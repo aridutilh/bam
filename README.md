@@ -1,4 +1,4 @@
-# Ark 0.3.1
+# Ark 0.3.2
 
 <img src="Resources/ArkIcon.png" width="128" alt="Ark’s crayon-drawn icon">
 
@@ -6,7 +6,7 @@ An open-source macOS browser prototype built with Swift, AppKit, Core Animation,
 
 The original application code is available under the [MIT license](LICENSE). The public source includes no extracted Arc artwork, animation frames, fonts, textures, binaries, or decompiler output. The app icon is a crayon-drawn reinterpretation of Arc’s mark; [branding notes](docs/branding.md) record its source and generation prompt. Sidebar controls use macOS SF Symbols, and the Spaces button uses an original native animation.
 
-[Download v0.3.1](https://github.com/aridutilh/ark/releases/tag/v0.3.1) · [Source repository](https://github.com/aridutilh/ark) · [Feature checklist](FEATURE-INVENTORY.md) · [Validation status](VALIDATION.md)
+[Download v0.3.2](https://github.com/aridutilh/ark/releases/tag/v0.3.2) · [Source repository](https://github.com/aridutilh/ark) · [Feature checklist](FEATURE-INVENTORY.md) · [Validation status](VALIDATION.md)
 
 ## Build and run
 
@@ -27,7 +27,7 @@ Run the integrated local fixtures after building:
 bash scripts/test-runtime.sh
 ```
 
-This starts a loopback fixture server and runs the packaged app's WebKit, manual PiP, native interaction, automatic PiP, and feature tests. Tests open native windows. The script manages its temporary server and files. [VALIDATION.md](VALIDATION.md) distinguishes available checks from actual results for this revision; all six build/component suites and all five packaged runtime suites passed again for v0.3.1 (11 suites total). The icon build also generated all ten standard macOS representations and passed strict code-signature verification. The installed About panel and home-page mark were also visually checked.
+This starts a loopback fixture server and runs the packaged app's WebKit, manual PiP, native interaction, automatic PiP, and feature tests. Tests open native windows. The script manages its temporary server and files. [VALIDATION.md](VALIDATION.md) distinguishes available checks from actual results for this revision; all six build/component suites and all five packaged runtime suites passed for v0.3.2 (11 suites total), including 41 controller interaction, 58 automatic PiP, and 46 browsing-feature checks. The installed app passed strict code-signature verification. Native UI checks confirmed PiP controls, Return to Tab, and the dark collapsed toolbar; physical trackpad feel remains a separate manual check.
 
 The bundled video is a generated test pattern. To regenerate it, install FFmpeg and run `bash scripts/generate-demo.sh`; FFmpeg is not needed for an ordinary build.
 
@@ -39,7 +39,7 @@ The bundled video is a generated test pattern. To regenerate it, install FFmpeg 
 - **Peek:** Shift-click a link, or follow a cross-host link from a pinned page, to open a retained overlay. Close it or transfer the same page into a tab, Split View, or Little Ark.
 - **Little Ark:** a compact browsing window with address/navigation controls and promotion into the main browser. HTTP(S) URLs delivered by macOS open here. Ark does not automatically make itself the default browser.
 - **Split View:** two live pages, draggable divider, per-pane address/navigation controls, focused-pane commands, close-one-pane, and separate-into-tabs. Pair membership is saved.
-- **Floating video:** tab/Space departure can move a playing video's existing page into a floating panel. Returning to its source restores it; automatic behavior can be disabled. Manual floating video is also available.
+- **Floating video:** tab/Space departure can move a playing video's existing page into a rounded, borderless panel with native hover controls for play/pause, ±10 seconds, mute/volume, Return to Tab, and resizing. The panel follows the video's aspect ratio. Selecting the source restores it; Return to Tab also selects and focuses the source. Automatic behavior can be disabled, and manual floating video is available.
 - **Page tools:** find in page, full URL copy, system printing, file-upload selection, and WebKit media permission prompts.
 - **Downloads and local Library:** destination selection, progress, cancel, open/reveal, plus a durable visit list and recently closed records. History and recently closed records can be searched and cleared separately. This is not automatic tab archiving.
 
@@ -77,12 +77,15 @@ These are implementation subsets, not a complete browser compatibility claim. Se
 | Manual floating video | ⌥⌘P or View → Picture in Picture |
 | Automatic floating video setting | View → Automatically Show Playing Videos |
 | Video demo | View → Open Video Demo |
-| Return floating video | Select source tab, Return Video, close panel, or Escape in panel |
+| Return and select video tab | PiP Return to Tab button, R, or double-click the video background |
+| Close floating panel without changing the selected tab | PiP × button or Escape |
+| PiP playback / seek / volume / mute | Space / ← or → (10 seconds) / ↑ or ↓ / M; also native overlay controls |
+| Resize floating video | Drag its bottom-right grip; Tab to the grip and use arrow keys |
 | Zoom | ⌘+ / ⌘− / ⌘0 |
 
 ## Motion and visual design
 
-Sidebar resizing uses a 228-point preferred width, 164–500-point bounds, and an 82-point collapse threshold. Toggle easing lasts 80 ms with cubic control points `(0.25, 0.46, 0.45, 0.94)`. The original analytical spring driver preserves momentum when retargeted; Space paging uses response `0.30` and damping ratio `0.99`. Response describes the spring, not a fixed animation duration.
+Sidebar resizing uses a 228-point preferred width, 164–500-point bounds, and an 82-point collapse threshold. Toggle easing lasts 80 ms with cubic control points `(0.25, 0.46, 0.45, 0.94)`. The original analytical spring driver preserves momentum when retargeted; Space paging uses response `0.30` and damping ratio `0.99`. Response describes the spring, not a fixed animation duration. Visible transitions run with the display's refresh cadence. Sidebar pages retain their rows and scroll positions across transitions; a new swipe takes over at the currently displayed offset. A ready single-page snapshot crossfades out over 160 ms after a Space commits. Reduce Motion uses immediate endpoints.
 
 Numeric tuning was informed by local behavioral research. The historical `RecoveredMotion.swift` filename does not imply that its Swift implementation is extracted source. Public code draws its own interface and uses system symbols. The Spaces symbol has its own hover tilt and selection pulse, with no copied geometry or animation keyframes. Reduce Motion applies to sidebar, paging, and symbol animations.
 
