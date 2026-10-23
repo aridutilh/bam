@@ -1,0 +1,10 @@
+.DS_Store
+.build/
+*.app/
+*.zip
+SHA256SUMS
+manifest.json
+preview.png
+validation/
+Resources/Recovered/
+RECOVERY-NOTES.md
