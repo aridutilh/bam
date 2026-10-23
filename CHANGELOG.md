@@ -4,6 +4,14 @@
 
 Remaining work is tracked with acceptance criteria in [FEATURE-INVENTORY.md](FEATURE-INVENTORY.md). An inventory item is complete only after its full behavior is verified.
 
+## 0.3.4 — 2026-10-23
+
+- Handle Space swipes in the native tab-list and sidebar scroll receivers as well as the local event monitor. Request horizontal responder forwarding and deduplicate repeated delivery of the same event object, while preserving native vertical and mouse-wheel scrolling.
+- Address a dispatch gap observed during v0.3.3 physical testing: tiny initial movements reached the monitor, but later movement/release packets did not; gestures claimed immediately did receive their follow-ups. Earlier direct-adapter fixtures did not cover this delivery gap.
+- Add 16 native receiver regression checks, bringing the controller interaction suite to 84. All six component suites and five packaged runtime suites passed for build 8.
+- Keep diagnostic capture bounded and opt-in; include the receiver source and duplicate-delivery decision without recording page or tab data.
+- Complete a limited physical check: eight of eight gentle swipes delivered movement/release events and committed a Space, compared with missing follow-ups for all 12 tiny starts in the earlier v0.3.3 sample. The new sample stayed on the monitored path; receiver-only recovery is an automated-test result. Other devices, broader vertical scrolling and subjective feel remain unverified.
+
 ## 0.3.3 — 2026-10-23
 
 - Keep a Space swipe eligible through small vertical or diagonal pickup noise while preserving established vertical scrolling.

@@ -1,4 +1,4 @@
-# Ark 0.3.3
+# Ark 0.3.4
 
 <img src="Resources/ArkIcon.png" width="128" alt="Ark’s crayon-drawn icon">
 
@@ -6,7 +6,9 @@ An open-source macOS browser prototype built with Swift, AppKit, Core Animation,
 
 The original application code is available under the [MIT license](LICENSE). The public source includes no extracted Arc artwork, animation frames, fonts, textures, binaries, or decompiler output. The app icon is a crayon-drawn reinterpretation of Arc’s mark; [branding notes](docs/branding.md) record its source and generation prompt. Sidebar controls use macOS SF Symbols, and the Spaces button uses an original native animation.
 
-[Download v0.3.3](https://github.com/aridutilh/ark/releases/tag/v0.3.3) · [Source repository](https://github.com/aridutilh/ark) · [Feature checklist](FEATURE-INVENTORY.md) · [Validation status](VALIDATION.md)
+[Download v0.3.4](https://github.com/aridutilh/ark/releases/tag/v0.3.4) · [Source repository](https://github.com/aridutilh/ark) · [Feature checklist](FEATURE-INVENTORY.md) · [Validation status](VALIDATION.md)
+
+Version **0.3.4 (build 8)** adds native scroll receivers and horizontal forwarding for Space swipes. All automated suites passed, and a limited physical check completed eight of eight gentle swipes. Broader device coverage and subjective feel remain unverified.
 
 ## Build and run
 
@@ -27,7 +29,7 @@ Run the integrated local fixtures after building:
 bash scripts/test-runtime.sh
 ```
 
-This starts a loopback fixture server and runs the packaged app's WebKit, manual PiP, native interaction, automatic PiP, and feature tests. Tests open native windows. The script manages its temporary server and files. [VALIDATION.md](VALIDATION.md) distinguishes available checks from actual results for this revision; all six build/component suites and all five packaged runtime suites passed for v0.3.3 (11 suites total), including 68 controller interaction, 58 automatic PiP, and 46 browsing-feature checks. The installed app passed strict code-signature verification. Earlier installed-app UI checks confirmed PiP controls, Return to Tab, and the dark collapsed toolbar; the corresponding runtime suites passed again. Physical swipe reliability after the v0.3.3 changes remains a separate manual check.
+This starts a loopback fixture server and runs the packaged app's WebKit, manual PiP, native interaction, automatic PiP, and feature tests. Tests open native windows. The script manages its temporary server and files. All six build/component suites and all five packaged runtime suites passed for v0.3.4 (11 suites total), including 84 controller interaction, 58 automatic PiP, and 46 browsing-feature checks. The bundle passed strict code-signature verification. The 16 new interaction checks exercise native sidebar receivers, duplicate-event handling, and preserved vertical scrolling. They do not simulate OS trackpad dispatch. Earlier installed-app UI checks confirmed PiP controls, Return to Tab, and the dark collapsed toolbar; the corresponding runtime suites passed again. [VALIDATION.md](VALIDATION.md) records the automated results and limited physical swipe check.
 
 The bundled video is a generated test pattern. To regenerate it, install FFmpeg and run `bash scripts/generate-demo.sh`; FFmpeg is not needed for an ordinary build.
 
@@ -90,6 +92,8 @@ Sidebar resizing uses a 228-point preferred width, 164–500-point bounds, and a
 Numeric tuning was informed by local behavioral research. The historical `RecoveredMotion.swift` filename does not imply that its Swift implementation is extracted source. Public code draws its own interface and uses system symbols. The Spaces symbol has its own hover tilt and selection pulse, with no copied geometry or animation keyframes. Reduce Motion applies to sidebar, paging, and symbol animations.
 
 Space swipes tolerate small diagonal or vertical pickup noise before locking direction. Release velocity uses an 80 ms motion window; a tiny final packet does not erase the preceding flick. Established vertical scrolling remains available to the tab list. Automated checks cover these decisions; physical device feel requires a separate check.
+
+Physical testing of v0.3.3 lost the follow-up events for all 12 tiny-start swipes in the captured sample. Version 0.3.4 also handles events in the native tab-list and sidebar receivers, requests horizontal responder forwarding, and processes each event object only once. A new physical sample completed all eight gentle swipes, including their movement, release and Space commit. That sample stayed on the monitored path; receiver-only recovery is covered by automated tests. Native vertical scrolling passed its fixture; broader physical vertical-scroll and device testing remain open.
 
 For an intermittent swipe failure, View → Record Space Swipes (60 Seconds) starts a local diagnostic capture at `~/Library/Caches/Ark/space-swipe-diagnostics.jsonl`. It stops after 60 seconds or 5,000 records and replaces the previous trace only when explicitly started again. Capture is off by default. It records gesture values and routing decisions, excluding URLs, titles, tab identifiers, and page content; no trace is uploaded automatically.
 

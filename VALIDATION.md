@@ -1,14 +1,14 @@
-# Validation — Ark 0.3.3
+# Validation — Ark 0.3.4
 
-Status: **passed on October 23, 2026**, on Apple Silicon using Swift 6.2.3 in Swift 5 language mode. The final application was built from an isolated copy of the public release files; no Arc installation, private research, or extracted assets were required. All component checks and all five packaged runtime suites exited successfully. Version 0.3.3 changes Space-swipe intent/velocity handling, disables horizontal tab-list elasticity, and adds opt-in local gesture diagnostics. All six component suites and all five packaged runtime suites ran against the v0.3.3 bundle.
+Status: **automated checks and a limited physical swipe check passed**, on October 23, 2026. Version 0.3.4 (build 8) was built on Apple Silicon using Swift 6.2.3 in Swift 5 language mode from an isolated copy of the publishable source files. No Arc installation, private research, or extracted assets were required. All six component suites and all five packaged runtime suites passed against this bundle. A subsequent physical sample completed eight of eight gentle swipes. This is limited evidence for the scroll-dispatch fix, not a general reliability or Arc-feel claim.
 
-Independent agents implemented PiP and Space interaction changes with separate file ownership. A separate reviewer checked cancellation, view ownership, gesture capture, interrupted/queued navigation, resize key routing, and animation completion when a window is hidden. Concrete findings were fixed and covered by regression checks before release. The final review found no remaining blockers.
+Independent agents implemented and reviewed the changes with separate file ownership. Receiver review checked shared routing, same-event deduplication, cached sidebar pages, horizontal-only forwarding and preserved vertical handling. The new fixture exercises receiver entry points directly; it does not establish that real AppKit trackpad dispatch follows the same path. The separate physical capture and its limits are described below.
 
 ## Build and component checks
 
 Run `bash build.sh`. The script compiles for the current host architecture with a macOS 14 minimum, locally signs the application, verifies the signature, packages it, and runs these suites.
 
-| Check | Scope | Current public revision |
+| Check | Scope | 0.3.4 |
 |---|---|---|
 | App build and strict signature verification | Swift/AppKit/WebKit/QuartzCore, generated bundle and ZIP | Passed |
 | `Tests/main.swift` | URL/search rules, model repair, tabs, remembered Space selection, session persistence and internal demo route | Passed — 69 checks |
@@ -24,13 +24,15 @@ The public sidebar uses SF Symbols and an original native stack-symbol animation
 
 Run `bash scripts/test-runtime.sh` after building. It serves `Tests/Fixtures` on loopback and invokes all five app fixture modes. The fixtures use local pages/media and nonpersistent website stores; no personal browser profile is involved.
 
-| Fixture | Scope | Current public revision |
+| Fixture | Scope | 0.3.4 |
 |---|---|---|
 | `--web-test` | Real WebKit DOM rendering, local navigation, Back and Forward | Passed |
 | `--pip-test` | Same-view playback, rounded aspect-fit panel, native playback/seek bounds/volume/mute/resize/Return controls, DOM restoration before reveal, rapid re-float, close/Escape, cancellation and no-video handling | Passed |
-| `--interaction-test` | Sidebar layout, toolbar geometry, capture/momentum/interruption routing, native Space buttons, NSEvent phase/window/flipped-coordinate adapter, vertical list geometry/scroll retention at three widths | Passed — 68 checks |
+| `--interaction-test` | Sidebar layout, toolbar geometry, capture/momentum/interruption routing, native Space buttons, NSEvent adapter, vertical list geometry/scroll retention, native receiver takeover, event deduplication and vertical/wheel forwarding | Passed — 84 checks |
 | `--auto-pip-test` | Actual controller departure/return, asynchronous candidates, Split departures, cancellation and existing-player ownership | Passed — 58 checks, including queued single pages, rapid return/Unsplit cleanup, destination focus, and utility-window closing |
 | `--feature-test` | Peek, Little Ark, Split, promotion, page lifecycle, downloads, and local Library integration | Passed — 46 checks, including cross-window Find, pushState URL preservation, preview history and exact downloaded payload |
+
+The 16 added interaction checks reproduce a tiny begin delivered through both monitor and receiver, followed by receiver-only movement and release. They verify exact displacement when an event reaches multiple paths, commit/return behavior, native vertical scrolling on the reused list, mouse-wheel forwarding, and header/dock responder delivery. The fixture uses local NSEvent objects with backing scroll CGEvents; it never posts them to an application or system event queue. Passing this fixture is not a physical dispatch result.
 
 The same 20 pure swipe scenarios were also run against v0.3.2: six failed there and all passed after the recognizer changes. A separate temporary recorder harness passed 15 assertions covering disabled-mode laziness, filtered fields, start/stop/restart, periodic flushing, event/time bounds and safe initialization failure. Its data stayed in a temporary test directory.
 
@@ -38,18 +40,22 @@ Additional standalone fixtures in `Tests/DownloadTests.swift` and `Tests/Preview
 
 ## Installed-app checks
 
-`/Applications/Ark.app` reports version 0.3.3 (build 7) and passes strict signature verification. All nine existing tab identifiers were preserved after relaunch. The prior Ark 0.3.2 app and session metadata were retained as local backups.
+Version 0.3.4 (build 8) is installed in `/Applications/Ark.app` and passes strict signature verification. It relaunched with every preexisting tab identifier retained. The prior app and session metadata are backed up locally. The limited physical swipe result is recorded below.
 
-Earlier v0.3.2 native UI checks confirmed a rounded video panel without a title bar, visible native overlay controls, play/pause and a 10-second backward seek. Return to Tab selected the source Space/tab and preserved the paused seven-second position. Collapsing the sidebar showed a dark toolbar with readable controls; reopening restored the sidebar. Those observations used the bundled generated video demo; the corresponding packaged PiP fixtures were rerun for v0.3.3. The accepted crayon artwork and icon packaging remain unchanged from v0.3.1.
+Earlier v0.3.2 native UI checks confirmed a rounded video panel without a title bar, visible native overlay controls, play/pause and a 10-second backward seek. Return to Tab selected the source Space/tab and preserved the paused seven-second position. Collapsing the sidebar showed a dark toolbar with readable controls; reopening restored the sidebar. Those observations used the bundled generated video demo; the corresponding packaged PiP fixtures passed again for v0.3.4. The accepted crayon artwork and icon packaging remain unchanged from v0.3.1.
 
-A user-provided recording of v0.3.2 showed horizontal movement confined to the tab list while the favorites and Space heading stayed fixed. This establishes native list bounce, not a full Space-page transition cancelling at release. The new build disables that list elasticity. Physical swipe reliability after the changes still requires a new device check; the local diagnostic capture is available for that purpose.
+A physical recording of v0.3.2 showed movement confined to the tab list while the favorites and Space heading stayed fixed. Version 0.3.3 disabled that native list bounce, but physical swipe testing still failed. Diagnostic capture showed tiny initial `.began` packets reaching the local monitor without their subsequent movement or release packets; immediately claimed starts received complete sequences. This matches AppKit's documented local-monitor blind spot during nested event tracking and exposes a boundary the earlier direct-adapter fixtures did not cover.
+
+Version 0.3.4 handles scroll events in the tab-list and sidebar receivers, requests horizontal forwarding through the responder chain, and deduplicates the same NSEvent across delivery paths. In the earlier v0.3.3 capture, all 12 tiny starts lacked subsequent movement and release events. In the new physical sample, all eight gentle starts (initial horizontal deltas of ±1 or −4 points) received movement and release events and produced eight Space commits. This verifies that the observed tiny-start failure did not recur in that sample.
+
+All original events in the new capture were recorded through the local monitor; 22 later deliveries to the tab-list or sidebar receivers were deduplicated. This is consistent with horizontal forwarding keeping the gesture on the monitored path. It does not physically demonstrate receiver-only recovery, which remains an automated fixture result. Native vertical and mouse-wheel behavior passed that fixture; broader physical vertical scrolling, other devices, extended use and subjective feel remain unverified.
 
 Earlier v0.3.0 native UI checks confirmed the Ark branding, readable sidebar symbols and home page, and new-tab palette dismissal. On one accessible YouTube player, switching to another tab opened the floating video panel, and selecting the source tab returned the same page while playback continued. This is a single-site observation, not universal video compatibility. Session restoration saves URLs and layout; it does not promise to restore media playhead position across an app restart.
 
 ## Manual checks still required
 
 - Check repeated Spaces-symbol hover/selection, window detachment and minimum-width controls across display scales.
-- Verify physical two-finger swipe reliability after the v0.3.3 changes. v0.3.2 remained unreliable in user testing despite passing its fixtures. Native event fixtures and the recorded list bounce narrow the cause; neither proves the revised physical interaction.
+- Extend the eight-swipe physical sample with longer sessions, other trackpads/settings, deliberate direction changes and ordinary vertical scrolling. Automated vertical checks passed; broad physical reliability and subjective feel are not established.
 - Check VoiceOver, increased contrast, Reduce Motion, and reduced transparency with the relevant system preferences enabled.
 - Try representative HTTPS sites, sign-in/upload/media permissions, error pages, and download cancellation without using personal profiles as fixtures.
 - Quit/relaunch and inspect metadata restoration, including invalid or missing records and Split pairs.
