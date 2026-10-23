@@ -17,19 +17,21 @@ struct MotionTests {
             let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
             try reachesEndpoint(response: 0.55, ratio: 0.94, reduceMotion: reduceMotion)
             try reachesEndpoint(response: 0.30, ratio: 0.99, reduceMotion: reduceMotion)
+            try reachesEndpoint(response: 0.24, ratio: 0.90, reduceMotion: reduceMotion)
+            try reachesEndpoint(response: 0.36, ratio: 0.62, reduceMotion: reduceMotion)
             try reachesEndpoint(response: 0.12, ratio: 1, reduceMotion: reduceMotion)
             try reachesEndpoint(response: 0.12, ratio: 1.6, reduceMotion: reduceMotion)
             try stopDuringUpdateSuppressesCompletion(reduceMotion: reduceMotion)
             try replacementCompletesOnlyNewAnimation(reduceMotion: reduceMotion)
             if !reduceMotion {
                 try retargetPreservesVelocity()
-                for ratio in [0.7, 1.0, 1.6] { try seededVelocityReturnsToSameEndpoint(ratio: ratio) }
+                for ratio in [0.62, 0.7, 1.0, 1.6] { try seededVelocityReturnsToSameEndpoint(ratio: ratio) }
             }
             print("PASS: motion math, endpoints, cancellation, replacement, and velocity handling")
             if reduceMotion {
                 print("Reduce Motion is enabled: immediate endpoint and reentrant cancellation/replacement paths checked; timed interpolation was not exercised.")
             } else {
-                print("Timed interpolation checked for both recovered spring pairs, critical damping, and overdamping.")
+                print("Timed interpolation checked for the sidebar and original symbol spring profiles, critical damping, and overdamping.")
             }
         } catch {
             FileHandle.standardError.write(Data("FAIL: \(error)\n".utf8))
@@ -47,7 +49,7 @@ struct MotionTests {
     }
 
     private static func numericConversions() throws {
-        // Independently evaluated unit-mass equations for the recovered parameter pairs.
+        // Independently evaluated unit-mass equations for the configured sidebar parameter pairs.
         try near(RecoveredMetrics.stiffness(response: 0.55), 130.5071656342394, "0.55-second stiffness")
         try near(RecoveredMetrics.damping(response: 0.55, ratio: 0.94), 21.4770697772684, "0.55/0.94 damping")
         try near(RecoveredMetrics.stiffness(response: 0.30), 438.6490844928604, "0.30-second stiffness")

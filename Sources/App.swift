@@ -1,7 +1,7 @@
 import AppKit
 import WebKit
 
-@MainActor final class AppDelegate: NSObject, NSApplicationDelegate {
+@MainActor final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     var window: NSWindow!
     var controller: BrowserController!
     var featureSmoke: FeatureSmokeTest?
@@ -22,7 +22,7 @@ import WebKit
         let preview = CommandLine.arguments.contains("--fresh-preview")
         controller = BrowserController(sessionURL: support.appendingPathComponent("session.json"), ephemeral: preview)
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1260, height: 800), styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
-        window.title = "Orbit"; window.titleVisibility = .hidden; window.titlebarAppearsTransparent = true
+        window.title = "Ark"; window.titleVisibility = .hidden; window.titlebarAppearsTransparent = true
         window.isMovableByWindowBackground = false; window.minSize = NSSize(width: 760, height: 540)
         window.backgroundColor = NSColor(srgbRed: 0.84, green: 0.82, blue: 0.92, alpha: 1)
         window.contentViewController = controller
@@ -44,8 +44,13 @@ import WebKit
     @objc func spaceOne(_ sender: Any?) { controller.changeSpace(0) }
     @objc func spaceTwo(_ sender: Any?) { controller.changeSpace(1) }
     @objc func spaceThree(_ sender: Any?) { controller.changeSpace(2) }
+    @objc func goHome(_ sender: Any?) { controller.showHome(sender) }
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(goHome(_:)) { return controller?.littleWindows.values.contains(where: { $0.window?.isKeyWindow == true }) != true }
+        return true
+    }
     @objc func showAbout(_ sender: Any?) {
-        NSApp.orderFrontStandardAboutPanel(options: [.applicationName: "Orbit", .applicationVersion: "0.3 — Native browser prototype", .credits: NSAttributedString(string: "An independent AppKit + WebKit prototype informed by recovered sidebar behavior.\nNot affiliated with The Browser Company.")])
+        NSApp.orderFrontStandardAboutPanel(options: [.applicationName: "Ark", .applicationVersion: (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "Development") + " — Native browser prototype", .credits: NSAttributedString(string: "An independent AppKit + WebKit prototype informed by recovered sidebar behavior.\nNot affiliated with The Browser Company.")])
     }
     func buildMenus() {
         let main = NSMenu(); NSApp.mainMenu = main
@@ -53,14 +58,14 @@ import WebKit
         func item(_ menu: NSMenu, _ title: String, _ action: Selector, _ key: String = "", _ modifiers: NSEvent.ModifierFlags = .command, _ target: AnyObject? = nil) {
             let item = NSMenuItem(title: title, action: action, keyEquivalent: key); item.keyEquivalentModifierMask = modifiers; item.target = target; menu.addItem(item)
         }
-        let app = menu("Orbit")
-        item(app, "About Orbit", #selector(showAbout), "", .command, self)
-        app.addItem(.separator()); item(app, "Hide Orbit", #selector(NSApplication.hide(_:)), "h")
+        let app = menu("Ark")
+        item(app, "About Ark", #selector(showAbout), "", .command, self)
+        app.addItem(.separator()); item(app, "Hide Ark", #selector(NSApplication.hide(_:)), "h")
         item(app, "Hide Others", #selector(NSApplication.hideOtherApplications(_:)), "h", [.command, .option])
         item(app, "Show All", #selector(NSApplication.unhideAllApplications(_:)))
-        app.addItem(.separator()); item(app, "Quit Orbit", #selector(NSApplication.terminate(_:)), "q")
+        app.addItem(.separator()); item(app, "Quit Ark", #selector(NSApplication.terminate(_:)), "q")
         let file = menu("File")
-        item(file, "New Little Orbit Window", #selector(BrowserController.newLittleOrbit(_:)), "n", [.command, .option], controller)
+        item(file, "New Little Ark Window", #selector(BrowserController.newLittleOrbit(_:)), "n", [.command, .option], controller)
         item(file, "New Tab", #selector(BrowserController.newTab(_:)), "t", .command, controller)
         item(file, "Open Location…", #selector(BrowserController.focusAddress(_:)), "l", .command, controller)
         item(file, "Close Tab", #selector(BrowserController.closeTab(_:)), "w", .command, controller)
@@ -94,7 +99,7 @@ import WebKit
         let history = menu("History")
         item(history, "Back", #selector(BrowserController.goBack(_:)), "[", .command, controller)
         item(history, "Forward", #selector(BrowserController.goForward(_:)), "]", .command, controller)
-        item(history, "Home", #selector(BrowserController.showHome(_:)), "h", [.command, .shift], controller)
+        item(history, "Home", #selector(goHome(_:)), "h", [.command, .shift], self)
         history.addItem(.separator())
         item(history, "Show History…", #selector(BrowserController.showHistory(_:)), "y", .command, controller)
         item(history, "Recently Closed…", #selector(BrowserController.showArchive(_:)), "", .command, controller)

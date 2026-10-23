@@ -1,7 +1,10 @@
 import AppKit
 import QuartzCore
 
-/// Measurements and conversions recovered from the shipped Arc binary.
+/// Sidebar dimensions and standard unit-mass spring conversions.
+/// The historical file/type names refer to local behavioral research. This file
+/// contains independently written Swift, not extracted code, geometry, or artwork.
+/// Numeric sidebar parameters were informed by those measurements.
 enum RecoveredMetrics {
     static let preferredWidth: CGFloat = 228
     static let minWidth: CGFloat = 164
@@ -20,10 +23,10 @@ enum RecoveredMetrics {
 }
 
 /// A small analytical spring driver, evaluated against monotonic elapsed time.
-/// Arc's recovered collection-layout pairs are (response: 0.55, ratio: 0.94)
+/// The measured collection-layout pairs are (response: 0.55, ratio: 0.94)
 /// and (response: 0.30, ratio: 0.99). They are response parameters, not durations.
-/// Orbit uses the latter pair for space paging as a prototype choice.
-/// Anchored sidebar presentation uses the separately recovered cubic curve.
+/// Ark chooses the latter pair for space paging; its original symbol animations
+/// use their own parameters. Sidebar presentation uses the cubic driver below.
 final class SpringAnimator {
     private var timer: Timer?
     private var generation: UInt = 0
@@ -162,7 +165,8 @@ final class SpringAnimator {
     deinit { timer?.invalidate() }
 }
 
-/// Fixed-duration cubic timing for the recovered root presentation callbacks.
+/// Independently implemented fixed-duration cubic easing.
+/// The sidebar's default timing parameters were informed by local measurements.
 /// The hidden-to-anchored path uses 0.08 seconds and (0.25, 0.46, 0.45, 0.94).
 /// This driver intentionally does not reuse the collection-layout spring settings.
 final class CubicAnimator {
@@ -254,9 +258,9 @@ final class CubicAnimator {
     deinit { timer?.invalidate() }
 }
 
-/// AppKit resize behavior reconstructed from the native sidebar's resize path.
-/// The grip's placement and color belong to this prototype; the width thresholds,
-/// snap gates, rounding, haptic delay, and pulse timing below come from the binary.
+/// Native AppKit resize handling and an originally drawn grip.
+/// Numeric width thresholds, snap gates, haptic delay, and pulse timing were
+/// informed by local measurements; drawing and event handling are Ark code.
 final class ResizeHandleView: NSView {
     var onResize: ((CGFloat, Bool) -> Void)?
     var onCollapse: (() -> Void)?

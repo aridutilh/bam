@@ -199,7 +199,7 @@ struct ClosedRecord: Codable, Identifiable, Equatable {
         self.library = library; self.mode = mode
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 820, height: 540), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         super.init(window: window)
-        window.title = mode == .history ? "History — Orbit" : "Recently Closed — Orbit"
+        window.title = mode == .history ? "History — Ark" : "Recently Closed — Ark"
         window.isReleasedWhenClosed = false
         window.minSize = NSSize(width: 640, height: 360)
         let root = NSView(frame: NSRect(x: 0, y: 0, width: 820, height: 540))
@@ -312,7 +312,7 @@ struct ClosedRecord: Codable, Identifiable, Equatable {
         guard let window, let library else { return }
         let alert = NSAlert()
         alert.messageText = mode == .history ? "Clear browsing history?" : "Clear recently closed tabs?"
-        alert.informativeText = mode == .history ? "Removes Orbit’s saved visit list. Cookies, downloaded files, and the closed-tab archive are kept." : "Removes the list of tabs available to reopen. Browsing history, open tabs, cookies, and downloaded files are kept."
+        alert.informativeText = mode == .history ? "Removes Ark’s saved visit list. Cookies, downloaded files, and the closed-tab archive are kept." : "Removes the list of tabs available to reopen. Browsing history, open tabs, cookies, and downloaded files are kept."
         alert.addButton(withTitle: mode == .history ? "Clear History" : "Clear Archive")
         alert.addButton(withTitle: "Cancel")
         alert.beginSheetModal(for: window) { [weak self, weak library] response in

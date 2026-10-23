@@ -205,7 +205,7 @@ import Darwin
         let fileManager = FileManager.default
         let normalized = url.standardizedFileURL
         if fileManager.fileExists(atPath: normalized.path) || (try? fileManager.attributesOfItem(atPath: normalized.path)) != nil {
-            throw DownloadError("A file already exists there. Choose a different name; Orbit does not replace downloads.")
+            throw DownloadError("A file already exists there. Choose a different name; Ark does not replace downloads.")
         }
         let parent = normalized.deletingLastPathComponent().resolvingSymlinksInPath()
         var directory: ObjCBool = false
@@ -301,7 +301,7 @@ import Darwin
         ])
         window.contentView?.addSubview(scroll)
         downloadsWindow = window; list = stack
-        let empty = NSTextField(labelWithString: "Downloads appear here. Closing Orbit cancels unfinished downloads.")
+        let empty = NSTextField(labelWithString: "Downloads appear here. Closing Ark cancels unfinished downloads.")
         empty.textColor = .secondaryLabelColor; empty.font = .systemFont(ofSize: 12)
         empty.lineBreakMode = .byWordWrapping; empty.maximumNumberOfLines = 2
         emptyLabel = empty; stack.addArrangedSubview(empty)

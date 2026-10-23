@@ -161,7 +161,7 @@ import WebKit
         var style: NSWindow.StyleMask = [.titled, .closable, .resizable, .miniaturizable]
         if automatic { style.insert(.nonactivatingPanel) }
         let videoPanel = OrbitVideoPanel(contentRect: NSRect(x: bounds.maxX - 504, y: bounds.minY + 24, width: 480, height: 300), styleMask: style, backing: .buffered, defer: false)
-        videoPanel.title = "Picture in Picture — Orbit"
+        videoPanel.title = "Picture in Picture — Ark"
         videoPanel.setAccessibilityLabel("Picture in Picture")
         videoPanel.contentMinSize = NSSize(width: 320, height: 180)
         videoPanel.level = .floating

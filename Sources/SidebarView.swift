@@ -24,16 +24,16 @@ struct SidebarTabItem: Equatable {
     var onSpaceChange: ((Int) -> Void)?
     var onPictureInPicture: (() -> Void)?
     override var isFlipped: Bool { true }
-    private let back = OrbitIconButton(symbol: "chevron.left", label: "Go back")
-    private let forward = OrbitIconButton(symbol: "chevron.right", label: "Go forward")
-    private let reload = OrbitIconButton(symbol: "arrow.clockwise", label: "Reload page")
-    private let toggle = OrbitIconButton(symbol: "sidebar.left", label: "Hide sidebar")
-    private let search = OrbitSearchButton()
-    private let pip = OrbitIconButton(symbol: "pip", label: "Picture in Picture (⌥⌘P)")
-    private let library = OrbitSpacesButton()
-    private let plus = OrbitIconButton(symbol: "plus", label: "New tab")
-    private let spaces = ["Studio", "Life", "Explore"].enumerated().map { OrbitSpaceButton(index: $0.offset, name: $0.element) }
-    private let clip = OrbitFlippedView()
+    private let back = ArkIconButton(symbol: "chevron.left", label: "Go back")
+    private let forward = ArkIconButton(symbol: "chevron.right", label: "Go forward")
+    private let reload = ArkIconButton(symbol: "arrow.clockwise", label: "Reload page")
+    private let toggle = ArkIconButton(symbol: "sidebar.left", label: "Hide sidebar")
+    private let search = ArkSearchButton()
+    private let pip = ArkIconButton(symbol: "pip", label: "Picture in Picture (⌥⌘P)")
+    private let library = ArkSpacesButton()
+    private let plus = ArkIconButton(symbol: "plus", label: "New tab")
+    private let spaces = ["Studio", "Life", "Explore"].enumerated().map { ArkSpaceButton(index: $0.offset, name: $0.element) }
+    private let clip = ArkFlippedView()
     private var page = SidebarPage()
     private var next: SidebarPage?
     private var pageDirection: CGFloat = 1
@@ -44,7 +44,7 @@ struct SidebarTabItem: Equatable {
 
     override init(frame: NSRect) {
         super.init(frame: frame); wantsLayer = true
-        setAccessibilityLabel("Orbit sidebar")
+        setAccessibilityLabel("Ark sidebar")
         clip.wantsLayer = true; clip.layer?.masksToBounds = true
         [toggle, back, forward, reload, search, clip, library, plus, pip].forEach(addSubview)
         spaces.forEach(addSubview); clip.addSubview(page); connect(page)
@@ -94,7 +94,7 @@ struct SidebarTabItem: Equatable {
         toggle.frame = NSRect(x: 81, y: 10, width: 25, height: 25)
         let start = max(108, w - 88)
         for (i, button) in [back, forward, reload].enumerated() { button.frame = NSRect(x: start + CGFloat(i)*27, y: 10, width: 25, height: 25) }
-        // At the recovered 164pt minimum, navigation moves into the address strip.
+        // At the 164-point minimum, navigation moves into the address strip.
         let compact = w < 208
         forward.isHidden = compact; back.isHidden = compact
         if compact { reload.frame.origin.x = w - 33 }
@@ -110,13 +110,13 @@ struct SidebarTabItem: Equatable {
     }
 }
 
-@MainActor private final class SidebarPage: OrbitFlippedView {
+@MainActor private final class SidebarPage: ArkFlippedView {
     var select: ((UUID)->Void)?; var close: ((UUID)->Void)?; var pin: ((UUID)->Void)?; var newTab: (()->Void)?
-    let favorites = (0..<3).map { _ in OrbitFavoriteButton() }
-    let heading = orbitLabel("◈  Studio", size: 12, weight: .semibold)
-    let scroll = NSScrollView(); let content = OrbitFlippedView(); let newButton = OrbitNewTabButton()
+    let favorites = (0..<3).map { _ in ArkFavoriteButton() }
+    let heading = arkLabel("◈  Studio", size: 12, weight: .semibold)
+    let scroll = NSScrollView(); let content = ArkFlippedView(); let newButton = ArkNewTabButton()
     let divider = NSView()
-    var rows: [OrbitTabRow] = []
+    var rows: [ArkTabRow] = []
     var tabs: [SidebarTabItem] = []
     override init(frame: NSRect) {
         super.init(frame: frame); wantsLayer = true
@@ -136,17 +136,17 @@ struct SidebarTabItem: Equatable {
         let surviving = Set(items.map(\.id))
         rows.filter { !surviving.contains($0.item.id) }.forEach { $0.removeFromSuperview() }
         rows = items.map { item in
-            let row = existing[item.id] ?? OrbitTabRow(item: item)
+            let row = existing[item.id] ?? ArkTabRow(item: item)
             row.update(item)
             row.select = { [weak self] in self?.select?(item.id) }; row.close = { [weak self] in self?.close?(item.id) }; row.pin = { [weak self] in self?.pin?(item.id) }
             if row.superview == nil { content.addSubview(row) }; return row
         }
         for (i, button) in favorites.enumerated() {
             if i < items.count {
-                let item = items[i]; button.configure(symbol: item.symbol, title: item.title, active: item.isActive, tint: OrbitPalette.spaceColors[space])
+                let item = items[i]; button.configure(symbol: item.symbol, title: item.title, active: item.isActive, tint: ArkPalette.spaceColors[space])
                 button.handler = { [weak self] in self?.select?(item.id) }
             } else {
-                button.configure(symbol: ["sparkles", "globe", "plus"][i], title: "New tab", active: false, tint: OrbitPalette.secondary)
+                button.configure(symbol: ["sparkles", "globe", "plus"][i], title: "New tab", active: false, tint: ArkPalette.secondary)
                 button.handler = { [weak self] in self?.newTab?() }
             }
         }
@@ -168,27 +168,27 @@ struct SidebarTabItem: Equatable {
 }
 
 @MainActor
-private enum OrbitPalette {
+private enum ArkPalette {
     static let ink = NSColor(white: 0.94, alpha: 1)
     static let secondary = NSColor(white: 0.73, alpha: 1)
     static let spaceColors = [NSColor(calibratedRed: 0.80, green: 0.72, blue: 0.96, alpha: 1), NSColor(calibratedRed: 0.88, green: 0.75, blue: 0.60, alpha: 1), NSColor(calibratedRed: 0.62, green: 0.81, blue: 0.86, alpha: 1)]
 }
 
 @MainActor
-private func orbitLabel(_ text: String, size: CGFloat, weight: NSFont.Weight) -> NSTextField {
+private func arkLabel(_ text: String, size: CGFloat, weight: NSFont.Weight) -> NSTextField {
     let label = NSTextField(labelWithString: text)
     label.font = .systemFont(ofSize: size, weight: weight)
-    label.textColor = OrbitPalette.ink
+    label.textColor = ArkPalette.ink
     label.lineBreakMode = .byTruncatingTail
     label.maximumNumberOfLines = 1
     return label
 }
 
 @MainActor
-private class OrbitFlippedView: NSView { override var isFlipped: Bool { true } }
+private class ArkFlippedView: NSView { override var isFlipped: Bool { true } }
 
 @MainActor
-private class OrbitHoverButton: NSButton {
+private class ArkHoverButton: NSButton {
     var handler: (() -> Void)?
     var hovered = false
     private var area: NSTrackingArea?
@@ -220,10 +220,9 @@ private class OrbitHoverButton: NSButton {
         NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: radius, yRadius: radius).fill()
     }
     func symbol(_ name: String, rect: NSRect, color: NSColor, size: CGFloat = 14) {
-        let recovered: String? = name == "sidebar.left" ? "Arc-icon-browser-navigation-sidebar" : (name == "arrow.clockwise" ? "Arc-icon-browser-navigation-reload" : nil)
-        let source = recovered.flatMap { Bundle.main.url(forResource: $0, withExtension: "png", subdirectory: "Recovered") }.flatMap(NSImage.init(contentsOf:))
-        guard let image = source ?? NSImage(systemSymbolName: name, accessibilityDescription: nil)?.withSymbolConfiguration(.init(pointSize: size, weight: .medium)) else { return }
-        let tinted = image.copy() as! NSImage
+        guard let image = NSImage(systemSymbolName: name, accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: size, weight: .medium)),
+              let tinted = image.copy() as? NSImage else { return }
         tinted.lockFocus()
         color.setFill()
         NSRect(origin: .zero, size: tinted.size).fill(using: .sourceAtop)
@@ -234,12 +233,12 @@ private class OrbitHoverButton: NSButton {
         let paragraph = NSMutableParagraphStyle()
         paragraph.alignment = alignment
         paragraph.lineBreakMode = .byTruncatingTail
-        (value as NSString).draw(in: rect, withAttributes: [.font: NSFont.systemFont(ofSize: size, weight: weight), .foregroundColor: color ?? OrbitPalette.ink, .paragraphStyle: paragraph])
+        (value as NSString).draw(in: rect, withAttributes: [.font: NSFont.systemFont(ofSize: size, weight: weight), .foregroundColor: color ?? ArkPalette.ink, .paragraphStyle: paragraph])
     }
 }
 
 @MainActor
-private final class OrbitIconButton: OrbitHoverButton {
+private final class ArkIconButton: ArkHoverButton {
     private var symbolName: String
     init(symbol: String, label: String) {
         symbolName = symbol
@@ -256,23 +255,23 @@ private final class OrbitIconButton: OrbitHoverButton {
     }
     override func draw(_ dirtyRect: NSRect) {
         if (hovered || isHighlighted) && isEnabled { fill(NSColor.white.withAlphaComponent(isHighlighted ? 0.20 : 0.10), radius: 7) }
-        symbol(symbolName, rect: NSRect(x: (bounds.width - 13) / 2, y: (bounds.height - 13) / 2, width: 13, height: 13), color: OrbitPalette.ink, size: 13)
+        symbol(symbolName, rect: NSRect(x: (bounds.width - 13) / 2, y: (bounds.height - 13) / 2, width: 13, height: 13), color: ArkPalette.ink, size: 13)
     }
 }
 
-@MainActor private final class OrbitSearchButton: OrbitHoverButton {
+@MainActor private final class ArkSearchButton: ArkHoverButton {
     var address = "Search or enter URL" { didSet { needsDisplay = true } }
     init() { super.init(frame: .zero); setAccessibilityLabel("Search or enter a web address"); toolTip = "Search or enter address (⌘L)" }
     required init?(coder: NSCoder) { fatalError() }
     override func draw(_ dirtyRect: NSRect) {
         fill(NSColor.black.withAlphaComponent(hovered ? 0.25 : 0.18), radius: 10)
-        text(address, rect: NSRect(x: 12, y: 9, width: bounds.width-34, height: 18), size: 12, color: OrbitPalette.ink)
-        symbol("ellipsis", rect: NSRect(x: bounds.width-23, y: 10, width: 13, height: 13), color: OrbitPalette.secondary, size: 12)
+        text(address, rect: NSRect(x: 12, y: 9, width: bounds.width-34, height: 18), size: 12, color: ArkPalette.ink)
+        symbol("ellipsis", rect: NSRect(x: bounds.width-23, y: 10, width: 13, height: 13), color: ArkPalette.secondary, size: 12)
     }
 }
 
 @MainActor
-private final class OrbitFavoriteButton: OrbitHoverButton {
+private final class ArkFavoriteButton: ArkHoverButton {
     private var symbolName = "globe"
     private var caption = ""
     private var active = false
@@ -295,18 +294,18 @@ private final class OrbitFavoriteButton: OrbitHoverButton {
 }
 
 @MainActor
-private final class OrbitNewTabButton: OrbitHoverButton {
+private final class ArkNewTabButton: ArkHoverButton {
     init() { super.init(frame: .zero); setAccessibilityLabel("New tab"); toolTip = "New tab (⌘T)" }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     override func draw(_ dirtyRect: NSRect) {
         if hovered { fill(NSColor.white.withAlphaComponent(0.08)) }
-        symbol("plus", rect: NSRect(x: 12, y: 10, width: 13, height: 13), color: OrbitPalette.secondary, size: 12)
-        text("New Tab", rect: NSRect(x: 35, y: 9, width: max(0, bounds.width - 48), height: 18), size: 12, color: OrbitPalette.secondary)
+        symbol("plus", rect: NSRect(x: 12, y: 10, width: 13, height: 13), color: ArkPalette.secondary, size: 12)
+        text("New Tab", rect: NSRect(x: 35, y: 9, width: max(0, bounds.width - 48), height: 18), size: 12, color: ArkPalette.secondary)
     }
 }
 
 @MainActor
-private final class OrbitSpaceButton: OrbitHoverButton {
+private final class ArkSpaceButton: ArkHoverButton {
     let index: Int
     private let name: String
     var selected = false { didSet { needsDisplay = true; setAccessibilityValue(selected ? "Selected" : "Not selected") } }
@@ -319,12 +318,12 @@ private final class OrbitSpaceButton: OrbitHoverButton {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     override func draw(_ dirtyRect: NSRect) {
         if selected || hovered { fill(NSColor.white.withAlphaComponent(selected ? 0.14 : 0.07), radius: 7) }
-        text(["✦", "☀︎", "◉"][index], rect: NSRect(x: 2, y: 4, width: bounds.width-4, height: 20), size: 16, color: selected ? OrbitPalette.ink : OrbitPalette.secondary, alignment: .center)
+        text(["✦", "☀︎", "◉"][index], rect: NSRect(x: 2, y: 4, width: bounds.width-4, height: 20), size: 16, color: selected ? ArkPalette.ink : ArkPalette.secondary, alignment: .center)
     }
 }
 
 @MainActor
-private final class OrbitTabRow: OrbitFlippedView {
+private final class ArkTabRow: ArkFlippedView {
     private(set) var item: SidebarTabItem
     var select: (() -> Void)?
     var close: (() -> Void)?
@@ -332,19 +331,19 @@ private final class OrbitTabRow: OrbitFlippedView {
     private let titleLabel: NSTextField
     private let subtitleLabel: NSTextField
     private let iconView = NSImageView()
-    private let closeButton = OrbitIconButton(symbol: "xmark", label: "Close tab")
+    private let closeButton = ArkIconButton(symbol: "xmark", label: "Close tab")
     private var hovered = false
     private var area: NSTrackingArea?
     init(item: SidebarTabItem) {
         self.item = item
-        titleLabel = orbitLabel(item.title.isEmpty ? "New Tab" : item.title, size: 12, weight: item.isActive ? .medium : .regular)
-        subtitleLabel = orbitLabel(item.subtitle, size: 9, weight: .regular)
+        titleLabel = arkLabel(item.title.isEmpty ? "New Tab" : item.title, size: 12, weight: item.isActive ? .medium : .regular)
+        subtitleLabel = arkLabel(item.subtitle, size: 9, weight: .regular)
         super.init(frame: .zero)
         wantsLayer = true
-        subtitleLabel.textColor = OrbitPalette.secondary.withAlphaComponent(0.84)
+        subtitleLabel.textColor = ArkPalette.secondary.withAlphaComponent(0.84)
         iconView.image = NSImage(systemSymbolName: item.symbol, accessibilityDescription: nil) ?? NSImage(systemSymbolName: "globe", accessibilityDescription: nil)
         iconView.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 15, weight: .regular)
-        iconView.contentTintColor = item.isActive ? OrbitPalette.spaceColors[0] : OrbitPalette.secondary
+        iconView.contentTintColor = item.isActive ? ArkPalette.spaceColors[0] : ArkPalette.secondary
         for view in [titleLabel, subtitleLabel, iconView, closeButton] as [NSView] { addSubview(view) }
         closeButton.isHidden = !item.isActive
         closeButton.handler = { [weak self] in self?.close?() }
@@ -360,7 +359,7 @@ private final class OrbitTabRow: OrbitFlippedView {
         titleLabel.font = .systemFont(ofSize: 12, weight: item.isActive ? .medium : .regular)
         subtitleLabel.stringValue = item.subtitle
         iconView.image = NSImage(systemSymbolName: item.symbol, accessibilityDescription: nil)
-        iconView.contentTintColor = item.isActive ? OrbitPalette.spaceColors[0] : OrbitPalette.secondary
+        iconView.contentTintColor = item.isActive ? ArkPalette.spaceColors[0] : ArkPalette.secondary
         closeButton.isHidden = !hovered && !item.isActive
         setAccessibilityLabel(item.title); setAccessibilityValue(item.isActive ? "Selected" : "")
         toolTip = item.subtitle; needsDisplay = true
@@ -431,36 +430,65 @@ private final class OrbitTabRow: OrbitFlippedView {
     @objc private func closeFromMenu() { close?() }
 }
 
-@MainActor private final class OrbitSpacesButton: OrbitHoverButton {
-    private static let frames: [NSImage?] = (0...35).map { frame in
-        Bundle.main.url(forResource: String(format: "spaces-%03d", frame), withExtension: "png", subdirectory: "Recovered/spaces-dark").flatMap(NSImage.init(contentsOf:))
+/// An original animation of a system symbol, drawn natively without image frames.
+@MainActor private final class ArkSpacesButton: ArkHoverButton {
+    private let hoverAnimator = SpringAnimator()
+    private let selectionAnimator = SpringAnimator()
+    private var hoverAmount: CGFloat = 0
+    private var selectionPulse: CGFloat = 0
+
+    init() {
+        super.init(frame: .zero)
+        toolTip = "Cycle spaces — two-finger swipe over sidebar"
+        setAccessibilityLabel("Cycle spaces")
     }
-    private var frameIndex = 0
-    private var timer: Timer?
-    init() { super.init(frame: .zero); toolTip = "Cycle spaces — two-finger swipe over sidebar"; setAccessibilityLabel("Cycle spaces") }
     required init?(coder: NSCoder) { fatalError() }
-    override func mouseEntered(with event: NSEvent) { super.mouseEntered(with: event); play(from: 1, to: 11) }
-    override func mouseExited(with event: NSEvent) { super.mouseExited(with: event); play(from: frameIndex, to: 0) }
-    func playSelection() { play(from: 11, to: 35) }
-    private func play(from: Int, to: Int) {
-        timer?.invalidate()
-        guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { frameIndex = 0; needsDisplay = true; return }
-        frameIndex = from; needsDisplay = true
-        let start = CACurrentMediaTime(); let step = to >= from ? 1 : -1
-        let timer = Timer(timeInterval: 1/60.0, repeats: true) { [weak self] timer in
-            MainActor.assumeIsolated {
-                guard let self else { timer.invalidate(); return }
-                let n = min(abs(to-from), Int((CACurrentMediaTime()-start)*60))
-                self.frameIndex = from+n*step; self.needsDisplay = true
-                if self.frameIndex == to { timer.invalidate(); self.timer = nil }
-            }
+
+    override func mouseEntered(with event: NSEvent) {
+        super.mouseEntered(with: event)
+        animateHover(to: 1)
+    }
+    override func mouseExited(with event: NSEvent) {
+        super.mouseExited(with: event)
+        animateHover(to: 0)
+    }
+    private func animateHover(to value: CGFloat) {
+        hoverAnimator.animate(from: hoverAmount, to: value, response: 0.24, dampingRatio: 0.90) { [weak self] value in
+            self?.hoverAmount = value
+            self?.needsDisplay = true
         }
-        self.timer = timer; RunLoop.main.add(timer, forMode: .common)
+    }
+    func playSelection() {
+        // A bounded impulse gives each space change a brief tilt and scale pulse.
+        // Repeated selections replace the existing animation; no callbacks queue.
+        selectionAnimator.animate(from: selectionPulse, to: 0, response: 0.36,
+                                  dampingRatio: 0.62, initialVelocity: 18) { [weak self] value in
+            self?.selectionPulse = value
+            self?.needsDisplay = true
+        }
+    }
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window == nil {
+            hoverAnimator.stop(); selectionAnimator.stop()
+            hoverAmount = 0; selectionPulse = 0; hovered = false
+        }
     }
     override func draw(_ dirtyRect: NSRect) {
         if hovered { fill(NSColor.white.withAlphaComponent(0.10), radius: 7) }
-        guard let source = Self.frames[frameIndex], let image = source.copy() as? NSImage else { return }
-        image.draw(in: bounds.insetBy(dx: 3, dy: 3), from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
+        let reduced = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        let hover: CGFloat = reduced ? 0 : min(1, max(0, hoverAmount))
+        let pulse: CGFloat = reduced ? 0 : min(1, max(-0.2, selectionPulse))
+        NSGraphicsContext.saveGraphicsState()
+        let transform = NSAffineTransform()
+        transform.translateX(by: bounds.midX, yBy: bounds.midY - hover)
+        transform.rotate(byDegrees: -8 * hover + 16 * pulse)
+        transform.scale(by: 1 + 0.08 * hover + 0.12 * pulse)
+        transform.translateX(by: -bounds.midX, yBy: -bounds.midY)
+        transform.concat()
+        symbol("square.stack.3d.up", rect: bounds.insetBy(dx: 4, dy: 4),
+               color: ArkPalette.ink, size: 18)
+        NSGraphicsContext.restoreGraphicsState()
     }
-    deinit { timer?.invalidate() }
+    deinit { hoverAnimator.stop(); selectionAnimator.stop() }
 }
