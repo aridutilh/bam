@@ -4,6 +4,14 @@
 
 Remaining work is tracked with acceptance criteria in [FEATURE-INVENTORY.md](FEATURE-INVENTORY.md). An inventory item is complete only after its full behavior is verified.
 
+## 0.3.3 — 2026-10-23
+
+- Keep a Space swipe eligible through small vertical or diagonal pickup noise while preserving established vertical scrolling.
+- Disable horizontal elasticity in the vertical tab list, removing the sideways row bounce that could be mistaken for a cancelled Space transition.
+- Measure release velocity over a short time window, making short flicks consistent across coalesced events and small release-tail packets. Preserve deliberate reverse-flick cancellation.
+- Exercise the actual native event adapter with local NSEvent fixtures, including window association, phase precedence, and flipped sidebar coordinates.
+- Add an explicit, bounded local Space-swipe recording command for physical-device troubleshooting. Recording is disabled by default, stops after 60 seconds or 5,000 records, and excludes URLs, titles, tab identifiers and page content.
+
 ## 0.3.2 — 2026-10-23
 
 - Replace the PiP title bar with a rounded video panel sized to the video's aspect ratio. Add native hover controls for Return to Tab, play/pause, ±10 seconds, mute, volume, and resizing, with keyboard access.

@@ -1,4 +1,4 @@
-# Ark 0.3.2
+# Ark 0.3.3
 
 <img src="Resources/ArkIcon.png" width="128" alt="Ark’s crayon-drawn icon">
 
@@ -6,7 +6,7 @@ An open-source macOS browser prototype built with Swift, AppKit, Core Animation,
 
 The original application code is available under the [MIT license](LICENSE). The public source includes no extracted Arc artwork, animation frames, fonts, textures, binaries, or decompiler output. The app icon is a crayon-drawn reinterpretation of Arc’s mark; [branding notes](docs/branding.md) record its source and generation prompt. Sidebar controls use macOS SF Symbols, and the Spaces button uses an original native animation.
 
-[Download v0.3.2](https://github.com/aridutilh/ark/releases/tag/v0.3.2) · [Source repository](https://github.com/aridutilh/ark) · [Feature checklist](FEATURE-INVENTORY.md) · [Validation status](VALIDATION.md)
+[Download v0.3.3](https://github.com/aridutilh/ark/releases/tag/v0.3.3) · [Source repository](https://github.com/aridutilh/ark) · [Feature checklist](FEATURE-INVENTORY.md) · [Validation status](VALIDATION.md)
 
 ## Build and run
 
@@ -27,7 +27,7 @@ Run the integrated local fixtures after building:
 bash scripts/test-runtime.sh
 ```
 
-This starts a loopback fixture server and runs the packaged app's WebKit, manual PiP, native interaction, automatic PiP, and feature tests. Tests open native windows. The script manages its temporary server and files. [VALIDATION.md](VALIDATION.md) distinguishes available checks from actual results for this revision; all six build/component suites and all five packaged runtime suites passed for v0.3.2 (11 suites total), including 41 controller interaction, 58 automatic PiP, and 46 browsing-feature checks. The installed app passed strict code-signature verification. Native UI checks confirmed PiP controls, Return to Tab, and the dark collapsed toolbar; physical trackpad feel remains a separate manual check.
+This starts a loopback fixture server and runs the packaged app's WebKit, manual PiP, native interaction, automatic PiP, and feature tests. Tests open native windows. The script manages its temporary server and files. [VALIDATION.md](VALIDATION.md) distinguishes available checks from actual results for this revision; all six build/component suites and all five packaged runtime suites passed for v0.3.3 (11 suites total), including 68 controller interaction, 58 automatic PiP, and 46 browsing-feature checks. The installed app passed strict code-signature verification. Earlier installed-app UI checks confirmed PiP controls, Return to Tab, and the dark collapsed toolbar; the corresponding runtime suites passed again. Physical swipe reliability after the v0.3.3 changes remains a separate manual check.
 
 The bundled video is a generated test pattern. To regenerate it, install FFmpeg and run `bash scripts/generate-demo.sh`; FFmpeg is not needed for an ordinary build.
 
@@ -88,6 +88,10 @@ These are implementation subsets, not a complete browser compatibility claim. Se
 Sidebar resizing uses a 228-point preferred width, 164–500-point bounds, and an 82-point collapse threshold. Toggle easing lasts 80 ms with cubic control points `(0.25, 0.46, 0.45, 0.94)`. The original analytical spring driver preserves momentum when retargeted; Space paging uses response `0.30` and damping ratio `0.99`. Response describes the spring, not a fixed animation duration. Visible transitions run with the display's refresh cadence. Sidebar pages retain their rows and scroll positions across transitions; a new swipe takes over at the currently displayed offset. A ready single-page snapshot crossfades out over 160 ms after a Space commits. Reduce Motion uses immediate endpoints.
 
 Numeric tuning was informed by local behavioral research. The historical `RecoveredMotion.swift` filename does not imply that its Swift implementation is extracted source. Public code draws its own interface and uses system symbols. The Spaces symbol has its own hover tilt and selection pulse, with no copied geometry or animation keyframes. Reduce Motion applies to sidebar, paging, and symbol animations.
+
+Space swipes tolerate small diagonal or vertical pickup noise before locking direction. Release velocity uses an 80 ms motion window; a tiny final packet does not erase the preceding flick. Established vertical scrolling remains available to the tab list. Automated checks cover these decisions; physical device feel requires a separate check.
+
+For an intermittent swipe failure, View → Record Space Swipes (60 Seconds) starts a local diagnostic capture at `~/Library/Caches/Ark/space-swipe-diagnostics.jsonl`. It stops after 60 seconds or 5,000 records and replaces the previous trace only when explicitly started again. Capture is off by default. It records gesture values and routing decisions, excluding URLs, titles, tab identifiers, and page content; no trace is uploaded automatically.
 
 ## Page ownership and limitations
 
