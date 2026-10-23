@@ -136,6 +136,7 @@ import QuartzCore
         }
         library.onRestoreClosed = { [weak self] record in self?.restoreClosed(record) }
         pictureInPicture.onChange = { [weak self] in self?.showActive() }
+        pictureInPicture.onReturnToTab = { [weak self] id in self?.returnToVideoTab(id) }
         scrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
             guard let self else { return event }; return self.handleSpaceScroll(event)
         }
@@ -458,6 +459,16 @@ import QuartzCore
     }
     @objc func nextSpace(_ sender: Any?) { changeSpace(min(2, session.space+1)) }
     @objc func previousSpace(_ sender: Any?) { changeSpace(max(0, session.space-1)) }
+    func returnToVideoTab(_ id: UUID) {
+        guard session.tabs.contains(where: { $0.id == id }) else { return }
+        select(id)
+        view.window?.makeKeyAndOrderFront(nil)
+        if let web = browsers[id], web.window === view.window { view.window?.makeFirstResponder(web) }
+        if let group = session.split(for: id) {
+            splitCoordinators[group.primaryID]?.setFocusedSide(id == group.secondaryID ? .right : .left)
+        }
+        refresh()
+    }
     func setSidebar(_ visible: Bool) {
         cancelPaging(); session.sidebarVisible = visible
         // Three concrete presentation-transition callbacks use this recovered curve.

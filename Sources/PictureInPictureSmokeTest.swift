@@ -3,7 +3,7 @@ import WebKit
 
 /// Uses only bundled pages, a bundled video, and a nonpersistent WebKit store.
 @MainActor final class PictureInPictureSmokeTest: NSObject, WKNavigationDelegate {
-    private enum Stage { case loadingVideo, cancelling, opening, playing, returning, restored, automaticPaused, automaticCancelled, automaticOpening, automaticPlaying, automaticReturning, automaticRestored, loadingEmpty, automaticEmpty, empty, finished }
+    private enum Stage { case loadingVideo, cancelling, opening, playing, returning, restored, rapidRefloat, automaticPaused, automaticCancelled, automaticOpening, automaticPlaying, automaticReturning, automaticRestored, loadingEmpty, automaticEmpty, empty, finished }
     private var stage = Stage.loadingVideo
     private let coordinator = PictureInPictureCoordinator()
     private let tabID = UUID()
@@ -16,6 +16,7 @@ import WebKit
     private var panelTime = 0.0
     private var restoreCount = 0
     private var cycle = 0
+    private var explicitReturns: [UUID] = []
     private var automaticCompletions: [String: [Bool]] = [:]
     private let focusField = NSTextField(string: "Typing continues in the selected tab")
     private weak var expectedKeyWindow: NSWindow?
@@ -36,7 +37,8 @@ import WebKit
         host.addSubview(web); web.frame = host.bounds
         window.makeKeyAndOrderFront(nil)
         coordinator.onChange = { [weak self] in self?.pictureInPictureChanged() }
-        timeout = Timer.scheduledTimer(withTimeInterval: 35, repeats: false) { [weak self] _ in
+        coordinator.onReturnToTab = { [weak self] id in self?.explicitReturns.append(id) }
+        timeout = Timer.scheduledTimer(withTimeInterval: 45, repeats: false) { [weak self] _ in
             DispatchQueue.main.async { self?.finish(false, "Timed out") }
         }
         loadFixture("PiPDemo")
@@ -77,7 +79,7 @@ import WebKit
                     let passed = message.hasPrefix("No HTML5 video found.") && self.coordinator.activeTabID == nil && !self.coordinator.owns(self.web) && self.web.superview === self.host
                     let expected = ["empty": [false], "paused": [false], "initialGuard": [false], "staleGuard": [false], "cancelled": [false], "presented": [true], "busy": [false]]
                     guard self.automaticCompletions == expected else { self.finish(false, "Automatic completion was not delivered exactly once per terminal result: \(self.automaticCompletions)"); return }
-                    self.finish(passed, "Manual and automatic PiP: live video identity/time, panel, styles/controls, close/Escape; playing-only automatic detection, focus retention, stale-guard/pending cancellation, no replacement, and no-video handling")
+                    self.finish(passed, "Manual and automatic PiP: live video identity/time, rounded aspect-fit panel, native pause/play/seek bounds/volume/mute/resize/Return, restored DOM before reveal, close/Escape; playing-only automatic detection, focus retention, stale-guard/pending cancellation, no replacement, and no-video handling")
                 })
             }
         default: break
@@ -117,29 +119,29 @@ import WebKit
             guard coordinator.owns(web), coordinator.activeTabID == tabID,
                   let floating = web.window as? NSPanel, floating !== window,
                   floating.isVisible, floating.level == .floating,
-                  floating.contentMinSize.width == 320, floating.contentMinSize.height == 180 else {
+                  !floating.styleMask.contains(.titled), floating.styleMask.contains(.resizable),
+                  floating.isOpaque == false, floating.contentView?.layer?.cornerRadius == 14,
+                  floating.contentMinSize.width == 320 else {
                 finish(false, "Floating panel/ownership state is incorrect"); return
             }
             stage = .playing
             after(0.75) {
-                self.web.evaluateJavaScript("({same: document.querySelector('video') === window.__orbitSmokeVideo, time: window.__orbitSmokeVideo.currentTime, controls: window.__orbitSmokeVideo.controls, width: window.__orbitSmokeVideo.getBoundingClientRect().width, viewport: window.innerWidth})") { [weak self] value, error in
+                self.web.evaluateJavaScript("({same: document.querySelector('video') === window.__orbitSmokeVideo, time: window.__orbitSmokeVideo.currentTime, controls: window.__orbitSmokeVideo.controls, width: window.__orbitSmokeVideo.getBoundingClientRect().width, height: window.__orbitSmokeVideo.getBoundingClientRect().height, ratio: window.__orbitSmokeVideo.videoWidth / window.__orbitSmokeVideo.videoHeight, viewport: window.innerWidth, viewportHeight: window.innerHeight})") { [weak self] value, error in
                     guard let self else { return }
                     guard error == nil, let info = value as? [String: Any], info["same"] as? Bool == true,
-                          info["controls"] as? Bool == true, let time = info["time"] as? Double, time > self.baselineTime + 0.1,
-                          let width = info["width"] as? Double, let viewport = info["viewport"] as? Double, abs(width - viewport) < 2 else {
+                          info["controls"] as? Bool == false, let time = info["time"] as? Double, time > self.baselineTime + 0.1,
+                          let width = info["width"] as? Double, let viewport = info["viewport"] as? Double, abs(width - viewport) < 2,
+                          let height = info["height"] as? Double, let viewportHeight = info["viewportHeight"] as? Double, abs(height - viewportHeight) < 2,
+                          let ratio = info["ratio"] as? Double, abs(Double(floating.frame.width / floating.frame.height) - ratio) < 0.02 else {
                         self.finish(false, "Video identity, playback, controls, or isolation failed: \(value ?? "nil")"); return
                     }
-                    self.panelTime = time
-                    self.stage = .returning
                     if self.cycle == 0 {
-                        self.web.window?.performClose(nil)
-                    } else if let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: floating.windowNumber, context: nil, characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}", isARepeat: false, keyCode: 53) {
-                        floating.sendEvent(event)
-                    } else { self.finish(false, "Could not construct Escape test event") }
+                        self.exerciseNativeControls(in: floating) { self.finishManualCycle(in: floating) }
+                    } else { self.finishManualCycle(in: floating) }
                 }
             }
         } else if stage == .returning {
-            guard coordinator.activeTabID == nil, !coordinator.owns(web), web.superview === host, restoreCount == cycle + 1 else {
+            guard coordinator.activeTabID == nil, !coordinator.owns(web), web.superview === host, restoreCount == cycle + 1, web.alphaValue == 0 else {
                 finish(false, "Return-to-tab callback or ownership failed"); return
             }
             stage = .restored
@@ -147,18 +149,129 @@ import WebKit
                 self.web.evaluateJavaScript("({same: document.querySelector('video') === window.__orbitSmokeVideo, time: window.__orbitSmokeVideo.currentTime, controls: window.__orbitSmokeVideo.controls, actualStyles: [window.__orbitSmokeVideo.getAttribute('style'),document.body.getAttribute('style'),document.documentElement.getAttribute('style')], expectedStyles: window.__orbitSmokeStyles, styles: JSON.stringify([window.__orbitSmokeVideo.getAttribute('style'),document.body.getAttribute('style'),document.documentElement.getAttribute('style')].map(value => value || '')) === JSON.stringify(window.__orbitSmokeStyles.map(value => value || ''))})") { [weak self] value, error in
                     guard let self else { return }
                     guard error == nil, let info = value as? [String: Any], info["same"] as? Bool == true,
-                          info["styles"] as? Bool == true, info["controls"] as? Bool == false,
+                          info["styles"] as? Bool == true, info["controls"] as? Bool == false, self.web.alphaValue == 1,
                           let time = info["time"] as? Double, time > self.panelTime + 0.1 else {
                         self.finish(false, "DOM/style/control restoration or continued playback failed: \(value ?? "nil")"); return
                     }
-                    if self.cycle == 0 {
-                        self.cycle = 1; self.baselineTime = time; self.openPanel()
+                    if self.cycle < 2 {
+                        self.cycle += 1; self.baselineTime = time; self.openPanel()
                     } else {
-                        self.testAutomaticPaused()
+                        guard self.explicitReturns == [self.tabID] else { self.finish(false, "Only the explicit Return control should request source selection"); return }
+                        self.testRapidRefloat()
                     }
                 }
             }
         }
+    }
+
+    private func finishManualCycle(in floating: NSPanel) {
+        web.evaluateJavaScript("window.__orbitSmokeVideo.currentTime") { [weak self] value, _ in
+            guard let self, let time = value as? Double else { return }
+            self.panelTime = time
+            self.stage = .returning
+            if self.cycle == 0 { floating.performClose(nil) }
+            else if self.cycle == 1 {
+                guard let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: floating.windowNumber, context: nil, characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}", isARepeat: false, keyCode: 53) else { self.finish(false, "Could not construct Escape event"); return }
+                floating.sendEvent(event)
+            } else if let button = self.control("return", in: floating.contentView) as? NSButton { button.performClick(nil) }
+            else { self.finish(false, "Return control missing") }
+        }
+    }
+
+    private func control(_ name: String, in root: NSView?) -> NSView? {
+        guard let root else { return nil }
+        if root.identifier?.rawValue == "pip.\(name)" { return root }
+        for child in root.subviews { if let result = control(name, in: child) { return result } }
+        return nil
+    }
+
+    private struct ControlFailure: Error { let message: String }
+    private func waitForJavaScript(_ expression: String) async throws {
+        for _ in 0..<60 {
+            if try await web.evaluateJavaScript(expression) as? Bool == true { return }
+            try await Task.sleep(nanoseconds: 25_000_000)
+        }
+        throw ControlFailure(message: expression)
+    }
+
+    private func exerciseNativeControls(in floating: NSPanel, completion: @escaping () -> Void) {
+        guard let pause = control("playPause", in: floating.contentView) as? NSButton,
+              let back = control("backward", in: floating.contentView) as? NSButton,
+              let forward = control("forward", in: floating.contentView) as? NSButton,
+              let mute = control("mute", in: floating.contentView) as? NSButton,
+              let volume = control("volume", in: floating.contentView) as? NSSlider,
+              let grip = control("resize", in: floating.contentView),
+              control("return", in: floating.contentView) is NSButton,
+              control("close", in: floating.contentView) is NSButton else {
+            finish(false, "Native overlay controls missing"); return
+        }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                pause.performClick(nil)
+                try await self.waitForJavaScript("window.__orbitSmokeVideo.paused")
+                _ = try await self.web.evaluateJavaScript("window.__orbitSmokeVideo.currentTime = 5; undefined")
+                forward.performClick(nil)
+                try await self.waitForJavaScript("Math.abs(window.__orbitSmokeVideo.currentTime - 15) < 0.3")
+                back.performClick(nil)
+                try await self.waitForJavaScript("Math.abs(window.__orbitSmokeVideo.currentTime - 5) < 0.3")
+                _ = try await self.web.evaluateJavaScript("window.__orbitSmokeVideo.currentTime = 1; undefined")
+                back.performClick(nil)
+                try await self.waitForJavaScript("window.__orbitSmokeVideo.currentTime < 0.1")
+                _ = try await self.web.evaluateJavaScript("window.__orbitSmokeVideo.currentTime = window.__orbitSmokeVideo.duration - 1; undefined")
+                forward.performClick(nil)
+                try await self.waitForJavaScript("window.__orbitSmokeVideo.currentTime <= window.__orbitSmokeVideo.duration && window.__orbitSmokeVideo.currentTime > window.__orbitSmokeVideo.duration - 0.3")
+                volume.doubleValue = 0.35; _ = volume.sendAction(volume.action, to: volume.target)
+                try await self.waitForJavaScript("Math.abs(window.__orbitSmokeVideo.volume - 0.35) < 0.001 && !window.__orbitSmokeVideo.muted")
+                mute.performClick(nil)
+                try await self.waitForJavaScript("window.__orbitSmokeVideo.muted")
+                let oldWidth = floating.frame.width
+                guard grip.accessibilityPerformIncrement(), floating.frame.width > oldWidth,
+                      abs(floating.frame.width / floating.frame.height - floating.contentAspectRatio.width) < 0.02,
+                      grip.accessibilityPerformDecrement() else { throw ControlFailure(message: "Accessible resize must preserve video aspect ratio") }
+                _ = try await self.web.evaluateJavaScript("window.__orbitSmokeVideo.currentTime = 5; undefined")
+                pause.performClick(nil)
+                try await self.waitForJavaScript("!window.__orbitSmokeVideo.paused && document.querySelector('video') === window.__orbitSmokeVideo && window.__orbitSmokeVideo.currentTime > 5.05")
+                completion()
+            } catch { self.finish(false, "Native media control check failed: \(error)") }
+        }
+    }
+
+    private func testRapidRefloat() {
+        stage = .rapidRefloat
+        let restore: (WKWebView) -> Void = { [weak self] returned in
+            guard let self else { return }; self.host.addSubview(returned); returned.frame = self.host.bounds
+        }
+        let report: (String) -> Void = { [weak self] message in self?.finish(false, "Immediate re-float: \(message)") }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                self.coordinator.toggle(web: self.web, tabID: self.tabID, restore: restore, report: report)
+                try await self.waitForOwnership(true)
+                self.coordinator.restore()
+                self.coordinator.toggle(web: self.web, tabID: self.tabID, restore: restore, report: report)
+                try await self.waitForOwnership(true)
+                try await Task.sleep(nanoseconds: 250_000_000)
+                guard self.web.alphaValue == 1, self.web.window !== self.window else {
+                    throw ControlFailure(message: "Stale restore completion hid or reparented the re-floated video")
+                }
+                try await self.waitForJavaScript("document.querySelector('video') === window.__orbitSmokeVideo && !window.__orbitSmokeVideo.controls && getComputedStyle(window.__orbitSmokeVideo).position === 'fixed'")
+                self.coordinator.restore()
+                try await self.waitForJavaScript("JSON.stringify([window.__orbitSmokeVideo.getAttribute('style'), document.body.getAttribute('style'), document.documentElement.getAttribute('style')].map(value => value || '')) === JSON.stringify(window.__orbitSmokeStyles.map(value => value || ''))")
+                guard self.web.superview === self.host, self.web.alphaValue == 1 else {
+                    throw ControlFailure(message: "Re-float cycle did not restore its original host/visibility")
+                }
+                self.testAutomaticPaused()
+            } catch { self.finish(false, "Immediate re-float check failed: \(error)") }
+        }
+    }
+
+    private func waitForOwnership(_ owned: Bool) async throws {
+        for _ in 0..<60 {
+            if coordinator.owns(web) == owned, coordinator.activeTabID == (owned ? tabID : nil) { return }
+            try await Task.sleep(nanoseconds: 25_000_000)
+        }
+        throw ControlFailure(message: "Timed out waiting for PiP ownership")
     }
 
     private func testAutomaticPaused() {
