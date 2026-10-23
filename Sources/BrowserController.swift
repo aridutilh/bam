@@ -84,6 +84,9 @@ import QuartzCore
     private var ignoredSpaceGestureEnd: DispatchWorkItem?
     private var unphasedScrollEnd: DispatchWorkItem?
     private var spaceScrollRoute = "idle"
+    // A packet may visit the monitor, the tab list, and the sidebar responder.
+    // Retain a small identity cache so nested dispatch cannot apply it twice.
+    private var recentSpaceScrollEvents: [(event: NSEvent, consumed: Bool)] = []
     private var spaceSnapshotRequest: UUID?
     private var spaceSnapshot: NSImage?
     private var spaceSnapshotSource: UUID?
@@ -148,6 +151,10 @@ import QuartzCore
         sidebar.onToggleSidebar = { [weak self] in self?.toggleSidebar(nil) }
         sidebar.onSpaceChange = { [weak self] space in self?.changeSpace(space) }
         sidebar.onPictureInPicture = { [weak self] in self?.togglePictureInPicture(nil) }
+        sidebar.onSpaceScroll = { [weak self] event, source in
+            guard let self else { return false }
+            return self.handleSpaceScroll(event, source: source) == nil
+        }
         library.onOpenURL = { [weak self] address in
             guard let self else { return }
             self.cancelPaging(); self.dismissAddress()
@@ -473,7 +480,12 @@ import QuartzCore
         prepareSpaceContentTransition()
         finishPaging(commit: space)
     }
-    func handleSpaceScroll(_ event: NSEvent) -> NSEvent? {
+    func handleSpaceScroll(_ event: NSEvent, source: SpaceScrollSource = .monitor) -> NSEvent? {
+        if let previous = recentSpaceScrollEvents.last(where: { $0.event === event }) {
+            SpaceSwipeDiagnostics.shared.record(["kind": "duplicate", "source": source.rawValue,
+                                                 "consumed": previous.consumed])
+            return previous.consumed ? nil : event
+        }
         let phase: SpaceSwipeStateMachine.Phase
         if event.phase.contains(.cancelled) { phase = .cancelled }
         else if event.phase.contains(.ended) { phase = .ended }
@@ -490,7 +502,9 @@ import QuartzCore
             isPrecise: event.hasPreciseScrollingDeltas,
             isInsideSidebar: insideSidebar,
             isFromBrowserWindow: event.window === view.window)
-        SpaceSwipeDiagnostics.shared.record(["kind": "event", "phase": String(describing: phase),
+        recentSpaceScrollEvents.append((event, consumed))
+        if recentSpaceScrollEvents.count > 32 { recentSpaceScrollEvents.removeFirst() }
+        SpaceSwipeDiagnostics.shared.record(["kind": "event", "source": source.rawValue, "phase": String(describing: phase),
             "rawPhase": event.phase.rawValue, "rawMomentumPhase": event.momentumPhase.rawValue,
             "precise": event.hasPreciseScrollingDeltas, "insideSidebar": insideSidebar,
             "browserWindow": event.window === view.window, "eventWindowPresent": event.window != nil,

@@ -1,6 +1,20 @@
 import AppKit
 import QuartzCore
 
+enum SpaceScrollSource: String {
+    case monitor, tabList, sidebar
+}
+
+/// AppKit can deliver tracked scroll events without going through a local monitor.
+@MainActor private final class SidebarScrollView: NSScrollView {
+    var onSpaceScroll: ((NSEvent) -> Bool)?
+
+    override func scrollWheel(with event: NSEvent) {
+        if onSpaceScroll?(event) == true { return }
+        super.scrollWheel(with: event)
+    }
+}
+
 struct SidebarTabItem: Equatable {
     let id: UUID
     let title: String
@@ -23,6 +37,7 @@ struct SidebarTabItem: Equatable {
     var onToggleSidebar: (() -> Void)?
     var onSpaceChange: ((Int) -> Void)?
     var onPictureInPicture: (() -> Void)?
+    var onSpaceScroll: ((NSEvent, SpaceScrollSource) -> Bool)?
     override var isFlipped: Bool { true }
     private let back = ArkIconButton(symbol: "chevron.left", label: "Go back")
     private let forward = ArkIconButton(symbol: "chevron.right", label: "Go forward")
@@ -62,7 +77,17 @@ struct SidebarTabItem: Equatable {
         for button in spaces { button.handler = { [weak self, weak button] in guard let button else { return }; self?.onSpaceChange?(button.index) } }
     }
     required init?(coder: NSCoder) { fatalError() }
+    // A vertical tab list is always at its horizontal edge. Ask AppKit to
+    // forward that axis through its responder chain, including tracked events.
+    override func wantsForwardedScrollEvents(for axis: NSEvent.GestureAxis) -> Bool {
+        axis == .horizontal
+    }
+    override func scrollWheel(with event: NSEvent) {
+        if onSpaceScroll?(event, .sidebar) == true { return }
+        super.scrollWheel(with: event)
+    }
     private func connect(_ page: SidebarPage) {
+        page.scroll.onSpaceScroll = { [weak self] in self?.onSpaceScroll?($0, .tabList) ?? false }
         page.select = { [weak self] in self?.onSelectTab?($0) }
         page.close = { [weak self] in self?.onCloseTab?($0) }
         page.pin = { [weak self] in self?.onPinTab?($0) }
@@ -167,7 +192,7 @@ struct SidebarTabItem: Equatable {
     var select: ((UUID)->Void)?; var close: ((UUID)->Void)?; var pin: ((UUID)->Void)?; var newTab: (()->Void)?
     let favorites = (0..<3).map { _ in ArkFavoriteButton() }
     let heading = arkLabel("◈  Studio", size: 12, weight: .semibold)
-    let scroll = NSScrollView(); let content = ArkFlippedView(); let newButton = ArkNewTabButton()
+    let scroll = SidebarScrollView(); let content = ArkFlippedView(); let newButton = ArkNewTabButton()
     let divider = NSView()
     var rows: [ArkTabRow] = []
     var tabs: [SidebarTabItem] = []

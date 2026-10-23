@@ -2,7 +2,8 @@ import AppKit
 import WebKit
 
 /// Controller-level native tests using bundled Home pages, real Space buttons,
-/// and local NSEvent fixtures passed through the actual scroll-event adapter.
+/// and local NSEvent fixtures passed through the scroll-event adapter and native
+/// sidebar receivers. Receiver fixtures exercise in-process delivery, not OS input.
 /// Fixtures are never posted to the application or system event queue.
 @MainActor final class InteractionSmokeTest {
     private var controller: BrowserController!
@@ -508,9 +509,114 @@ import WebKit
                                  && abs(sourceScroll.contentView.bounds.origin.y - sourceY) < 0.5
                                  && abs(sourceScroll.contentView.bounds.origin.x) < 0.001,
                                  "Returning to a Space replaced its tab list or lost the saved vertical position") else { return }
-                let note = self.skippedInterruptions == 0 ? "" : "; \(self.skippedInterruptions) timed interruption cases used preview cancellation or synchronous selection because Reduce Motion is enabled"
-                self.finish(true, "\(self.checks) checks: rendered Space change, address/selection/new-tab cancellation, rapid sidebar toggles, resize/collapse/reset, continuous toolbar geometry, capture/end/momentum, unphased fallback, interruption/queued commands, native Space buttons, NSEvent adapter phase/window/flipped-coordinate/noisy-intent coverage, vertical-only list widths/scrolling, and retained scroll position across Spaces\(note)")
+                self.testNativeScrollReceiverTakeover()
             }
+        }
+    }
+
+    private func testNativeScrollReceiverTakeover() {
+        selectSpaceImmediately(0)
+        controller.session.sidebarWidth = 228; controller.displayedWidth = 228
+        controller.layoutBrowser(); controller.view.layoutSubtreeIfNeeded()
+        guard let receiver = descendantScroll(in: controller.sidebar) else {
+            finish(false, "Missing tab-list receiver for native tracking regression"); return
+        }
+        let point = NSPoint(x: 60, y: 240)
+        let began = adapterEvent(-2, phase: .began, at: point, in: window)
+        guard check(controller.handleSpaceScroll(began) === began && controller.trackingSwipe
+                    && abs(controller.pagingOffset) < 0.001,
+                    "Tiny native begin should remain undecided before receiver delivery") else { return }
+        // This is the sequence observed in the physical trace: after an
+        // unclaimed begin, later packets may bypass the local event monitor.
+        // Each packet here is a local object; none is posted to an event queue.
+        receiver.scrollWheel(with: began)
+        guard check(controller.trackingSwipe && abs(controller.pagingOffset) < 0.001,
+                    "Receiving the same undecided begin acquired or lost the gesture") else { return }
+        let changed = adapterEvent(-4, phase: .changed, at: point, in: window)
+        receiver.scrollWheel(with: changed)
+        guard check(controller.trackingSwipe && abs(controller.pagingOffset + 6) < 0.001,
+                    "Receiver-only changed packet was lost or counted the tiny begin twice: offset=\(controller.pagingOffset)") else { return }
+        let monitoredAgain = controller.handleSpaceScroll(changed)
+        controller.sidebar.scrollWheel(with: changed)
+        guard check(monitoredAgain == nil && abs(controller.pagingOffset + 6) < 0.001,
+                    "Monitor/receiver/responder bubbling applied one NSEvent more than once") else { return }
+        receiver.scrollWheel(with: adapterEvent(-64, phase: .changed, at: point, in: window))
+        guard check(abs(controller.pagingOffset + 70) < 0.001,
+                    "Native receiver did not keep the full horizontal displacement: \(controller.pagingOffset)") else { return }
+        let ended = adapterEvent(phase: .ended, at: point, in: window)
+        receiver.scrollWheel(with: ended)
+        controller.sidebar.scrollWheel(with: ended)
+        guard check(!controller.trackingSwipe, "Receiver-only end failed to release native sidebar capture") else { return }
+        waitUntil("receiver-only swipe commit", condition: {
+            self.controller.session.space == 1 && self.pagingIsClear
+        }) {
+            guard self.check(self.controller.activeWebView?.superview === self.controller.webHost,
+                             "Receiver-only swipe did not display the destination Space") else { return }
+            self.testNativeVerticalAfterTakeover(receiver)
+        }
+    }
+    private func testNativeVerticalAfterTakeover(_ original: NSScrollView) {
+        // Reuse exactly the same list after takeover, so a stranded native
+        // scroll state cannot be hidden by creating a new NSScrollView.
+        selectSpaceImmediately(0)
+        guard let receiver = descendantScroll(in: controller.sidebar), receiver === original else {
+            finish(false, "Receiver takeover regression did not preserve the original native list"); return
+        }
+        receiver.contentView.scroll(to: NSPoint(x: 0, y: 160))
+        receiver.reflectScrolledClipView(receiver.contentView)
+        let point = NSPoint(x: 60, y: 240)
+        let began = adapterEvent(0, y: -2, phase: .began, at: point, in: window)
+        guard check(controller.handleSpaceScroll(began) === began,
+                    "Native vertical begin was consumed after horizontal takeover") else { return }
+        receiver.scrollWheel(with: began)
+        let changed = adapterEvent(0, y: -34, phase: .changed, at: point, in: window)
+        receiver.scrollWheel(with: changed)
+        let ended = adapterEvent(phase: .ended, at: point, in: window)
+        receiver.scrollWheel(with: ended)
+        guard check(!controller.trackingSwipe && abs(controller.pagingOffset) < 0.001
+                    && controller.session.space == 0,
+                    "Vertical receiver stream acquired or stranded Space paging") else { return }
+        // AppKit may apply native scrolling during its next layout/display turn.
+        waitUntil("native vertical scroll after takeover", condition: {
+            receiver.contentView.bounds.origin.y > 170
+        }) {
+            guard self.check(abs(receiver.contentView.bounds.origin.x) < 0.001,
+                             "Vertical receiver scrolling introduced horizontal tab-list movement") else { return }
+            let start = receiver.contentView.bounds.origin.y
+            let wheel = self.adapterEvent(0, y: -24, phase: [], precise: false, at: point, in: self.window)
+            guard self.check(self.controller.handleSpaceScroll(wheel) === wheel,
+                             "Receiver regression swallowed a nonprecise mouse wheel") else { return }
+            receiver.scrollWheel(with: wheel)
+            self.waitUntil("native mouse-wheel forwarding", condition: {
+                receiver.contentView.bounds.origin.y > start
+            }) {
+                guard self.check(self.pagingIsClear && self.controller.session.space == 0,
+                                 "Native mouse-wheel forwarding changed Spaces") else { return }
+                self.testSidebarResponderRegion(0)
+            }
+        }
+    }
+    private func testSidebarResponderRegion(_ index: Int) {
+        let regions = [("header", NSPoint(x: 120, y: 20)),
+                       ("bottom dock", NSPoint(x: 50, y: controller.sidebar.bounds.height - 20))]
+        guard index < regions.count else {
+            let note = skippedInterruptions == 0 ? "" : "; \(skippedInterruptions) timed interruption cases used preview cancellation or synchronous selection because Reduce Motion is enabled"
+            finish(true, "\(checks) checks: rendered Space change, address/selection/new-tab cancellation, rapid sidebar toggles, resize/collapse/reset, continuous toolbar geometry, capture/end/momentum, unphased fallback, interruption/queued commands, native Space buttons, NSEvent adapter phase/window/flipped-coordinate/noisy-intent coverage, vertical-only list widths/scrolling, retained scroll position across Spaces, native receiver takeover/deduplication, and vertical/mouse-wheel forwarding\(note)")
+            return
+        }
+        selectSpaceImmediately(0)
+        let (name, point) = regions[index]
+        controller.sidebar.scrollWheel(with: adapterEvent(-2, phase: .began, at: point, in: window))
+        controller.sidebar.scrollWheel(with: adapterEvent(-68, phase: .changed, at: point, in: window))
+        guard check(controller.trackingSwipe && abs(controller.pagingOffset + 70) < 0.001,
+                    "Direct \(name) responder delivery did not acquire the horizontal gesture") else { return }
+        controller.sidebar.scrollWheel(with: adapterEvent(phase: .ended, at: point, in: window))
+        waitUntil("direct \(name) responder commit", condition: {
+            self.controller.session.space == 1 && self.pagingIsClear
+        }) {
+            guard self.check(self.controller.activeWebView?.superview === self.controller.webHost,
+                             "Direct \(name) responder commit did not attach its destination page") else { return }
+            self.testSidebarResponderRegion(index + 1)
         }
     }
 
@@ -539,8 +645,9 @@ import WebKit
     }
 }
 
-/// An in-process event object, never dispatched or posted. Overridden properties
-/// exercise the production NSEvent adapter without synthesizing system input.
+/// An in-process event object, never posted. Overridden properties exercise the
+/// production adapter and responder methods; a real backing scroll CGEvent lets
+/// NSScrollView process its unconsumed vertical packets using native APIs.
 private final class AdapterScrollEvent: NSEvent {
     private weak var sampleWindow: NSWindow?
     private let samplePoint: NSPoint
@@ -550,14 +657,32 @@ private final class AdapterScrollEvent: NSEvent {
     private let sampleMomentum: NSEvent.Phase
     private let samplePrecise: Bool
     private let sampleTime: TimeInterval
+    private let backingEvent: NSEvent?
 
     init(window: NSWindow?, point: NSPoint, x: CGFloat, y: CGFloat,
          phase: NSEvent.Phase, momentum: NSEvent.Phase, precise: Bool, time: TimeInterval) {
         sampleWindow = window; samplePoint = point; sampleX = x; sampleY = y
         samplePhase = phase; sampleMomentum = momentum; samplePrecise = precise; sampleTime = time
+        let cg = CGEvent(scrollWheelEvent2Source: nil, units: precise ? .pixel : .line,
+                         wheelCount: 2, wheel1: Int32(y), wheel2: Int32(x), wheel3: 0)
+        let cgPhase: Int64
+        if phase.contains(.cancelled) { cgPhase = 8 }
+        else if phase.contains(.ended) { cgPhase = 4 }
+        else if phase.contains(.began) { cgPhase = 1 }
+        else if phase.contains(.mayBegin) { cgPhase = 128 }
+        else if phase.contains(.changed) { cgPhase = 2 }
+        else { cgPhase = 0 }
+        let cgMomentum: Int64 = momentum.contains(.ended) ? 3 : momentum.contains(.began) ? 1 : momentum.isEmpty ? 0 : 2
+        cg?.setIntegerValueField(.scrollWheelEventScrollPhase, value: cgPhase)
+        cg?.setIntegerValueField(.scrollWheelEventMomentumPhase, value: cgMomentum)
+        cg?.setIntegerValueField(.scrollWheelEventIsContinuous, value: precise ? 1 : 0)
+        cg?.timestamp = UInt64(max(0, time) * 1_000_000_000)
+        backingEvent = cg.flatMap { NSEvent(cgEvent: $0) }
         super.init()
     }
     required init?(coder: NSCoder) { fatalError("Adapter fixture is not decoded") }
+    override var cgEvent: CGEvent? { backingEvent?.cgEvent }
+    override var eventRef: UnsafeRawPointer? { backingEvent?.eventRef }
     override var type: NSEvent.EventType { .scrollWheel }
     override var window: NSWindow? { sampleWindow }
     override var windowNumber: Int { sampleWindow?.windowNumber ?? 0 }

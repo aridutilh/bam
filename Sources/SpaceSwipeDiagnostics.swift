@@ -23,7 +23,7 @@ import Foundation
     private var stopTimer: Timer?
 
     private static let allowedKeys: Set<String> = [
-        "kind", "phase", "momentum", "precise", "insideSidebar", "browserWindow",
+        "kind", "source", "phase", "momentum", "precise", "insideSidebar", "browserWindow",
         "eventWindowPresent", "rawPhase", "rawMomentumPhase", "deltaX", "deltaY",
         "pointX", "pointY", "space", "beforeSpace", "offset", "beforeOffset",
         "tracking", "beforeTracking", "consumed", "route", "didLock", "finished",
@@ -32,7 +32,7 @@ import Foundation
         "totalY", "velocityX"
     ]
     private static let enumKeys: Set<String> = [
-        "kind", "phase", "momentum", "route", "overlay", "ignored", "rejected", "axis"
+        "kind", "source", "phase", "momentum", "route", "overlay", "ignored", "rejected", "axis"
     ]
 
     /// Directory and shorter limits can be injected by an isolated test harness.
