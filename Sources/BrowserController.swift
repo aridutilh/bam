@@ -83,6 +83,7 @@ import QuartzCore
     private var rejectedSpaceGesture = false
     private var ignoredSpaceGestureEnd: DispatchWorkItem?
     private var unphasedScrollEnd: DispatchWorkItem?
+    private var spaceScrollRoute = "idle"
     private var spaceSnapshotRequest: UUID?
     private var spaceSnapshot: NSImage?
     private var spaceSnapshotSource: UUID?
@@ -436,6 +437,8 @@ import QuartzCore
         return preview.visibleTabs.map { sidebarItem($0, activeID: preview.activeID) }
     }
     func cancelPaging() {
+        SpaceSwipeDiagnostics.shared.record(["kind": "cancel", "space": session.space,
+            "offset": pagingOffset, "tracking": trackingSwipe])
         unphasedScrollEnd?.cancel(); unphasedScrollEnd = nil
         quarantineActiveSpaceGesture()
         pagingAnimator.stop(); swipe.reset(); trackingSwipe = false
@@ -479,11 +482,25 @@ import QuartzCore
         else if event.phase.contains(.changed) { phase = .changed }
         else if event.phase.contains(.stationary) { phase = .stationary }
         else { phase = .none }
+        let point = sidebar.convert(event.locationInWindow, from: nil)
+        let insideSidebar = sidebar.bounds.contains(point)
+        let beforeSpace = session.space, beforeOffset = pagingOffset, beforeTracking = trackingSwipe
         let consumed = routeSpaceScroll(deltaX: event.scrollingDeltaX, deltaY: event.scrollingDeltaY,
             phase: phase, isMomentum: !event.momentumPhase.isEmpty, timestamp: event.timestamp,
             isPrecise: event.hasPreciseScrollingDeltas,
-            isInsideSidebar: sidebar.bounds.contains(sidebar.convert(event.locationInWindow, from: nil)),
+            isInsideSidebar: insideSidebar,
             isFromBrowserWindow: event.window === view.window)
+        SpaceSwipeDiagnostics.shared.record(["kind": "event", "phase": String(describing: phase),
+            "rawPhase": event.phase.rawValue, "rawMomentumPhase": event.momentumPhase.rawValue,
+            "precise": event.hasPreciseScrollingDeltas, "insideSidebar": insideSidebar,
+            "browserWindow": event.window === view.window, "eventWindowPresent": event.window != nil,
+            "deltaX": event.scrollingDeltaX, "deltaY": event.scrollingDeltaY,
+            "pointX": point.x, "pointY": point.y, "sidebarWidth": sidebar.bounds.width,
+            "sidebarVisible": session.sidebarVisible, "overlay": addressOverlay != nil,
+            "beforeSpace": beforeSpace, "space": session.space, "beforeOffset": beforeOffset,
+            "offset": pagingOffset, "beforeTracking": beforeTracking, "tracking": trackingSwipe,
+            "ignored": ignoreSpaceGestureUntilEnd, "rejected": rejectedSpaceGesture,
+            "consumed": consumed, "route": spaceScrollRoute, "animationRunning": pagingAnimator.isRunning])
         return consumed ? nil : event
     }
     /// The event adapter and native regression fixture use the same routing path.
@@ -492,14 +509,21 @@ import QuartzCore
     @discardableResult func routeSpaceScroll(deltaX: CGFloat, deltaY: CGFloat,
         phase: SpaceSwipeStateMachine.Phase, isMomentum: Bool, timestamp: TimeInterval,
         isPrecise: Bool, isInsideSidebar: Bool, isFromBrowserWindow: Bool) -> Bool {
-        guard isFromBrowserWindow, session.sidebarVisible, addressOverlay == nil,
-              isPrecise || phase != .none else { return false }
+        spaceScrollRoute = "window"
+        guard isFromBrowserWindow else { return false }
+        spaceScrollRoute = "hidden"
+        guard session.sidebarVisible else { return false }
+        spaceScrollRoute = "overlay"
+        guard addressOverlay == nil else { return false }
+        spaceScrollRoute = "wheel"
+        guard isPrecise || phase != .none else { return false }
         if phase == .began || phase == .mayBegin {
             ignoreSpaceGestureUntilEnd = false
             ignoredSpaceGestureEnd?.cancel(); ignoredSpaceGestureEnd = nil
             rejectedSpaceGesture = !isInsideSidebar
         }
         if rejectedSpaceGesture {
+            spaceScrollRoute = "outsideStart"
             if phase == .began || phase == .mayBegin {
                 swipe.reset(); trackingSwipe = false; capturedSpaceMomentum = false
                 unphasedScrollEnd?.cancel(); unphasedScrollEnd = nil
@@ -508,6 +532,7 @@ import QuartzCore
             return false
         }
         if ignoreSpaceGestureUntilEnd {
+            spaceScrollRoute = "quarantine"
             if phase == .ended || phase == .cancelled {
                 ignoreSpaceGestureUntilEnd = false; capturedSpaceMomentum = true
                 ignoredSpaceGestureEnd?.cancel(); ignoredSpaceGestureEnd = nil
@@ -517,12 +542,14 @@ import QuartzCore
         if phase == .began || phase == .mayBegin {
             unphasedScrollEnd?.cancel(); unphasedScrollEnd = nil
             trackingSwipe = isInsideSidebar; capturedSpaceMomentum = false
-            if !trackingSwipe { swipe.reset(); return false }
+            if !trackingSwipe { spaceScrollRoute = "outside"; swipe.reset(); return false }
         } else if !trackingSwipe && !isMomentum && isInsideSidebar && (phase == .changed || phase == .none) {
             trackingSwipe = true
         }
-        if isMomentum && capturedSpaceMomentum && !trackingSwipe { return true }
+        if isMomentum && capturedSpaceMomentum && !trackingSwipe { spaceScrollRoute = "momentum"; return true }
+        spaceScrollRoute = "notTracking"
         guard trackingSwipe else { return false }
+        spaceScrollRoute = "recognizer"
         // Some trackpad drivers provide precise deltas without physical phases.
         // Give those streams a quiet-period end, rather than ignoring them all.
         let unphased = phase == .none && !isMomentum
@@ -565,9 +592,18 @@ import QuartzCore
     }
     private func applySpaceScroll(deltaX: CGFloat, deltaY: CGFloat, phase: SpaceSwipeStateMachine.Phase,
                                   isMomentum: Bool, timestamp: TimeInterval) -> Bool {
+        let before = SpaceSwipeDiagnostics.shared.isRecording ? swipe.diagnostics : nil
         let result = swipe.handle(deltaX: deltaX, deltaY: deltaY, phase: phase, isMomentum: isMomentum,
                                   timestamp: timestamp, space: session.space, width: sidebar.bounds.width,
                                   initialOffset: pagingOffset)
+        SpaceSwipeDiagnostics.shared.record(["kind": "result", "phase": String(describing: phase),
+            "momentum": isMomentum, "didLock": result.didLock, "consumed": result.shouldConsume,
+            "finished": result.finished, "target": result.committedSpace ?? -1,
+            "offset": result.previewOffset ?? pagingOffset, "releaseVelocity": result.releaseVelocity,
+            "space": session.space, "axis": (result.finished ? before : swipe.diagnostics)?.axis ?? "idle",
+            "totalX": (result.finished ? before : swipe.diagnostics)?.totalX ?? 0,
+            "totalY": (result.finished ? before : swipe.diagnostics)?.totalY ?? 0,
+            "velocityX": (result.finished ? before : swipe.diagnostics)?.velocityX ?? 0])
         if result.didLock {
             pagingAnimator.stop(); pagingCommit = nil; queuedSpace = nil
             prepareSpaceContentTransition()
@@ -593,6 +629,8 @@ import QuartzCore
         return result.shouldConsume
     }
     func finishPaging(commit: Int?, initialVelocity: CGFloat? = nil) {
+        SpaceSwipeDiagnostics.shared.record(["kind": "settle", "space": session.space,
+            "target": commit ?? -1, "offset": pagingOffset, "releaseVelocity": initialVelocity ?? 0])
         pagingCommit = commit
         let end: CGFloat = commit.map { $0 > session.space ? -sidebar.bounds.width : sidebar.bounds.width } ?? 0
         pagingAnimator.animate(from: pagingOffset, to: end, response: 0.30, dampingRatio: 0.99,
@@ -603,6 +641,8 @@ import QuartzCore
             self.root.previewProgress = abs(offset) / max(1, self.sidebar.bounds.width)
         }, completion: { [weak self] in
             guard let self else { return }
+            SpaceSwipeDiagnostics.shared.record(["kind": "commit", "space": self.session.space,
+                "target": commit ?? -1, "offset": self.pagingOffset])
             let nextRequest = self.queuedSpace
             self.queuedSpace = nil; self.pagingCommit = nil
             if let commit {

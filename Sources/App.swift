@@ -45,8 +45,12 @@ import WebKit
     @objc func spaceTwo(_ sender: Any?) { controller.changeSpace(1) }
     @objc func spaceThree(_ sender: Any?) { controller.changeSpace(2) }
     @objc func goHome(_ sender: Any?) { controller.showHome(sender) }
+    @objc func recordSpaceSwipes(_ sender: Any?) { SpaceSwipeDiagnostics.shared.start() }
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         if menuItem.action == #selector(goHome(_:)) { return controller?.littleWindows.values.contains(where: { $0.window?.isKeyWindow == true }) != true }
+        if menuItem.action == #selector(recordSpaceSwipes(_:)) {
+            return !SpaceSwipeDiagnostics.shared.isRecording && !SpaceSwipeDiagnostics.shared.isStarting
+        }
         return true
     }
     @objc func showAbout(_ sender: Any?) {
@@ -96,6 +100,8 @@ import WebKit
         view.addItem(.separator())
         item(view, "Split View with New Page", #selector(BrowserController.splitWithNewPage(_:)), "=", [.command, .option], controller)
         item(view, "Separate Split into Tabs", #selector(BrowserController.unsplitCurrent(_:)), "", .command, controller)
+        view.addItem(.separator())
+        item(view, "Record Space Swipes (60 Seconds)", #selector(recordSpaceSwipes(_:)), "", .command, self)
         let history = menu("History")
         item(history, "Back", #selector(BrowserController.goBack(_:)), "[", .command, controller)
         item(history, "Forward", #selector(BrowserController.goForward(_:)), "]", .command, controller)
