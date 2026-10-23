@@ -19,7 +19,19 @@ struct SpaceSwipeStateMachine {
         var releaseVelocity: CGFloat = 0
     }
 
+    struct DiagnosticSnapshot {
+        let axis: String
+        let totalX: CGFloat
+        let totalY: CGFloat
+        let velocityX: CGFloat
+    }
+    var diagnostics: DiagnosticSnapshot {
+        DiagnosticSnapshot(axis: String(describing: axis), totalX: accumulatedX,
+                           totalY: accumulatedY, velocityX: velocityX)
+    }
+
     private enum Axis { case idle, undecided, horizontal, vertical }
+    private struct MotionSample { let time: TimeInterval; let position: CGFloat }
     private var axis = Axis.idle
     private var originSpace = 0
     private var pageWidth: CGFloat = 228
@@ -27,7 +39,7 @@ struct SpaceSwipeStateMachine {
     private var baseOffset: CGFloat = 0
     private var accumulatedY: CGFloat = 0
     private var velocityX: CGFloat = 0
-    private var hasVelocity = false
+    private var motionSamples: [MotionSample] = []
     private var previousTime: TimeInterval = 0
     private var lastMovementTime: TimeInterval = 0
     private var suppressMomentum = false
@@ -88,12 +100,13 @@ struct SpaceSwipeStateMachine {
                 originSpace = min(2, max(0, space))
                 pageWidth = width.isFinite && width > 0 ? max(1, width) : 228
                 baseOffset = rawOffset(forDisplayedOffset: initialOffset.isFinite ? initialOffset : 0)
-            } else if vertical >= 6 && vertical >= horizontal * 1.1 {
-                axis = .vertical
-            } else if max(horizontal, vertical) >= 12 {
-                // Ambiguous diagonal movement belongs to ordinary scrolling.
+            } else if vertical >= 12 && vertical >= horizontal * 1.25 {
+                // A tiny vertical pickup is not a direction decision. Once
+                // deliberate vertical travel is established, it remains locked.
                 axis = .vertical
             }
+            // An ambiguous diagonal stays unclaimed. Later horizontal intent can
+            // still resolve it; a diagonal that never resolves scrolls normally.
         }
         if phase == .ended {
             return finish(commitAllowed: true, timestamp: timestamp, didLock: didLock)
@@ -108,7 +121,7 @@ struct SpaceSwipeStateMachine {
         baseOffset = 0
         accumulatedY = 0
         velocityX = 0
-        hasVelocity = false
+        motionSamples.removeAll(keepingCapacity: true)
         suppressMomentum = false
     }
 
@@ -119,22 +132,70 @@ struct SpaceSwipeStateMachine {
         pageWidth = width.isFinite && width > 0 ? max(1, width) : 228
         previousTime = timestamp
         lastMovementTime = timestamp
+        motionSamples = [MotionSample(time: timestamp, position: 0)]
     }
 
     private mutating func recordVelocity(deltaX: CGFloat, timestamp: TimeInterval) {
-        let elapsed = timestamp - previousTime
+        let time = max(previousTime, timestamp)
         if deltaX != 0 {
-            if elapsed > 0 && elapsed <= 0.1 {
-                let instantaneous = deltaX / CGFloat(max(elapsed, 1.0 / 240.0))
-                velocityX = hasVelocity ? velocityX * 0.65 + instantaneous * 0.35 : instantaneous
-                hasVelocity = true
-            } else if elapsed > 0.1 {
-                velocityX = 0
-                hasVelocity = false
+            let sample = MotionSample(time: time, position: accumulatedX)
+            if motionSamples.count > 1, motionSamples.last?.time == time {
+                motionSamples[motionSamples.count - 1] = sample
+            } else { motionSamples.append(sample) }
+            // Keep the point before the window so its boundary can be interpolated.
+            while motionSamples.count > 2 && motionSamples[1].time < time - 0.08 {
+                motionSamples.removeFirst()
             }
-            lastMovementTime = max(lastMovementTime, timestamp)
+            if motionSamples.count > 128 { motionSamples.removeFirst(motionSamples.count - 128) }
+            velocityX = measuredVelocity()
+            lastMovementTime = time
         }
-        previousTime = max(previousTime, timestamp)
+        previousTime = time
+    }
+
+    private func measuredVelocity(releasedAt releaseTime: TimeInterval? = nil) -> CGFloat {
+        guard motionSamples.count > 1, let latest = motionSamples.last else { return 0 }
+        let lastIndex = motionSamples.count - 1
+        let cutoff = latest.time - 0.08
+        var startIndex = 0
+        while startIndex + 1 < lastIndex && motionSamples[startIndex + 1].time <= cutoff { startIndex += 1 }
+
+        // A substantial reversal should respond to its own direction promptly;
+        // one-point release jitter must not replace the preceding motion window.
+        let lastStep = latest.position - motionSamples[lastIndex - 1].position
+        if lastStep != 0 {
+            var turnIndex = lastIndex - 1
+            while turnIndex > 0 {
+                let step = motionSamples[turnIndex].position - motionSamples[turnIndex - 1].position
+                if step * lastStep < 0 { break }
+                turnIndex -= 1
+            }
+            if abs(latest.position - motionSamples[turnIndex].position) >= 6 {
+                startIndex = max(startIndex, turnIndex)
+            }
+        }
+        let start = motionSamples[startIndex]
+        var startTime = start.time
+        var startPosition = start.position
+        if start.time < cutoff, startIndex < lastIndex {
+            let next = motionSamples[startIndex + 1]
+            if next.time > start.time {
+                let fraction = CGFloat((cutoff - start.time) / (next.time - start.time))
+                startTime = cutoff
+                startPosition += (next.position - start.position) * fraction
+            }
+        }
+        let elapsed = latest.time - startTime
+        if elapsed > 0 {
+            return (latest.position - startPosition) / CGFloat(max(elapsed, 1.0 / 240.0))
+        }
+        // A device can deliver all movement in its initial packet. Finger-up gives
+        // that packet a measured duration; a held gesture is rejected as stale by
+        // finish(), so this does not invent velocity after a pause.
+        if let releaseTime, releaseTime > startTime {
+            return (latest.position - startPosition) / CGFloat(max(releaseTime - startTime, 1.0 / 240.0))
+        }
+        return 0
     }
 
     private var rawOffset: CGFloat { baseOffset + accumulatedX }
@@ -169,7 +230,7 @@ struct SpaceSwipeStateMachine {
         let offset = displayedOffset
         let raw = rawOffset
         let distanceThreshold = max(48, min(100, pageWidth * 0.24))
-        let speed = timestamp - lastMovementTime <= 0.12 ? velocityX : 0
+        let speed = timestamp - lastMovementTime <= 0.12 ? measuredVelocity(releasedAt: timestamp) : 0
         let matchingDirection = (speed < 0) == (raw < 0)
         // A deliberate reverse flick cancels a partly completed transition.
         let reversing = abs(speed) >= 650 && !matchingDirection

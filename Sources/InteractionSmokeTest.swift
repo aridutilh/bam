@@ -2,7 +2,8 @@ import AppKit
 import WebKit
 
 /// Controller-level native tests using bundled Home pages, real Space buttons,
-/// and the same event-routing path as the local trackpad monitor.
+/// and local NSEvent fixtures passed through the actual scroll-event adapter.
+/// Fixtures are never posted to the application or system event queue.
 @MainActor final class InteractionSmokeTest {
     private var controller: BrowserController!
     private var window: NSWindow!
@@ -347,8 +348,168 @@ import WebKit
             guard self.check(fresh && ended,
                              "Ending a superseded gesture left subsequent sidebar swipes disabled") else { return }
             self.waitUntil("fresh swipe after commands", condition: { self.controller.session.space == 1 && self.pagingIsClear }) {
+                self.testNativeEventAdapterGuards()
+            }
+        }
+    }
+
+    private func adapterEvent(_ x: CGFloat = 0, y: CGFloat = 0,
+        phase: NSEvent.Phase, momentum: NSEvent.Phase = [], precise: Bool = true,
+        at sidebarPoint: NSPoint, in eventWindow: NSWindow?) -> AdapterScrollEvent {
+        gestureTimestamp += 0.02
+        // NSEvent locations use the window's base coordinates. The real adapter
+        // must convert this back into the flipped, potentially translated sidebar.
+        let point = controller.sidebar.convert(sidebarPoint, to: nil)
+        return AdapterScrollEvent(window: eventWindow, point: point, x: x, y: y,
+            phase: phase, momentum: momentum, precise: precise, time: gestureTimestamp)
+    }
+    private func testNativeEventAdapterGuards() {
+        selectSpaceImmediately(0)
+        let inside = NSPoint(x: 60, y: 240)
+        let coarse = adapterEvent(-100, phase: [], precise: false, at: inside, in: window)
+        guard check(controller.handleSpaceScroll(coarse) === coarse && pagingIsClear,
+                    "Native event adapter swallowed an ordinary mouse-wheel event") else { return }
+        let nilWindow = adapterEvent(-100, phase: .began, at: inside, in: nil)
+        let otherWindow = NSWindow(contentRect: .zero, styleMask: .borderless, backing: .buffered, defer: true)
+        let foreign = adapterEvent(-100, phase: .began, at: inside, in: otherWindow)
+        guard check(controller.handleSpaceScroll(nilWindow) === nilWindow
+                    && controller.handleSpaceScroll(foreign) === foreign && pagingIsClear,
+                    "Native event adapter captured an event without its browser window") else { return }
+        let outside = NSPoint(x: controller.sidebar.bounds.maxX + 40, y: 240)
+        let began = adapterEvent(phase: .began, at: outside, in: window)
+        let changed = adapterEvent(-90, phase: .changed, at: inside, in: window)
+        let ended = adapterEvent(phase: .ended, at: inside, in: window)
+        guard check(controller.handleSpaceScroll(began) === began
+                    && controller.handleSpaceScroll(changed) === changed
+                    && controller.handleSpaceScroll(ended) === ended && pagingIsClear,
+                    "Native event window coordinates let a webpage gesture enter the sidebar") else { return }
+        testNativeEventAdapterRegion(0)
+    }
+    private func testNativeEventAdapterRegion(_ index: Int) {
+        let regions = [("header", NSPoint(x: 120, y: 20)),
+                       ("tab rows", NSPoint(x: 60, y: 240)),
+                       ("bottom dock", NSPoint(x: 50, y: controller.sidebar.bounds.height - 20))]
+        guard index < regions.count else { testNativeEventAdapterCancellation(); return }
+        selectSpaceImmediately(0)
+        let (name, point) = regions[index]
+        let touch = adapterEvent(phase: .mayBegin, at: point, in: window)
+        let began = adapterEvent(phase: .began, at: point, in: window)
+        guard check(controller.handleSpaceScroll(touch) === touch
+                    && controller.handleSpaceScroll(began) === began,
+                    "Touch announcements over the \(name) acquired scrolling prematurely") else { return }
+        let moved = adapterEvent(-70, phase: .changed, at: point, in: window)
+        let stationary = adapterEvent(phase: .stationary, at: point, in: window)
+        guard check(controller.handleSpaceScroll(moved) == nil
+                    && controller.handleSpaceScroll(stationary) == nil
+                    && controller.trackingSwipe && abs(controller.pagingOffset + 70) < 0.001,
+                    "Native event decoding/flipped coordinates failed over the \(name)") else { return }
+        // End takes precedence when AppKit supplies multiple phase bits; the
+        // momentum announcement must not add its displacement to the gesture.
+        let ended = adapterEvent(-90, phase: [.ended, .changed], momentum: .began,
+                                 precise: false, at: point, in: window)
+        let tail = adapterEvent(-150, phase: [], momentum: .changed, at: point, in: window)
+        guard check(controller.handleSpaceScroll(ended) == nil
+                    && controller.handleSpaceScroll(tail) == nil && !controller.trackingSwipe,
+                    "Native ended/momentum decoding stranded or leaked the \(name) gesture") else { return }
+        waitUntil("native event commit from \(name)", condition: {
+            self.controller.session.space == 1 && self.pagingIsClear
+        }) { self.testNativeEventAdapterRegion(index + 1) }
+    }
+    private func testNativeEventAdapterCancellation() {
+        selectSpaceImmediately(0)
+        let point = NSPoint(x: 60, y: 240)
+        _ = controller.handleSpaceScroll(adapterEvent(phase: .began, at: point, in: window))
+        _ = controller.handleSpaceScroll(adapterEvent(-70, phase: .changed, at: point, in: window))
+        let cancelled = adapterEvent(phase: [.cancelled, .ended], at: point, in: window)
+        guard check(controller.handleSpaceScroll(cancelled) == nil && !controller.trackingSwipe,
+                    "Native cancellation did not take precedence over an ended flag") else { return }
+        waitUntil("native event cancellation", condition: { self.pagingIsClear }) {
+            guard self.check(self.controller.session.space == 0,
+                             "A cancelled native event committed a Space") else { return }
+            self.testNativeEventNoisyIntent()
+        }
+    }
+    private func testNativeEventNoisyIntent() {
+        selectSpaceImmediately(0)
+        let point = NSPoint(x: 60, y: 240)
+        _ = controller.handleSpaceScroll(adapterEvent(phase: .began, at: point, in: window))
+        let diagonal = adapterEvent(-13, y: -12, phase: .changed, at: point, in: window)
+        guard check(controller.handleSpaceScroll(diagonal) === diagonal,
+                    "Ambiguous diagonal pickup was claimed before horizontal intent") else { return }
+        let horizontal = adapterEvent(-52, phase: .changed, at: point, in: window)
+        let ended = adapterEvent(phase: .ended, at: point, in: window)
+        guard check(controller.handleSpaceScroll(horizontal) == nil
+                    && controller.handleSpaceScroll(ended) == nil,
+                    "A diagonal pickup permanently blocked the subsequent horizontal swipe") else { return }
+        waitUntil("noisy-intent native event commit", condition: {
+            self.controller.session.space == 1 && self.pagingIsClear
+        }) {
+            self.testVerticalTabList()
+        }
+    }
+
+    private func descendantScroll(in view: NSView) -> NSScrollView? {
+        if let scroll = view as? NSScrollView { return scroll }
+        for child in view.subviews {
+            if let scroll = descendantScroll(in: child) { return scroll }
+        }
+        return nil
+    }
+    private func testVerticalTabList() {
+        selectSpaceImmediately(0)
+        // Only local, ephemeral tab metadata is added. Inactive pages are not
+        // loaded; enough rows are needed to test actual vertical overflow.
+        controller.session.tabs.append(contentsOf: (1...36).map {
+            BrowserTab(title: "Vertical fixture \($0)", address: "orbit://newtab", space: 0)
+        })
+        controller.refresh()
+        for width: CGFloat in [164, 228, 500] {
+            controller.session.sidebarWidth = Double(width)
+            controller.displayedWidth = width
+            controller.layoutBrowser()
+            controller.view.layoutSubtreeIfNeeded()
+            guard let scroll = descendantScroll(in: controller.sidebar), let document = scroll.documentView else {
+                finish(false, "Missing native tab-list scroll view at width \(width)"); return
+            }
+            scroll.layoutSubtreeIfNeeded()
+            let viewport = scroll.contentView.bounds
+            let diagnostic = "sidebar=\(width), scroll=\(scroll.frame), viewport=\(viewport), document=\(document.frame)"
+            guard check(scroll.hasVerticalScroller && !scroll.hasHorizontalScroller
+                        && scroll.horizontalScrollElasticity == .none,
+                        "Tab-list scroll configuration permits sideways bounce or disables vertical scrolling: \(diagnostic)") else { return }
+            guard check(viewport.width > 0 && abs(document.frame.width - viewport.width) < 0.5
+                        && document.frame.height > viewport.height + 160,
+                        "Overflowing tab list does not fit its viewport horizontally: \(diagnostic)") else { return }
+            scroll.contentView.scroll(to: .zero)
+            scroll.reflectScrolledClipView(scroll.contentView)
+            let start = scroll.contentView.bounds.origin
+            scroll.contentView.scroll(to: NSPoint(x: 0, y: 160))
+            scroll.reflectScrolledClipView(scroll.contentView)
+            let moved = scroll.contentView.bounds.origin
+            guard check(abs(start.y) < 0.001 && abs(moved.y - 160) < 0.5 && abs(moved.x) < 0.001,
+                        "Native vertical scrolling failed or introduced horizontal movement: start=\(start), end=\(moved); \(diagnostic)") else { return }
+        }
+        guard let sourceScroll = descendantScroll(in: controller.sidebar) else {
+            finish(false, "Missing source scroll view for Space round trip"); return
+        }
+        let sourceY = sourceScroll.contentView.bounds.origin.y
+        controller.changeSpace(1)
+        waitUntil("vertical-list departure", condition: {
+            self.controller.session.space == 1 && self.pagingIsClear
+        }) {
+            guard self.check(self.descendantScroll(in: self.controller.sidebar) !== sourceScroll
+                             && abs(sourceScroll.contentView.bounds.origin.y - sourceY) < 0.5,
+                             "Leaving a Space reused its tab list for the destination or erased its vertical position") else { return }
+            self.controller.changeSpace(0)
+            self.waitUntil("vertical-list return", condition: {
+                self.controller.session.space == 0 && self.pagingIsClear
+            }) {
+                guard self.check(self.descendantScroll(in: self.controller.sidebar) === sourceScroll
+                                 && abs(sourceScroll.contentView.bounds.origin.y - sourceY) < 0.5
+                                 && abs(sourceScroll.contentView.bounds.origin.x) < 0.001,
+                                 "Returning to a Space replaced its tab list or lost the saved vertical position") else { return }
                 let note = self.skippedInterruptions == 0 ? "" : "; \(self.skippedInterruptions) timed interruption cases used preview cancellation or synchronous selection because Reduce Motion is enabled"
-                self.finish(true, "\(self.checks) checks: rendered Space change, address/selection/new-tab cancellation, rapid sidebar toggles, resize/collapse/reset, continuous toolbar geometry, trackpad capture/end/momentum, unphased fallback, ignored webpage/wheel events, interruption/queued commands, and native Space buttons\(note)")
+                self.finish(true, "\(self.checks) checks: rendered Space change, address/selection/new-tab cancellation, rapid sidebar toggles, resize/collapse/reset, continuous toolbar geometry, capture/end/momentum, unphased fallback, interruption/queued commands, native Space buttons, NSEvent adapter phase/window/flipped-coordinate/noisy-intent coverage, vertical-only list widths/scrolling, and retained scroll position across Spaces\(note)")
             }
         }
     }
@@ -376,4 +537,39 @@ import WebKit
         print("\(success ? "PASS" : "FAIL"): Controller interactions — \(message)"); fflush(stdout)
         exit(success ? 0 : 1)
     }
+}
+
+/// An in-process event object, never dispatched or posted. Overridden properties
+/// exercise the production NSEvent adapter without synthesizing system input.
+private final class AdapterScrollEvent: NSEvent {
+    private weak var sampleWindow: NSWindow?
+    private let samplePoint: NSPoint
+    private let sampleX: CGFloat
+    private let sampleY: CGFloat
+    private let samplePhase: NSEvent.Phase
+    private let sampleMomentum: NSEvent.Phase
+    private let samplePrecise: Bool
+    private let sampleTime: TimeInterval
+
+    init(window: NSWindow?, point: NSPoint, x: CGFloat, y: CGFloat,
+         phase: NSEvent.Phase, momentum: NSEvent.Phase, precise: Bool, time: TimeInterval) {
+        sampleWindow = window; samplePoint = point; sampleX = x; sampleY = y
+        samplePhase = phase; sampleMomentum = momentum; samplePrecise = precise; sampleTime = time
+        super.init()
+    }
+    required init?(coder: NSCoder) { fatalError("Adapter fixture is not decoded") }
+    override var type: NSEvent.EventType { .scrollWheel }
+    override var window: NSWindow? { sampleWindow }
+    override var windowNumber: Int { sampleWindow?.windowNumber ?? 0 }
+    override var locationInWindow: NSPoint { samplePoint }
+    override var scrollingDeltaX: CGFloat { sampleX }
+    override var scrollingDeltaY: CGFloat { sampleY }
+    override var deltaX: CGFloat { sampleX }
+    override var deltaY: CGFloat { sampleY }
+    override var phase: NSEvent.Phase { samplePhase }
+    override var momentumPhase: NSEvent.Phase { sampleMomentum }
+    override var hasPreciseScrollingDeltas: Bool { samplePrecise }
+    override var isDirectionInvertedFromDevice: Bool { true }
+    override var timestamp: TimeInterval { sampleTime }
+    override var modifierFlags: NSEvent.ModifierFlags { [] }
 }

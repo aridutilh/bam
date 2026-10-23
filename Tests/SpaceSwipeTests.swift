@@ -19,6 +19,13 @@ struct SpaceSwipeTests {
             try reverseFlickCancelsAndReportsVelocity()
             try changedPhaseCanStartWithoutBegan()
             try previousAnimationCanCommitBeforeAxisLocks()
+            try diagonalPickupCanResolveHorizontally()
+            try smallVerticalPickupDoesNotDecideWholeGesture()
+            try sustainedDiagonalAndEstablishedVerticalStayUnclaimed()
+            try releaseTailDoesNotEraseShortFlick()
+            try velocityIsIndependentOfEventCoalescing()
+            try singleMovementPacketCanFlickWithoutGuessingAfterHold()
+            try deliberateReversalUsesRecentDirection()
             print("PASS: swipe intent/axis lock, live animation handoff, release velocity, distance/flick commits, boundaries, real trackpad phases, cancellation, and momentum")
         } catch {
             FileHandle.standardError.write(Data("FAIL: \(error)\n".utf8))
@@ -219,6 +226,103 @@ struct SpaceSwipeTests {
         let end = send(&machine, .ended, 0.3, space: 1)
         try check(lock.didLock && lock.previewOffset == -8 && end.committedSpace == 2,
                   "A transition that settled during undecided intent left a stale origin space")
+    }
+
+    private static func diagonalPickupCanResolveHorizontally() throws {
+        for direction: CGFloat in [-1, 1] {
+            var machine = SpaceSwipeStateMachine()
+            _ = send(&machine, .began, 0)
+            let pickup = send(&machine, direction * 13, 12, .changed, 0.02)
+            let horizontal = send(&machine, direction * 50, 1, .changed, 0.04)
+            let end = send(&machine, .ended, 0.3)
+            try check(!pickup.shouldConsume && horizontal.didLock && horizontal.previewOffset == direction * 63,
+                      "An ambiguous diagonal pickup permanently rejected later clear horizontal intent")
+            try check(end.committedSpace == (direction < 0 ? 2 : 0), "Resolved horizontal travel failed to commit")
+        }
+    }
+
+    private static func smallVerticalPickupDoesNotDecideWholeGesture() throws {
+        var machine = SpaceSwipeStateMachine()
+        _ = send(&machine, .began, 0)
+        let pickup = send(&machine, 0, 7, .changed, 0.01)
+        let horizontal = send(&machine, -70, 1, .changed, 0.03)
+        let end = send(&machine, .ended, 0.3)
+        try check(!pickup.shouldConsume && horizontal.didLock && end.committedSpace == 2,
+                  "Seven points of vertical pickup noise permanently rejected a horizontal swipe")
+    }
+
+    private static func sustainedDiagonalAndEstablishedVerticalStayUnclaimed() throws {
+        var machine = SpaceSwipeStateMachine()
+        _ = send(&machine, .began, 0)
+        for i in 1...10 {
+            let result = send(&machine, -8, 8, .changed, Double(i) * 0.01)
+            try check(!result.shouldConsume, "An unresolved diagonal gesture was stolen from ordinary scrolling")
+        }
+        let diagonalEnd = send(&machine, .ended, 0.12)
+        try check(!diagonalEnd.finished && diagonalEnd.committedSpace == nil, "Unresolved diagonal travel committed")
+        _ = send(&machine, .began, 1)
+        let vertical = send(&machine, 2, 13, .changed, 1.02)
+        let horizontal = send(&machine, -90, 0, .changed, 1.04)
+        let end = send(&machine, .ended, 1.06)
+        try check(!vertical.shouldConsume && !horizontal.shouldConsume && !end.finished,
+                  "Substantial deliberate vertical travel was later stolen by horizontal paging")
+    }
+
+    private static func releaseTailDoesNotEraseShortFlick() throws {
+        var machine = SpaceSwipeStateMachine()
+        _ = send(&machine, .began, 0)
+        _ = send(&machine, -2, 0, .changed, 0.01)
+        _ = send(&machine, -18, 0, .changed, 0.02)
+        _ = send(&machine, -1, 0, .changed, 0.03)
+        let result = send(&machine, .ended, 0.04)
+        try check(result.committedSpace == 2 && result.releaseVelocity <= -650,
+                  "A one-point release-tail packet erased a deliberate 21-point/30-ms flick")
+    }
+
+    private static func velocityIsIndependentOfEventCoalescing() throws {
+        var split = SpaceSwipeStateMachine()
+        var coalesced = SpaceSwipeStateMachine()
+        _ = send(&split, .began, 0)
+        _ = send(&coalesced, .began, 0)
+        _ = send(&split, -2, 0, .changed, 0.01)
+        _ = send(&split, -18, 0, .changed, 0.02)
+        _ = send(&coalesced, -20, 0, .changed, 0.02)
+        _ = send(&split, -1, 0, .changed, 0.03)
+        _ = send(&coalesced, -1, 0, .changed, 0.03)
+        let first = send(&split, .ended, 0.04)
+        let second = send(&coalesced, .ended, 0.04)
+        try check(first.committedSpace == second.committedSpace && first.committedSpace == 2
+                  && abs(first.releaseVelocity - second.releaseVelocity) < 0.001,
+                  "Equivalent motion produced different release behavior when event packets were coalesced")
+    }
+
+    private static func singleMovementPacketCanFlickWithoutGuessingAfterHold() throws {
+        for start: SpaceSwipeStateMachine.Phase in [.began, .changed] {
+            var machine = SpaceSwipeStateMachine()
+            _ = send(&machine, -20, 0, start, 0)
+            let immediate = send(&machine, .ended, 0.02)
+            try check(immediate.committedSpace == 2 && immediate.releaseVelocity < -650,
+                      "A short one-packet gesture had no release velocity")
+            _ = send(&machine, -20, 0, start, 1)
+            let held = send(&machine, .ended, 1.3)
+            try check(held.committedSpace == nil && held.releaseVelocity == 0,
+                      "A held one-packet drag reused stale flick velocity")
+        }
+    }
+
+    private static func deliberateReversalUsesRecentDirection() throws {
+        var machine = SpaceSwipeStateMachine()
+        _ = send(&machine, .began, 0)
+        _ = send(&machine, -70, 0, .changed, 0.1)
+        _ = send(&machine, 20, 0, .changed, 0.11)
+        let reversal = send(&machine, .ended, 0.12)
+        try check(reversal.committedSpace == nil && reversal.releaseVelocity > 650,
+                  "A deliberate reverse flick kept stale forward velocity")
+        _ = send(&machine, .began, 1)
+        _ = send(&machine, -70, 0, .changed, 1.1)
+        _ = send(&machine, 1, 0, .changed, 1.11)
+        let noise = send(&machine, .ended, 1.12)
+        try check(noise.committedSpace == 2, "One point of opposite-direction pickup noise cancelled a complete swipe")
     }
 
 }

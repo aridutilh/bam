@@ -175,6 +175,10 @@ struct SidebarTabItem: Equatable {
         super.init(frame: frame); wantsLayer = true
         favorites.forEach(addSubview); addSubview(heading); addSubview(scroll)
         scroll.drawsBackground = false; scroll.hasVerticalScroller = true; scroll.autohidesScrollers = true; scroll.scrollerStyle = .overlay
+        // The tab list has no horizontal content. Unclaimed startup movement
+        // must not bounce just the rows and look like an attempted Space switch.
+        scroll.hasHorizontalScroller = false
+        scroll.horizontalScrollElasticity = .none
         scroll.documentView = content; content.wantsLayer = true
         divider.wantsLayer = true; divider.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.13).cgColor
         content.addSubview(divider); content.addSubview(newButton)
