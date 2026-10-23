@@ -8,7 +8,7 @@ import WebKit
     enum Failure: Error { case assertion(String) }
     func start() {
         Task { @MainActor in
-            do { try await run(); finish(true, "\(checks) checks: per-tab Peek, same-page promotion, Little Orbit, split focus/navigation, persisted groups, close/reopen and unsplit") }
+            do { try await run(); finish(true, "\(checks) checks: per-tab Peek, same-page promotion, Little Ark, cross-window Find, preview history, split focus/navigation, persisted groups, close/reopen and unsplit") }
             catch { finish(false, String(describing: error)) }
         }
     }
@@ -27,7 +27,7 @@ import WebKit
     }
     func run() async throws {
         guard let raw = ProcessInfo.processInfo.environment["ORBIT_TEST_URL"], let url = URLInput.directURL(raw) else { throw Failure.assertion("Set ORBIT_TEST_URL to a local fixture") }
-        let destination = FileManager.default.temporaryDirectory.appendingPathComponent("Orbit-feature-download-\(UUID().uuidString).bin")
+        let destination = FileManager.default.temporaryDirectory.appendingPathComponent("Ark-feature-download-\(UUID().uuidString).bin")
         defer { try? FileManager.default.removeItem(at: destination) }
         let downloadManager = DownloadCoordinator(destinationChooser: { _, _, completion in completion(destination) })
         controller = BrowserController(sessionURL: URL(fileURLWithPath: "/private/tmp/orbit-unused-features.json"), ephemeral: true, downloadCoordinator: downloadManager)
@@ -40,9 +40,13 @@ import WebKit
         let original = controller.activeWebView!
         try await wait("original fixture") { !original.isLoading && original.title == "Orbit Feature Fixture" }
         _ = try await js(original, "window.savedOriginal=41; true")
-        controller.openPeek(url)
+        var previewComponents = URLComponents(url: url, resolvingAgainstBaseURL: false)!
+        previewComponents.queryItems = [URLQueryItem(name: "ark_preview_visit", value: "1")]
+        let previewURL = previewComponents.url!
+        controller.openPeek(previewURL)
         guard let peek = controller.peeks[first.id], let preview = peek.webView else { throw Failure.assertion("Peek created") }
         try await wait("peek fixture") { !preview.isLoading && preview.title == "Orbit Feature Fixture" }
+        try await wait("Peek visit enters history") { self.controller.library.history.contains { $0.address == previewURL.absoluteString } }
         _ = try await js(preview, "window.savedPreview=42; document.querySelector('input').value='kept'; true")
         controller.zoomIn(nil)
         try check(preview.pageZoom > 1 && original.pageZoom == 1, "Peek commands target preview rather than parent")
@@ -53,12 +57,16 @@ import WebKit
         try check(controller.peeks[first.id] === peek && preview.window == nil || preview.isHiddenOrHasHiddenAncestor, "Peek hides while retaining owner")
         controller.select(first.id)
         try check(controller.peeks[first.id] === peek && !preview.isHiddenOrHasHiddenAncestor, "Peek returns with owner")
+        let splitURL = try await js(preview, "history.pushState(null,'','?ark_split_promoted=1'); location.href") as! String
+        try await wait("split preview address updated") { preview.url?.absoluteString == splitURL }
         peek.openInSplitView()
         guard let group = controller.session.split(for: first.id), let split = controller.splitCoordinators[first.id] else { throw Failure.assertion("Peek promoted into split") }
         try check(controller.browsers[group.secondaryID] === preview && controller.browsers[first.id] === original, "Split owns the original two WKWebViews")
         try check((try await js(preview, "savedPreview===42 && document.querySelector('input').value==='kept'")) as? Bool == true, "Promotion preserves page and form state")
         try check(controller.peeks[first.id] == nil && controller.session.visibleTabs.count == 2, "Peek removed and split is one sidebar row")
-        try check(controller.focusedTabID == group.secondaryID && controller.activeWebView === preview, "New split routes commands to promoted pane")
+        try check(controller.session.tabs.first(where: { $0.id == group.secondaryID })?.address == splitURL, "Split promotion persists the settled pushState URL")
+        await pause()
+        try check(controller.focusedTabID == group.secondaryID && controller.activeWebView === preview, "New split keeps final AppKit focus on the promoted pane")
         split.setFocusedSide(.left)
         try check(controller.activeWebView === original, "Left focus routes browser commands")
         controller.select(second.id); controller.select(first.id)
@@ -74,12 +82,34 @@ import WebKit
         controller.openPeek(url)
         guard let littlePreview = controller.peeks[group.secondaryID], let littleWeb = littlePreview.webView else { throw Failure.assertion("Little preview") }
         try await wait("little fixture") { !littleWeb.isLoading && littleWeb.title == "Orbit Feature Fixture" }
-        _ = try await js(littleWeb, "window.littleSentinel=43; true")
         littlePreview.openInLittleOrbit()
         guard let little = controller.littleWindows.values.first else { throw Failure.assertion("Little window retained") }
-        try check(little.webView === littleWeb && controller.peeks[group.secondaryID] == nil, "Peek transfers to Little Orbit")
+        try check(little.webView === littleWeb && controller.peeks[group.secondaryID] == nil, "Peek transfers to Little Ark")
+        var littleComponents = URLComponents(url: url, resolvingAgainstBaseURL: false)!
+        littleComponents.queryItems = [URLQueryItem(name: "ark_little_visit", value: "1")]
+        let littleURL = littleComponents.url!
+        try check(little.open(url: littleURL), "Little Ark accepts its local visit fixture")
+        try await wait("Little Ark visit finishes") { !littleWeb.isLoading && littleWeb.url == littleURL }
+        try await wait("Little Ark visit enters history") { self.controller.library.history.contains { $0.address == littleURL.absoluteString } }
+        _ = try await js(littleWeb, "window.littleSentinel=43; document.body.insertAdjacentHTML('beforeend','<p>OnlyInLittleArk</p>'); true")
+        little.window?.makeKeyAndOrderFront(nil)
+        try await wait("Little Ark key window") { little.window?.isKeyWindow == true }
+        controller.findInPage(nil); controller.findBar.searchText = "OnlyInLittleArk"
+        try await wait("Little Ark find match") { self.controller.findBar.matchFound == true }
+        window.makeKeyAndOrderFront(nil)
+        try await wait("main key window for Find Next") { self.window.isKeyWindow }
+        controller.findNext(nil)
+        try await wait("Find Next changes page and host") { self.controller.findBar.matchFound == false && self.controller.findBar.view.window === self.window }
+        little.window?.makeKeyAndOrderFront(nil)
+        try await wait("Little Ark key window for Find Previous") { little.window?.isKeyWindow == true }
+        controller.findPrevious(nil)
+        try await wait("Find Previous changes page and host") { self.controller.findBar.matchFound == true && self.controller.findBar.view.window === little.window }
+        controller.findBar.hide()
+        let promotedURL = try await js(littleWeb, "history.pushState(null,'','?ark_tab_promoted=1'); location.href") as! String
+        try await wait("Little Ark address updated") { littleWeb.url?.absoluteString == promotedURL }
         little.promoteToOrbit()
-        try check(controller.littleWindows.isEmpty && controller.activeWebView === littleWeb, "Little Orbit promotes same view and cleans up window")
+        try check(controller.littleWindows.isEmpty && controller.activeWebView === littleWeb, "Little Ark promotes same view and cleans up window")
+        try check(controller.session.active?.address == promotedURL, "Tab promotion persists the settled pushState URL")
         try check((try await js(littleWeb, "littleSentinel===43")) as? Bool == true, "Little promotion preserves script state")
         controller.splitWithNewPage(nil)
         guard let secondGroup = controller.session.split(for: controller.session.activeID) else { throw Failure.assertion("Menu split created") }

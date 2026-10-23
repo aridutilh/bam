@@ -6,6 +6,10 @@ import WebKit
 /// The parent owns one coordinator per source tab and calls setVisible on selection.
 @MainActor final class PreviewWKWebView: WKWebView {
     var requestedURL: URL?
+    var isProvisionalNavigation = false
+    var promotionURL: URL? {
+        isProvisionalNavigation ? (requestedURL ?? url) : (url ?? requestedURL)
+    }
 }
 
 @MainActor final class PeekCoordinator: NSObject {
@@ -14,6 +18,7 @@ import WebKit
     var onOpenLittleOrbit: ((WKWebView) -> Void)?
     var onDismiss: (() -> Void)?
     var onDownload: ((WKDownload) -> Void)? { didSet { content?.onDownload = onDownload } }
+    var onVisit: ((String, String) -> Void)? { didSet { content?.onVisit = onVisit } }
     var shouldHandleEscape: (() -> Bool)?
     var isPresented: Bool { backdrop != nil }
     var webView: WKWebView? { content?.webView }
@@ -36,6 +41,7 @@ import WebKit
         let content = PreviewWebContent(webView: browser)
         self.content = content
         content.onDownload = onDownload
+        content.onVisit = onVisit
         let backdrop = PeekBackdrop(frame: hostView.bounds)
         backdrop.autoresizingMask = [.width, .height]
         backdrop.onOutsideClick = { [weak self] in self?.dismiss() }
@@ -174,7 +180,7 @@ import WebKit
     let closeButton = NSButton(title: "✕", target: nil, action: nil)
     let tabButton = NSButton(title: "Open in Tab", target: nil, action: nil)
     let splitButton = NSButton(title: "Split View", target: nil, action: nil)
-    let littleButton = NSButton(title: "Little Orbit", target: nil, action: nil)
+    let littleButton = NSButton(title: "Little Ark", target: nil, action: nil)
     let progress = NSProgressIndicator()
     override var isFlipped: Bool { true }
 
@@ -219,7 +225,7 @@ import WebKit
     override func mouseDown(with event: NSEvent) { /* Blank card area is not the dimmed backdrop. */ }
 }
 
-/// Shared by Peek and Little Orbit; no external URL is handed to NSWorkspace.
+/// Shared by Peek and Little Ark; no external URL is handed to NSWorkspace.
 enum PreviewURLPolicy {
     static func allows(_ url: URL) -> Bool {
         guard let scheme = url.scheme?.lowercased(), ["http", "https"].contains(scheme),
@@ -248,6 +254,7 @@ enum PreviewURLPolicy {
     var onChange: (() -> Void)?
     var onCloseRequest: (() -> Void)?
     var onDownload: ((WKDownload) -> Void)?
+    var onVisit: ((String, String) -> Void)?
     private var uploadPanel: NSOpenPanel?
     private var uploadCompletion: (([URL]?) -> Void)?
     private var expectedDownloadNavigation = false
@@ -273,6 +280,7 @@ enum PreviewURLPolicy {
         guard PreviewURLPolicy.allows(url) else { status = "Only HTTP and HTTPS pages can open here"; onChange?(); return false }
         status = nil
         (webView as? PreviewWKWebView)?.requestedURL = url
+        (webView as? PreviewWKWebView)?.isProvisionalNavigation = true
         webView?.load(URLRequest(url: url))
         onChange?()
         return webView != nil
@@ -285,7 +293,7 @@ enum PreviewURLPolicy {
         web?.navigationDelegate = nil; web?.uiDelegate = nil
         web?.removeFromSuperview()
         webView = nil
-        onChange = nil; onCloseRequest = nil; onDownload = nil
+        onChange = nil; onCloseRequest = nil; onDownload = nil; onVisit = nil
         return web
     }
 
@@ -343,12 +351,27 @@ enum PreviewURLPolicy {
         return nil
     }
     func webViewDidClose(_ webView: WKWebView) { onCloseRequest?() }
-    func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) { expectedDownloadNavigation = false; status = nil; onChange?() }
-    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { status = nil; onChange?() }
+    func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+        (webView as? PreviewWKWebView)?.isProvisionalNavigation = true
+        expectedDownloadNavigation = false; status = nil; onChange?()
+    }
+    func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        (webView as? PreviewWKWebView)?.isProvisionalNavigation = false
+        onChange?()
+    }
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        guard self.webView === webView else { return }
+        (webView as? PreviewWKWebView)?.isProvisionalNavigation = false
+        status = nil; onChange?()
+        if let url = webView.url, PreviewURLPolicy.allows(url) {
+            onVisit?(webView.title ?? url.host ?? "Page", url.absoluteString)
+        }
+    }
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) { failed(error) }
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) { failed(error) }
     private func failed(_ error: Error) {
         let failure = error as NSError
+        (webView as? PreviewWKWebView)?.isProvisionalNavigation = false
         guard failure.code != NSURLErrorCancelled else { return }
         if expectedDownloadNavigation && failure.domain == "WebKitErrorDomain" && failure.code == 102 { return }
         status = "Couldn’t load page — try Reload"; onChange?()

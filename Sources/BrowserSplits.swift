@@ -55,13 +55,18 @@ import WebKit
         guard let primary = session.tabs.first(where: { $0.id == owner }) else { _ = adoptWebView(web); return }
         cancelPaging(); dismissAddress(); session.select(primary.id)
         if session.split(for: primary.id) != nil { unsplit(primary.id) }
-        let address = ((web as? PreviewWKWebView)?.requestedURL ?? web.url).flatMap { URLInput.directURL($0.absoluteString) }?.absoluteString ?? "orbit://newtab"
+        let address = ((web as? PreviewWKWebView)?.promotionURL ?? web.url).flatMap { URLInput.directURL($0.absoluteString) }?.absoluteString ?? "orbit://newtab"
         let id = session.add(address: address, title: web.title)
         web.removeFromSuperview(); register(web, id: id)
         if web.isLoading { pendingLoads.insert(id) }
         session.makeSplit(primary: primary.id, secondary: id)
-        showActive(); splitCoordinators[primary.id]?.setFocusedSide(.right); save()
+        showActive()
         view.window?.makeKeyAndOrderFront(nil)
+        // Give AppKit the final page responder before publishing the focused side;
+        // otherwise its window-update observer can restore the old left focus.
+        view.window?.makeFirstResponder(web)
+        splitCoordinators[primary.id]?.setFocusedSide(.right)
+        refresh(); save()
     }
     @objc func splitWithNewPage(_ sender: Any?) {
         let primary = session.activeID

@@ -35,6 +35,31 @@ import WebKit
 
     /// Supply the page's card as host. The bar leaves its top 36 points unobstructed.
     func show(in host: NSView, web: WKWebView) {
+        _ = attach(in: host, web: web)
+        findNext()
+        host.window?.makeFirstResponder(overlay.search)
+        overlay.search.selectText(nil)
+    }
+
+    /// Command-G moves the existing query to the current window and performs
+    /// exactly one search in the requested direction, without stealing page focus.
+    func continueFind(in host: NSView, web: WKWebView, backwards: Bool) {
+        let wasVisible = isVisible
+        _ = attach(in: host, web: web)
+        findNext(backwards: backwards)
+        if !wasVisible && searchText.isEmpty {
+            host.window?.makeFirstResponder(overlay.search)
+        }
+    }
+
+    /// Controller refreshes keep the bar's host and page together, preserving focus.
+    func synchronize(in host: NSView, web: WKWebView) {
+        guard isVisible else { return }
+        if attach(in: host, web: web) { findNext() }
+    }
+
+    @discardableResult private func attach(in host: NSView, web: WKWebView) -> Bool {
+        let changed = overlay.superview !== host || self.web !== web
         if overlay.superview !== host {
             overlay.removeFromSuperview()
             overlay.frame = host.bounds
@@ -42,18 +67,15 @@ import WebKit
             host.addSubview(overlay, positioned: .above, relativeTo: nil)
         }
         overlay.isHidden = false
-        let alreadyTargetingPage = self.web === web
-        retarget(web: web)
-        if alreadyTargetingPage { findNext() }
+        retarget(web: web, performSearch: false)
         overlay.needsLayout = true
         overlay.layoutSubtreeIfNeeded()
-        installKeyboardHandling()
-        host.window?.makeFirstResponder(overlay.search)
-        overlay.search.selectText(nil)
+        if changed || keyMonitor == nil { installKeyboardHandling() }
+        return changed
     }
 
     /// Keeps the query, but invalidates all results from the previously selected page.
-    func retarget(web: WKWebView?) {
+    func retarget(web: WKWebView?, performSearch: Bool = true) {
         guard self.web !== web else { return }
         invalidateSearch()
         clearHighlight(in: self.web)
@@ -73,7 +95,7 @@ import WebKit
                 }
             }
         }
-        findNext()
+        if performSearch { findNext() }
     }
 
     func hide() {
