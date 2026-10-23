@@ -1,8 +1,8 @@
-# Validation — Ark 0.3.0
+# Validation — Ark 0.3.1
 
-Status: **passed on October 23, 2026**, on Apple Silicon using Swift 6.2.3 in Swift 5 language mode. The final application was built from an isolated copy containing only Git-tracked/staged public files; no Arc installation, private research, or extracted assets were required. All component checks and all five packaged runtime suites exited successfully. The source implementation is recorded in commit `c979db7`; subsequent release documentation does not change the app.
+Status: **passed on October 23, 2026**, on Apple Silicon using Swift 6.2.3 in Swift 5 language mode. The final application was built from an isolated copy containing only Git-tracked/staged public files; no Arc installation, private research, or extracted assets were required. All component checks and all five packaged runtime suites exited successfully. Version 0.3.1 adds the generated crayon icon, home-page mark, and icon packaging; the Swift runtime source is unchanged from v0.3.0. All six component suites and all five packaged runtime suites were rerun against the v0.3.1 bundle.
 
-Independent agents reviewed PiP lifecycle/focus, command routing/preview ownership, and the public-file boundary. Their concrete findings were fixed and exercised by regression checks before release.
+Independent agents reviewed PiP lifecycle/focus, command routing/preview ownership, and the public-file boundary. Their concrete findings were fixed and exercised by regression checks before release. A separate review checked the v0.3.1 artwork, packaging, version metadata, provenance, and public-file boundary.
 
 ## Build and component checks
 
@@ -36,9 +36,9 @@ Additional standalone fixtures in `Tests/DownloadTests.swift` and `Tests/Preview
 
 ## Installed-app checks
 
-`/Applications/Ark.app` reports version 0.3.0 and passes strict signature verification. The existing browser session reopened with the same tab identifiers and selected tab. The prior Orbit app was retained as a local backup.
+`/Applications/Ark.app` reports version 0.3.1 (build 4) and passes strict signature verification. All nine existing tab identifiers were preserved on relaunch. The prior Ark 0.3.0 app was retained as a local backup. The installed About panel and home-page footer were visually inspected and show the accepted rough crayon artwork. The icon package contains ten standard macOS representations generated from the committed 1254 × 1254 master PNG, with its alpha channel preserved.
 
-Native UI checks confirmed the Ark branding, readable sidebar symbols and home page, and new-tab palette dismissal. On one accessible YouTube player, switching to another tab opened the floating video panel, and selecting the source tab returned the same page while playback continued. This is a single-site observation, not universal video compatibility. Session restoration saves URLs and layout; it does not promise to restore media playhead position across an app restart.
+Earlier v0.3.0 native UI checks confirmed the Ark branding, readable sidebar symbols and home page, and new-tab palette dismissal. On one accessible YouTube player, switching to another tab opened the floating video panel, and selecting the source tab returned the same page while playback continued. This is a single-site observation, not universal video compatibility. Session restoration saves URLs and layout; it does not promise to restore media playhead position across an app restart.
 
 ## Manual checks still required
 

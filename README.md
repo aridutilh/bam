@@ -1,10 +1,12 @@
-# Ark 0.3.0
+# Ark 0.3.1
+
+<img src="Resources/ArkIcon.png" width="128" alt="Ark’s crayon-drawn icon">
 
 An open-source macOS browser prototype built with Swift, AppKit, Core Animation, and WebKit. Ark explores a compact sidebar, Spaces, Peek, Split View, and floating video. It is an independent project, not affiliated with Arc, The Browser Company, or Yab, and does not claim feature parity with them.
 
-The original application code is available under the [MIT license](LICENSE). The public source includes no extracted Arc artwork, animation frames, fonts, textures, binaries, or decompiler output. Icons come from macOS SF Symbols; the Spaces button uses an original native animation.
+The original application code is available under the [MIT license](LICENSE). The public source includes no extracted Arc artwork, animation frames, fonts, textures, binaries, or decompiler output. The app icon is a crayon-drawn reinterpretation of Arc’s mark; [branding notes](docs/branding.md) record its source and generation prompt. Sidebar controls use macOS SF Symbols, and the Spaces button uses an original native animation.
 
-[Download v0.3.0](https://github.com/aridutilh/ark/releases/tag/v0.3.0) · [Source repository](https://github.com/aridutilh/ark) · [Feature checklist](FEATURE-INVENTORY.md) · [Validation status](VALIDATION.md)
+[Download v0.3.1](https://github.com/aridutilh/ark/releases/tag/v0.3.1) · [Source repository](https://github.com/aridutilh/ark) · [Feature checklist](FEATURE-INVENTORY.md) · [Validation status](VALIDATION.md)
 
 ## Build and run
 
@@ -25,7 +27,7 @@ Run the integrated local fixtures after building:
 bash scripts/test-runtime.sh
 ```
 
-This starts a loopback fixture server and runs the packaged app's WebKit, manual PiP, native interaction, automatic PiP, and feature tests. Tests open native windows. The script manages its temporary server and files. [VALIDATION.md](VALIDATION.md) distinguishes available checks from actual results for this revision; all six build/component suites and all five packaged runtime suites passed for v0.3.0.
+This starts a loopback fixture server and runs the packaged app's WebKit, manual PiP, native interaction, automatic PiP, and feature tests. Tests open native windows. The script manages its temporary server and files. [VALIDATION.md](VALIDATION.md) distinguishes available checks from actual results for this revision; all six build/component suites and all five packaged runtime suites passed again for v0.3.1 (11 suites total). The icon build also generated all ten standard macOS representations and passed strict code-signature verification. The installed About panel and home-page mark were also visually checked.
 
 The bundled video is a generated test pattern. To regenerate it, install FFmpeg and run `bash scripts/generate-demo.sh`; FFmpeg is not needed for an ordinary build.
 

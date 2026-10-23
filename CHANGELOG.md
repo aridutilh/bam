@@ -4,6 +4,12 @@
 
 Remaining work is tracked with acceptance criteria in [FEATURE-INVENTORY.md](FEATURE-INVENTORY.md). An inventory item is complete only after its full behavior is verified.
 
+## 0.3.1 — 2026-10-23
+
+- Add the colorful, crayon-drawn Ark app icon, inspired by a child drawing Arc’s mark from memory, with deliberately crooked geometry.
+- Package standard macOS icon sizes for Finder, the Dock and the About panel; use the same artwork on the home page and in the README.
+- Add the master PNG, generation prompt, provenance and reproducible native icon packaging script.
+
 ## 0.3.0 — 2026-10-23
 
 First public Ark source release, continuing the local Orbit prototype.

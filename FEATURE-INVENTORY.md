@@ -1,8 +1,8 @@
 # Arc for macOS, Yab, and Ark: feature inventory and implementation checklist
 
-Research date: **October 23, 2026**. Target: the desktop macOS experience. Ark source inspection: October 23, including the 0.3 media, browsing-surface, search, download, and local Library integrations. The public v0.3.0 build passed its component suites and all five packaged runtime fixtures; see [VALIDATION.md](VALIDATION.md). This is a documented feature inventory and a working acceptance checklist, **not a claim of exhaustive discovery, tested competitor behavior, or Ark parity**.
+Research date: **October 23, 2026**. Target: the desktop macOS experience. Ark source inspection: October 23, including the 0.3 media, browsing-surface, search, download, and local Library integrations. The public v0.3.1 icon build reran and passed all six build/component suites and all five packaged runtime fixtures, with the browser runtime Swift source unchanged from v0.3.0; see [VALIDATION.md](VALIDATION.md). This is a documented feature inventory and a working acceptance checklist, **not a claim of exhaustive discovery, tested competitor behavior, or Ark parity**.
 
-Ark is an independent project with original code under [MIT](LICENSE). It is not affiliated with Arc, The Browser Company, or Yab. The public source uses SF Symbols and original native animation; it includes no extracted Arc assets or binary-analysis dumps.
+Ark is an independent project with original code under [MIT](LICENSE). It is not affiliated with Arc, The Browser Company, or Yab. The public source uses SF Symbols, original native animation, and a newly generated crayon app icon; it includes no extracted Arc assets or binary-analysis dumps. The [branding notes](docs/branding.md) document the icon’s Arc reference and drawn-from-memory refinement.
 
 ## Current product status and evidence quality
 
@@ -20,7 +20,7 @@ Ark: **Implemented** = the inspected code contains a usable implementation of th
 
 ## Implemented in 0.3: source checklist, not full feature acceptance
 
-Checked items describe concrete source implementation. The final public v0.3.0 build passed the component and packaged-runtime checks; [validation][O-validation] is the authoritative result log. The larger feature-group boxes remain open because their acceptance criteria go beyond these subsets. Passing the listed fixtures does not establish the broader acceptance criteria.
+Checked items describe concrete source implementation. The final public v0.3.1 build passed all 11 component and packaged-runtime suites; [validation][O-validation] is the authoritative result log. The larger feature-group boxes remain open because their acceptance criteria go beyond these subsets. Passing the listed fixtures does not establish the broader acceptance criteria.
 
 | Implemented subtask | Scope | Remaining boundary |
 |---|---|---|
@@ -35,7 +35,7 @@ Checked items describe concrete source implementation. The final public v0.3.0 b
 | [x] Download manager | Real WKDownload handling, destination choice, progress, cancel, open/reveal, and filename collision protection. | Session-only; no restart resume or retry UI. |
 | [x] Durable visit list and recently closed archive | Separate searchable stores, atomic persistence, restore and clear actions; closed Split pairs retain grouping. | Metadata only; no automatic archive, page-content search, or complete history filters. |
 | [x] Basic page host services | Native file upload chooser and WebKit camera/microphone permission prompts. | No complete site permissions/settings surface or general authentication manager. |
-| [x] Public artwork replacement | System sidebar/reload symbols and an original native stack-symbol hover/selection animation. | Basic appearance inspected; full hover/accessibility coverage remains unverified. No copied image-frame animation. |
+| [x] Public artwork and crayon app icon | System sidebar/reload symbols, original native stack-symbol hover/selection animation, and the v0.3.1 crayon PNG packaged into ten standard macOS icon representations and reused on Home/README. | The icon master, installed About panel and home-page mark were visually checked, and native packaging passed. Full hover/accessibility coverage remains unverified. No copied image-frame animation. |
 
 ## 1. Browsing surfaces and media
 

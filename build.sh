@@ -12,6 +12,7 @@ if [ "$VERSION" != "$BUNDLE_VERSION" ]; then
     echo 'VERSION and Info.plist must agree before building.' >&2
     exit 1
 fi
+bash "$PROJECT_DIR/scripts/generate-icon.sh"
 BUILD_DIR=${ARK_BUILD_DIR:-${ORBIT_BUILD_DIR:-"$PROJECT_DIR/.build"}}
 DELIVERABLE_APP="$PROJECT_DIR/Ark.app"
 # Sign outside iCloud/File Provider folders, which may add FinderInfo during signing.
