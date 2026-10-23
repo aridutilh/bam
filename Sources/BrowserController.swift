@@ -7,7 +7,6 @@ import QuartzCore
     var space = 0 { didSet { if space != oldValue { previewSpace = nil; previewProgress = 0 }; needsDisplay = true } }
     var previewSpace: Int? { didSet { needsDisplay = true } }
     var previewProgress: CGFloat = 0 { didSet { needsDisplay = true } }
-    private lazy var grain: NSImage? = Bundle.main.url(forResource: "WindowTheme-grain", withExtension: "png", subdirectory: "Recovered").flatMap(NSImage.init(contentsOf:))
     override var isFlipped: Bool { true }
     override func layout() { super.layout(); onLayout?() }
     override func draw(_ dirtyRect: NSRect) {
@@ -21,7 +20,6 @@ import QuartzCore
         if let previewSpace { colors = zip(base, palettes[min(2, max(0, previewSpace))]).map { $0.blended(withFraction: min(1,max(0,previewProgress)), of: $1) ?? $0 } }
         else { colors = base }
         NSGradient(colors: colors)?.draw(in: bounds, angle: 65)
-        if let grain { for x in stride(from: CGFloat(0), to: bounds.width, by: 155) { for y in stride(from: CGFloat(0), to: bounds.height, by: 155) { grain.draw(in: NSRect(x: x, y: y, width: 155, height: 155), from: .zero, operation: .sourceOver, fraction: 0.045, respectFlipped: true, hints: nil) } } }
     }
 }
 
@@ -61,7 +59,9 @@ import QuartzCore
     var displayedMemberIDs: [UUID] = []
     var automaticDepartureQueue: [UUID] = []
     var automaticProbeInFlight = false
-    var retiringSplitViews: [UUID: NSView] = [:]
+    private var automaticProbeToken: UUID?
+    private var automaticProbeTabID: UUID?
+    var retiringViews: [ObjectIdentifier: NSView] = [:]
     var splitCoordinators: [UUID: SplitViewCoordinator] = [:]
     var isShuttingDown = false
     var automaticallyShowsVideo = true
@@ -130,7 +130,9 @@ import QuartzCore
         sidebar.onSpaceChange = { [weak self] space in self?.changeSpace(space) }
         sidebar.onPictureInPicture = { [weak self] in self?.togglePictureInPicture(nil) }
         library.onOpenURL = { [weak self] address in
-            guard let self else { return }; self.session.add(address: address); self.showActive(); self.save()
+            guard let self else { return }
+            self.cancelPaging(); self.dismissAddress()
+            self.session.add(address: address); self.showActive(); self.save()
         }
         library.onRestoreClosed = { [weak self] record in self?.restoreClosed(record) }
         pictureInPicture.onChange = { [weak self] in self?.showActive() }
@@ -223,29 +225,34 @@ import QuartzCore
         if address == "orbit://newtab" || address == "orbit://video" {
             pendingHome.insert(id)
             if let file = Bundle.main.url(forResource: address == "orbit://video" ? "PiPDemo" : "Home", withExtension: "html") { browser.loadFileURL(file, allowingReadAccessTo: file.deletingLastPathComponent()) }
-            else { browser.loadHTMLString("<h1>Orbit</h1><p>Press Command-L to explore.</p>", baseURL: nil) }
+            else { browser.loadHTMLString("<h1>Ark</h1><p>Press Command-L to explore.</p>", baseURL: nil) }
         } else if let url = URLInput.directURL(address) {
             pendingHome.remove(id); browser.load(URLRequest(url: url))
         }
     }
     func showActive() {
         guard let tab = session.active, !isShuttingDown else { return }
-        let previousID = displayedTabID
         let arriving = visibleMemberIDs
         let outgoing = displayedMemberIDs.filter { !arriving.contains($0) }
         let switched = displayedTabID != nil && displayedTabID != tab.id
-        // Commit identity before PiP restoration callbacks can re-enter.
+        // Capture actual hosts before restore callbacks or model changes can re-enter.
+        let departingHosts = outgoing.compactMap { id in browsers[id].flatMap { hostedAncestor($0) } }
+        let previousFocus = focusedView(in: view.window)
+        let focusHosts = departingHosts + Array(retiringViews.values)
+        let focusWasDeparting = previousFocus.map { focused in
+            focusHosts.contains { focused === $0 || focused.isDescendant(of: $0) }
+        } ?? false
+        let focusWasWindow = view.window?.firstResponder === view.window
         displayedTabID = tab.id; displayedMemberIDs = arriving
         if switched, let source = pictureInPicture.referencedTabID, arriving.contains(source) { pictureInPicture.restore() }
-        // Keep a departing split attached behind the destination while both
-        // asynchronous video candidates are inspected. Detaching it first can
-        // suspend WebKit's second player before that candidate is examined.
-        if automaticallyShowsVideo, outgoing.count > 1, let previousID, let split = splitCoordinators[previousID], split.view.superview === webHost {
-            retiringSplitViews[previousID] = split.view
+        // Every queued page keeps its original window attachment until discovery
+        // completes, including single tabs queued behind another pending probe.
+        if automaticallyShowsVideo {
+            for host in departingHosts where host.superview === webHost { retiringViews[ObjectIdentifier(host)] = host }
+            if !outgoing.isEmpty { automaticallyFloatDeparture(outgoing) }
         }
-        if automaticallyShowsVideo, !outgoing.isEmpty { automaticallyFloatDeparture(outgoing) }
         for (id, peek) in peeks { peek.setVisible(id == tab.id) }
-        webHost.subviews.filter { child in !retiringSplitViews.values.contains { $0 === child } }.forEach { $0.removeFromSuperview() }
+        webHost.subviews.filter { retiringViews[ObjectIdentifier($0)] == nil }.forEach { $0.removeFromSuperview() }
         if let group = session.split(for: tab.id) { showSplit(group) }
         else {
             let browser = webView(for: tab)
@@ -256,6 +263,32 @@ import QuartzCore
             } else { webHost.addSubview(browser); browser.frame = webHost.bounds }
         }
         refresh()
+        // A covered retiring view is still a valid AppKit responder. Move only
+        // departing page focus; preserve Find, the palette, and other windows.
+        if (focusWasDeparting || (switched && focusWasWindow)), addressOverlay == nil, !findBar.isVisible,
+           let window = view.window, window.isKeyWindow, NSApp.keyWindow === window,
+           let destination = commandWebView, destination.window === window {
+            window.makeFirstResponder(destination)
+        }
+    }
+    private func hostedAncestor(_ view: NSView) -> NSView? {
+        var current: NSView? = view
+        while let candidate = current {
+            if candidate.superview === webHost { return candidate }
+            current = candidate.superview
+        }
+        return nil
+    }
+    private func focusedView(in window: NSWindow?) -> NSView? {
+        if let editor = window?.firstResponder as? NSTextView, editor.isFieldEditor,
+           let owner = editor.delegate as? NSView { return owner }
+        return window?.firstResponder as? NSView
+    }
+    private var activeRenderedHost: NSView? {
+        if let group = session.split(for: session.activeID), let split = splitCoordinators[group.primaryID],
+           split.view.superview === webHost { return split.view }
+        if session.split(for: session.activeID) == nil, let web = browsers[session.activeID], web.superview === webHost { return web }
+        return nil
     }
     func automaticallyFloatDeparture(_ candidates: [UUID]) {
         for id in candidates where !automaticDepartureQueue.contains(id) { automaticDepartureQueue.append(id) }
@@ -264,33 +297,49 @@ import QuartzCore
     func drainAutomaticDepartures() {
         guard !automaticProbeInFlight else { return }
         guard automaticallyShowsVideo, !isShuttingDown, pictureInPicture.referencedTabID == nil else {
-            automaticDepartureQueue.removeAll(); releaseRetiringSplits(); return
+            automaticDepartureQueue.removeAll(); releaseRetiringViews(); return
         }
         while let first = automaticDepartureQueue.first,
               visibleMemberIDs.contains(first) || browsers[first] == nil || !session.tabs.contains(where: { $0.id == first }) {
             automaticDepartureQueue.removeFirst()
         }
-        guard !automaticDepartureQueue.isEmpty else { releaseRetiringSplits(); return }
+        guard !automaticDepartureQueue.isEmpty else { releaseRetiringViews(); return }
         let id = automaticDepartureQueue.removeFirst()
         guard let outgoing = browsers[id] else { drainAutomaticDepartures(); return }
-        automaticProbeInFlight = true
+        let token = UUID()
+        automaticProbeInFlight = true; automaticProbeToken = token; automaticProbeTabID = id
         pictureInPicture.automaticallyPresentIfPlaying(web: outgoing, tabID: id, shouldPresent: { [weak self, weak outgoing] in
             guard let self, let outgoing else { return false }
-            return !self.isShuttingDown && self.automaticallyShowsVideo && !self.visibleMemberIDs.contains(id)
-                && self.session.tabs.contains(where: { $0.id == id }) && self.browsers[id] === outgoing
+            return self.automaticProbeToken == token && !self.isShuttingDown && self.automaticallyShowsVideo
+                && !self.visibleMemberIDs.contains(id) && self.session.tabs.contains(where: { $0.id == id })
+                && self.browsers[id] === outgoing
         }, restore: { [weak self] _ in self?.showActive() }, completion: { [weak self] presented in
-            guard let self else { return }
-            self.automaticProbeInFlight = false
-            if presented { self.automaticDepartureQueue.removeAll(); self.releaseRetiringSplits() }
-            else { self.drainAutomaticDepartures() }
+            guard let self, self.automaticProbeToken == token else { return }
+            self.automaticProbeInFlight = false; self.automaticProbeToken = nil; self.automaticProbeTabID = nil
+            if presented && self.pictureInPicture.activeTabID == id {
+                self.automaticDepartureQueue.removeAll(); self.releaseRetiringViews()
+            } else { self.drainAutomaticDepartures() }
         })
     }
-    func releaseRetiringSplits() {
-        for (id, retiringView) in retiringSplitViews where session.activeID != id { retiringView.removeFromSuperview() }
-        retiringSplitViews.removeAll()
+    func cancelAutomaticDepartures() {
+        let pendingID = automaticProbeTabID
+        automaticProbeToken = nil; automaticProbeTabID = nil; automaticProbeInFlight = false
+        automaticDepartureQueue.removeAll()
+        if let pendingID, pictureInPicture.activeTabID == nil, pictureInPicture.referencedTabID == pendingID {
+            pictureInPicture.restore()
+        }
+        releaseRetiringViews()
+    }
+    func releaseRetiringViews() {
+        let activeHost = activeRenderedHost
+        for retiringView in retiringViews.values {
+            // A single page may already have moved into PiP. Never pull it out.
+            if retiringView.superview === webHost, retiringView !== activeHost { retiringView.removeFromSuperview() }
+        }
+        retiringViews.removeAll()
     }
     func prepareToClose() {
-        isShuttingDown = true; automaticDepartureQueue.removeAll(); releaseRetiringSplits(); findBar.hide(); downloads.cancelAll(); pictureInPicture.restore()
+        isShuttingDown = true; cancelAutomaticDepartures(); findBar.hide(); downloads.cancelAll(); pictureInPicture.restore()
         for peek in Array(peeks.values) { peek.dismiss() }
         for little in Array(littleWindows.values) { little.close() }
         if let monitor = scrollMonitor { NSEvent.removeMonitor(monitor); scrollMonitor = nil }
@@ -316,14 +365,14 @@ import QuartzCore
         sidebar.update(tabs: tabs, space: session.space, canGoBack: activeWebView?.canGoBack ?? false, canGoForward: activeWebView?.canGoForward ?? false, isLoading: activeWebView?.isLoading ?? false)
         if let tab = session.active {
             let host = URL(string: tab.address)?.host ?? tab.address
-            location.title = tabErrors[tab.id] ?? (tab.isHome ? "Orbit  /  New tab" : host)
+            location.title = tabErrors[tab.id] ?? (tab.isHome ? "Ark  /  New tab" : host)
             location.toolTip = tab.isHome ? "Search or enter a URL ⌘L" : tab.address
             sidebar.setAddress(tab.address, title: tabErrors[tab.id] ?? (tab.isHome ? "Search or enter URL" : host))
             pin.image = NSImage(systemSymbolName: tab.pinned ? "pin.fill" : "pin", accessibilityDescription: "Pin tab")
-            view.window?.title = "\(tab.title) — Orbit"
+            view.window?.title = "\(tab.title) — Ark"
         }
         refreshSplitMetadata()
-        if findBar.isVisible { findBar.retarget(web: commandWebView) }
+        refreshFindTarget()
         layoutBrowser()
     }
     func select(_ id: UUID) { cancelPaging(); session.select(id); dismissAddress(); showActive(); save() }
@@ -334,13 +383,19 @@ import QuartzCore
         let closed = closingIDs.compactMap { closingID in session.tabs.first { $0.id == closingID } }
         library.recordClosed(tabs: closed, split: closed.count == 2)
         _ = session.close(id)
-        if let group { splitCoordinators.removeValue(forKey: group.primaryID)?.detach() }
+        if let group, let split = splitCoordinators.removeValue(forKey: group.primaryID) {
+            split.detach(); split.view.removeFromSuperview()
+            retiringViews.removeValue(forKey: ObjectIdentifier(split.view))
+        }
         for closingID in closingIDs {
             peeks[closingID]?.dismiss()
             if let web = browsers[closingID], pictureInPicture.references(web) { pictureInPicture.restore() }
             observations.removeValue(forKey: closingID)
             browsers[closingID]?.stopLoading(); browsers[closingID]?.navigationDelegate = nil; browsers[closingID]?.uiDelegate = nil
-            browsers[closingID]?.removeFromSuperview(); browsers.removeValue(forKey: closingID)
+            if let web = browsers[closingID] {
+                retiringViews.removeValue(forKey: ObjectIdentifier(web)); web.removeFromSuperview()
+            }
+            browsers.removeValue(forKey: closingID)
             pendingHome.remove(closingID); tabErrors.removeValue(forKey: closingID); pendingLoads.remove(closingID); requestedAddresses.removeValue(forKey: closingID)
         }
         showActive(); save()
@@ -431,8 +486,10 @@ import QuartzCore
     @objc func newTab(_ sender: Any?) { cancelPaging(); openAddress(newTab: true, empty: true) }
     @objc func closeTab(_ sender: Any?) {
         if let little = littleWindows.values.first(where: { $0.window?.isKeyWindow == true }) { little.close(); return }
+        if let keyWindow = NSApp.keyWindow, keyWindow !== view.window {
+            keyWindow.performClose(sender); return
+        }
         if let peek = peeks[session.activeID], peek.isPresented { peek.dismiss(); return }
-        if pictureInPicture.activeTabID != nil, view.window?.isKeyWindow == false { pictureInPicture.restore(); return }
         close(session.activeID)
     }
     @objc func reopenTab(_ sender: Any?) { if let record = library.popClosed() { restoreClosed(record) } }
@@ -466,7 +523,10 @@ import QuartzCore
     @objc func zoomIn(_ sender: Any?) { if let web = commandWebView { web.pageZoom = min(3, web.pageZoom + 0.1) } }
     @objc func zoomOut(_ sender: Any?) { if let web = commandWebView { web.pageZoom = max(0.4, web.pageZoom - 0.1) } }
     @objc func actualSize(_ sender: Any?) { commandWebView?.pageZoom = 1 }
-    @objc func showHome(_ sender: Any?) { navigate("orbit://newtab") }
+    @objc func showHome(_ sender: Any?) {
+        guard !littleWindows.values.contains(where: { $0.window?.isKeyWindow == true }) else { return }
+        navigate("orbit://newtab")
+    }
     func navigate(_ address: String) {
         peeks[session.activeID]?.dismiss()
         returnActiveVideo()
@@ -593,8 +653,13 @@ import QuartzCore
                 else { session.select(previous); if let tab = session.tabs.first(where: { $0.id == id }) { _ = self.webView(for: tab) }; refresh(); save() }
                 decisionHandler(.cancel); return
             }
-            let crossesPinnedOrigin = session.active?.pinned == true && address.host?.lowercased() != webView.url?.host?.lowercased()
-            if activeWebView === webView && (modifiers.contains(.shift) || crossesPinnedOrigin) {
+            let sourceID = browsers.first(where: { $0.value === webView })?.key
+            let sourceTab = sourceID.flatMap { id in session.tabs.first(where: { $0.id == id }) }
+            let crossesPinnedOrigin = sourceTab?.pinned == true && address.host?.lowercased() != webView.url?.host?.lowercased()
+            if let sourceID, visibleMemberIDs.contains(sourceID), modifiers.contains(.shift) || crossesPinnedOrigin {
+                if let group = session.split(for: sourceID) {
+                    splitCoordinators[group.primaryID]?.setFocusedSide(sourceID == group.secondaryID ? .right : .left)
+                }
                 openPeek(address); decisionHandler(.cancel); return
             }
         }

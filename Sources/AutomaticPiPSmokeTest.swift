@@ -9,7 +9,7 @@ import WebKit
     enum Failure: Error { case assertion(String) }
     func start() {
         Task { @MainActor in
-            do { try await run(); finish(true, "\(checks) checks: automatic departure/return, playback continuity, focus, paused/no-video, rapid switching, spaces, closure, preference, split fallback/return, and split-group cleanup") }
+            do { try await run(); finish(true, "\(checks) checks: automatic departure/return, playback continuity, focus, paused/no-video, rapid switching, spaces, closure, preference, split fallback/return, queued single tabs, retirement cleanup/focus, utility close routing, and split-group cleanup") }
             catch { finish(false, String(describing: error)) }
         }
     }
@@ -76,6 +76,7 @@ import WebKit
         try await wait("space departure PiP") { self.controller.session.space == 1 && self.controller.pictureInPicture.activeTabID == video.id }
         controller.changeSpace(0)
         try await wait("space return") { self.controller.session.activeID == video.id && self.controller.pictureInPicture.referencedTabID == nil }
+        try await runQueuedSingleDeparture(player: player, videoID: video.id, homeID: home.id, destinationID: otherSpace.id)
         controller.automaticallyShowsVideo = false
         controller.select(home.id); await pause(0.3)
         try require(controller.pictureInPicture.referencedTabID == nil, "Disabled auto preference is respected")
@@ -84,6 +85,34 @@ import WebKit
         try require(controller.pictureInPicture.referencedTabID == nil && controller.browsers[video.id] == nil, "Closing source cancels pending or active panel")
         try require(controller.session.activeID == home.id, "Background video closure preserves destination selection")
         try await runSplitLifecycle(destinationID: home.id)
+        try await runRetirementAndCommandRouting(destinationID: home.id)
+    }
+
+    func runQueuedSingleDeparture(player: WKWebView, videoID: UUID, homeID: UUID, destinationID: UUID) async throws {
+        _ = try await js(player, "__orbitTestVideo.pause(); true")
+        controller.select(homeID)
+        try await wait("paused departure before queued single test") {
+            !self.controller.automaticProbeInFlight && self.controller.pictureInPicture.referencedTabID == nil
+        }
+        guard let home = controller.browsers[homeID] else { throw Failure.assertion("Missing no-video queue fixture") }
+        // Deliberately occupy only this fixture's WebContent process. The next
+        // native find-video request queues behind it, as on a busy real page.
+        home.evaluateJavaScript("(() => { const end = performance.now() + 1000; while (performance.now() < end) {} return true; })()") { _, _ in }
+        controller.select(videoID)
+        _ = try await js(player, "__orbitTestVideo.play(); true")
+        try require(controller.pictureInPicture.referencedTabID == homeID, "First candidate is pending while the single video becomes visible")
+        controller.select(destinationID)
+        try require(player.window === window && player.superview === controller.webHost,
+                    "Queued single video keeps its original window attachment behind the destination")
+        try await wait("queued single video after the busy no-video candidate") { self.controller.pictureInPicture.activeTabID == videoID }
+        try require(controller.pictureInPicture.owns(player) && player.window !== window,
+                    "Retirement cleanup does not pull the selected single video out of PiP")
+        try await wait("queued single retirement cleanup") { self.controller.retiringViews.isEmpty }
+        controller.select(videoID)
+        try await wait("queued single return") {
+            !self.controller.automaticProbeInFlight && self.controller.pictureInPicture.referencedTabID == nil
+        }
+        try require(player.superview === controller.webHost, "Queued single source returns to its original browser view")
     }
 
     func runSplitLifecycle(destinationID: UUID) async throws {
@@ -146,6 +175,68 @@ import WebKit
         try require(!controller.session.tabs.contains(where: { $0.id == left.id || $0.id == right.id }) && leftWeb.superview == nil && player.superview == nil, "Closed split members leave session and all view hosts")
         try require(controller.session.activeID == destinationID && controller.browsers[destinationID] === destinationWeb && controller.activeWebView === destinationWeb && destinationWeb.superview === controller.webHost, "Background split-group close preserves the destination and original WKWebView")
     }
+    func runRetirementAndCommandRouting(destinationID: UUID) async throws {
+        let left = BrowserTab(title: "Retirement left", address: "orbit://newtab", space: 0)
+        let right = BrowserTab(title: "Retirement right", address: "orbit://newtab", space: 0)
+        controller.session.tabs.append(contentsOf: [left, right])
+        try require(controller.session.makeSplit(primary: left.id, secondary: right.id), "Retirement fixture split created")
+        controller.showActive()
+        try await wait("retirement fixture pages") {
+            self.controller.browsers[left.id]?.isLoading == false && self.controller.browsers[right.id]?.isLoading == false
+                && !self.controller.automaticProbeInFlight
+        }
+        guard let split = controller.splitCoordinators[left.id], let leftWeb = controller.browsers[left.id],
+              let destination = controller.browsers[destinationID], let leftHost = leftWeb.superview else {
+            throw Failure.assertion("Missing retirement hosts")
+        }
+        let oldSplitView = split.view
+        let editor = NSTextField(string: "Input in the departing pane")
+        editor.frame = NSRect(x: 8, y: 8, width: 240, height: 24)
+        leftHost.addSubview(editor)
+        window.makeKeyAndOrderFront(nil)
+        window.makeFirstResponder(editor)
+        let canCheckFocus = window.isKeyWindow && NSApp.keyWindow === window
+        // Mirrors a Space animation commit: model selection changes before the
+        // view transaction, without a palette dismissal moving focus first.
+        controller.session.select(destinationID)
+        controller.showActive()
+        if canCheckFocus {
+            try require(responderIsInside(destination), "Covered retiring pane relinquishes keyboard focus to the attached destination")
+        }
+        try require(oldSplitView.superview === controller.webHost, "Pending split stays attached until discovery finishes")
+        controller.select(left.id)
+        controller.unsplit(left.id)
+        try await wait("rapid return and unsplit retirement cleanup") {
+            !self.controller.automaticProbeInFlight && self.controller.retiringViews.isEmpty
+        }
+        try require(oldSplitView.superview == nil, "Unsplit does not preserve an orphan host just because its old tab ID is active")
+        try require(controller.session.activeID == left.id && leftWeb.superview === controller.webHost,
+                    "Unsplit keeps the actual active single-page host")
+        editor.removeFromSuperview()
+
+        let utility = NSWindow(contentRect: NSRect(x: 40, y: 40, width: 380, height: 220),
+                               styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        utility.title = "Ark — utility close test"; utility.isReleasedWhenClosed = false
+        let tabIDs = controller.session.tabs.map(\.id)
+        let activeID = controller.session.activeID
+        utility.makeKeyAndOrderFront(nil)
+        try await wait("utility key window") { NSApp.keyWindow === utility }
+        controller.closeTab(nil)
+        try require(!utility.isVisible, "Command-W closes the key utility window")
+        try require(controller.session.tabs.map(\.id) == tabIDs && controller.session.activeID == activeID,
+                    "Closing a utility window preserves main browser tabs and selection")
+        window.makeKeyAndOrderFront(nil)
+        controller.automaticallyShowsVideo = false; controller.cancelAutomaticDepartures()
+        controller.close(left.id); controller.close(right.id); controller.select(destinationID)
+    }
+
+    func responderIsInside(_ host: NSView) -> Bool {
+        var responder = window.firstResponder as? NSView
+        if let editor = window.firstResponder as? NSTextView, editor.isFieldEditor,
+           let field = editor.delegate as? NSView { responder = field }
+        return responder.map { $0 === host || $0.isDescendant(of: host) } ?? false
+    }
+
     func finish(_ success: Bool, _ detail: String) {
         controller?.prepareToClose()
         print("\(success ? "PASS" : "FAIL"): Automatic PiP — \(detail)"); fflush(stdout); exit(success ? 0 : 1)

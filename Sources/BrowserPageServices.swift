@@ -6,6 +6,7 @@ import WebKit
     @objc func showHistory(_ sender: Any?) { library.showHistory(relativeTo: view.window) }
     @objc func showArchive(_ sender: Any?) { library.showArchive(relativeTo: view.window) }
     func restoreClosed(_ record: ClosedRecord) {
+        cancelPaging(); dismissAddress()
         var restored: [BrowserTab] = []
         for var tab in record.tabs { tab.id = UUID(); restored.append(tab); session.tabs.append(tab) }
         guard let first = restored.first else { return }
