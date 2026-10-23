@@ -24,7 +24,7 @@ import WebKit
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1260, height: 800), styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
         window.title = "Ark"; window.titleVisibility = .hidden; window.titlebarAppearsTransparent = true
         window.isMovableByWindowBackground = false; window.minSize = NSSize(width: 760, height: 540)
-        window.backgroundColor = NSColor(srgbRed: 0.84, green: 0.82, blue: 0.92, alpha: 1)
+        window.backgroundColor = NSColor(white: 0.10, alpha: 1)
         window.contentViewController = controller
         let available = NSScreen.main?.visibleFrame.size ?? NSSize(width: 1440, height: 900)
         window.setContentSize(NSSize(width: min(1260, available.width - 60), height: min(800, available.height - 60)))

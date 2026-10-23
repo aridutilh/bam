@@ -22,13 +22,54 @@ enum RecoveredMetrics {
     }
 }
 
+/// Visible UI animations follow the display's refresh cadence. A quiet-display
+/// fallback finishes state changes if their window is hidden or minimized.
+private final class AnimationFrameClock: NSObject {
+    private var displayLink: CADisplayLink?
+    private var timer: Timer?
+    private var update: (() -> Void)?
+    private var lastDisplayFrame: CFTimeInterval = 0
+
+    func start(view: NSView?, update: @escaping () -> Void) {
+        stop()
+        self.update = update
+        if let view, view.window?.screen != nil {
+            let link = view.displayLink(target: self, selector: #selector(frame(_:)))
+            displayLink = link
+            lastDisplayFrame = CACurrentMediaTime()
+            link.add(to: .main, forMode: .common)
+            let watchdog = Timer(timeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
+                guard let self, CACurrentMediaTime() - self.lastDisplayFrame > 0.10 else { return }
+                self.update?()
+            }
+            timer = watchdog
+            RunLoop.main.add(watchdog, forMode: .common)
+        } else {
+            let timer = Timer(timeInterval: 1.0 / 120.0, repeats: true) { [weak self] _ in self?.update?() }
+            timer.tolerance = 0.001
+            self.timer = timer
+            RunLoop.main.add(timer, forMode: .common)
+        }
+    }
+    @objc private func frame(_ link: CADisplayLink) {
+        lastDisplayFrame = CACurrentMediaTime(); update?()
+    }
+    func stop() {
+        displayLink?.invalidate(); displayLink = nil
+        timer?.invalidate(); timer = nil
+        update = nil
+    }
+    deinit { displayLink?.invalidate(); timer?.invalidate() }
+}
+
 /// A small analytical spring driver, evaluated against monotonic elapsed time.
 /// The measured collection-layout pairs are (response: 0.55, ratio: 0.94)
 /// and (response: 0.30, ratio: 0.99). They are response parameters, not durations.
 /// Ark chooses the latter pair for space paging; its original symbol animations
 /// use their own parameters. Sidebar presentation uses the cubic driver below.
 final class SpringAnimator {
-    private var timer: Timer?
+    weak var animationView: NSView?
+    private let frameClock = AnimationFrameClock()
     private var generation: UInt = 0
     private var startTime: CFTimeInterval = 0
     private var startValue: CGFloat = 0
@@ -88,18 +129,12 @@ final class SpringAnimator {
         didComplete = completion
         update(from)
         guard generation == token else { return }
-        let timer = Timer(timeInterval: 1.0 / 120.0, repeats: true) { [weak self] _ in
-            self?.tick()
-        }
-        timer.tolerance = 0.001
-        self.timer = timer
-        RunLoop.main.add(timer, forMode: .common)
+        frameClock.start(view: animationView) { [weak self] in self?.tick() }
     }
 
     func stop() {
         generation &+= 1
-        timer?.invalidate()
-        timer = nil
+        frameClock.stop()
         updateValue = nil
         didComplete = nil
         velocity = 0
@@ -113,8 +148,7 @@ final class SpringAnimator {
         if settled || elapsed >= timeLimit || NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
             let update = updateValue
             let completion = didComplete
-            timer?.invalidate()
-            timer = nil
+            frameClock.stop()
             updateValue = nil
             didComplete = nil
             value = targetValue
@@ -162,7 +196,7 @@ final class SpringAnimator {
         return (slowTerm + fastTerm, slow * slowTerm + fast * fastTerm)
     }
 
-    deinit { timer?.invalidate() }
+    deinit { frameClock.stop() }
 }
 
 /// Independently implemented fixed-duration cubic easing.
@@ -170,7 +204,8 @@ final class SpringAnimator {
 /// The hidden-to-anchored path uses 0.08 seconds and (0.25, 0.46, 0.45, 0.94).
 /// This driver intentionally does not reuse the collection-layout spring settings.
 final class CubicAnimator {
-    private var timer: Timer?
+    weak var animationView: NSView?
+    private let frameClock = AnimationFrameClock()
     private var generation: UInt = 0
     private var startTime: CFTimeInterval = 0
     private var duration: Double = 0.08
@@ -206,16 +241,12 @@ final class CubicAnimator {
         startTime = CACurrentMediaTime()
         update(from)
         guard generation == token else { return }
-        let timer = Timer(timeInterval: 1.0 / 120.0, repeats: true) { [weak self] _ in self?.tick() }
-        timer.tolerance = 0.001
-        self.timer = timer
-        RunLoop.main.add(timer, forMode: .common)
+        frameClock.start(view: animationView) { [weak self] in self?.tick() }
     }
 
     func stop() {
         generation &+= 1
-        timer?.invalidate()
-        timer = nil
+        frameClock.stop()
         updateValue = nil
         didComplete = nil
     }
@@ -226,8 +257,7 @@ final class CubicAnimator {
         if elapsed >= duration || NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
             let update = updateValue
             let completion = didComplete
-            timer?.invalidate()
-            timer = nil
+            frameClock.stop()
             updateValue = nil
             didComplete = nil
             value = targetValue
@@ -255,7 +285,7 @@ final class CubicAnimator {
         return 3 * inverse * inverse * t * first + 3 * inverse * t * t * second + t * t * t
     }
 
-    deinit { timer?.invalidate() }
+    deinit { frameClock.stop() }
 }
 
 /// Native AppKit resize handling and an originally drawn grip.

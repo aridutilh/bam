@@ -36,6 +36,9 @@ struct SidebarTabItem: Equatable {
     private let clip = ArkFlippedView()
     private var page = SidebarPage()
     private var next: SidebarPage?
+    private var nextSpace: Int?
+    private var nextItems: [SidebarTabItem] = []
+    private var cachedPages: [Int: SidebarPage] = [:]
     private var pageDirection: CGFloat = 1
     private var offset: CGFloat = 0
     private var selectedSpace = 0
@@ -47,7 +50,7 @@ struct SidebarTabItem: Equatable {
         setAccessibilityLabel("Ark sidebar")
         clip.wantsLayer = true; clip.layer?.masksToBounds = true
         [toggle, back, forward, reload, search, clip, library, plus, pip].forEach(addSubview)
-        spaces.forEach(addSubview); clip.addSubview(page); connect(page)
+        spaces.forEach(addSubview); clip.addSubview(page); connect(page); cachedPages[0] = page
         back.handler = { [weak self] in self?.onBack?() }
         forward.handler = { [weak self] in self?.onForward?() }
         reload.handler = { [weak self] in self?.onReload?() }
@@ -66,27 +69,77 @@ struct SidebarTabItem: Equatable {
         page.newTab = { [weak self] in self?.onNewTab?() }
     }
     func update(tabs: [SidebarTabItem], space: Int, canGoBack: Bool, canGoForward: Bool, isLoading: Bool) {
-        if items != tabs || selectedSpace != space { if selectedSpace != space { library.playSelection() }; items = tabs; selectedSpace = space; page.configure(tabs, space: space) }
+        // A commit can reach refresh() before the controller explicitly finishes
+        // paging. Adopt the incoming view here too, without rebuilding either page.
+        let spaceChanged = selectedSpace != space
+        if spaceChanged {
+            if nextSpace == space { commitPaging(to: space) }
+            else {
+                endPaging()
+                page.removeFromSuperview()
+                page = pageForSpace(space)
+                clip.addSubview(page)
+                selectedSpace = space
+                items = []
+                library.playSelection()
+            }
+        }
+        if items != tabs || spaceChanged { items = tabs; page.configure(tabs, space: space) }
         back.isEnabled = canGoBack; forward.isEnabled = canGoForward
         reload.setSymbol(isLoading ? "xmark" : "arrow.clockwise", label: isLoading ? "Stop loading" : "Reload page")
         for button in spaces { button.selected = button.index == space }
         needsLayout = true
     }
+    private func pageForSpace(_ space: Int) -> SidebarPage {
+        if let cached = cachedPages[space] { return cached }
+        let created = SidebarPage(); connect(created); cachedPages[space] = created
+        return created
+    }
     func setAddress(_ address: String, title: String) { search.address = title; search.toolTip = address }
     func beginPaging(tabs: [SidebarTabItem], space: Int, direction: CGFloat) {
-        if next != nil, pageDirection == direction { return }
+        guard space != selectedSpace else { return }
+        if let next, nextSpace == space, pageDirection == direction {
+            // Loading/title/selection updates may arrive while fingers are down.
+            // Keep the page and offset; only reconcile its changing row data.
+            if nextItems != tabs { nextItems = tabs; next.configure(tabs, space: space) }
+            return
+        }
         next?.removeFromSuperview()
-        let incoming = SidebarPage(); connect(incoming); incoming.configure(tabs, space: space)
-        clip.addSubview(incoming); next = incoming; pageDirection = direction
+        let incoming = pageForSpace(space)
+        incoming.configure(tabs, space: space)
+        nextSpace = space; nextItems = tabs; pageDirection = direction
+        clip.addSubview(incoming); next = incoming
         layoutSubtreeIfNeeded(); setPagingOffset(offset)
     }
     func setPagingOffset(_ value: CGFloat) {
+        guard value.isFinite else { return }
         offset = value
-        page.frame = NSRect(x: value, y: 0, width: clip.bounds.width, height: clip.bounds.height)
-        next?.frame = NSRect(x: value + clip.bounds.width * pageDirection, y: 0, width: clip.bounds.width, height: clip.bounds.height)
+        // Frames are driven by the gesture/spring. Backing layers must not add a
+        // second implicit animation, and origin-only moves need no row relayout.
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        position(page, at: value)
+        if let next { position(next, at: value + clip.bounds.width * pageDirection) }
+        CATransaction.commit()
+    }
+    private func position(_ page: SidebarPage, at x: CGFloat) {
+        let size = clip.bounds.size
+        if page.frame.size != size { page.setFrameSize(size) }
+        let origin = NSPoint(x: x, y: 0)
+        if page.frame.origin != origin { page.setFrameOrigin(origin) }
+    }
+    /// Commit the existing incoming page, preserving its scroll position and rows.
+    func commitPaging(to space: Int) {
+        guard let incoming = next, nextSpace == space else { return }
+        page.removeFromSuperview()
+        page = incoming; items = nextItems; selectedSpace = space
+        next = nil; nextSpace = nil; nextItems = []
+        setPagingOffset(0)
+        for button in spaces { button.selected = button.index == space }
+        library.playSelection()
     }
     func endPaging() {
-        next?.removeFromSuperview(); next = nil; offset = 0; setPagingOffset(0)
+        next?.removeFromSuperview(); next = nil; nextSpace = nil; nextItems = []
+        setPagingOffset(0)
     }
     override func layout() {
         super.layout(); let w = bounds.width

@@ -27,6 +27,10 @@ import QuartzCore
     override var isFlipped: Bool { true }
 }
 
+@MainActor private final class SpaceTransitionImage: NSImageView {
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}
+
 @MainActor final class PaletteField: NSTextField {
     var escape: (() -> Void)?
     override func cancelOperation(_ sender: Any?) { escape?() }
@@ -72,6 +76,18 @@ import QuartzCore
     var trackingSwipe = false
     var pagingOffset: CGFloat = 0
     var pagingTarget: Int?
+    private var pagingCommit: Int?
+    private var queuedSpace: Int?
+    private var capturedSpaceMomentum = false
+    private var ignoreSpaceGestureUntilEnd = false
+    private var rejectedSpaceGesture = false
+    private var ignoredSpaceGestureEnd: DispatchWorkItem?
+    private var unphasedScrollEnd: DispatchWorkItem?
+    private var spaceSnapshotRequest: UUID?
+    private var spaceSnapshot: NSImage?
+    private var spaceSnapshotSource: UUID?
+    private var contentTransitionOverlay: NSImageView?
+    private let contentTransitionAnimator = CubicAnimator()
     let sessionURL: URL
     var session: BrowserSession
     var displayedWidth: CGFloat
@@ -101,15 +117,17 @@ import QuartzCore
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     override func loadView() {
         view = root; root.wantsLayer = true; root.layer?.masksToBounds = true
+        animator.animationView = root; pagingAnimator.animationView = root
+        contentTransitionAnimator.animationView = root
         root.onLayout = { [weak self] in self?.layoutBrowser() }
         [sidebar, card, handle].forEach(root.addSubview)
-        card.wantsLayer = true; card.layer?.backgroundColor = NSColor(srgbRed: 0.985, green: 0.98, blue: 0.97, alpha: 1).cgColor
+        card.wantsLayer = true; card.layer?.backgroundColor = NSColor(white: 0.10, alpha: 1).cgColor
         card.layer?.cornerRadius = 9; card.layer?.masksToBounds = true
         card.layer?.borderWidth = 1; card.layer?.borderColor = NSColor.white.withAlphaComponent(0.30).cgColor
         card.addSubview(webHost); card.addSubview(topbar)
-        topbar.wantsLayer = true; topbar.layer?.backgroundColor = NSColor(srgbRed: 0.98, green: 0.975, blue: 0.97, alpha: 1).cgColor
+        topbar.wantsLayer = true; topbar.layer?.backgroundColor = NSColor(white: 0.13, alpha: 1).cgColor
         topbar.addSubview(location); topbar.addSubview(reveal); topbar.addSubview(pin)
-        for button in [location, reveal, pin] { button.isBordered = false; button.bezelStyle = .inline; button.contentTintColor = NSColor.secondaryLabelColor }
+        for button in [location, reveal, pin] { button.isBordered = false; button.bezelStyle = .inline; button.contentTintColor = NSColor(white: 0.86, alpha: 1) }
         location.font = .systemFont(ofSize: 11, weight: .medium); location.target = self; location.action = #selector(focusAddress)
         location.setAccessibilityLabel("Address — click to navigate")
         reveal.image = NSImage(systemSymbolName: "sidebar.left", accessibilityDescription: "Toggle sidebar")
@@ -174,8 +192,12 @@ import QuartzCore
         sidebar.alphaValue = 1
         sidebar.isHidden = width < 0.5
         card.frame = NSRect(x: width + 8, y: 8, width: max(100, w - width - 16), height: h - 16)
-        let toolbarHeight: CGFloat = width < 80 ? 36 : 0
-        topbar.isHidden = toolbarHeight == 0
+        // The strip grows continuously as the sidebar collapses. A threshold
+        // switch here used to resize the webpage by 36 points in a single frame.
+        let toolbarFraction = 1 - min(1, max(0, width / 80))
+        let toolbarHeight: CGFloat = 36 * toolbarFraction
+        topbar.isHidden = toolbarFraction == 0
+        topbar.alphaValue = toolbarFraction
         topbar.frame = NSRect(x: 0, y: 0, width: card.bounds.width, height: toolbarHeight)
         webHost.frame = NSRect(x: 0, y: toolbarHeight, width: card.bounds.width, height: max(0, card.bounds.height - toolbarHeight))
         if let web = activeWebView, web.superview === webHost { web.frame = webHost.bounds }
@@ -364,6 +386,9 @@ import QuartzCore
         root.space = session.space
         let tabs = session.visibleTabs.map { sidebarItem($0, activeID: session.activeID) }
         sidebar.update(tabs: tabs, space: session.space, canGoBack: activeWebView?.canGoBack ?? false, canGoForward: activeWebView?.canGoForward ?? false, isLoading: activeWebView?.isLoading ?? false)
+        if let target = pagingTarget {
+            sidebar.beginPaging(tabs: sidebarItems(for: target), space: target, direction: target > session.space ? 1 : -1)
+        }
         if let tab = session.active {
             let host = URL(string: tab.address)?.host ?? tab.address
             location.title = tabErrors[tab.id] ?? (tab.isHome ? "Ark  /  New tab" : host)
@@ -411,54 +436,222 @@ import QuartzCore
         return preview.visibleTabs.map { sidebarItem($0, activeID: preview.activeID) }
     }
     func cancelPaging() {
-        pagingAnimator.stop(); swipe.reset(); trackingSwipe = false; pagingOffset = 0; pagingTarget = nil; sidebar.endPaging(); root.previewSpace = nil; root.previewProgress = 0
+        unphasedScrollEnd?.cancel(); unphasedScrollEnd = nil
+        quarantineActiveSpaceGesture()
+        pagingAnimator.stop(); swipe.reset(); trackingSwipe = false
+        capturedSpaceMomentum = false; queuedSpace = nil; pagingCommit = nil
+        pagingOffset = 0; pagingTarget = nil; sidebar.endPaging()
+        root.previewSpace = nil; root.previewProgress = 0
+        clearSpaceContentTransition()
     }
     func changeSpace(_ space: Int) {
         guard (0...2).contains(space) else { return }
-        if space == session.space { cancelPaging(); return }
-        cancelPaging(); dismissAddress()
+        dismissAddress()
+        quarantineActiveSpaceGesture()
+        swipe.reset(); trackingSwipe = false
+        unphasedScrollEnd?.cancel(); unphasedScrollEnd = nil
+        if pagingAnimator.isRunning {
+            if space == pagingCommit { queuedSpace = nil; return }
+            if space == session.space || space == pagingTarget {
+                queuedSpace = nil
+                finishPaging(commit: space == session.space ? nil : space)
+            } else { queuedSpace = space }
+            return
+        }
+        if space == session.space {
+            if pagingOffset != 0 { finishPaging(commit: nil) }
+            return
+        }
+        swipe.reset(); trackingSwipe = false
+        unphasedScrollEnd?.cancel(); unphasedScrollEnd = nil
         let direction: CGFloat = space > session.space ? 1 : -1
         sidebar.beginPaging(tabs: sidebarItems(for: space), space: space, direction: direction)
         pagingTarget = space
+        prepareSpaceContentTransition()
         finishPaging(commit: space)
     }
     func handleSpaceScroll(_ event: NSEvent) -> NSEvent? {
-        guard event.window === view.window, session.sidebarVisible, addressOverlay == nil,
-              (trackingSwipe || sidebar.bounds.contains(sidebar.convert(event.locationInWindow, from: nil))), event.hasPreciseScrollingDeltas else { return event }
         let phase: SpaceSwipeStateMachine.Phase
-        if event.phase.contains(.began) { phase = .began; trackingSwipe = true; pagingAnimator.stop(); pagingOffset = 0; pagingTarget = nil; sidebar.endPaging(); root.previewSpace = nil; root.previewProgress = 0 }
-        else if event.phase.contains(.cancelled) { phase = .cancelled }
+        if event.phase.contains(.cancelled) { phase = .cancelled }
         else if event.phase.contains(.ended) { phase = .ended }
+        else if event.phase.contains(.began) { phase = .began }
+        else if event.phase.contains(.mayBegin) { phase = .mayBegin }
         else if event.phase.contains(.changed) { phase = .changed }
+        else if event.phase.contains(.stationary) { phase = .stationary }
         else { phase = .none }
-        let result = swipe.handle(deltaX: event.scrollingDeltaX, deltaY: event.scrollingDeltaY, phase: phase, isMomentum: !event.momentumPhase.isEmpty, timestamp: event.timestamp, space: session.space, width: sidebar.bounds.width)
+        let consumed = routeSpaceScroll(deltaX: event.scrollingDeltaX, deltaY: event.scrollingDeltaY,
+            phase: phase, isMomentum: !event.momentumPhase.isEmpty, timestamp: event.timestamp,
+            isPrecise: event.hasPreciseScrollingDeltas,
+            isInsideSidebar: sidebar.bounds.contains(sidebar.convert(event.locationInWindow, from: nil)),
+            isFromBrowserWindow: event.window === view.window)
+        return consumed ? nil : event
+    }
+    /// The event adapter and native regression fixture use the same routing path.
+    /// Capture starts over the visible sidebar and survives pointer exit; ordinary
+    /// webpage scrolling and nonprecise mouse wheels retain their own behavior.
+    @discardableResult func routeSpaceScroll(deltaX: CGFloat, deltaY: CGFloat,
+        phase: SpaceSwipeStateMachine.Phase, isMomentum: Bool, timestamp: TimeInterval,
+        isPrecise: Bool, isInsideSidebar: Bool, isFromBrowserWindow: Bool) -> Bool {
+        guard isFromBrowserWindow, session.sidebarVisible, addressOverlay == nil,
+              isPrecise || phase != .none else { return false }
+        if phase == .began || phase == .mayBegin {
+            ignoreSpaceGestureUntilEnd = false
+            ignoredSpaceGestureEnd?.cancel(); ignoredSpaceGestureEnd = nil
+            rejectedSpaceGesture = !isInsideSidebar
+        }
+        if rejectedSpaceGesture {
+            if phase == .began || phase == .mayBegin {
+                swipe.reset(); trackingSwipe = false; capturedSpaceMomentum = false
+                unphasedScrollEnd?.cancel(); unphasedScrollEnd = nil
+            }
+            if phase == .ended || phase == .cancelled { rejectedSpaceGesture = false }
+            return false
+        }
+        if ignoreSpaceGestureUntilEnd {
+            if phase == .ended || phase == .cancelled {
+                ignoreSpaceGestureUntilEnd = false; capturedSpaceMomentum = true
+                ignoredSpaceGestureEnd?.cancel(); ignoredSpaceGestureEnd = nil
+            } else { scheduleIgnoredGestureEnd() }
+            return true
+        }
+        if phase == .began || phase == .mayBegin {
+            unphasedScrollEnd?.cancel(); unphasedScrollEnd = nil
+            trackingSwipe = isInsideSidebar; capturedSpaceMomentum = false
+            if !trackingSwipe { swipe.reset(); return false }
+        } else if !trackingSwipe && !isMomentum && isInsideSidebar && (phase == .changed || phase == .none) {
+            trackingSwipe = true
+        }
+        if isMomentum && capturedSpaceMomentum && !trackingSwipe { return true }
+        guard trackingSwipe else { return false }
+        // Some trackpad drivers provide precise deltas without physical phases.
+        // Give those streams a quiet-period end, rather than ignoring them all.
+        let unphased = phase == .none && !isMomentum
+        let deliveredPhase: SpaceSwipeStateMachine.Phase = unphased ? .changed : phase
+        if isMomentum && trackingSwipe && phase == .none {
+            _ = applySpaceScroll(deltaX: 0, deltaY: 0, phase: .ended, isMomentum: false, timestamp: timestamp)
+        }
+        let consumed = applySpaceScroll(deltaX: deltaX, deltaY: deltaY, phase: deliveredPhase,
+                                        isMomentum: isMomentum, timestamp: timestamp)
+        if unphased {
+            unphasedScrollEnd?.cancel()
+            let work = DispatchWorkItem { [weak self] in
+                guard let self, self.trackingSwipe else { return }
+                self.unphasedScrollEnd = nil
+                _ = self.applySpaceScroll(deltaX: 0, deltaY: 0, phase: .ended, isMomentum: false, timestamp: timestamp + 0.12)
+            }
+            unphasedScrollEnd = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: work)
+        } else if phase == .ended || phase == .cancelled || isMomentum {
+            unphasedScrollEnd?.cancel(); unphasedScrollEnd = nil
+        }
+        return consumed
+    }
+    private func quarantineActiveSpaceGesture() {
+        if trackingSwipe {
+            ignoreSpaceGestureUntilEnd = true
+            scheduleIgnoredGestureEnd()
+        }
+    }
+    private func scheduleIgnoredGestureEnd() {
+        ignoredSpaceGestureEnd?.cancel()
+        // Unphased devices have no finger-up event. Quarantine only their tail,
+        // then permit the next gesture after a quiet period.
+        let work = DispatchWorkItem { [weak self] in
+            self?.ignoreSpaceGestureUntilEnd = false
+            self?.ignoredSpaceGestureEnd = nil
+        }
+        ignoredSpaceGestureEnd = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: work)
+    }
+    private func applySpaceScroll(deltaX: CGFloat, deltaY: CGFloat, phase: SpaceSwipeStateMachine.Phase,
+                                  isMomentum: Bool, timestamp: TimeInterval) -> Bool {
+        let result = swipe.handle(deltaX: deltaX, deltaY: deltaY, phase: phase, isMomentum: isMomentum,
+                                  timestamp: timestamp, space: session.space, width: sidebar.bounds.width,
+                                  initialOffset: pagingOffset)
+        if result.didLock {
+            pagingAnimator.stop(); pagingCommit = nil; queuedSpace = nil
+            prepareSpaceContentTransition()
+        }
         if let offset = result.previewOffset {
             pagingOffset = offset
             let direction: CGFloat = offset < 0 ? 1 : -1
             let target = session.space + Int(direction)
             if (0...2).contains(target) {
-                if pagingTarget != target { sidebar.beginPaging(tabs: sidebarItems(for: target), space: target, direction: direction); pagingTarget = target }
+                if pagingTarget != target {
+                    sidebar.beginPaging(tabs: sidebarItems(for: target), space: target, direction: direction)
+                    pagingTarget = target
+                }
             } else if pagingTarget != nil { sidebar.endPaging(); pagingTarget = nil }
-            sidebar.setPagingOffset(offset); root.previewSpace = pagingTarget; root.previewProgress = abs(offset) / max(1,sidebar.bounds.width)
+            sidebar.setPagingOffset(offset)
+            root.previewSpace = pagingTarget; root.previewProgress = abs(offset) / max(1, sidebar.bounds.width)
         }
         if phase == .ended || phase == .cancelled { trackingSwipe = false }
-        if result.finished { finishPaging(commit: result.committedSpace) }
-        return result.shouldConsume ? nil : event
+        if result.finished {
+            capturedSpaceMomentum = result.shouldConsume
+            finishPaging(commit: result.committedSpace, initialVelocity: result.releaseVelocity)
+        }
+        return result.shouldConsume
     }
-    func finishPaging(commit: Int?) {
+    func finishPaging(commit: Int?, initialVelocity: CGFloat? = nil) {
+        pagingCommit = commit
         let end: CGFloat = commit.map { $0 > session.space ? -sidebar.bounds.width : sidebar.bounds.width } ?? 0
-        pagingAnimator.animate(from: pagingOffset, to: end, response: 0.30, dampingRatio: 0.99, update: { [weak self] offset in
+        pagingAnimator.animate(from: pagingOffset, to: end, response: 0.30, dampingRatio: 0.99,
+            initialVelocity: initialVelocity, update: { [weak self] offset in
             guard let self else { return }
             self.pagingOffset = offset; self.sidebar.setPagingOffset(offset)
-            self.root.previewSpace = self.pagingTarget; self.root.previewProgress = abs(offset) / max(1,self.sidebar.bounds.width)
+            self.root.previewSpace = self.pagingTarget
+            self.root.previewProgress = abs(offset) / max(1, self.sidebar.bounds.width)
         }, completion: { [weak self] in
             guard let self else { return }
-            if let commit { self.session.changeSpace(commit); self.showActive(); self.save() }
-            self.sidebar.endPaging(); self.pagingOffset = 0; self.pagingTarget = nil; self.root.previewSpace = nil; self.root.previewProgress = 0
+            let nextRequest = self.queuedSpace
+            self.queuedSpace = nil; self.pagingCommit = nil
+            if let commit {
+                let image = self.spaceSnapshotSource == self.session.activeID ? self.spaceSnapshot : nil
+                self.sidebar.commitPaging(to: commit)
+                // Clear target before refresh so it cannot recreate the promoted page.
+                self.pagingTarget = nil; self.pagingOffset = 0
+                self.session.changeSpace(commit); self.showActive(); self.save()
+                self.revealSpaceContent(over: image)
+            } else { self.sidebar.endPaging(); self.clearSpaceContentTransition() }
+            self.pagingOffset = 0; self.pagingTarget = nil
+            self.root.previewSpace = nil; self.root.previewProgress = 0
+            if let nextRequest, nextRequest != self.session.space { self.changeSpace(nextRequest) }
         })
     }
-    @objc func nextSpace(_ sender: Any?) { changeSpace(min(2, session.space+1)) }
-    @objc func previousSpace(_ sender: Any?) { changeSpace(max(0, session.space-1)) }
+    private func prepareSpaceContentTransition() {
+        guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion,
+              spaceSnapshotSource != session.activeID, session.split(for: session.activeID) == nil,
+              let web = activeWebView, web.superview === webHost, web.bounds.width > 0 else { return }
+        clearSpaceContentTransition()
+        let request = UUID(), source = session.activeID
+        spaceSnapshotRequest = request; spaceSnapshotSource = source
+        let configuration = WKSnapshotConfiguration(); configuration.rect = web.bounds
+        web.takeSnapshot(with: configuration) { [weak self] image, _ in
+            guard let self, self.spaceSnapshotRequest == request, self.session.activeID == source else { return }
+            self.spaceSnapshot = image
+        }
+    }
+    private func revealSpaceContent(over image: NSImage?) {
+        clearSpaceContentTransition()
+        guard let image, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { return }
+        let overlay = SpaceTransitionImage(frame: webHost.bounds)
+        overlay.image = image; overlay.imageScaling = .scaleAxesIndependently
+        overlay.autoresizingMask = [.width, .height]; overlay.wantsLayer = true
+        overlay.setAccessibilityElement(false)
+        webHost.addSubview(overlay); contentTransitionOverlay = overlay
+        contentTransitionAnimator.animate(from: 1, to: 0, duration: 0.16,
+            controlPoints: (0.25, 0.1, 0.25, 1), update: { [weak overlay] alpha in overlay?.alphaValue = alpha },
+            completion: { [weak self, weak overlay] in
+                overlay?.removeFromSuperview()
+                if self?.contentTransitionOverlay === overlay { self?.contentTransitionOverlay = nil }
+            })
+    }
+    private func clearSpaceContentTransition() {
+        spaceSnapshotRequest = nil; spaceSnapshot = nil; spaceSnapshotSource = nil
+        contentTransitionAnimator.stop(); contentTransitionOverlay?.removeFromSuperview(); contentTransitionOverlay = nil
+    }
+    @objc func nextSpace(_ sender: Any?) { changeSpace(min(2, (queuedSpace ?? pagingCommit ?? session.space) + 1)) }
+    @objc func previousSpace(_ sender: Any?) { changeSpace(max(0, (queuedSpace ?? pagingCommit ?? session.space) - 1)) }
     func returnToVideoTab(_ id: UUID) {
         guard session.tabs.contains(where: { $0.id == id }) else { return }
         select(id)
