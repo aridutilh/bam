@@ -189,13 +189,39 @@ extension BrowserController {
         addressField?.placeholderString = "Search \(engine.name)…"
         paletteHint?.stringValue = ""
         refreshPaletteResults()
+        popInEnginePill(pill)
         return true
+    }
+    /// Springs the pill in from the left once layout has given it its frame.
+    private func popInEnginePill(_ pill: PaletteEnginePill) {
+        guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion, let layer = pill.layer else { return }
+        pill.layoutSubtreeIfNeeded()
+        let w = pill.bounds.width / 2, h = pill.bounds.height / 2
+        var start = CATransform3DMakeTranslation(w - 10, h, 0)
+        start = CATransform3DScale(start, 0.55, 0.55, 1)
+        start = CATransform3DTranslate(start, -w, -h, 0)
+        let spring = CASpringAnimation(keyPath: "transform")
+        spring.fromValue = start
+        spring.toValue = CATransform3DIdentity
+        spring.damping = 16; spring.stiffness = 380; spring.mass = 1; spring.initialVelocity = 6
+        spring.duration = spring.settlingDuration
+        let fade = CABasicAnimation(keyPath: "opacity")
+        fade.fromValue = 0; fade.toValue = 1; fade.duration = 0.14
+        layer.add(spring, forKey: "pop")
+        layer.add(fade, forKey: "fade")
     }
     func clearPaletteEngine() {
         guard paletteEngine != nil else { return }
         paletteEngine = nil
         paletteSuggestions = []
-        paletteEnginePill?.removeFromSuperview(); paletteEnginePill = nil
+        let pill = paletteEnginePill
+        paletteEnginePill = nil
+        if let pill, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            NSAnimationContext.runAnimationGroup({ context in
+                context.duration = 0.12
+                pill.animator().alphaValue = 0
+            }, completionHandler: { pill.removeFromSuperview() })
+        } else { pill?.removeFromSuperview() }
         addressField?.placeholderString = "Search or Enter URL…"
         refreshPaletteResults()
     }

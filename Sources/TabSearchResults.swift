@@ -266,11 +266,14 @@ enum TabSearchMatcher {
     }
     override func updateTrackingAreas() {
         if let hoverArea { removeTrackingArea(hoverArea) }
-        let area = NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self)
+        // Selection follows real pointer movement only. Rows resliding under a
+        // stationary cursor (suggestions arriving, panel resizing) generate
+        // entered events but no moved events, and must not steal the selection.
+        let area = NSTrackingArea(rect: .zero, options: [.mouseMoved, .activeInKeyWindow, .inVisibleRect], owner: self)
         addTrackingArea(area); hoverArea = area
         super.updateTrackingAreas()
     }
-    override func mouseEntered(with event: NSEvent) { onHover?() }
+    override func mouseMoved(with event: NSEvent) { onHover?() }
     override func mouseDown(with event: NSEvent) { onActivate?() }
     override func hitTest(_ point: NSPoint) -> NSView? { super.hitTest(point) == nil ? nil : self }
     override func accessibilityPerformPress() -> Bool { guard let onActivate else { return false }; onActivate(); return true }
