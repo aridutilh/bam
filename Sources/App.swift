@@ -39,6 +39,7 @@ import WebKit
         let preview = CommandLine.arguments.contains("--fresh-preview")
         let sessionFileExists = FileManager.default.fileExists(atPath: support.appendingPathComponent("session.json").path)
         if !preview { BrowserController.restoreDefaultSearchEngine() }
+        ShortcutStore.shared.configure(persists: !preview)
         if #available(macOS 15.4, *) {
             ExtensionManagement.dress = { BamSheetStyle.dress(window: $0, root: $1) }
             ExtensionManagement.rowView = { BamTableRowView() }
@@ -63,6 +64,10 @@ import WebKit
             if self?.settings?.window.isVisible == true { self?.settings?.refresh() }
         }
         buildMenus(); window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
+        NotificationCenter.default.addObserver(forName: ShortcutStore.didChange, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.applyShortcuts() }
+        }
+        ShortcutStore.shared.reservedOwner = { [weak self] combo in self?.fixedMenuItem(wearing: combo)?.title }
         for url in pendingExternalURLs { controller.openLittleOrbit(url: url) }; pendingExternalURLs.removeAll()
         let completed = UserDefaults.standard.bool(forKey: OnboardingGate.completedKey)
         let started = UserDefaults.standard.bool(forKey: OnboardingGate.startedKey)
@@ -190,6 +195,23 @@ import WebKit
         if menu === extensionsMenu { controller?.updateExtensionsMenu(menu) }
     }
     @objc func selectSpace(_ sender: NSMenuItem) { controller.changeSpace(sender.tag) }
+    var boundItems: [ShortcutCommand: NSMenuItem] = [:]
+    /// A menu item outside the remappable set whose key equivalent is this chord.
+    func fixedMenuItem(wearing combo: KeyCombo, in menu: NSMenu? = NSApp.mainMenu) -> NSMenuItem? {
+        for item in menu?.items ?? [] {
+            if let hit = fixedMenuItem(wearing: combo, in: item.submenu) { return hit }
+            guard !item.keyEquivalent.isEmpty, !boundItems.values.contains(where: { $0 === item }) else { continue }
+            if KeyCombo(item.keyEquivalent, item.keyEquivalentModifierMask) == combo { return item }
+        }
+        return nil
+    }
+    /// Settings changed a shortcut: the menu items pick up the new chord at once.
+    func applyShortcuts() {
+        for (command, item) in boundItems {
+            let combo = ShortcutStore.shared.combo(for: command)
+            item.keyEquivalent = combo.key; item.keyEquivalentModifierMask = combo.modifiers
+        }
+    }
     func rebuildSpacesMenu() {
         guard let spacesMenu, let controller else { return }
         spacesMenu.removeAllItems()
@@ -226,18 +248,24 @@ import WebKit
         func item(_ menu: NSMenu, _ title: String, _ action: Selector, _ key: String = "", _ modifiers: NSEvent.ModifierFlags = .command, _ target: AnyObject? = nil) {
             let item = NSMenuItem(title: title, action: action, keyEquivalent: key); item.keyEquivalentModifierMask = modifiers; item.target = target; menu.addItem(item)
         }
+        // Remappable commands read their chord from ShortcutStore; applyShortcuts re-reads it on change.
+        func bound(_ menu: NSMenu, _ title: String, _ action: Selector, _ command: ShortcutCommand, _ target: AnyObject? = nil) {
+            let combo = ShortcutStore.shared.combo(for: command)
+            item(menu, title, action, combo.key, combo.modifiers, target)
+            boundItems[command] = menu.items.last
+        }
         let app = menu("Bam")
         item(app, "About Bam", #selector(showAbout), "", .command, self)
         item(app, "Welcome to Bam…", #selector(showWelcome), "", .command, self)
-        app.addItem(.separator()); item(app, "Settings…", #selector(showSettings), ",", .command, self)
+        app.addItem(.separator()); bound(app, "Settings…", #selector(showSettings), .settings, self)
         app.addItem(.separator()); item(app, "Hide Bam", #selector(NSApplication.hide(_:)), "h")
         item(app, "Hide Others", #selector(NSApplication.hideOtherApplications(_:)), "h", [.command, .option])
         item(app, "Show All", #selector(NSApplication.unhideAllApplications(_:)))
         app.addItem(.separator()); item(app, "Quit Bam", #selector(NSApplication.terminate(_:)), "q")
         let file = menu("File")
         item(file, "New Little Bam Window", #selector(BrowserController.newLittleOrbit(_:)), "n", [.command, .option], controller)
-        item(file, "New Tab", #selector(BrowserController.newTab(_:)), "t", .command, controller)
-        item(file, "Open Location…", #selector(BrowserController.focusAddress(_:)), "l", .command, controller)
+        bound(file, "New Tab", #selector(BrowserController.newTab(_:)), .newTab, controller)
+        bound(file, "Open Location…", #selector(BrowserController.focusAddress(_:)), .openLocation, controller)
         item(file, "Close Tab", #selector(BrowserController.closeTab(_:)), "w", .command, controller)
         item(file, "Reopen Closed Tab", #selector(BrowserController.reopenTab(_:)), "t", [.command, .shift], controller)
         file.addItem(.separator()); item(file, "Print…", #selector(BrowserController.printPage(_:)), "p", .command, controller)
@@ -250,9 +278,9 @@ import WebKit
         item(edit, "Find Previous", #selector(BrowserController.findPrevious(_:)), "g", [.command, .shift], controller)
         item(edit, "Copy Current URL", #selector(BrowserController.copyCurrentURL(_:)), "c", [.command, .shift], controller)
         let view = menu("View")
-        item(view, "Toggle Sidebar", #selector(BrowserController.toggleSidebar(_:)), "s", .command, controller)
+        bound(view, "Toggle Sidebar", #selector(BrowserController.toggleSidebar(_:)), .toggleSidebar, controller)
         item(view, "Reset Sidebar Width", #selector(BrowserController.resetSidebar(_:)), "s", [.command, .shift], controller)
-        item(view, "Keep / Unkeep Tab", #selector(BrowserController.togglePin(_:)), "d", .command, controller)
+        bound(view, "Keep / Unkeep Tab", #selector(BrowserController.togglePin(_:)), .keepTab, controller)
         item(view, "Add / Remove Favorite", #selector(BrowserController.toggleFavorite(_:)), "d", [.command, .shift], controller)
         item(view, "Edit Saved Tab…", #selector(BrowserController.editCurrentSavedTab(_:)), "", .command, controller)
         item(view, "Reset to Saved Page", #selector(BrowserController.resetCurrentSavedTab(_:)), "", .command, controller)
@@ -285,8 +313,8 @@ import WebKit
         let tabs = menu("Tabs")
         item(tabs, "Next Tab", #selector(BrowserController.nextTab(_:)), "\t", .control, controller)
         item(tabs, "Previous Tab", #selector(BrowserController.previousTab(_:)), "\t", [.control, .shift], controller)
-        item(tabs, "Next Space", #selector(BrowserController.nextSpace(_:)), String(UnicodeScalar(NSRightArrowFunctionKey)!), [.command, .option], controller)
-        item(tabs, "Previous Space", #selector(BrowserController.previousSpace(_:)), String(UnicodeScalar(NSLeftArrowFunctionKey)!), [.command, .option], controller)
+        bound(tabs, "Next Space", #selector(BrowserController.nextSpace(_:)), .nextSpace, controller)
+        bound(tabs, "Previous Space", #selector(BrowserController.previousSpace(_:)), .previousSpace, controller)
         tabs.addItem(.separator())
         item(tabs, "Manage Spaces…", #selector(BrowserController.manageSpaces(_:)), "", .command, controller)
         let chooseSpace = NSMenuItem(title: "Go to Space", action: nil, keyEquivalent: "")

@@ -297,8 +297,11 @@ import QuartzCore
 }
 
 /// The site's `kbd`: a mono cap on page paper with a thicker bottom edge.
-@MainActor final class BamKeycap: NSView {
+@MainActor class BamKeycap: NSView {
+    enum Tone { case resting, recording, refused }
     private let label = NSTextField(labelWithString: "")
+    var text: String { get { label.stringValue } set { label.stringValue = newValue } }
+    var tone: Tone = .resting { didSet { paint() } }
     init(_ keys: String) {
         super.init(frame: .zero)
         wantsLayer = true
@@ -306,8 +309,7 @@ import QuartzCore
         layer?.borderWidth = 1
         layer?.masksToBounds = false
         label.stringValue = keys
-        label.font = BamType.mono(12)
-        label.textColor = BamTheme.ink
+        label.alignment = .center
         label.translatesAutoresizingMaskIntoConstraints = false
         addSubview(label)
         translatesAutoresizingMaskIntoConstraints = false
@@ -320,11 +322,16 @@ import QuartzCore
         paint()
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
-    private func paint() {
-        layer?.backgroundColor = bamCG(BamTheme.bg)
-        layer?.borderColor = bamCG(BamTheme.line)
-        // The lip: a hard, unblurred shadow one and a half points down.
-        layer?.shadowColor = bamCG(BamTheme.ink.withAlphaComponent(0.28))
+    func paint() {
+        let live = tone != .resting
+        label.font = tone == .recording ? BamType.sans(12, weight: .semibold) : BamType.mono(12)
+        label.textColor = live ? BamTheme.red : BamTheme.ink
+        layer?.backgroundColor = bamCG(tone == .refused ? BamTheme.redWash : tone == .recording ? BamTheme.card : BamTheme.bg)
+        layer?.borderColor = bamCG(live ? BamTheme.red : BamTheme.line)
+        layer?.borderWidth = live ? 1.5 : 1
+        // The lip: a hard, unblurred shadow one and a half points down; a
+        // recording cap sits pressed, without it.
+        layer?.shadowColor = bamCG(BamTheme.ink.withAlphaComponent(tone == .recording ? 0 : 0.28))
         layer?.shadowOpacity = 1
         layer?.shadowRadius = 0
         layer?.shadowOffset = CGSize(width: 0, height: -1.5)
@@ -504,5 +511,90 @@ import QuartzCore
         button.layer?.backgroundColor = button.bamCG(prominent ? BamTheme.red : BamTheme.card)
         button.layer?.borderColor = button.bamCG(BamTheme.line)
         button.layer?.shadowColor = button.bamCG(prominent ? BamTheme.redDeep : BamTheme.line)
+    }
+}
+
+/// A keycap that records: click it and the next chord becomes the shortcut.
+/// Escape keeps the old one, Delete restores the default, a chord something
+/// else owns is refused with a flash of red.
+@MainActor final class BamShortcutRecorder: BamKeycap {
+    let command: ShortcutCommand
+    private var monitor: Any?
+    private var recording = false { didSet { show() } }
+    private var refused = false { didSet { show() } }
+
+    init(command: ShortcutCommand) {
+        self.command = command
+        super.init(ShortcutStore.shared.combo(for: command).display)
+        widthAnchor.constraint(greaterThanOrEqualToConstant: 58).isActive = true
+        setAccessibilityElement(true)
+        setAccessibilityRole(.button)
+        setAccessibilityLabel("\(command.title) shortcut")
+        // Reset-all and edits from elsewhere reach every cap; the General
+        // section itself is not rebuilt for a shortcut change.
+        NotificationCenter.default.addObserver(self, selector: #selector(storeChanged), name: ShortcutStore.didChange, object: nil)
+        show()
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+    deinit { if let monitor { NSEvent.removeMonitor(monitor) } }
+
+    @objc private func storeChanged() { if !recording { show() } }
+
+    private func show() {
+        let combo = ShortcutStore.shared.combo(for: command)
+        text = recording ? "Type a shortcut" : combo.display
+        tone = refused ? .refused : recording ? .recording : .resting
+        toolTip = recording ? "Press the new shortcut. Escape keeps \(combo.display); Delete restores the default."
+            : "\(combo.spoken). Click to change."
+        setAccessibilityValue(recording ? "Recording" : combo.spoken)
+    }
+    override func resetCursorRects() { addCursorRect(bounds, cursor: .pointingHand) }
+    override var acceptsFirstResponder: Bool { true }
+
+    override func mouseDown(with event: NSEvent) {
+        if recording { stop() } else { start() }
+    }
+    override func keyDown(with event: NSEvent) {
+        // Space or Return on the focused keycap starts recording, like a button.
+        if !recording, event.charactersIgnoringModifiers == " " || event.keyCode == 36 { start(); return }
+        super.keyDown(with: event)
+    }
+
+    private func start() {
+        guard !recording else { return }
+        window?.makeFirstResponder(self)
+        recording = true
+        monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .leftMouseDown, .rightMouseDown]) { [weak self] event in
+            guard let self else { return event }
+            return MainActor.assumeIsolated { self.handle(event) }
+        }
+    }
+    private func stop() {
+        if let monitor { NSEvent.removeMonitor(monitor) }
+        monitor = nil
+        recording = false
+    }
+    private func handle(_ event: NSEvent) -> NSEvent? {
+        if event.type != .keyDown {
+            // A click on the cap itself reaches mouseDown and ends recording
+            // there; a click anywhere else ends it here and goes through.
+            if event.window !== window || !bounds.contains(convert(event.locationInWindow, from: nil)) { stop() }
+            return event
+        }
+        guard let scalar = event.charactersIgnoringModifiers?.unicodeScalars.first else { return nil }
+        switch scalar.value {
+        case 0x1B: stop(); return nil                                       // Escape keeps the old chord
+        case 0x7F, 0xF728: ShortcutStore.shared.reset(command); stop(); return nil // Delete restores the default
+        default: break
+        }
+        guard let combo = KeyCombo.from(event: event) else { NSSound.beep(); return nil }
+        if ShortcutStore.shared.set(combo, for: command) { stop() } else { refuse(combo) }
+        return nil
+    }
+    private func refuse(_ combo: KeyCombo) {
+        NSSound.beep()
+        if let owner = ShortcutStore.shared.owner(of: combo, besides: command) { toolTip = "\(combo.display) already opens \(owner)." }
+        refused = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in self?.refused = false }
     }
 }

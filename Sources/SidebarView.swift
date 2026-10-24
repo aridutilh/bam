@@ -673,7 +673,11 @@ private final class ArkIconButton: ArkHoverButton {
 
 @MainActor private final class ArkSearchButton: ArkHoverButton {
     var address = "Search or enter URL" { didSet { needsDisplay = true } }
-    init() { super.init(frame: .zero); setAccessibilityLabel("Search or enter a web address"); toolTip = "Search or enter address (⌘L)" }
+    init() {
+        super.init(frame: .zero); setAccessibilityLabel("Search or enter a web address"); hint()
+        NotificationCenter.default.addObserver(self, selector: #selector(hint), name: ShortcutStore.didChange, object: nil)
+    }
+    @objc private func hint() { toolTip = "Search or enter address (\(ShortcutStore.shared.combo(for: .openLocation).compact))" }
     required init?(coder: NSCoder) { fatalError() }
     override func draw(_ dirtyRect: NSRect) {
         fill(NSColor.black.withAlphaComponent(hovered ? 0.25 : 0.18), radius: 10)
@@ -762,7 +766,11 @@ private final class ArkFavoriteButton: ArkHoverButton {
 
 @MainActor
 private final class ArkNewTabButton: ArkHoverButton {
-    init() { super.init(frame: .zero); setAccessibilityLabel("New tab"); toolTip = "New tab (⌘T)" }
+    init() {
+        super.init(frame: .zero); setAccessibilityLabel("New tab"); hint()
+        NotificationCenter.default.addObserver(self, selector: #selector(hint), name: ShortcutStore.didChange, object: nil)
+    }
+    @objc private func hint() { toolTip = "New tab (\(ShortcutStore.shared.combo(for: .newTab).compact))" }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     override func draw(_ dirtyRect: NSRect) {
         if hovered { fill(NSColor.white.withAlphaComponent(0.08)) }
