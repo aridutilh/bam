@@ -1,5 +1,9 @@
 # Changelog
 
+## Local draft — onboarding in Bam’s look (unreleased, branch `onboarding-theme`)
+
+- Restyle the first-run welcome in bambrowser.com’s look: the stage is Bam’s paper (pink, plum in dark mode, following the system) with a soft glow in the chosen Space colour and two faint bursts in the corners; headlines in Bricolage Grotesque (“The browser that goes Bam.” with a red “Bam.”), body in Instrument Sans; red lip-and-face pills, paper keycaps on a hard lip, ink-ringed colour swatches, red-washed picked icons, a “NEW!” sticker over the icon, and burst-shaped confetti on the finale. The step flow, keyboard handling, Chrome import, default-browser handoff and the `--onboarding` gate are unchanged.
+
 ## 0.16.0 prerelease — build 34
 
 - Redress Settings and every secondary panel in bambrowser.com’s own look: matte pink paper in light mode and plum in dark (following the system appearance like the site), white cards with a hairline and soft shadow, sticker-red toggles, chips, pill buttons that sit on a deep-red lip, keycaps with a bottom edge, and the site’s version sticker on About. Manage Spaces, Extensions, Downloads and History/Recently Closed share the same paper, pills and red-wash table selection.
