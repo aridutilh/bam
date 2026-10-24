@@ -22,6 +22,16 @@ import AppKit
         let nearTopRight = CGRect(origin: CGPoint(x: 850, y: 600), size: size)
         try check(PiPPositioning.releaseFrame(nearTopRight, screens: [display]).origin == CGPoint(x: 864, y: 604),
                   "top-right corner did not respect visible bounds and inset")
+        // A 60-by-80 offset is 100 points from the corner: inside the wider
+        // release radius, while a 100-by-100 offset is just outside 140 points.
+        let gentleApproach = CGRect(origin: CGPoint(x: 804, y: 524), size: size)
+        try check(PiPPositioning.releaseFrame(gentleApproach, screens: [display]).origin == CGPoint(x: 864, y: 604),
+                  "a release 100 points from the corner did not use the wider magnet")
+        let outsideRadius = CGRect(origin: CGPoint(x: 764, y: 504), size: size)
+        try check(PiPPositioning.releaseFrame(outsideRadius, screens: [display]) == outsideRadius,
+                  "corner capture ignored combined-axis distance or exceeded its radius")
+        try check(PiPPositioning.dragFrame(gentleApproach, delta: .zero, screens: [display]) == gentleApproach,
+                  "corner attraction pulled the panel while fingers were still down")
         let left = CGRect(x: -1000, y: -120, width: 1000, height: 720)
         let nearLeft = CGRect(origin: CGPoint(x: -979, y: -98), size: size)
         try check(PiPPositioning.releaseFrame(nearLeft, screens: [display, left]).origin == CGPoint(x: -984, y: -104),

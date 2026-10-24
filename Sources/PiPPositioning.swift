@@ -4,7 +4,7 @@ import Foundation
 /// frames (including negative coordinates), not full frames behind the Dock.
 enum PiPPositioning {
     static let cornerInset: CGFloat = 16
-    static let magneticRadius: CGFloat = 44
+    static let magneticRadius: CGFloat = 140
 
     static func fingerDelta(x: CGFloat, y: CGFloat, invertedFromDevice: Bool) -> CGPoint {
         // Normalize the scrolling preference, then convert scroll Y into
