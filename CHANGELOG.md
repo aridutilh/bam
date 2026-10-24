@@ -7,7 +7,7 @@
 - Add enumeration scaling/ownership regressions and real WebKit snapshot-count checks. Performance measurements are scoped in [the performance notes](docs/tab-performance.md).
 - Integrate the fixes on top of 0.12.0, preserving onboarding, command-palette/site-search and Prism/Clear changes. The unrelated local Preview icon draft is excluded.
 
-## Unreleased — 0.12.0 local draft, build 26
+## 0.12.0 prerelease — build 26
 
 Two parallel draft lines each used the 0.10–0.11 numbers; this merge renumbers them as one release. Both lines' entries follow.
 

@@ -8,7 +8,7 @@ Bam explores the things that make sidebar browsers feel good: a compact sidebar 
 
 **Latest download:** [v0.12.1 prerelease](https://github.com/aridutilh/bam/releases/tag/v0.12.1) · [all releases](https://github.com/aridutilh/bam/releases) · [changelog](CHANGELOG.md)
 
-**Source on `main`: Bam 0.12.1 (build 27).** This source includes Favorites, kept tabs, performance improvements, login profiles, a local extension host, the redesigned command palette with Tab-to-search, a full-screen first-run onboarding (replay it from Bam ▸ "Welcome to Bam…", or demo with `bash scripts/preview-onboarding.sh`), and two new Space appearances: **Prism**, a slowly shifting spectrum, and **Clear**, a translucent window that lets your desktop show through. See [CHANGELOG.md](CHANGELOG.md) and [VALIDATION.md](VALIDATION.md).
+**Released: Bam 0.12.1 (build 27).** This version includes Favorites, kept tabs, performance improvements, login profiles, a local extension host, the redesigned command palette with Tab-to-search, a full-screen first-run onboarding (replay it from Bam ▸ "Welcome to Bam…", or demo with `bash scripts/preview-onboarding.sh`), and two new Space appearances: **Prism**, a slowly shifting spectrum, and **Clear**, a translucent window that lets your desktop show through. See [CHANGELOG.md](CHANGELOG.md) and [VALIDATION.md](VALIDATION.md).
 
 This patch reduces extension tab/window enumeration work and skips automatic-PiP page snapshots when no video is playing. See the [performance notes](docs/tab-performance.md) for measurements and limits.
 
