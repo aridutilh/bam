@@ -221,11 +221,12 @@ struct SpaceEditPlan {
         cancel.frame = NSRect(x: 398, y: 481, width: 100, height: 30); cancel.keyEquivalent = "\u{1b}"; root.addSubview(cancel)
         saveButton.frame = NSRect(x: 501, y: 481, width: 126, height: 30); saveButton.target = self; saveButton.action = #selector(saveChanges); saveButton.keyEquivalent = "\r"; root.addSubview(saveButton)
         for button in [saveButton, addButton, removeButton, upButton, downButton, newProfileButton, cancel] { button.bezelStyle = .rounded }
-        BamSheetStyle.dress(window: window, root: root, colorIndex: plan.spaces.first { $0.id == selectedID }?.colorIndex ?? 0)
+        BamSheetStyle.dress(window: window, root: root)
     }
     func present(on parent: NSWindow) {
         guard let window else { return }
-        window.appearance = parent.appearance
+        // The sheet wears the site's paper and follows the system appearance,
+        // not the always-dark browser window beneath it.
         parent.beginSheet(window)
         window.makeFirstResponder(nameField); nameField.selectText(nil)
     }
@@ -255,14 +256,17 @@ struct SpaceEditPlan {
         return valid && Set(profileNames.map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }).count == profileNames.count
     }
     func numberOfRows(in tableView: NSTableView) -> Int { plan.spaces.count }
+    func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? { BamTableRowView() }
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         guard plan.spaces.indices.contains(row) else { return nil }
         let space = plan.spaces[row]
         let cell = NSTableCellView(frame: NSRect(x: 0, y: 0, width: 220, height: 36))
-        let image = NSImageView(frame: NSRect(x: 10, y: 8, width: 20, height: 20))
-        image.image = NSImage(systemSymbolName: space.symbol, accessibilityDescription: nil); image.contentTintColor = ArkPalette.spaceColor(space.colorIndex)
+        let image = NSImageView(frame: NSRect(x: 12, y: 8, width: 20, height: 20))
+        image.image = NSImage(systemSymbolName: space.symbol, accessibilityDescription: nil)?.withSymbolConfiguration(.init(pointSize: 13, weight: .semibold))
+        image.contentTintColor = ArkPalette.spaceColor(space.colorIndex)
         let text = NSTextField(labelWithString: space.name.isEmpty ? "Untitled Space" : space.name)
-        text.frame = NSRect(x: 40, y: 9, width: 169, height: 19); text.lineBreakMode = .byTruncatingTail
+        text.font = BamType.sans(13, weight: .medium); text.textColor = BamTheme.ink
+        text.frame = NSRect(x: 42, y: 9, width: 167, height: 19); text.lineBreakMode = .byTruncatingTail
         cell.addSubview(image); cell.addSubview(text); cell.textField = text; cell.imageView = image
         cell.setAccessibilityLabel(space.name); return cell
     }

@@ -22,6 +22,7 @@ import WebKit
     private let quitCoordinator = QuitCoordinator()
     private var mainWindowWasClosed = false
     func applicationDidFinishLaunching(_ notification: Notification) {
+        BamType.registerFonts()
         if CommandLine.arguments.contains("--favicon-test") { faviconSmoke = WebsiteFaviconSmokeTest(); faviconSmoke?.start(); return }
         if CommandLine.arguments.contains("--vendor-extension-probe") { vendorProbe = VendorExtensionProbe(); vendorProbe?.start(); return }
         if CommandLine.arguments.contains("--extension-test") { extensionSmoke = ExtensionRuntimeSmokeTest(); extensionSmoke?.start(); return }
@@ -39,8 +40,12 @@ import WebKit
         let sessionFileExists = FileManager.default.fileExists(atPath: support.appendingPathComponent("session.json").path)
         if !preview { BrowserController.restoreDefaultSearchEngine() }
         if #available(macOS 15.4, *) {
-            ExtensionManagement.dress = { BamSheetStyle.dress(window: $0, root: $1, colorIndex: BrowserSpace.flatColorCount - 1) }
+            ExtensionManagement.dress = { BamSheetStyle.dress(window: $0, root: $1) }
+            ExtensionManagement.rowView = { BamTableRowView() }
+            ExtensionManagement.restyleCell = { $0.font = BamType.sans(12.5); $0.textColor = BamTheme.ink }
         }
+        BrowserLibrary.dress = { BamSheetStyle.dress(window: $0, root: $1) }
+        BrowserLibrary.rowView = { BamTableRowView() }
         controller = BrowserController(sessionURL: support.appendingPathComponent("session.json"), ephemeral: preview)
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1260, height: 800), styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
         window.title = "Bam"; window.titleVisibility = .hidden; window.titlebarAppearsTransparent = true

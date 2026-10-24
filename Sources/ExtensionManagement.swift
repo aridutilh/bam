@@ -42,6 +42,10 @@ import UniformTypeIdentifiers
     /// The app installs Bam's wash and pill styling here; this file also builds
     /// alone in its component suite, where the styling kit is absent.
     @MainActor static var dress: ((NSWindow?, NSView) -> Void)?
+    /// Supplies the app's selection-tinted row; nil keeps AppKit's.
+    @MainActor static var rowView: (() -> NSTableRowView)?
+    /// Restyles a freshly made row label the way `dress` styles static ones.
+    @MainActor static var restyleCell: ((NSTextField) -> Void)?
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
     func show(profileID: UUID, relativeTo parent: NSWindow?) {
         self.profileID = profileID; refresh()
@@ -71,12 +75,19 @@ import UniformTypeIdentifiers
         status.toolTip = guidance
     }
     func numberOfRows(in tableView: NSTableView) -> Int { items.count }
+    func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? { Self.rowView?() }
     func tableViewSelectionDidChange(_ notification: Notification) { updateControls() }
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         guard items.indices.contains(row) else { return nil }
         let record = items[row]
         let label = NSTextField(wrappingLabelWithString: "\(record.name)  \(record.version)\n\(record.enabled ? "Enabled" : "Disabled")\(host?.errors[record.id] != nil ? " · Needs attention" : "")")
-        label.font = .systemFont(ofSize: 12); label.setAccessibilityLabel(label.stringValue); return label
+        label.font = .systemFont(ofSize: 12); label.setAccessibilityLabel(label.stringValue)
+        let cell = NSView(); label.translatesAutoresizingMaskIntoConstraints = false; cell.addSubview(label)
+        NSLayoutConstraint.activate([label.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 12),
+                                     label.trailingAnchor.constraint(lessThanOrEqualTo: cell.trailingAnchor, constant: -12),
+                                     label.centerYAnchor.constraint(equalTo: cell.centerYAnchor)])
+        Self.restyleCell?(label)
+        return cell
     }
     @objc private func importPackage() {
         guard let host, !busy else { return }

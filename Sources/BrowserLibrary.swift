@@ -241,6 +241,13 @@ struct ClosedRecord: Codable, Identifiable, Equatable {
     private static func matches(_ words: [String], text: String) -> Bool { words.allSatisfy { text.localizedCaseInsensitiveContains($0) } }
 }
 
+extension BrowserLibrary {
+    /// The app installs Bam's paper and pill styling here; this file also
+    /// builds alone in its component suites, where the styling kit is absent.
+    @MainActor static var dress: ((NSWindow?, NSView) -> Void)?
+    @MainActor static var rowView: (() -> NSTableRowView)?
+}
+
 @MainActor private final class BrowserLibraryWindowController: NSWindowController, NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate {
     enum Mode { case history, archive }
     private struct Row {
@@ -303,9 +310,11 @@ struct ClosedRecord: Codable, Identifiable, Equatable {
             clearButton.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 16), clearButton.centerYAnchor.constraint(equalTo: openButton.centerYAnchor),
             countLabel.leadingAnchor.constraint(equalTo: clearButton.trailingAnchor, constant: 12), countLabel.trailingAnchor.constraint(equalTo: openButton.leadingAnchor, constant: -12), countLabel.centerYAnchor.constraint(equalTo: openButton.centerYAnchor)
         ])
+        BrowserLibrary.dress?(window, root)
         reload()
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? { BrowserLibrary.rowView?() }
 
     func present(relativeTo parent: NSWindow?) {
         reload()

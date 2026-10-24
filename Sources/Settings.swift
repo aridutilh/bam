@@ -67,8 +67,8 @@ struct SettingsActions {
     override func cancelOperation(_ sender: Any?) { performClose(nil) }
 }
 
-/// Bam's settings: a floating Space-tinted window with a section rail and
-/// stacked cards, built from the same ink and washes as onboarding.
+/// Bam's settings: a window on bambrowser.com's paper with a section rail
+/// and stacked cards, following the system appearance like the site does.
 @MainActor final class SettingsController: NSObject, NSWindowDelegate {
     static let githubURL = URL(string: "https://github.com/aridutilh/bam")!
     static let siteURL = URL(string: "https://bambrowser.com")!
@@ -77,14 +77,14 @@ struct SettingsActions {
     private(set) var snapshot: SettingsSnapshot
     private(set) var section: SettingsSection = .general
     let window: SettingsWindow
-    private let backdrop = BamBackdropView(frame: .zero)
+    private let paper = BamSurfaceView(frame: .zero)
     private let rail = NSStackView()
     private var railButtons: [SettingsSection: SettingsRailButton] = [:]
     private let scroll = NSScrollView()
     private let column = NSStackView()
     private var shownOnce = false
     private var renderQueued = false
-    private var accent: NSColor { ArkPalette.spaceColor(snapshot.accentIndex) }
+    private var accent: NSColor { BamTheme.red }
 
     init(snapshot provider: @escaping () -> SettingsSnapshot, actions: SettingsActions) {
         self.provider = provider
@@ -100,27 +100,38 @@ struct SettingsActions {
         window.standardWindowButton(.zoomButton)?.isHidden = true
         window.isMovableByWindowBackground = true
         window.isReleasedWhenClosed = false
-        window.appearance = NSAppearance(named: .darkAqua)
-        window.backgroundColor = NSColor(white: 0.10, alpha: 1)
+        window.appearance = nil
+        window.backgroundColor = BamTheme.bg
         window.delegate = self
         window.setFrameAutosaveName("BamSettings")
         build()
     }
 
     private func build() {
-        backdrop.frame = NSRect(x: 0, y: 0, width: 820, height: 600)
-        backdrop.autoresizingMask = [.width, .height]
-        window.contentView = backdrop
-        let heading = NSTextField(labelWithString: "Settings")
-        heading.font = OnboardingText.serif(26, weight: .bold)
-        heading.textColor = ArkPalette.ink
+        paper.frame = NSRect(x: 0, y: 0, width: 820, height: 600)
+        paper.autoresizingMask = [.width, .height]
+        window.contentView = paper
+        // The site header: icon tile, then the wordmark.
+        let heading = NSStackView()
+        heading.orientation = .horizontal; heading.alignment = .centerY; heading.spacing = 10
+        let icon = NSImageView()
+        icon.image = Self.appIcon
+        icon.imageScaling = .scaleProportionallyUpOrDown
+        icon.wantsLayer = true; icon.layer?.cornerRadius = 8; icon.layer?.masksToBounds = true
+        icon.translatesAutoresizingMaskIntoConstraints = false
+        icon.widthAnchor.constraint(equalToConstant: 30).isActive = true
+        icon.heightAnchor.constraint(equalToConstant: 30).isActive = true
+        let word = NSTextField(labelWithString: "Settings")
+        word.font = BamType.display(24, weight: .heavy)
+        word.textColor = BamTheme.ink
+        heading.addArrangedSubview(icon); heading.addArrangedSubview(word)
         rail.orientation = .vertical
         rail.alignment = .leading
         rail.spacing = 4
         rail.translatesAutoresizingMaskIntoConstraints = false
         heading.translatesAutoresizingMaskIntoConstraints = false
-        backdrop.addSubview(heading)
-        backdrop.addSubview(rail)
+        paper.addSubview(heading)
+        paper.addSubview(rail)
         for section in SettingsSection.allCases {
             let button = SettingsRailButton(section: section)
             button.target = self; button.action = #selector(pickSection(_:))
@@ -128,10 +139,8 @@ struct SettingsActions {
             rail.addArrangedSubview(button)
             button.widthAnchor.constraint(equalTo: rail.widthAnchor).isActive = true
         }
-        let divider = NSView(); divider.wantsLayer = true
-        divider.layer?.backgroundColor = BamStyle.separator.cgColor
-        divider.translatesAutoresizingMaskIntoConstraints = false
-        backdrop.addSubview(divider)
+        let divider = BamHairline()
+        paper.addSubview(divider)
         scroll.drawsBackground = false
         scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true
@@ -145,27 +154,32 @@ struct SettingsActions {
         column.translatesAutoresizingMaskIntoConstraints = false
         document.addSubview(column)
         scroll.documentView = document
-        backdrop.addSubview(scroll)
+        paper.addSubview(scroll)
         NSLayoutConstraint.activate([
-            heading.leadingAnchor.constraint(equalTo: backdrop.leadingAnchor, constant: 26),
-            heading.topAnchor.constraint(equalTo: backdrop.topAnchor, constant: 48),
-            rail.leadingAnchor.constraint(equalTo: backdrop.leadingAnchor, constant: 16),
-            rail.topAnchor.constraint(equalTo: heading.bottomAnchor, constant: 18),
-            rail.widthAnchor.constraint(equalToConstant: 180),
-            divider.leadingAnchor.constraint(equalTo: backdrop.leadingAnchor, constant: 212),
-            divider.topAnchor.constraint(equalTo: backdrop.topAnchor),
-            divider.bottomAnchor.constraint(equalTo: backdrop.bottomAnchor),
+            heading.leadingAnchor.constraint(equalTo: paper.leadingAnchor, constant: 22),
+            heading.topAnchor.constraint(equalTo: paper.topAnchor, constant: 46),
+            rail.leadingAnchor.constraint(equalTo: paper.leadingAnchor, constant: 16),
+            rail.topAnchor.constraint(equalTo: heading.bottomAnchor, constant: 20),
+            rail.widthAnchor.constraint(equalToConstant: 184),
+            divider.leadingAnchor.constraint(equalTo: paper.leadingAnchor, constant: 216),
+            divider.topAnchor.constraint(equalTo: paper.topAnchor),
+            divider.bottomAnchor.constraint(equalTo: paper.bottomAnchor),
             divider.widthAnchor.constraint(equalToConstant: 1),
             scroll.leadingAnchor.constraint(equalTo: divider.trailingAnchor),
-            scroll.trailingAnchor.constraint(equalTo: backdrop.trailingAnchor),
-            scroll.topAnchor.constraint(equalTo: backdrop.topAnchor),
-            scroll.bottomAnchor.constraint(equalTo: backdrop.bottomAnchor),
+            scroll.trailingAnchor.constraint(equalTo: paper.trailingAnchor),
+            scroll.topAnchor.constraint(equalTo: paper.topAnchor),
+            scroll.bottomAnchor.constraint(equalTo: paper.bottomAnchor),
             document.widthAnchor.constraint(equalTo: scroll.widthAnchor),
             column.topAnchor.constraint(equalTo: document.topAnchor, constant: 48),
             column.leadingAnchor.constraint(equalTo: document.leadingAnchor, constant: 36),
-            column.trailingAnchor.constraint(equalTo: document.trailingAnchor, constant: -36),
-            column.bottomAnchor.constraint(equalTo: document.bottomAnchor, constant: -40)
+            column.trailingAnchor.constraint(equalTo: document.trailingAnchor, constant: -40),
+            column.bottomAnchor.constraint(equalTo: document.bottomAnchor, constant: -44)
         ])
+    }
+    static var appIcon: NSImage {
+        let bundled = Bundle.main.url(forResource: "BamIcon", withExtension: "png")
+        let override = ProcessInfo.processInfo.environment["BAM_RESOURCES_DIR"].map { URL(fileURLWithPath: $0).appendingPathComponent("BamIcon.png") }
+        return (bundled ?? override).flatMap { NSImage(contentsOf: $0) } ?? NSApp.applicationIconImage
     }
 
     func show(section: SettingsSection, relativeTo parent: NSWindow?) {
@@ -196,8 +210,6 @@ struct SettingsActions {
     }
     private func reload() {
         snapshot = provider()
-        backdrop.tint(colorIndex: snapshot.accentIndex)
-        for (_, button) in railButtons { button.accent = accent }
     }
     func select(_ section: SettingsSection) {
         self.section = section
@@ -227,14 +239,14 @@ struct SettingsActions {
         case .about: (title, subtitle) = ("About", "Bam \(snapshot.version)")
         }
         let heading = NSTextField(labelWithString: title)
-        heading.font = OnboardingText.serif(30, weight: .bold)
-        heading.textColor = ArkPalette.ink
+        heading.font = BamType.display(34, weight: .heavy)
+        heading.textColor = BamTheme.ink
         let sub = NSTextField(wrappingLabelWithString: subtitle)
-        sub.font = .systemFont(ofSize: 14); sub.textColor = ArkPalette.secondary; sub.isSelectable = false
+        sub.font = BamType.sans(15); sub.textColor = BamTheme.muted; sub.isSelectable = false
         column.addArrangedSubview(heading)
         column.addArrangedSubview(sub)
-        column.setCustomSpacing(4, after: heading)
-        column.setCustomSpacing(22, after: sub)
+        column.setCustomSpacing(2, after: heading)
+        column.setCustomSpacing(26, after: sub)
         let cards: [NSView]
         switch section {
         case .general: cards = generalCards()
@@ -250,9 +262,10 @@ struct SettingsActions {
     }
 
     private func caption(_ text: String) -> NSTextField {
-        let label = NSTextField(labelWithString: text.uppercased())
-        label.font = .systemFont(ofSize: 11, weight: .semibold)
-        label.textColor = ArkPalette.secondary
+        let label = NSTextField(labelWithString: "")
+        label.attributedStringValue = NSAttributedString(string: text.uppercased(), attributes: [
+            .font: BamType.sans(12, weight: .bold), .foregroundColor: BamTheme.muted, .kern: 0.8
+        ])
         return label
     }
     private func toggle(_ on: Bool, enabled: Bool = true, _ change: @escaping (Bool) -> Void) -> BamToggle {
@@ -304,6 +317,7 @@ struct SettingsActions {
         }
         card.add(BamRow(title: "Default search engine", detail: "Where plain words go. Suggestions come from it when it offers them.", control: chips))
         let tip = BamCard(frame: .zero)
+        tip.isDashed = true
         tip.add(BamRow(title: "Search one site instead",
                        detail: "Type a site name in the palette — YouTube, Wikipedia, GitHub and more — and press Tab to search it directly.",
                        control: BamKeycap("⇥")))
@@ -345,9 +359,12 @@ struct SettingsActions {
             card.add(BamRow(title: "No extensions yet", detail: "Import an unpacked WebExtension folder to get started."))
         }
         for item in snapshot.extensions {
-            let state = NSTextField(labelWithString: item.enabled ? "On" : "Off")
-            state.font = .systemFont(ofSize: 12, weight: .semibold)
-            state.textColor = item.enabled ? accent : ArkPalette.secondary
+            let state: NSView
+            if item.enabled { state = BamBadge("On") } else {
+                let off = NSTextField(labelWithString: "Off")
+                off.font = BamType.sans(12, weight: .semibold); off.textColor = BamTheme.muted
+                state = off
+            }
             card.add(BamRow(title: item.name, detail: "Version \(item.version)", control: state))
         }
         let manage = BamPillButton(title: "Manage Extensions…", symbol: "puzzlepiece.extension")
@@ -362,7 +379,7 @@ struct SettingsActions {
         let hero = NSStackView()
         hero.orientation = .horizontal; hero.alignment = .centerY; hero.spacing = 18
         let icon = NSImageView()
-        icon.image = Bundle.main.url(forResource: "BamIcon", withExtension: "png").flatMap { NSImage(contentsOf: $0) } ?? NSApp.applicationIconImage
+        icon.image = Self.appIcon
         icon.imageScaling = .scaleProportionallyUpOrDown
         icon.wantsLayer = true; icon.layer?.cornerRadius = 20; icon.layer?.masksToBounds = true
         icon.translatesAutoresizingMaskIntoConstraints = false
@@ -370,23 +387,28 @@ struct SettingsActions {
         icon.heightAnchor.constraint(equalToConstant: 88).isActive = true
         let words = NSStackView()
         words.orientation = .vertical; words.alignment = .leading; words.spacing = 4
-        let name = NSTextField(labelWithString: "Bam")
-        name.font = OnboardingText.serif(34, weight: .bold); name.textColor = ArkPalette.ink
+        let name = NSTextField(labelWithString: "The browser that goes Bam.")
+        name.font = BamType.display(28, weight: .heavy); name.textColor = BamTheme.ink
         let version = NSTextField(labelWithString: snapshot.build.isEmpty ? "Version \(snapshot.version)" : "Version \(snapshot.version) · build \(snapshot.build)")
-        version.font = .systemFont(ofSize: 13); version.textColor = ArkPalette.secondary
-        let blurb = NSTextField(wrappingLabelWithString: "A native AppKit + WebKit browser. Not affiliated with The Browser Company.")
-        blurb.font = .systemFont(ofSize: 12); blurb.textColor = ArkPalette.secondary; blurb.isSelectable = false
+        version.font = BamType.sans(13.5, weight: .medium); version.textColor = BamTheme.muted
+        let blurb = NSTextField(wrappingLabelWithString: "Native, fast, built in Swift on your Mac’s own WebKit. Free, no account. Not affiliated with The Browser Company.")
+        blurb.font = BamType.sans(13); blurb.textColor = BamTheme.muted; blurb.isSelectable = false
         words.addArrangedSubview(name); words.addArrangedSubview(version); words.addArrangedSubview(blurb)
+        words.setCustomSpacing(10, after: version)
         blurb.widthAnchor.constraint(equalTo: words.widthAnchor).isActive = true
         hero.addArrangedSubview(icon); hero.addArrangedSubview(words)
         hero.translatesAutoresizingMaskIntoConstraints = false
+        // The changelog's version sticker; its label carries the site's tilt.
+        let sticker = BamSticker(snapshot.version.split(separator: ".").prefix(2).joined(separator: "."), diameter: 84)
         let heroRow = NSView(); heroRow.translatesAutoresizingMaskIntoConstraints = false
-        heroRow.addSubview(hero)
+        heroRow.addSubview(hero); heroRow.addSubview(sticker)
         NSLayoutConstraint.activate([
-            hero.leadingAnchor.constraint(equalTo: heroRow.leadingAnchor, constant: 18),
-            hero.trailingAnchor.constraint(equalTo: heroRow.trailingAnchor, constant: -18),
-            hero.topAnchor.constraint(equalTo: heroRow.topAnchor, constant: 18),
-            hero.bottomAnchor.constraint(equalTo: heroRow.bottomAnchor, constant: -18)
+            hero.leadingAnchor.constraint(equalTo: heroRow.leadingAnchor, constant: 20),
+            hero.trailingAnchor.constraint(equalTo: sticker.leadingAnchor, constant: -16),
+            hero.topAnchor.constraint(equalTo: heroRow.topAnchor, constant: 22),
+            hero.bottomAnchor.constraint(equalTo: heroRow.bottomAnchor, constant: -22),
+            sticker.trailingAnchor.constraint(equalTo: heroRow.trailingAnchor, constant: -22),
+            sticker.centerYAnchor.constraint(equalTo: heroRow.centerYAnchor)
         ])
         let heroCard = BamCard(frame: .zero); heroCard.add(heroRow)
         let links = BamCard(frame: .zero)
@@ -406,10 +428,10 @@ struct SettingsActions {
     @objc private func openSite() { actions.openURL(Self.siteURL) }
 }
 
-/// One rail entry: symbol + title, filled when picked.
+/// One rail entry: symbol + title; the picked one sits on a paper card.
 @MainActor final class SettingsRailButton: NSButton {
     let section: SettingsSection
-    var accent: NSColor = ArkPalette.spaceColor(0) { didSet { paint() } }
+    var accent: NSColor = BamTheme.red { didSet { paint() } }
     var isPicked = false { didSet { paint(); setAccessibilityValue(isPicked ? "Selected" : "") } }
     init(section: SettingsSection) {
         self.section = section
@@ -419,25 +441,29 @@ struct SettingsActions {
         setButtonType(.momentaryChange)
         alignment = .left
         imagePosition = .imageLeading
-        layer?.cornerRadius = 9
+        layer?.cornerRadius = 11
         setAccessibilityRole(.radioButton)
         setAccessibilityLabel("\(section.title) settings")
         translatesAutoresizingMaskIntoConstraints = false
-        heightAnchor.constraint(equalToConstant: 34).isActive = true
+        heightAnchor.constraint(equalToConstant: 38).isActive = true
         paint()
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
     private func paint() {
         attributedTitle = NSAttributedString(string: "  " + section.title, attributes: [
-            .font: NSFont.systemFont(ofSize: 14, weight: isPicked ? .semibold : .medium),
-            .foregroundColor: isPicked ? ArkPalette.ink : ArkPalette.secondary
+            .font: BamType.sans(14.5, weight: isPicked ? .bold : .medium),
+            .foregroundColor: isPicked ? BamTheme.ink : BamTheme.muted
         ])
-        image = NSImage(systemSymbolName: section.symbol, accessibilityDescription: nil)
-        contentTintColor = isPicked ? accent : ArkPalette.secondary
-        layer?.backgroundColor = (isPicked ? NSColor.white.withAlphaComponent(0.12) : NSColor.clear).cgColor
+        image = NSImage(systemSymbolName: section.symbol, accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: 13, weight: .semibold))
+        contentTintColor = isPicked ? accent : BamTheme.muted
+        layer?.backgroundColor = bamCG(isPicked ? BamTheme.card : NSColor.clear)
+        layer?.borderWidth = isPicked ? 1.5 : 0
+        layer?.borderColor = bamCG(BamTheme.line)
     }
+    override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); paint() }
     override var focusRingMaskBounds: NSRect { bounds }
-    override func drawFocusRingMask() { NSBezierPath(roundedRect: bounds, xRadius: 9, yRadius: 9).fill() }
+    override func drawFocusRingMask() { NSBezierPath(roundedRect: bounds, xRadius: 11, yRadius: 11).fill() }
     override func resetCursorRects() { addCursorRect(bounds, cursor: .pointingHand) }
     override var isHighlighted: Bool { didSet { layer?.opacity = isHighlighted ? 0.8 : 1 } }
 }
@@ -478,13 +504,8 @@ struct SettingsActions {
         field.widthAnchor.constraint(greaterThanOrEqualToConstant: 220).isActive = true
         header.addArrangedSubview(preview)
         header.addArrangedSubview(field)
-        if isCurrent {
-            let tag = NSTextField(labelWithString: "Current")
-            tag.font = .systemFont(ofSize: 11, weight: .semibold)
-            tag.textColor = accent
-            header.addArrangedSubview(tag)
-        }
-        add(pad(header, top: 16, bottom: 6))
+        if isCurrent { header.addArrangedSubview(BamBadge("Current")) }
+        add(pad(header, top: 18, bottom: 8))
         let colors = NSStackView(); colors.orientation = .horizontal; colors.spacing = 8
         for index in 0..<BrowserSpace.colorNames.count {
             let swatch = SettingsSwatch(colorIndex: index)
@@ -500,7 +521,7 @@ struct SettingsActions {
             glyphs.append(glyph); glyphRow.addArrangedSubview(glyph)
         }
         add(pad(colors, top: 6, bottom: 6))
-        add(pad(glyphRow, top: 6, bottom: 16))
+        add(pad(glyphRow, top: 6, bottom: 18))
         updatePreview()
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
@@ -509,8 +530,8 @@ struct SettingsActions {
         view.translatesAutoresizingMaskIntoConstraints = false
         host.addSubview(view)
         NSLayoutConstraint.activate([
-            view.leadingAnchor.constraint(equalTo: host.leadingAnchor, constant: 18),
-            view.trailingAnchor.constraint(lessThanOrEqualTo: host.trailingAnchor, constant: -18),
+            view.leadingAnchor.constraint(equalTo: host.leadingAnchor, constant: 20),
+            view.trailingAnchor.constraint(lessThanOrEqualTo: host.trailingAnchor, constant: -20),
             view.topAnchor.constraint(equalTo: host.topAnchor, constant: top),
             view.bottomAnchor.constraint(equalTo: host.bottomAnchor, constant: -bottom)
         ])
@@ -555,13 +576,11 @@ struct SettingsActions {
             rainbow.frame = NSRect(x: 0, y: 0, width: 26, height: 26); rainbow.cornerRadius = 13
             layer?.insertSublayer(rainbow, at: 0)
         } else if colorIndex == BrowserSpace.clearColorIndex {
-            layer?.backgroundColor = NSColor.white.withAlphaComponent(0.13).cgColor
-            layer?.borderWidth = 1; layer?.borderColor = NSColor.white.withAlphaComponent(0.4).cgColor
+            layer?.borderWidth = 1.5
         } else {
             layer?.backgroundColor = ArkPalette.spaceColor(colorIndex).cgColor
         }
         layer?.cornerRadius = 13
-        ring.borderColor = NSColor.white.cgColor
         ring.cornerRadius = 16
         ring.frame = NSRect(x: -3, y: -3, width: 32, height: 32)
         layer?.addSublayer(ring)
@@ -572,8 +591,17 @@ struct SettingsActions {
         translatesAutoresizingMaskIntoConstraints = false
         widthAnchor.constraint(equalToConstant: 26).isActive = true
         heightAnchor.constraint(equalToConstant: 26).isActive = true
+        paint()
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+    private func paint() {
+        ring.borderColor = bamCG(BamTheme.ink)
+        if colorIndex == BrowserSpace.clearColorIndex {
+            layer?.backgroundColor = bamCG(BamTheme.bg)
+            layer?.borderColor = bamCG(BamTheme.line)
+        }
+    }
+    override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); paint() }
     override var focusRingMaskBounds: NSRect { bounds.insetBy(dx: -3, dy: -3) }
     override func drawFocusRingMask() { NSBezierPath(ovalIn: bounds.insetBy(dx: -3, dy: -3)).fill() }
     override func resetCursorRects() { addCursorRect(bounds, cursor: .pointingHand) }
@@ -581,25 +609,31 @@ struct SettingsActions {
 
 @MainActor final class SettingsGlyph: NSButton {
     let symbol: String
-    var isPicked = false {
-        didSet { layer?.backgroundColor = NSColor.white.withAlphaComponent(isPicked ? 0.22 : 0.07).cgColor; setAccessibilityValue(isPicked ? "Selected" : "") }
-    }
+    var isPicked = false { didSet { paint(); setAccessibilityValue(isPicked ? "Selected" : "") } }
     init(symbol: String) {
         self.symbol = symbol
         super.init(frame: .zero)
         title = ""; isBordered = false; wantsLayer = true
         setButtonType(.momentaryChange)
-        image = SidebarSymbol.image(named: symbol, color: ArkPalette.ink, pointSize: 13)
-            ?? NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
         layer?.cornerRadius = 8
-        layer?.backgroundColor = NSColor.white.withAlphaComponent(0.07).cgColor
+        layer?.borderWidth = 1.5
         setAccessibilityRole(.radioButton)
         setAccessibilityLabel("\(symbol) icon")
         translatesAutoresizingMaskIntoConstraints = false
         widthAnchor.constraint(equalToConstant: 30).isActive = true
         heightAnchor.constraint(equalToConstant: 30).isActive = true
+        paint()
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+    private func paint() {
+        var ink = BamTheme.ink
+        effectiveAppearance.performAsCurrentDrawingAppearance { ink = NSColor(cgColor: BamTheme.ink.cgColor) ?? BamTheme.ink }
+        image = SidebarSymbol.image(named: symbol, color: ink, pointSize: 13)
+            ?? NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+        layer?.backgroundColor = bamCG(isPicked ? BamTheme.redWash : BamTheme.bg)
+        layer?.borderColor = bamCG(isPicked ? BamTheme.red : BamTheme.line)
+    }
+    override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); paint() }
     override var focusRingMaskBounds: NSRect { bounds }
     override func drawFocusRingMask() { NSBezierPath(roundedRect: bounds, xRadius: 8, yRadius: 8).fill() }
     override func resetCursorRects() { addCursorRect(bounds, cursor: .pointingHand) }

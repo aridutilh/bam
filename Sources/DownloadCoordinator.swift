@@ -287,8 +287,9 @@ import Darwin
         window.minSize = NSSize(width: 480, height: 240)
         window.isReleasedWhenClosed = false
         window.center()
-        let scroll = NSScrollView(frame: window.contentView!.bounds)
+        let scroll = NSScrollView(frame: window.contentView!.bounds.insetBy(dx: 16, dy: 16))
         scroll.autoresizingMask = [.width, .height]; scroll.hasVerticalScroller = true
+        scroll.contentView = FlippedClipView()
         let stack = NSStackView()
         stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 8
         stack.edgeInsets = NSEdgeInsets(top: 12, left: 12, bottom: 12, right: 12)
@@ -300,9 +301,10 @@ import Darwin
             stack.topAnchor.constraint(equalTo: scroll.contentView.topAnchor)
         ])
         window.contentView?.addSubview(scroll)
+        if let root = window.contentView { BamSheetStyle.dress(window: window, root: root) }
         downloadsWindow = window; list = stack
         let empty = NSTextField(labelWithString: "Downloads appear here. Closing Bam cancels unfinished downloads.")
-        empty.textColor = .secondaryLabelColor; empty.font = .systemFont(ofSize: 12)
+        empty.textColor = BamTheme.muted; empty.font = BamType.sans(13)
         empty.lineBreakMode = .byWordWrapping; empty.maximumNumberOfLines = 2
         emptyLabel = empty; stack.addArrangedSubview(empty)
         refreshList()
@@ -393,6 +395,10 @@ private struct DownloadError: LocalizedError {
     init(_ description: String) { errorDescription = description }
 }
 
+@MainActor private final class FlippedClipView: NSClipView {
+    override var isFlipped: Bool { true }
+}
+
 @MainActor private final class DownloadRow: NSView {
     var onCancel: (() -> Void)?
     var onOpen: (() -> Void)?
@@ -406,16 +412,22 @@ private struct DownloadError: LocalizedError {
     override var isFlipped: Bool { true }
     override init(frame: NSRect) {
         super.init(frame: frame)
-        wantsLayer = true; layer?.cornerRadius = 8
-        layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
-        title.font = .systemFont(ofSize: 13, weight: .medium); title.lineBreakMode = .byTruncatingMiddle
-        detail.font = .systemFont(ofSize: 11); detail.textColor = .secondaryLabelColor; detail.lineBreakMode = .byTruncatingTail
+        wantsLayer = true; layer?.cornerRadius = 14
+        title.font = BamType.sans(14, weight: .semibold); title.textColor = BamTheme.ink; title.lineBreakMode = .byTruncatingMiddle
+        detail.font = BamType.sans(12); detail.textColor = BamTheme.muted; detail.lineBreakMode = .byTruncatingTail
         progress.style = .bar; progress.minValue = 0; progress.maxValue = 1
-        for button in [cancel, open, reveal] { button.bezelStyle = .rounded; button.font = .systemFont(ofSize: 11); button.target = self }
+        for button in [cancel, open, reveal] { button.bezelStyle = .rounded; button.target = self }
         cancel.action = #selector(cancelAction); open.action = #selector(openAction); reveal.action = #selector(revealAction)
         [title, detail, progress, cancel, open, reveal].forEach(addSubview)
+        paint()
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    private func paint() {
+        layer?.backgroundColor = bamCG(BamTheme.card)
+        layer?.borderWidth = 1.5; layer?.borderColor = bamCG(BamTheme.line)
+        for button in [cancel, open, reveal] { BamSheetStyle.pill(button, prominent: false) }
+    }
+    override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); paint() }
     override func layout() {
         super.layout()
         title.frame = NSRect(x: 12, y: 10, width: max(0, bounds.width - 24), height: 18)
@@ -429,7 +441,7 @@ private struct DownloadError: LocalizedError {
         title.stringValue = item.filename
         title.toolTip = item.destinationURL?.path ?? item.sourceURL?.absoluteString
         detail.stringValue = item.detail; detail.toolTip = item.detail
-        detail.textColor = item.status == .failed ? .systemRed : .secondaryLabelColor
+        detail.textColor = item.status == .failed ? BamTheme.red : BamTheme.muted
         let active = item.status == .choosingDestination || item.status == .downloading
         cancel.isEnabled = active
         open.isEnabled = item.status == .finished; reveal.isEnabled = item.status == .finished
