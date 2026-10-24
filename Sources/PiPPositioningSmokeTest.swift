@@ -16,18 +16,18 @@ import AppKit
         let free = CGRect(origin: CGPoint(x: 400, y: 250), size: size)
         try check(PiPPositioning.releaseFrame(free, screens: [display]) == free,
                   "free interior placement was attracted to a corner")
-        let edge = CGRect(origin: CGPoint(x: 0, y: 250), size: size)
+        let edge = CGRect(origin: CGPoint(x: 0, y: 322), size: size)
         try check(PiPPositioning.releaseFrame(edge, screens: [display]) == edge,
                   "middle-of-edge placement was attracted to a corner")
         let nearTopRight = CGRect(origin: CGPoint(x: 850, y: 600), size: size)
         try check(PiPPositioning.releaseFrame(nearTopRight, screens: [display]).origin == CGPoint(x: 872, y: 612),
                   "top-right corner did not respect visible bounds and inset")
-        // A 60-by-80 offset is 100 points from the corner: inside the wider
-        // release radius, while a 100-by-100 offset is just outside 140 points.
-        let gentleApproach = CGRect(origin: CGPoint(x: 812, y: 532), size: size)
+        // A 120-by-160 offset is 200 points from the corner: inside the wider
+        // release radius, while a 180-by-180 offset is outside 240 points.
+        let gentleApproach = CGRect(origin: CGPoint(x: 752, y: 452), size: size)
         try check(PiPPositioning.releaseFrame(gentleApproach, screens: [display]).origin == CGPoint(x: 872, y: 612),
-                  "a release 100 points from the corner did not use the wider magnet")
-        let outsideRadius = CGRect(origin: CGPoint(x: 772, y: 512), size: size)
+                  "a release 200 points from the corner did not use the wider magnet")
+        let outsideRadius = CGRect(origin: CGPoint(x: 692, y: 432), size: size)
         try check(PiPPositioning.releaseFrame(outsideRadius, screens: [display]) == outsideRadius,
                   "corner capture ignored combined-axis distance or exceeded its radius")
         try check(PiPPositioning.dragFrame(gentleApproach, delta: .zero, screens: [display]) == gentleApproach,

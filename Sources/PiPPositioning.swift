@@ -4,7 +4,7 @@ import Foundation
 /// frames (including negative coordinates), not full frames behind the Dock.
 enum PiPPositioning {
     static let cornerInset: CGFloat = 8
-    static let magneticRadius: CGFloat = 140
+    static let magneticRadius: CGFloat = 240
     // Original Ark tuning, guided by the reference's long decelerating sweeps.
     // These are not recovered Arc constants.
     static let minimumFlickSpeed: CGFloat = 450
