@@ -64,8 +64,10 @@ import QuartzCore
         overlay.setAccessibilityElement(true)
         overlay.setAccessibilityRole(.group)
         overlay.setAccessibilityLabel("Welcome to Bam")
-        overlay.tint(colorIndex: model.colorIndex, glow: 1, animated: false)
+        // Tint after the overlay joins the window: a Clear tint reaches
+        // through overlay.window to make the stage itself translucent.
         window.contentView = overlay
+        overlay.tint(colorIndex: model.colorIndex, glow: 1, animated: false)
 
         stepHost.translatesAutoresizingMaskIntoConstraints = false
         backButton.translatesAutoresizingMaskIntoConstraints = false
@@ -639,8 +641,11 @@ extension OnboardingController: NSWindowDelegate {
             spectrum.frame = bounds
             layer?.insertSublayer(spectrum, above: wash)
             prism = spectrum
+        } else if !prismActive, let prism {
+            // The spectrum's infinite animation stops when deselected.
+            prism.removeFromSuperlayer()
+            self.prism = nil
         }
-        prism?.isHidden = !prismActive
         // The stage has no glass layer, so Clear keeps a stronger wash than the
         // browser does: text must stay readable over a light wallpaper.
         let clear = colorIndex == BrowserSpace.clearColorIndex

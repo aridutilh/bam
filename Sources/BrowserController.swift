@@ -70,17 +70,22 @@ import QuartzCore
     override func draw(_ dirtyRect: NSRect) {
         let palettes = Self.palettes
         func pair(_ index: Int) -> [NSColor] { palettes[min(palettes.count - 1, max(0, index))] }
-        let progress = min(1, max(0, previewProgress))
-        var colors = zip(pair(space), pair(previewSpace ?? space))
-            .map { $0.blended(withFraction: progress, of: $1) ?? $0 }
-        // A Clear canvas keeps only a faint wash; the glass layer and the
-        // translucent window supply the look. Previews fade the gradient.
-        let fromClear = space == BrowserSpace.clearColorIndex
-        let toClear = previewSpace == BrowserSpace.clearColorIndex
-        if fromClear || toClear {
-            let clearAmount = fromClear && toClear ? 1 : fromClear ? 1 - progress : progress
-            let alpha = 1 - clearAmount * 0.9
-            colors = colors.map { $0.withAlphaComponent(alpha) }
+        var colors = pair(space)
+        if let previewSpace {
+            let progress = min(1, max(0, previewProgress))
+            colors = zip(colors, pair(previewSpace)).map { $0.blended(withFraction: progress, of: $1) ?? $0 }
+            // Glass hides during swipes, so previews into or out of Clear fade
+            // the gradient itself toward transparency.
+            let fromClear = space == BrowserSpace.clearColorIndex
+            let toClear = previewSpace == BrowserSpace.clearColorIndex
+            if fromClear || toClear {
+                let clearAmount = fromClear && toClear ? 1 : fromClear ? 1 - progress : progress
+                let alpha = 1 - clearAmount * 0.9
+                colors = colors.map { $0.withAlphaComponent(alpha) }
+            }
+        } else if space == BrowserSpace.clearColorIndex {
+            // At rest the glass and translucent window carry the look.
+            colors = colors.map { $0.withAlphaComponent(0.1) }
         }
         NSGradient(colors: colors)?.draw(in: bounds, angle: 65)
     }
@@ -88,14 +93,15 @@ import QuartzCore
     private func updateAppearanceLayers() {
         let clear = space == BrowserSpace.clearColorIndex
         let prismActive = space == BrowserSpace.prismColorIndex
-        if prismActive || clear { wantsLayer = true }
-        if prismActive, prism == nil {
-            let layer = PrismBackground.makeLayer()
-            layer.frame = bounds
-            self.layer?.insertSublayer(layer, at: 0)
-            prism = layer
+        if prismActive {
+            installPrism()
+        } else if let prism {
+            // The spectrum's infinite animation must not outlive its Space.
+            prism.removeFromSuperlayer()
+            self.prism = nil
         }
         if clear, glass == nil {
+            wantsLayer = true
             let view = NSVisualEffectView(frame: bounds)
             view.material = .hudWindow
             view.blendingMode = .behindWindow
@@ -110,13 +116,39 @@ import QuartzCore
         prism?.opacity = 1
         CATransaction.commit()
         glass?.isHidden = !clear
-        onTranslucencyChange?(clear)
+        if lastReportedTranslucency != clear {
+            lastReportedTranslucency = clear
+            onTranslucencyChange?(clear)
+        }
+    }
+    private var lastReportedTranslucency = false
+    private func installPrism() {
+        guard prism == nil else { return }
+        wantsLayer = true
+        // Re-creating per visit also re-samples Reduce Motion.
+        let layer = PrismBackground.makeLayer()
+        layer.frame = bounds
+        self.layer?.insertSublayer(layer, at: 0)
+        prism = layer
     }
     private func updatePreviewEffects() {
-        guard let prism, !prism.isHidden else { return }
+        let progress = Float(min(1, max(0, previewProgress)))
         CATransaction.begin(); CATransaction.setDisableActions(true)
-        prism.opacity = previewSpace == nil ? 1 : Float(1 - min(1, max(0, previewProgress)))
+        if space == BrowserSpace.prismColorIndex {
+            prism?.opacity = previewSpace == nil ? 1 : 1 - progress
+        } else if previewSpace == BrowserSpace.prismColorIndex {
+            // Fade the spectrum in while swiping toward a Prism Space.
+            installPrism()
+            prism?.isHidden = false
+            prism?.opacity = progress
+        } else if let prism, previewSpace == nil {
+            prism.removeFromSuperlayer()
+            self.prism = nil
+        }
         CATransaction.commit()
+        // Glass cannot blend; it steps aside during swipes so the gradient
+        // fade in draw() shows, and returns when the preview settles.
+        glass?.isHidden = !(space == BrowserSpace.clearColorIndex && previewSpace == nil)
     }
 }
 

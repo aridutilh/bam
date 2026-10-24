@@ -123,8 +123,10 @@ struct BrowserSpace: Codable, Equatable, Identifiable {
     /// shows the desktop) are appearances, not flat colors; their indices are
     /// stable because sessions persist colorIndex.
     static let colorNames = ["Violet", "Sage", "Ocean", "Rose", "Amber", "Graphite", "Prism", "Clear"]
-    static let prismColorIndex = 6
-    static let clearColorIndex = 7
+    /// The first six entries are flat colors; the appearances follow them.
+    static let flatColorCount = 6
+    static let prismColorIndex = flatColorCount
+    static let clearColorIndex = flatColorCount + 1
     static let defaults = [
         BrowserSpace(id: 0, name: "Studio", symbol: "sparkles", colorIndex: 0),
         BrowserSpace(id: 1, name: "Life", symbol: "sun.max", colorIndex: 1),
@@ -449,7 +451,7 @@ struct BrowserSession: Codable {
                                 // Prism and Clear apply only by explicit choice.
                                 colorIndex: BrowserSpace.colorNames.indices.contains(definition.colorIndex)
                                     ? definition.colorIndex
-                                    : min(BrowserSpace.prismColorIndex - 1, max(0, definition.colorIndex)))
+                                    : min(BrowserSpace.flatColorCount - 1, max(0, definition.colorIndex)))
         }
         if spaces.isEmpty { spaces = BrowserSpace.defaults }
         lastIssuedSpaceID = max(2, max(lastIssuedSpaceID, spaces.map(\.id).max() ?? 2))
