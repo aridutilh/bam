@@ -1,9 +1,12 @@
 import AppKit
 import WebKit
 
-@MainActor final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuItemValidation {
+@MainActor final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuItemValidation, NSMenuDelegate {
     var window: NSWindow!
     var controller: BrowserController!
+    var profileSmoke: ProfileSmokeTest?
+    var extensionSmoke: ExtensionRuntimeSmokeTest?
+    var vendorProbe: VendorExtensionProbe?
     var resourceSmoke: TabResourceSmokeTest?
     var featureSmoke: FeatureSmokeTest?
     var smoke: WebSmokeTest?
@@ -13,9 +16,13 @@ import WebKit
     var pendingExternalURLs: [URL] = []
     var spacesMenu: NSMenu?
     var onboarding: OnboardingController?
+    var extensionsMenu: NSMenu?
     private let quitCoordinator = QuitCoordinator()
     private var mainWindowWasClosed = false
     func applicationDidFinishLaunching(_ notification: Notification) {
+        if CommandLine.arguments.contains("--vendor-extension-probe") { vendorProbe = VendorExtensionProbe(); vendorProbe?.start(); return }
+        if CommandLine.arguments.contains("--extension-test") { extensionSmoke = ExtensionRuntimeSmokeTest(); extensionSmoke?.start(); return }
+        if CommandLine.arguments.contains("--profile-test") { profileSmoke = ProfileSmokeTest(); profileSmoke?.start(); return }
         if CommandLine.arguments.contains("--resource-test") { resourceSmoke = TabResourceSmokeTest(); resourceSmoke?.start(); return }
         if CommandLine.arguments.contains("--feature-test") { featureSmoke = FeatureSmokeTest(); featureSmoke?.start(); return }
         if CommandLine.arguments.contains("--auto-pip-test") { autoPiPSmoke = AutomaticPiPSmokeTest(); autoPiPSmoke?.start(); return }
@@ -153,6 +160,9 @@ import WebKit
         }
     }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { window?.makeKeyAndOrderFront(nil); return true }
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        if menu === extensionsMenu { controller?.updateExtensionsMenu(menu) }
+    }
     @objc func selectSpace(_ sender: NSMenuItem) { controller.changeSpace(sender.tag) }
     func rebuildSpacesMenu() {
         guard let spacesMenu, let controller else { return }
@@ -254,6 +264,8 @@ import WebKit
         let chooseSpace = NSMenuItem(title: "Go to Space", action: nil, keyEquivalent: "")
         let submenu = NSMenu(title: "Go to Space"); chooseSpace.submenu = submenu; tabs.addItem(chooseSpace)
         spacesMenu = submenu; rebuildSpacesMenu()
+        let extensions = menu("Extensions"); extensions.delegate = self; extensionsMenu = extensions
+        controller.updateExtensionsMenu(extensions)
         let windowMenu = menu("Window"); NSApp.windowsMenu = windowMenu
         item(windowMenu, "Minimize", #selector(NSWindow.performMiniaturize(_:)), "m")
         item(windowMenu, "Zoom", #selector(NSWindow.performZoom(_:)))

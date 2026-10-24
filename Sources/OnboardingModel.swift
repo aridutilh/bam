@@ -8,7 +8,8 @@ enum OnboardingGate {
     static let completedKey = "OnboardingCompleted"
     static let startedKey = "OnboardingStarted"
     static let testArguments: Set<String> = ["--web-test", "--pip-test", "--interaction-test",
-                                             "--auto-pip-test", "--feature-test", "--resource-test"]
+                                             "--auto-pip-test", "--feature-test", "--resource-test",
+                                             "--profile-test", "--extension-test", "--vendor-extension-probe"]
 
     /// First launches with no profile get the welcome; existing profiles are
     /// grandfathered silently — unless the welcome already started and was cut

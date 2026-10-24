@@ -204,7 +204,7 @@ expect(migratedSpaces.spaces == BrowserSpace.defaults && migratedSpaces.spaceIDs
 expect(migratedSpaces.tabs == editableLegacy.tabs && migratedSpaces.splits == editableLegacy.splits && migratedSpaces.activeID == editableLegacy.activeID, "Space migration preserves tab identity, content, split grouping, and active selection")
 expect(migratedSpaces.lastSelectedTabIDsBySpace == editableLegacy.lastSelectedTabIDsBySpace && migratedSpaces.sidebarWidth == 311 && !migratedSpaces.sidebarVisible, "Space migration preserves remembered tabs and sidebar preferences")
 let migratedJSON = try JSONSerialization.jsonObject(with: JSONEncoder().encode(migratedSpaces)) as! [String: Any]
-expect(migratedJSON["version"] as? Int == 4 && migratedJSON["spaces"] != nil, "Subsequent saves explicitly version the editable-Space format")
+expect(migratedJSON["version"] as? Int == 5 && migratedJSON["spaces"] != nil, "Subsequent saves explicitly version the editable-Space format")
 var futureJSON = migratedJSON; futureJSON["version"] = 999
 let futureData = try JSONSerialization.data(withJSONObject: futureJSON)
 expect((try? JSONDecoder().decode(BrowserSession.self, from: futureData)) == nil, "A future session format is not silently decoded as current state")
@@ -328,7 +328,7 @@ expect(!defaultSaved.isUnloaded && defaultSaved.customTitle == nil && defaultSav
 var malformedSavedJSON = oldOrdinaryJSON; malformedSavedJSON["saved"] = ["kind": "unknown", "address": 123]
 let malformedSavedTab = try JSONDecoder().decode(BrowserTab.self, from: JSONSerialization.data(withJSONObject: malformedSavedJSON))
 expect(malformedSavedTab.saved == nil && malformedSavedTab.id == oldPinID, "Malformed saved metadata does not invalidate an otherwise valid ordinary tab")
-for version in [1, 2, 3, 4] {
+for version in [1, 2, 3, 4, 5] {
     var versioned = try JSONSerialization.jsonObject(with: JSONEncoder().encode(BrowserSession.fresh())) as! [String: Any]
     versioned["version"] = version
     let decoded = try JSONDecoder().decode(BrowserSession.self, from: JSONSerialization.data(withJSONObject: versioned))
@@ -472,7 +472,7 @@ try SessionFile.save(retainedTabs, to: spacesFile)
 let savedReload = SessionFile.load(spacesFile)
 expect(savedReload.tabs == retainedTabs.tabs && savedReload.activeID == retainedTabs.activeID && savedReload.lastSelectedTabIDsBySpace == retainedTabs.lastSelectedTabIDsBySpace, "Saved state, unloaded rows, original URLs, custom labels and selection survive file persistence")
 let savedVersion = try JSONSerialization.jsonObject(with: Data(contentsOf: spacesFile)) as! [String: Any]
-expect(savedVersion["version"] as? Int == 4, "Sessions with retention metadata save as current format 4")
+expect(savedVersion["version"] as? Int == 5, "Sessions with retention metadata save as current format 5")
 
 // Sleeping is recoverable current-page state, not the saved-tab close/unload state.
 let sleepAddress = "https://example.com/current?query=1#position"
@@ -560,7 +560,128 @@ let sleepReloaded = SessionFile.load(spacesFile)
 expect(sleepReloaded.tabs == sleepSelection.tabs && sleepReloaded.activeID == sleepingTab.id
        && sleepReloaded.lastSelectedTabIDsBySpace?[1] == sleepingTab.id, "Session file round-trip preserves sleeping selected and remembered pages")
 let sleepVersion = try JSONSerialization.jsonObject(with: Data(contentsOf: spacesFile)) as! [String: Any]
-expect(sleepVersion["version"] as? Int == 4, "Current-page sleeping metadata uses session format 4")
+expect(sleepVersion["version"] as? Int == 5, "Current-page sleeping metadata uses session format 5")
+
+
+// Login profiles: default migration, explicit Favorite ownership and stable stores.
+var loginProfiles = BrowserSession.fresh()
+expect(loginProfiles.currentProfileID == BrowserProfile.defaultID && loginProfiles.profiles == BrowserProfile.defaults, "Existing sessions start in the persistent default login profile")
+let workProfile = loginProfiles.createProfile(name: "  Work  ")!
+let lifeProfile = loginProfiles.createProfile(name: "Personal")!
+expect(loginProfiles.profileName(workProfile) == "Work" && workProfile != lifeProfile, "Named profiles trim names and receive distinct stable UUIDs")
+expect(loginProfiles.createProfile(name: "work") == nil && loginProfiles.createProfile(name: "\n") == nil, "Duplicate or empty profile names are rejected")
+expect(loginProfiles.createProfile(name: "Zero", id: UUID(uuid: (0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0))) == nil, "An invalid zero WebKit store identifier cannot be created")
+expect(loginProfiles.renameProfile(id: workProfile, name: "Team") && loginProfiles.profileName(workProfile) == "Team", "Renaming a profile preserves its storage identity")
+expect(!loginProfiles.renameProfile(id: workProfile, name: "personal"), "A rename cannot make the profile picker ambiguous")
+expect(loginProfiles.createSpace(name: "Unknown", symbol: "book", colorIndex: 0, profileID: UUID()) == nil, "A newly created Space cannot reference an undefined profile")
+let profileDefinitions = [
+    BrowserSpace(id: 10, name: "Work A", symbol: "briefcase", colorIndex: 0, profileID: workProfile),
+    BrowserSpace(id: 20, name: "Personal", symbol: "heart", colorIndex: 1, profileID: lifeProfile),
+    BrowserSpace(id: 30, name: "Work B", symbol: "book", colorIndex: 2, profileID: workProfile)
+]
+let workTab = BrowserTab(title: "Work tab", address: "https://example.com/work", space: 10)
+let personalTab = BrowserTab(title: "Personal tab", address: "https://example.com/personal", space: 20)
+let otherWorkTab = BrowserTab(title: "Other work", address: "https://example.com/other-work", space: 30)
+var profileTabs = BrowserSession(tabs: [workTab, personalTab, otherWorkTab], activeID: workTab.id, space: 10,
+                                 spaces: profileDefinitions, profiles: loginProfiles.profiles)
+expect(profileTabs.setRetention(id: workTab.id, kind: .favorite) && profileTabs.active?.saved?.profileID == workProfile, "Creating a Favorite binds it to its login profile")
+profileTabs.changeSpace(30); profileTabs.select(workTab.id)
+expect(profileTabs.space == 30 && profileTabs.favoriteTabs.map(\.id) == [workTab.id], "Spaces sharing a profile share the same Favorite identity without changing Space")
+profileTabs.changeSpace(20)
+expect(profileTabs.favoriteTabs.isEmpty && !profileTabs.visibleTabs.contains { $0.id == workTab.id }, "Other profiles do not expose a foreign Favorite or its live page")
+let foreignConversionBefore = profileTabs.tabs
+expect(!profileTabs.setRetention(id: workTab.id, kind: .kept) && profileTabs.tabs == foreignConversionBefore, "Converting a foreign-profile Favorite cannot silently move it into personal logins")
+profileTabs.select(workTab.id)
+expect(profileTabs.space == 10 && profileTabs.currentProfileID == workProfile, "Cross-profile Favorite selection returns to a matching Space")
+expect(profileTabs.updateSpace(id: 10, name: "Work A renamed", symbol: "briefcase", colorIndex: 0) && profileTabs.spaceDefinition(10)?.profileID == workProfile, "Legacy appearance-only Space edits preserve its login assignment")
+expect(profileTabs.updateSpace(id: 10, name: "Now personal", symbol: "heart", colorIndex: 0, profileID: lifeProfile), "A Space can change its login profile")
+expect(profileTabs.tabs.first { $0.id == workTab.id }?.saved?.profileID == workProfile && profileTabs.currentProfileID == lifeProfile && profileTabs.activeID != workTab.id, "Reassigning a Favorite's original Space does not move the Favorite's login or retain an invalid active selection")
+profileTabs.select(workTab.id)
+expect(profileTabs.space == 30 && profileTabs.activeID == workTab.id, "A Favorite selects another matching Space when its old home uses a different profile")
+expect(profileTabs.setRetention(id: workTab.id, kind: .kept) && profileTabs.active?.space == 30 && profileTabs.active?.saved?.profileID == nil, "Same-profile un-Favorite becomes a kept tab in the current Space")
+expect(profileTabs.setRetention(id: workTab.id, kind: .favorite), "The converted tab can become a profile Favorite again")
+expect(profileTabs.deleteSpace(id: 30, movingTabsTo: 20), "The last Space using a profile can be removed without deleting its saved data")
+let orphanActive = profileTabs.activeID, orphanSpace = profileTabs.space
+profileTabs.select(workTab.id)
+expect(profileTabs.activeID == orphanActive && profileTabs.space == orphanSpace && profileTabs.spaceID(forProfile: workProfile) == nil, "Selecting a temporarily unassigned profile does not fall back to personal logins")
+expect(profileTabs.tabs.first { $0.id == workTab.id }?.saved?.profileID == workProfile && profileTabs.favorites(in: workProfile).count == 1, "An orphan profile's Favorite remains recoverable")
+expect(profileTabs.updateSpace(id: 10, name: "Work restored", symbol: "briefcase", colorIndex: 0, profileID: workProfile), "An existing profile can be reassigned without creating a new identity")
+profileTabs.select(workTab.id)
+expect(profileTabs.space == 10 && profileTabs.currentProfileID == workProfile, "Reassigning the profile restores access to its existing Favorite")
+let privateSleep = TabSleepState(address: workTab.address, scrollX: 12, scrollY: 480)
+var moveProfiles = BrowserSession(tabs: [
+    BrowserTab(id: workTab.id, title: workTab.title, address: workTab.address, space: 10, sleepState: privateSleep),
+    BrowserTab(id: otherWorkTab.id, title: "Partner", address: "https://example.com/partner", space: 10)
+], activeID: workTab.id, space: 10, spaces: profileDefinitions, profiles: loginProfiles.profiles)
+expect(moveProfiles.makeSplit(primary: workTab.id, secondary: otherWorkTab.id), "Profile move fixture creates a whole Split group")
+expect(moveProfiles.moveTab(id: otherWorkTab.id, toSpace: 30) && moveProfiles.active?.sleepState == privateSleep, "Same-profile Split move retains current-page resume state")
+expect(moveProfiles.moveTab(id: workTab.id, toSpace: 20) && moveProfiles.tabs.allSatisfy { $0.space == 20 } && moveProfiles.active?.sleepState == nil, "Cross-profile move moves both Split members and drops old-profile resume state")
+expect(moveProfiles.split(for: workTab.id)?.secondaryID == otherWorkTab.id && Set(moveProfiles.tabs.map(\.id)) == Set([workTab.id, otherWorkTab.id]), "Profile moves preserve tab and Split identities")
+var cappedProfiles = BrowserSession(tabs: [workTab, personalTab, otherWorkTab], activeID: workTab.id, space: 10, spaces: profileDefinitions, profiles: loginProfiles.profiles)
+for profileSpace in [10, 20] {
+    cappedProfiles.changeSpace(profileSpace)
+    for i in 0..<12 {
+        let id = cappedProfiles.add(address: "https://example.com/favorite-\(profileSpace)-\(i)")
+        expect(cappedProfiles.setRetention(id: id, kind: .favorite), "Each login profile has its own Favorite capacity")
+    }
+    let excess = cappedProfiles.add(address: "https://example.com/excess-\(profileSpace)")
+    expect(!cappedProfiles.setRetention(id: excess, kind: .favorite), "A thirteenth Favorite is rejected within its own profile")
+}
+expect(cappedProfiles.favorites(in: workProfile).count == 12 && cappedProfiles.favorites(in: lifeProfile).count == 12, "The Favorite limit is per profile, not globally shared")
+let workOrder = cappedProfiles.favorites(in: workProfile).map(\.id)
+let personalOrder = cappedProfiles.favorites(in: lifeProfile).map(\.id)
+expect(cappedProfiles.reorderSavedTab(id: workOrder[1], by: -1) && cappedProfiles.favorites(in: workProfile).first?.id == workOrder[1]
+       && cappedProfiles.favorites(in: lifeProfile).map(\.id) == personalOrder, "Favorite reordering stays inside its profile")
+var legacyProfiles = try JSONSerialization.jsonObject(with: JSONEncoder().encode(retainedTabs)) as! [String: Any]
+legacyProfiles["version"] = 4; legacyProfiles.removeValue(forKey: "profiles")
+legacyProfiles["spaces"] = (legacyProfiles["spaces"] as! [[String: Any]]).map { raw in var raw = raw; raw.removeValue(forKey: "profileID"); return raw }
+legacyProfiles["tabs"] = (legacyProfiles["tabs"] as! [[String: Any]]).map { raw in
+    var raw = raw
+    if var saved = raw["saved"] as? [String: Any] { saved.removeValue(forKey: "profileID"); raw["saved"] = saved }
+    return raw
+}
+var migratedProfiles = try JSONDecoder().decode(BrowserSession.self, from: JSONSerialization.data(withJSONObject: legacyProfiles)); migratedProfiles.sanitize()
+expect(migratedProfiles.spaces.allSatisfy { $0.profileID == BrowserProfile.defaultID } && migratedProfiles.profiles == BrowserProfile.defaults, "Version 4 sessions keep the existing default cookies/store")
+expect(migratedProfiles.tabs.map(\.id) == retainedTabs.tabs.map(\.id) && migratedProfiles.tabs.map(\.address) == retainedTabs.tabs.map(\.address), "Profile migration preserves existing tab identities and destinations")
+let unknownProfile = UUID(), unknownFavoriteProfile = UUID()
+let recoveredFavorite = BrowserTab(title: "Recovered", address: "https://example.com/recovered", space: 10,
+                                   saved: SavedTabState(kind: .favorite, address: "https://example.com/recovered", profileID: unknownFavoriteProfile))
+var missingDefinitions = BrowserSession(tabs: [workTab, recoveredFavorite], activeID: workTab.id, space: 10,
+    spaces: [BrowserSpace(id: 10, name: "Recovered Space", symbol: "book", colorIndex: 0, profileID: unknownProfile)])
+missingDefinitions.sanitize()
+expect(missingDefinitions.profiles.contains { $0.id == unknownProfile } && missingDefinitions.profiles.contains { $0.id == unknownFavoriteProfile }, "Missing valid profile UUID definitions are recovered instead of routed to Default")
+expect(missingDefinitions.currentProfileID == unknownProfile && missingDefinitions.profileID(for: recoveredFavorite) == unknownFavoriteProfile
+       && missingDefinitions.favoriteTabs.isEmpty, "Recovered Space and Favorite stores remain distinct")
+var invalidProfileJSON = try JSONSerialization.jsonObject(with: JSONEncoder().encode(missingDefinitions)) as! [String: Any]
+var invalidProfileSpaces = invalidProfileJSON["spaces"] as! [[String: Any]]
+invalidProfileSpaces[0]["profileID"] = "not-a-uuid"; invalidProfileJSON["spaces"] = invalidProfileSpaces
+expect((try? JSONDecoder().decode(BrowserSession.self, from: JSONSerialization.data(withJSONObject: invalidProfileJSON))) == nil, "Malformed Space profile UUID fails decoding instead of opening its tabs with default cookies")
+invalidProfileSpaces[0]["profileID"] = NSNull(); invalidProfileJSON["spaces"] = invalidProfileSpaces
+expect((try? JSONDecoder().decode(BrowserSession.self, from: JSONSerialization.data(withJSONObject: invalidProfileJSON))) == nil, "An explicit null profile binding is not treated as a legacy absent key")
+var invalidFavoriteJSON = try JSONSerialization.jsonObject(with: JSONEncoder().encode(recoveredFavorite)) as! [String: Any]
+var badBinding = invalidFavoriteJSON["saved"] as! [String: Any]; badBinding["profileID"] = "not-a-uuid"; invalidFavoriteJSON["saved"] = badBinding
+expect((try? JSONDecoder().decode(BrowserTab.self, from: JSONSerialization.data(withJSONObject: invalidFavoriteJSON))) == nil, "Malformed Favorite profile binding cannot fall through optional retention recovery")
+try SessionFile.save(profileTabs, to: spacesFile)
+let storedProfiles = SessionFile.load(spacesFile)
+expect(storedProfiles.profiles == profileTabs.profiles && storedProfiles.spaces == profileTabs.spaces
+       && storedProfiles.tabs == profileTabs.tabs && storedProfiles.activeID == profileTabs.activeID, "Profile names, UUID bindings, Favorites and selection survive a disk round trip")
+let profileVersion = try JSONSerialization.jsonObject(with: Data(contentsOf: spacesFile)) as! [String: Any]
+expect(profileVersion["version"] as? Int == 5, "Login profile metadata uses session format 5")
+
+badBinding["profileID"] = unknownFavoriteProfile.uuidString; badBinding["kind"] = "unknown"; invalidFavoriteJSON["saved"] = badBinding
+expect((try? JSONDecoder().decode(BrowserTab.self, from: JSONSerialization.data(withJSONObject: invalidFavoriteJSON))) == nil, "Malformed retention with an explicit profile binding cannot become a personal ordinary tab")
+let extensionAddress = "webkit-extension://\(UUID().uuidString)/onboarding/start.html?step=1#intro"
+expect(URLInput.extensionURL(extensionAddress) != nil && URLInput.directURL(extensionAddress) == nil, "Extension page restoration has separate URL validation from web navigation")
+for badExtension in ["webkit-extension://not-a-uuid/page", "webkit-extension:///page", "webkit-extension://user@\(UUID().uuidString)/page", "webkit-extension://\(UUID().uuidString):443/page", "https://\(UUID().uuidString)/page"] {
+    expect(URLInput.extensionURL(badExtension) == nil, "Invalid extension origin is rejected: \(badExtension)")
+}
+let extensionTab = BrowserTab(title: "Extension setup", address: extensionAddress, space: 0)
+var extensionSession = BrowserSession(tabs: [extensionTab], activeID: extensionTab.id)
+extensionSession.sanitize()
+expect(extensionSession.tabs == [extensionTab] && extensionSession.activeID == extensionTab.id, "Valid extension tab identity, title and destination survive sanitation")
+expect(!extensionSession.setRetention(id: extensionTab.id, kind: .favorite) && !extensionSession.setRetention(id: extensionTab.id, kind: .kept), "Extension setup/vault pages are not promoted into saved web destinations")
+let extensionRoundTrip = try JSONDecoder().decode(BrowserSession.self, from: JSONEncoder().encode(extensionSession))
+expect(extensionRoundTrip.tabs == extensionSession.tabs, "Extension page restoration metadata round-trips without broadening typed web URLs")
 
 print("PASS: \(count) model, URL, space, and persistence checks")
 

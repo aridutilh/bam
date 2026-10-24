@@ -4,6 +4,7 @@
 *.zip
 SHA256SUMS
 manifest.json
+!/Resources/ExtensionFixture/manifest.json
 preview.png
 validation/
 Resources/Recovered/

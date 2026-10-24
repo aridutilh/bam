@@ -101,6 +101,7 @@ extension BrowserController {
     func releaseSleepingPage(_ id: UUID, web: WKWebView, state: TabSleepState) {
         guard browsers[id] === web, let index = session.tabs.firstIndex(where: { $0.id == id }) else { return }
         tabActivityProbe.invalidate(web)
+        navigationTokens.removeValue(forKey: id); browserExtensionOrigins.removeValue(forKey: id)
         observations.removeValue(forKey: id); browsers.removeValue(forKey: id)
         web.navigationDelegate = nil; web.uiDelegate = nil; web.stopLoading()
         retiringViews.removeValue(forKey: ObjectIdentifier(web)); web.removeFromSuperview()

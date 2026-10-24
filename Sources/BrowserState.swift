@@ -8,13 +8,15 @@ struct SavedTabState: Codable, Equatable {
     var customTitle: String?
     var customSymbol: String?
     var isUnloaded: Bool
+    // Favorites belong to a login profile independently of their old home Space.
+    var profileID: UUID?
 
     init(kind: SavedTabKind, address: String, customTitle: String? = nil,
-         customSymbol: String? = nil, isUnloaded: Bool = false) {
+         customSymbol: String? = nil, isUnloaded: Bool = false, profileID: UUID? = nil) {
         self.kind = kind; self.address = address; self.customTitle = customTitle
-        self.customSymbol = customSymbol; self.isUnloaded = isUnloaded
+        self.customSymbol = customSymbol; self.isUnloaded = isUnloaded; self.profileID = profileID
     }
-    private enum CodingKeys: String, CodingKey { case kind, address, customTitle, customSymbol, isUnloaded }
+    private enum CodingKeys: String, CodingKey { case kind, address, customTitle, customSymbol, isUnloaded, profileID }
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         kind = try values.decode(SavedTabKind.self, forKey: .kind)
@@ -22,6 +24,10 @@ struct SavedTabState: Codable, Equatable {
         customTitle = try? values.decodeIfPresent(String.self, forKey: .customTitle)
         customSymbol = try? values.decodeIfPresent(String.self, forKey: .customSymbol)
         isUnloaded = (try? values.decodeIfPresent(Bool.self, forKey: .isUnloaded)) ?? false
+        profileID = values.contains(.profileID) ? try values.decode(UUID.self, forKey: .profileID) : nil
+        if profileID == UUID(uuid: (0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0)) {
+            throw DecodingError.dataCorruptedError(forKey: .profileID, in: values, debugDescription: "Invalid profile identifier")
+        }
     }
 }
 
@@ -77,19 +83,31 @@ struct BrowserTab: Codable, Identifiable, Equatable {
         return "globe"
     }
     fileprivate static func validAddress(_ address: String) -> Bool {
-        address == "orbit://newtab" || address == "orbit://video" || URLInput.directURL(address) != nil
+        address == "orbit://newtab" || address == "orbit://video" || URLInput.directURL(address) != nil || URLInput.extensionURL(address) != nil
     }
     fileprivate static func validCustomTitle(_ title: String) -> Bool {
         title.count <= 80 && !title.unicodeScalars.contains { CharacterSet.controlCharacters.contains($0) }
     }
     private enum CodingKeys: String, CodingKey { case id, title, address, space, pinned, saved, sleepState }
+    private enum SavedProfileKeys: String, CodingKey { case profileID }
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         id = try values.decode(UUID.self, forKey: .id)
         title = try values.decode(String.self, forKey: .title)
         address = try values.decode(String.self, forKey: .address)
         space = try values.decode(Int.self, forKey: .space)
-        saved = try? values.decodeIfPresent(SavedTabState.self, forKey: .saved)
+        // Other malformed optional retention metadata remains recoverable, but
+        // a corrupt profile binding must not silently become a personal tab.
+        var hasProfileBinding = false
+        if let binding = try? values.nestedContainer(keyedBy: SavedProfileKeys.self, forKey: .saved), binding.contains(.profileID) {
+            hasProfileBinding = true
+            let id = try binding.decode(UUID.self, forKey: .profileID)
+            if id == UUID(uuid: (0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0)) {
+                throw DecodingError.dataCorruptedError(forKey: .saved, in: values, debugDescription: "Invalid saved profile identifier")
+            }
+        }
+        if hasProfileBinding { saved = try values.decodeIfPresent(SavedTabState.self, forKey: .saved) }
+        else { saved = try? values.decodeIfPresent(SavedTabState.self, forKey: .saved) }
         sleepState = try? values.decodeIfPresent(TabSleepState.self, forKey: .sleepState)
         if saved == nil, (try? values.decodeIfPresent(Bool.self, forKey: .pinned)) == true {
             saved = SavedTabState(kind: .kept, address: address)
@@ -110,6 +128,14 @@ struct BrowserSplit: Codable, Equatable {
     var secondaryID: UUID
 }
 
+/// The reserved default ID always maps to WebKit's existing default data store.
+struct BrowserProfile: Codable, Equatable, Identifiable {
+    var id: UUID
+    var name: String
+    static let defaultID = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
+    static let defaults = [BrowserProfile(id: defaultID, name: "Default")]
+}
+
 /// IDs remain stable as the user reorders Spaces; their array position is only
 /// presentation order. Existing sessions retain IDs 0, 1, and 2.
 struct BrowserSpace: Codable, Equatable, Identifiable {
@@ -117,6 +143,21 @@ struct BrowserSpace: Codable, Equatable, Identifiable {
     var name: String
     var symbol: String
     var colorIndex: Int
+    var profileID: UUID
+
+    init(id: Int, name: String, symbol: String, colorIndex: Int, profileID: UUID = BrowserProfile.defaultID) {
+        self.id = id; self.name = name; self.symbol = symbol; self.colorIndex = colorIndex; self.profileID = profileID
+    }
+    private enum CodingKeys: String, CodingKey { case id, name, symbol, colorIndex, profileID }
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decode(Int.self, forKey: .id); name = try values.decode(String.self, forKey: .name)
+        symbol = try values.decode(String.self, forKey: .symbol); colorIndex = try values.decode(Int.self, forKey: .colorIndex)
+        profileID = values.contains(.profileID) ? try values.decode(UUID.self, forKey: .profileID) : BrowserProfile.defaultID
+        if profileID == UUID(uuid: (0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0)) {
+            throw DecodingError.dataCorruptedError(forKey: .profileID, in: values, debugDescription: "Invalid profile identifier")
+        }
+    }
 
     static let symbols = ["sparkles", "sun.max", "globe", "briefcase", "house", "heart", "book", "paintbrush", "terminal", "bolt", "leaf", "music.note"]
     /// Prism (a slowly shifting spectrum) and Clear (a translucent window that
@@ -156,27 +197,29 @@ struct BrowserSession: Codable {
     var lastSelectedTabIDsBySpace: [Int: UUID]?
     var splits: [BrowserSplit]?
     var spaces: [BrowserSpace]
+    var profiles: [BrowserProfile]
     // Persist the high-water mark, including deleted Spaces, so tab/archive
     // metadata can never accidentally refer to a different newly created Space.
     private var lastIssuedSpaceID: Int
     static let maximumSpaces = 32
-    private static let formatVersion = 4
+    private static let formatVersion = 5
     static let maximumFavorites = 12
+    static let maximumProfiles = 32
 
     init(tabs: [BrowserTab], activeID: UUID, space: Int = 0,
          sidebarWidth: Double = 228, sidebarVisible: Bool = true,
          lastSelectedTabIDsBySpace: [Int: UUID]? = nil, splits: [BrowserSplit]? = nil,
-         spaces: [BrowserSpace] = BrowserSpace.defaults) {
+         spaces: [BrowserSpace] = BrowserSpace.defaults, profiles: [BrowserProfile] = BrowserProfile.defaults) {
         self.tabs = tabs; self.activeID = activeID; self.space = space
         self.sidebarWidth = sidebarWidth; self.sidebarVisible = sidebarVisible
         self.lastSelectedTabIDsBySpace = lastSelectedTabIDsBySpace; self.splits = splits
-        self.spaces = spaces
+        self.spaces = spaces; self.profiles = profiles.contains(where: { $0.id == BrowserProfile.defaultID }) ? profiles : BrowserProfile.defaults + profiles
         lastIssuedSpaceID = max(2, spaces.map(\.id).max() ?? 2)
     }
 
     private enum CodingKeys: String, CodingKey {
         case version, tabs, activeID, space, sidebarWidth, sidebarVisible
-        case lastSelectedTabIDsBySpace, splits, spaces, lastIssuedSpaceID
+        case lastSelectedTabIDsBySpace, splits, spaces, lastIssuedSpaceID, profiles
     }
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -192,6 +235,7 @@ struct BrowserSession: Codable {
         lastSelectedTabIDsBySpace = try values.decodeIfPresent([Int: UUID].self, forKey: .lastSelectedTabIDsBySpace)
         splits = try values.decodeIfPresent([BrowserSplit].self, forKey: .splits)
         spaces = try values.decodeIfPresent([BrowserSpace].self, forKey: .spaces) ?? BrowserSpace.defaults
+        profiles = try values.decodeIfPresent([BrowserProfile].self, forKey: .profiles) ?? BrowserProfile.defaults
         lastIssuedSpaceID = max(2, max(try values.decodeIfPresent(Int.self, forKey: .lastIssuedSpaceID) ?? 2,
                                       spaces.map(\.id).max() ?? 2))
     }
@@ -204,6 +248,7 @@ struct BrowserSession: Codable {
         try values.encodeIfPresent(lastSelectedTabIDsBySpace, forKey: .lastSelectedTabIDsBySpace)
         try values.encodeIfPresent(splits, forKey: .splits)
         try values.encode(spaces, forKey: .spaces)
+        try values.encode(profiles, forKey: .profiles)
         try values.encode(lastIssuedSpaceID, forKey: .lastIssuedSpaceID)
     }
 
@@ -219,25 +264,56 @@ struct BrowserSession: Codable {
     }
     var active: BrowserTab? { tabs.first { $0.id == activeID } }
     var visibleTabs: [BrowserTab] { orderedTabs(in: space) }
-    var favoriteTabs: [BrowserTab] { tabs.filter(\.isFavorite) }
+    var currentProfileID: UUID { spaceDefinition(space)?.profileID ?? BrowserProfile.defaultID }
+    func profileID(for tab: BrowserTab) -> UUID {
+        if tab.isFavorite, let id = tab.saved?.profileID { return id }
+        return spaceDefinition(tab.space)?.profileID ?? BrowserProfile.defaultID
+    }
+    func profileName(_ id: UUID) -> String { profiles.first { $0.id == id }?.name ?? "Default" }
+    func spaceID(forProfile id: UUID) -> Int? { spaces.first { $0.profileID == id }?.id }
+    func favorites(in profile: UUID) -> [BrowserTab] { tabs.filter { $0.isFavorite && profileID(for: $0) == profile } }
+    var favoriteTabs: [BrowserTab] { favorites(in: currentProfileID) }
+    @discardableResult mutating func createProfile(name: String, id: UUID = UUID()) -> UUID? {
+        guard profiles.count < Self.maximumProfiles, id != UUID(uuid: (0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0)),
+              !profiles.contains(where: { $0.id == id }), let name = BrowserSpace.validName(name),
+              !profiles.contains(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame }) else { return nil }
+        profiles.append(BrowserProfile(id: id, name: name)); return id
+    }
+    @discardableResult mutating func renameProfile(id: UUID, name: String) -> Bool {
+        guard let index = profiles.firstIndex(where: { $0.id == id }), let name = BrowserSpace.validName(name),
+              !profiles.contains(where: { $0.id != id && $0.name.caseInsensitiveCompare(name) == .orderedSame }) else { return false }
+        profiles[index].name = name; return true
+    }
+    private mutating func bindFavoriteProfiles() {
+        for index in tabs.indices where tabs[index].isFavorite && tabs[index].saved?.profileID == nil {
+            let id = profileID(for: tabs[index]); tabs[index].saved?.profileID = id
+        }
+    }
     var spaceIDs: [Int] { spaces.map(\.id) }
     func spaceIndex(_ id: Int) -> Int? { spaces.firstIndex { $0.id == id } }
     func spaceDefinition(_ id: Int) -> BrowserSpace? { spaces.first { $0.id == id } }
 
-    @discardableResult mutating func createSpace(name: String, symbol: String, colorIndex: Int) -> Int? {
-        guard spaces.count < Self.maximumSpaces, let name = BrowserSpace.validName(name),
+    @discardableResult mutating func createSpace(name: String, symbol: String, colorIndex: Int, profileID: UUID = BrowserProfile.defaultID) -> Int? {
+        guard profiles.contains(where: { $0.id == profileID }), spaces.count < Self.maximumSpaces, let name = BrowserSpace.validName(name),
               BrowserSpace.colorNames.indices.contains(colorIndex) else { return nil }
         let highWater = max(lastIssuedSpaceID, spaces.map(\.id).max() ?? 2)
         guard highWater < Int.max else { return nil }
         lastIssuedSpaceID = highWater + 1
         spaces.append(BrowserSpace(id: lastIssuedSpaceID, name: name,
-                                   symbol: BrowserSpace.normalizedSymbol(symbol), colorIndex: colorIndex))
+                                   symbol: BrowserSpace.normalizedSymbol(symbol), colorIndex: colorIndex, profileID: profileID))
         return lastIssuedSpaceID
     }
-    @discardableResult mutating func updateSpace(id: Int, name: String, symbol: String, colorIndex: Int) -> Bool {
+    @discardableResult mutating func updateSpace(id: Int, name: String, symbol: String, colorIndex: Int, profileID: UUID? = nil) -> Bool {
         guard let index = spaceIndex(id), let name = BrowserSpace.validName(name),
               BrowserSpace.colorNames.indices.contains(colorIndex) else { return false }
-        spaces[index] = BrowserSpace(id: id, name: name, symbol: BrowserSpace.normalizedSymbol(symbol), colorIndex: colorIndex)
+        let profile = profileID ?? spaces[index].profileID
+        guard profiles.contains(where: { $0.id == profile }) else { return false }
+        bindFavoriteProfiles()
+        if profile != spaces[index].profileID {
+            for i in tabs.indices where tabs[i].space == id && !tabs[i].isFavorite { tabs[i].sleepState = nil }
+        }
+        spaces[index] = BrowserSpace(id: id, name: name, symbol: BrowserSpace.normalizedSymbol(symbol), colorIndex: colorIndex, profileID: profile)
+        repairRememberedSelections(); repairActiveSelection()
         return true
     }
     @discardableResult mutating func reorderSpace(id: Int, to index: Int) -> Bool {
@@ -248,10 +324,16 @@ struct BrowserSession: Codable {
     }
     @discardableResult mutating func deleteSpace(id: Int, movingTabsTo destination: Int) -> Bool {
         guard spaces.count > 1, id != destination, let index = spaceIndex(id), spaceDefinition(destination) != nil else { return false }
+        bindFavoriteProfiles()
         rememberActiveSelection()
+        let oldProfile = spaceDefinition(id)!.profileID
+        let newProfile = spaceDefinition(destination)!.profileID
         let remembered = rememberedTab(in: id)
         let wasSelected = space == id
-        for index in tabs.indices where tabs[index].space == id { tabs[index].space = destination }
+        for index in tabs.indices where tabs[index].space == id {
+            if !tabs[index].isFavorite && oldProfile != newProfile { tabs[index].sleepState = nil }
+            tabs[index].space = destination
+        }
         spaces.remove(at: index)
         lastSelectedTabIDsBySpace?[id] = nil
         repairRememberedSelection(in: destination, preferred: remembered)
@@ -260,7 +342,7 @@ struct BrowserSession: Codable {
         return true
     }
     /// A split is one movable item. Stable tab IDs let the controller retain the
-    /// existing WKWebViews; moving changes only their Space membership.
+    /// existing WKWebViews within a profile. The controller reloads cross-profile moves.
     @discardableResult mutating func moveTab(id: UUID, toSpace destination: Int) -> Bool {
         guard spaceDefinition(destination) != nil, let tab = tabs.first(where: { $0.id == id }), !tab.isFavorite else { return false }
         guard tab.space != destination else { return true }
@@ -268,7 +350,11 @@ struct BrowserSession: Codable {
         let group = split(for: id)
         let members = Set(group.map { [$0.primaryID, $0.secondaryID] } ?? [id])
         let movedSelection = members.contains(activeID)
-        for index in tabs.indices where members.contains(tabs[index].id) { tabs[index].space = destination }
+        let crossesProfile = profileID(for: tab) != spaceDefinition(destination)!.profileID
+        for index in tabs.indices where members.contains(tabs[index].id) {
+            tabs[index].space = destination
+            if crossesProfile { tabs[index].sleepState = nil }
+        }
         repairRememberedSelection(in: tab.space)
         repairRememberedSelection(in: destination, preferred: group?.primaryID ?? id)
         if movedSelection { space = destination }
@@ -278,10 +364,15 @@ struct BrowserSession: Codable {
 
     @discardableResult mutating func setRetention(id: UUID, kind: SavedTabKind?) -> Bool {
         guard let index = tabs.firstIndex(where: { $0.id == id }) else { return false }
+        if kind != nil && URLInput.extensionURL(tabs[index].address) != nil { return false }
+        let profile = profileID(for: tabs[index])
         if kind == .favorite {
             guard split(for: id) == nil,
-                  tabs[index].isFavorite || favoriteTabs.count < Self.maximumFavorites else { return false }
+                  tabs[index].isFavorite || favorites(in: profile).count < Self.maximumFavorites else { return false }
         }
+        let localDestination = currentProfileID == profile ? space
+            : (spaceDefinition(tabs[index].space)?.profileID == profile ? tabs[index].space : spaceID(forProfile: profile))
+        if tabs[index].isFavorite && kind != .favorite && (localDestination == nil || currentProfileID != profile) { return false }
         rememberActiveSelection()
         let wasFavorite = tabs[index].isFavorite
         if let kind {
@@ -290,7 +381,9 @@ struct BrowserSession: Codable {
                 tabs[index].saved = SavedTabState(kind: kind, address: tabs[index].address)
             } else { tabs[index].saved?.kind = kind }
         } else { tabs[index].saved = nil }
-        if wasFavorite && kind != .favorite { tabs[index].space = space }
+        if kind == .favorite { tabs[index].saved?.profileID = profile }
+        else { tabs[index].saved?.profileID = nil }
+        if wasFavorite && kind != .favorite { tabs[index].space = localDestination! }
         repairRememberedSelections()
         repairActiveSelection()
         return true
@@ -319,7 +412,7 @@ struct BrowserSession: Codable {
         let secondaryIDs = Set((splits ?? []).map(\.secondaryID))
         let candidates = tabs.indices.filter {
             !secondaryIDs.contains(tabs[$0].id) && tabs[$0].saved?.kind == kind
-                && (kind == .favorite || tabs[$0].space == source.space)
+                && (kind == .favorite ? profileID(for: tabs[$0]) == profileID(for: source) : tabs[$0].space == source.space)
         }
         guard let current = candidates.firstIndex(where: { tabs[$0].id == primaryID }) else { return false }
         let (target, overflow) = current.addingReportingOverflow(offset)
@@ -332,10 +425,10 @@ struct BrowserSession: Codable {
     private func orderedTabs(in space: Int) -> [BrowserTab] {
         let grouped = Set((splits ?? []).map(\.secondaryID))
         let local = tabs.filter { $0.space == space && !$0.isFavorite && !grouped.contains($0.id) }
-        return favoriteTabs + local.filter(\.isSaved) + local.filter { !$0.isSaved }
+        return favorites(in: spaceDefinition(space)?.profileID ?? BrowserProfile.defaultID) + local.filter(\.isSaved) + local.filter { !$0.isSaved }
     }
     private func selectable(_ tab: BrowserTab, in space: Int) -> Bool {
-        !tab.isUnloaded && (tab.isFavorite || tab.space == space)
+        !tab.isUnloaded && (tab.isFavorite ? profileID(for: tab) == spaceDefinition(space)?.profileID : tab.space == space)
     }
     private func fallbackTab(in space: Int, last: Bool = false) -> UUID? {
         let visible = orderedTabs(in: space).filter { !$0.isUnloaded }
@@ -350,7 +443,7 @@ struct BrowserSession: Codable {
         return split(for: id)?.primaryID ?? id
     }
     private mutating func rememberActiveSelection() {
-        guard let tab = active, !tab.isUnloaded, spaceDefinition(space) != nil else { return }
+        guard let tab = active, selectable(tab, in: space), spaceDefinition(space) != nil else { return }
         if lastSelectedTabIDsBySpace == nil { lastSelectedTabIDsBySpace = [:] }
         let selectedID = split(for: tab.id)?.primaryID ?? tab.id
         let context = tab.isFavorite ? space : tab.space
@@ -374,7 +467,7 @@ struct BrowserSession: Codable {
     }
     private mutating func repairActiveSelection() {
         if let selected = active, !selected.isUnloaded,
-           selected.isFavorite || spaceDefinition(selected.space) != nil {
+           (selected.isFavorite ? profileID(for: selected) == currentProfileID : spaceDefinition(selected.space) != nil) {
             activeID = split(for: selected.id)?.primaryID ?? selected.id
             if !selected.isFavorite { space = selected.space }
             rememberActiveSelection()
@@ -396,7 +489,15 @@ struct BrowserSession: Codable {
         let selectedID = split(for: id)?.primaryID ?? id
         guard let index = tabs.firstIndex(where: { $0.id == selectedID }),
               tabs[index].isFavorite || spaceDefinition(tabs[index].space) != nil else { return }
+        let selected = tabs[index]
+        var destination = space
+        if selected.isFavorite && profileID(for: selected) != currentProfileID {
+            let profile = profileID(for: selected)
+            guard let matching = spaceDefinition(selected.space)?.profileID == profile ? selected.space : spaceID(forProfile: profile) else { return }
+            destination = matching
+        }
         rememberActiveSelection()
+        space = destination
         let members = split(for: selectedID).map { [$0.primaryID, $0.secondaryID] } ?? [selectedID]
         for index in tabs.indices where members.contains(tabs[index].id) { tabs[index].saved?.isUnloaded = false }
         activeID = selectedID
@@ -439,6 +540,25 @@ struct BrowserSession: Codable {
         return closing
     }
     mutating func sanitize() {
+        let zero = UUID(uuid: (0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0))
+        var seenProfiles = Set<UUID>()
+        profiles = profiles.compactMap { profile in
+            guard profile.id != zero, seenProfiles.insert(profile.id).inserted else { return nil }
+            return BrowserProfile(id: profile.id, name: BrowserSpace.validName(profile.name) ?? "Profile")
+        }
+        if !profiles.contains(where: { $0.id == BrowserProfile.defaultID }) { profiles.insert(BrowserProfile.defaults[0], at: 0) }
+        // Missing definitions must never route formerly isolated pages through
+        // personal/default cookies. Recover the same stable store identifier.
+        let replacementForZero = UUID()
+        for i in spaces.indices where spaces[i].profileID == zero { spaces[i].profileID = replacementForZero }
+        for i in tabs.indices where tabs[i].saved?.profileID == zero { tabs[i].saved?.profileID = replacementForZero }
+        let referenced = spaces.map(\.profileID) + tabs.compactMap { $0.isFavorite ? $0.saved?.profileID : nil }
+        for id in referenced where !profiles.contains(where: { $0.id == id }) {
+            var name = "Recovered profile", suffix = 2
+            while profiles.contains(where: { $0.name == name }) { name = "Recovered profile \(suffix)"; suffix += 1 }
+            profiles.append(BrowserProfile(id: id, name: name))
+        }
+        let validProfiles = Set(profiles.map(\.id))
         lastIssuedSpaceID = max(lastIssuedSpaceID, spaces.map(\.id).max() ?? 2)
         var seenSpaces = Set<Int>()
         spaces = spaces.compactMap { definition in
@@ -451,7 +571,8 @@ struct BrowserSession: Codable {
                                 // Prism and Clear apply only by explicit choice.
                                 colorIndex: BrowserSpace.colorNames.indices.contains(definition.colorIndex)
                                     ? definition.colorIndex
-                                    : min(BrowserSpace.flatColorCount - 1, max(0, definition.colorIndex)))
+                                    : min(BrowserSpace.flatColorCount - 1, max(0, definition.colorIndex)),
+                                profileID: validProfiles.contains(definition.profileID) ? definition.profileID : BrowserProfile.defaultID)
         }
         if spaces.isEmpty { spaces = BrowserSpace.defaults }
         lastIssuedSpaceID = max(2, max(lastIssuedSpaceID, spaces.map(\.id).max() ?? 2))
@@ -462,10 +583,12 @@ struct BrowserSession: Codable {
         }
         sidebarWidth = sidebarWidth.isFinite ? min(500, max(164, sidebarWidth)) : 228
         var seen = Set<UUID>()
-        var favoriteCount = 0
+        var favoriteCounts: [UUID: Int] = [:]
+        let profilesBySpace = Dictionary(uniqueKeysWithValues: spaces.map { ($0.id, $0.profileID) })
         tabs = tabs.compactMap { original in
             var tab = original
             guard seen.insert(tab.id).inserted else { return nil }
+            if let saved = tab.saved, URLInput.extensionURL(saved.address) != nil || URLInput.extensionURL(tab.address) != nil { tab.saved = nil }
             if var saved = tab.saved {
                 if !BrowserTab.validAddress(saved.address) {
                     guard BrowserTab.validAddress(tab.address) else { return nil }
@@ -477,9 +600,14 @@ struct BrowserSession: Codable {
                 saved.customSymbol = symbol.map { BrowserSpace.symbols.contains($0) } == true ? symbol : nil
                 if saved.kind == .favorite {
                     if !validSpaceIDs.contains(tab.space) { tab.space = space }
-                    favoriteCount += 1
-                    if favoriteCount > Self.maximumFavorites { saved.kind = .kept }
-                }
+                    let candidate = saved.profileID ?? profilesBySpace[tab.space] ?? BrowserProfile.defaultID
+                    let profile = validProfiles.contains(candidate) ? candidate : BrowserProfile.defaultID
+                    saved.profileID = profile
+                    favoriteCounts[profile, default: 0] += 1
+                    if favoriteCounts[profile, default: 0] > Self.maximumFavorites, let matching = spaces.first(where: { $0.profileID == profile }) {
+                        saved.kind = .kept; saved.profileID = nil; tab.space = matching.id
+                    }
+                } else { saved.profileID = nil }
                 tab.saved = saved
                 if saved.isUnloaded || !BrowserTab.validAddress(tab.address) { tab.address = saved.address }
             }
@@ -506,6 +634,14 @@ struct BrowserSession: Codable {
 }
 
 enum URLInput {
+    /// Extension-page restoration is validated separately from user input and
+    /// HTTP navigation. The controller must still authorize the live context.
+    static func extensionURL(_ text: String) -> URL? {
+        guard let url = URL(string: text), url.scheme?.lowercased() == "webkit-extension",
+              let host = url.host, UUID(uuidString: host) != nil,
+              url.user == nil, url.password == nil, url.port == nil else { return nil }
+        return url
+    }
     static func directURL(_ text: String) -> URL? {
         guard let url = URL(string: text), let scheme = url.scheme?.lowercased(), ["https", "http"].contains(scheme), let host = url.host, !host.isEmpty, url.user == nil, url.password == nil else { return nil }
         return url

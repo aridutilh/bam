@@ -100,8 +100,25 @@ import QuartzCore
             let responder = window.firstResponder
             pasteboard.clearContents()
             pasteboard.setString("unmodified", forType: .string)
+            let changeCountBefore = pasteboard.changeCount
             commands.pageFeedback.hide()
             commands.copyCurrentURL(nil)
+            if pasteboard.string(forType: .string) != web.url?.absoluteString {
+                let details = [
+                    "label=\(label)", "appActive=\(NSApp.isActive)",
+                    "keyWindow=\(String(describing: NSApp.keyWindow?.windowNumber))", "expectedWindow=\(window.windowNumber)",
+                    "expectedWindowIsKey=\(window.isKeyWindow)", "keyHasSheet=\(NSApp.keyWindow?.attachedSheet != nil)",
+                    "shuttingDown=\(commands.isShuttingDown)", "activeWebMatches=\(commands.activeWebView === web)",
+                    "commandWebMatches=\(commands.commandWebView === web)",
+                    "webWindow=\(String(describing: web.window?.windowNumber))", "webHidden=\(web.isHiddenOrHasHiddenAncestor)",
+                    "webHasSuperview=\(web.superview != nil)", "expectedURL=\(web.url?.absoluteString ?? "nil")",
+                    "copyableURL=\(web.url.flatMap { URLInput.directURL($0.absoluteString) }?.absoluteString ?? "nil")",
+                    "actualPasteboard=\(pasteboard.string(forType: .string) ?? "nil")",
+                    "pasteboardChanges=\(changeCountBefore)→\(pasteboard.changeCount)",
+                    "feedbackVisible=\(commands.pageFeedback.isVisible)", "feedbackMessage=\(commands.pageFeedback.message ?? "nil")"
+                ]
+                print("Copy URL failure diagnostics: " + details.joined(separator: "; ")); fflush(stdout)
+            }
             try check(pasteboard.string(forType: .string) == web.url?.absoluteString,
                       "Copy URL did not use \(label)'s live address")
             try check(commands.pageFeedback.isVisible && commands.pageFeedback.message == "Page copied"
@@ -203,6 +220,7 @@ import QuartzCore
         // A same-document URL change must be copied instead of stale saved-tab metadata.
         let pushed = try await js(main, "history.pushState(null,'','?ark_page_command=main-live'); location.href") as! String
         try await wait("main live URL") { main.url?.absoluteString == pushed }
+        try await establishKeyWindow(commandWindow, label: "main live URL copy")
         try copy(main, label: "main", window: commandWindow)
         if let originalSize = commandWindow.contentView?.bounds.size {
             defer {

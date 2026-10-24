@@ -185,7 +185,16 @@ import QuartzCore
     let pageFeedback = PageFeedbackCoordinator()
     var pageCommandPasteboard: NSPasteboard = .general
     let downloads: DownloadCoordinator
-    lazy var library = BrowserLibrary(storageURL: privateMode ? nil : sessionURL.deletingLastPathComponent().appendingPathComponent("library.json"))
+    let profileStores: WebsiteProfileStore
+    var profileLibraries: [UUID: BrowserLibrary] = [:]
+    var library: BrowserLibrary { library(for: commandProfileID) }
+    var confirmProfileChange: ((String) -> Bool)?
+    var isApplyingProfileChange = false
+    var extensionStorage: AnyObject?
+    var extensionRefreshWork: DispatchWorkItem?
+    var peekExtensionIDs: [UUID: UUID] = [:]
+    var navigationTokens: [UUID: UUID] = [:]
+    var browserExtensionOrigins: [UUID: String] = [:]
     var displayedTabID: UUID?
     var displayedMemberIDs: [UUID] = []
     var automaticDepartureQueue: [UUID] = []
@@ -223,9 +232,18 @@ import QuartzCore
     var observations: [UUID: [NSKeyValueObservation]] = [:]
     var addressOverlay: DismissView?
     var addressField: PaletteField?
-    var addressCard: FlippedContainer?
+    var addressCard: NSView?
     var tabSearchResults: TabSearchResultsView?
-    var paletteShortcuts: NSTextField?
+    var paletteIcon: NSImageView?
+    var paletteHint: NSTextField?
+    var paletteSeparator: NSBox?
+    var paletteGlow: NSView?
+    var paletteTint: NSView?
+    var paletteEnginePill: PaletteEnginePill?
+    var paletteEngine: SiteSearchEngine?
+    var paletteHintEngine: SiteSearchEngine?
+    var paletteSuggestions: [String] = []
+    let suggestionFetcher = SearchSuggestionFetcher()
     var newTabOnSubmit = false
     var privateMode: Bool
     var spaceManager: SpaceManagementController?
@@ -254,6 +272,7 @@ import QuartzCore
     init(sessionURL: URL, ephemeral: Bool = false, downloadCoordinator: DownloadCoordinator? = nil) {
         self.downloads = downloadCoordinator ?? DownloadCoordinator()
         self.sessionURL = sessionURL; self.privateMode = ephemeral
+        self.profileStores = WebsiteProfileStore(ephemeral: ephemeral)
         session = ephemeral ? .fresh() : SessionFile.load(sessionURL)
         if !ephemeral, UserDefaults.standard.object(forKey: "AutomaticallyShowPlayingVideo") != nil { automaticallyShowsVideo = UserDefaults.standard.bool(forKey: "AutomaticallyShowPlayingVideo") }
         displayedWidth = session.sidebarVisible ? CGFloat(session.sidebarWidth) : 0
@@ -311,12 +330,6 @@ import QuartzCore
             guard let self else { return false }
             return self.handleSpaceScroll(event, source: source) == nil
         }
-        library.onOpenURL = { [weak self] address in
-            guard let self else { return }
-            self.cancelPaging(); self.dismissAddress()
-            self.session.add(address: address); self.showActive(); self.save()
-        }
-        library.onRestoreClosed = { [weak self] record in self?.restoreClosed(record) }
         pictureInPicture.onChange = { [weak self] in self?.showActive() }
         pictureInPicture.onReturnToTab = { [weak self] id in self?.returnToVideoTab(id) }
         scrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
@@ -384,21 +397,14 @@ import QuartzCore
         progress.frame = NSRect(x: 0, y: toolbarHeight, width: card.bounds.width * CGFloat(activeWebView?.estimatedProgress ?? 0), height: 2)
         handle.frame = NSRect(x: max(0, width - 5), y: 44, width: 10, height: max(0, h - 60))
         handle.currentWidth = targetWidth; handle.isHidden = !session.sidebarVisible || width < 100
-        if let overlay = addressOverlay, let content = addressCard {
-            overlay.frame = root.bounds
-            let cw = min(590, w - 60)
-            let rowsHeight = tabSearchResults?.preferredHeight ?? 44
-            content.frame = NSRect(x: (w - cw) / 2, y: min(100, h * 0.10), width: cw, height: 145 + rowsHeight)
-            addressField?.frame = NSRect(x: 24, y: 50, width: cw - 48, height: 40)
-            tabSearchResults?.frame = NSRect(x: 14, y: 116, width: cw - 28, height: rowsHeight)
-            paletteShortcuts?.frame = NSRect(x: 26, y: 124 + rowsHeight, width: cw - 52, height: 18)
-        }
+        if addressOverlay != nil { layoutPalette(width: w, height: h) }
     }
 
     func webView(for tab: BrowserTab) -> WKWebView {
         if let cached = browsers[tab.id] { return cached }
         let configuration = WKWebViewConfiguration()
-        configuration.websiteDataStore = privateMode ? .nonPersistent() : .default()
+        configuration.websiteDataStore = profileStores.store(for: session.profileID(for: tab))
+        configureExtensions(configuration, profileID: session.profileID(for: tab))
         let browser = WKWebView(frame: .zero, configuration: configuration)
         register(browser, id: tab.id)
         load(tab.address, in: browser, id: tab.id)
@@ -406,7 +412,7 @@ import QuartzCore
             sleepRestores[tab.id] = state
             if let index = session.tabs.firstIndex(where: { $0.id == tab.id }) { session.tabs[index].sleepState = nil }
         }
-        return browser
+        return browsers[tab.id] ?? browser
     }
     func register(_ browser: WKWebView, id: UUID) {
         browser.navigationDelegate = self; browser.uiDelegate = self
@@ -427,20 +433,59 @@ import QuartzCore
         ]
     }
     func load(_ address: String, in browser: WKWebView, id: UUID) {
+        guard let tab = session.tabs.first(where: { $0.id == id }), browsers[id] === browser else { return }
+        let profile = session.profileID(for: tab), token = UUID()
+        navigationTokens[id] = token
         tabActivityProbe.invalidate(browser); sleepRestores.removeValue(forKey: id)
         tabErrors.removeValue(forKey: id)
         requestedAddresses[id] = address; pendingLoads.insert(id)
-        if address == "orbit://newtab" || address == "orbit://video" {
-            pendingHome.insert(id)
-            if let file = Bundle.main.url(forResource: address == "orbit://video" ? "PiPDemo" : "Home", withExtension: "html") { browser.loadFileURL(file, allowingReadAccessTo: file.deletingLastPathComponent()) }
-            else { browser.loadHTMLString("<h1>Bam</h1><p>Press Command-L to explore.</p>", baseURL: nil) }
-        } else if let url = URLInput.directURL(address) {
-            TabActivityProbe.install(in: browser.configuration)
-            pendingHome.remove(id); browser.load(URLRequest(url: url))
+        whenExtensionsReady(profileID: profile) { [weak self, weak browser] in
+            guard let self, let browser, !self.isShuttingDown, self.navigationTokens[id] == token,
+                  self.browsers[id] === browser,
+                  let current = self.session.tabs.first(where: { $0.id == id }), self.session.profileID(for: current) == profile else { return }
+            self.loadPrepared(address, in: browser, id: id, profileID: profile)
         }
     }
+    private func loadPrepared(_ address: String, in browser: WKWebView, id: UUID, profileID: UUID) {
+        let extensionURL = URLInput.extensionURL(address)
+        if let extensionURL, !allowsExtensionPage(extensionURL, profileID: profileID) {
+            pendingLoads.remove(id); pendingHome.remove(id)
+            tabErrors[id] = "This extension is unavailable in this profile — open Manage Extensions to enable it"
+            refresh(); return
+        }
+        let origin = extensionURL?.host?.lowercased()
+        var destination = browser
+        if browserExtensionOrigins[id] != origin {
+            // Extension pages require their context's configuration, which cannot
+            // navigate outside its origin. Replace the renderer at that boundary.
+            let configuration: WKWebViewConfiguration
+            if let extensionURL, let configured = extensionPageConfiguration(extensionURL, profileID: profileID) { configuration = configured }
+            else {
+                configuration = WKWebViewConfiguration()
+                configuration.websiteDataStore = profileStores.store(for: profileID)
+                configureExtensions(configuration, profileID: profileID)
+            }
+            let wasVisible = visibleMemberIDs.contains(id)
+            isApplyingProfileChange = true; retireProfilePage(id); isApplyingProfileChange = false
+            destination = WKWebView(frame: browser.frame, configuration: configuration)
+            register(destination, id: id); browserExtensionOrigins[id] = origin
+            requestedAddresses[id] = address; pendingLoads.insert(id)
+            if wasVisible { showActive() }
+        }
+        if address == "orbit://newtab" || address == "orbit://video" {
+            pendingHome.insert(id)
+            if let file = Bundle.main.url(forResource: address == "orbit://video" ? "PiPDemo" : "Home", withExtension: "html") { destination.loadFileURL(file, allowingReadAccessTo: file.deletingLastPathComponent()) }
+            else { destination.loadHTMLString("<h1>Bam</h1><p>Press Command-L to explore.</p>", baseURL: nil) }
+        } else if let url = extensionURL ?? URLInput.directURL(address) {
+            if extensionURL == nil { TabActivityProbe.install(in: destination.configuration) }
+            pendingHome.remove(id); destination.load(URLRequest(url: url))
+        } else {
+            pendingLoads.remove(id); tabErrors[id] = "This address cannot be opened"; refresh()
+        }
+        scheduleExtensionRefresh()
+    }
     func showActive() {
-        guard let tab = session.active, !isShuttingDown else { return }
+        guard let tab = session.active, !isShuttingDown, !isApplyingProfileChange else { return }
         let arriving = visibleMemberIDs
         for id in arriving { tabLastUsed[id] = ProcessInfo.processInfo.systemUptime }
         let outgoing = displayedMemberIDs.filter { !arriving.contains($0) }
@@ -555,6 +600,7 @@ import QuartzCore
         saveWork?.cancel(); saveWork = nil
         chromeRefreshWork?.cancel(); chromeRefreshWork = nil
         stopTabResourceMonitoring()
+        stopExtensions()
         spaceManager?.cancel(nil)
         savedTabEditor?.cancel(nil)
         isShuttingDown = true; cancelAutomaticDepartures(); findBar.hide(); pageFeedback.hide(); downloads.cancelAll(); pictureInPicture.restore()
@@ -568,7 +614,7 @@ import QuartzCore
         guard let pair = browsers.first(where: { $0.value === web }), let i = session.tabs.firstIndex(where: { $0.id == pair.key }) else { return }
         guard !pendingLoads.contains(pair.key), tabErrors[pair.key] == nil else { return }
         let previous = session.tabs[i]
-        if let url = web.url, ["https", "http"].contains(url.scheme ?? "") {
+        if let url = web.url, ["https", "http"].contains(url.scheme ?? "") || allowsExtensionPage(url, profileID: session.profileID(for: session.tabs[i])) {
             session.tabs[i].address = url.absoluteString
             session.tabs[i].title = web.title?.isEmpty == false ? web.title! : url.host ?? "New tab"
         } else if web.url?.standardizedFileURL == Bundle.main.url(forResource: "PiPDemo", withExtension: "html")?.standardizedFileURL {
@@ -591,6 +637,7 @@ import QuartzCore
     }
     func refresh() {
         guard isViewLoaded else { return }
+        scheduleExtensionRefresh()
         root.space = session.spaceDefinition(session.space)?.colorIndex ?? 0
         sidebar.configureSpaces(session.spaces)
         let tabs = sidebarItems(in: session)
@@ -614,14 +661,18 @@ import QuartzCore
         refreshFindTarget()
         layoutBrowser()
     }
-    func select(_ id: UUID) { cancelPaging(); session.select(id); dismissAddress(); showActive(); save() }
+    func select(_ id: UUID) {
+        if let tab = session.tabs.first(where: { $0.id == id }), tab.isFavorite,
+           !selectSpace(forProfile: session.profileID(for: tab)) { return }
+        cancelPaging(); session.select(id); dismissAddress(); showActive(); save()
+    }
     func close(_ id: UUID) {
         cancelPaging(); cancelAutomaticDepartures()
         let group = session.split(for: id)
         let closingIDs = group?.primaryID == id ? [id, group!.secondaryID] : [id]
         let closed = closingIDs.compactMap { closingID in session.tabs.first { $0.id == closingID } }
         let removed = closed.filter { !$0.isSaved }
-        library.recordClosed(tabs: removed, split: removed.count == 2)
+        if let source = closed.first { library(for: session.profileID(for: source)).recordClosed(tabs: removed, split: removed.count == 2) }
         _ = session.close(id)
         if let group, let split = splitCoordinators.removeValue(forKey: group.primaryID) {
             split.detach(); split.view.removeFromSuperview()
@@ -641,6 +692,7 @@ import QuartzCore
                 web.pauseAllMediaPlayback(completionHandler: nil)
                 retiringViews.removeValue(forKey: ObjectIdentifier(web)); web.removeFromSuperview()
             }
+            navigationTokens.removeValue(forKey: closingID); browserExtensionOrigins.removeValue(forKey: closingID)
             pendingHome.remove(closingID); tabErrors.removeValue(forKey: closingID); pendingLoads.remove(closingID); requestedAddresses.removeValue(forKey: closingID)
         }
         showActive(); save()
@@ -965,7 +1017,7 @@ import QuartzCore
             return
         }
         returnActiveVideo()
-        if activeWebView?.isLoading == true { activeWebView?.stopLoading(); pendingLoads.remove(focusedTabID) }
+        if activeWebView?.isLoading == true || pendingLoads.contains(focusedTabID) { activeWebView?.stopLoading(); navigationTokens.removeValue(forKey: focusedTabID); pendingLoads.remove(focusedTabID) }
         else if tabErrors[focusedTabID] != nil, let address = requestedAddresses[focusedTabID] { navigate(address) }
         else { activeWebView?.reload() }
     }
@@ -1021,71 +1073,8 @@ import QuartzCore
         return false
     }
 
-    func openAddress(newTab: Bool, empty: Bool) {
-        cancelPaging(); dismissAddress(); view.window?.makeKeyAndOrderFront(nil); newTabOnSubmit = newTab
-        let overlay = DismissView(); overlay.wantsLayer = true
-        overlay.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.12).cgColor
-        overlay.dismiss = { [weak self] in self?.dismissAddress() }
-        let box = FlippedContainer(); box.wantsLayer = true
-        box.appearance = NSAppearance(named: .aqua)
-        box.layer?.backgroundColor = NSColor(srgbRed: 0.985, green: 0.98, blue: 0.97, alpha: 1).cgColor
-        box.layer?.cornerRadius = 18; box.layer?.shadowOpacity = 0.20; box.layer?.shadowRadius = 30; box.layer?.shadowOffset = CGSize(width: 0, height: -8)
-        let heading = NSTextField(labelWithString: "Where would you like to go?")
-        heading.font = .systemFont(ofSize: 12, weight: .medium); heading.textColor = .secondaryLabelColor
-        heading.frame = NSRect(x: 26, y: 23, width: 400, height: 18); box.addSubview(heading)
-        let field = PaletteField(); field.font = .systemFont(ofSize: 23, weight: .regular)
-        field.isBordered = false; field.drawsBackground = false; field.focusRingType = .none
-        field.placeholderString = "Search or enter a URL"; field.stringValue = empty ? "" : session.active?.address ?? ""
-        field.target = self; field.action = #selector(submitAddress); field.delegate = self
-        field.escape = { [weak self] in self?.dismissAddress() }; field.setAccessibilityLabel("Search or enter URL")
-        box.addSubview(field)
-        let line = NSBox(); line.boxType = .separator; line.frame = NSRect(x: 24, y: 108, width: 530, height: 1); line.autoresizingMask = [.width]; box.addSubview(line)
-        let shortcuts = NSTextField(labelWithString: "↑↓ Choose     ↵ Open or switch     Esc Cancel")
-        shortcuts.font = .systemFont(ofSize: 11); shortcuts.textColor = .tertiaryLabelColor; shortcuts.frame = NSRect(x: 26, y: 183, width: 500, height: 18); box.addSubview(shortcuts)
-        let results = TabSearchResultsView(frame: .zero)
-        results.onSelect = { [weak self] id in self?.selectSearchResult(id) }
-        results.onSubmitQuery = { [weak self] query in self?.submitAddressQuery(query) }
-        box.addSubview(results)
-        overlay.addSubview(box); root.addSubview(overlay)
-        addressOverlay = overlay; addressField = field; addressCard = box; tabSearchResults = results; paletteShortcuts = shortcuts
-        refreshPaletteResults(); layoutBrowser()
-        box.alphaValue = 0
-        NSAnimationContext.runAnimationGroup { context in context.duration = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 0 : 0.12; box.animator().alphaValue = 1 }
-        view.window?.makeFirstResponder(field); field.selectText(nil)
-    }
-    @objc func submitAddress(_ sender: Any?) {
-        if tabSearchResults?.activateSelection() == true { return }
-        submitAddressQuery(addressField?.stringValue ?? "")
-    }
-    func submitAddressQuery(_ query: String) {
-        guard let address = URLInput.resolve(query) else { NSSound.beep(); return }
-        if newTabOnSubmit { session.add(address: address); dismissAddress(); showActive(); save() }
-        else { navigate(address) }
-    }
-    func refreshPaletteResults() {
-        guard let field = addressField else { return }
-        tabSearchResults?.update(tabs: session.tabs, query: field.stringValue, activeID: focusedTabID, canCreate: true, spaces: session.spaces)
-        layoutBrowser()
-    }
-    func selectSearchResult(_ id: UUID) {
-        select(id)
-        if let group = session.split(for: id), let split = splitCoordinators[group.primaryID] {
-            split.setFocusedSide(id == group.secondaryID ? .right : .left)
-        }
-        view.window?.makeFirstResponder(commandWebView)
-    }
-    func controlTextDidChange(_ obj: Notification) { if obj.object as AnyObject? === addressField { refreshPaletteResults() } }
-    func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
-        if commandSelector == #selector(NSResponder.cancelOperation(_:)) { dismissAddress(); return true }
-        if commandSelector == #selector(NSResponder.moveDown(_:)) { tabSearchResults?.moveSelection(delta: 1); return true }
-        if commandSelector == #selector(NSResponder.moveUp(_:)) { tabSearchResults?.moveSelection(delta: -1); return true }
-        if commandSelector == #selector(NSResponder.insertNewline(_:)) { submitAddress(control); return true }
-        return false
-    }
-    func dismissAddress() {
-        addressOverlay?.removeFromSuperview(); addressOverlay = nil; addressField = nil; addressCard = nil; tabSearchResults = nil; paletteShortcuts = nil
-        view.window?.makeFirstResponder(commandWebView)
-    }
+    // The command palette (open, search, site-scoped search, layout, dismissal)
+    // lives in CommandPalette.swift.
 
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
         tabActivityProbe.invalidate(webView)
@@ -1099,13 +1088,13 @@ import QuartzCore
                 if nonGet { nonGetDocuments.insert(id) } else { nonGetDocuments.remove(id) }
             }
         }
-        updateMetadata(webView)
+        updateMetadata(webView); scheduleExtensionRefresh()
     }
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         if let id = browsers.first(where: { $0.value === webView })?.key { tabErrors.removeValue(forKey: id); pendingLoads.remove(id) }
         updateMetadata(webView)
         restoreSleepingPage(webView)
-        if let url = webView.url { library.recordVisit(title: webView.title ?? url.host ?? "Page", address: url.absoluteString) }
+        if let url = webView.url, let profile = profileID(of: webView) { library(for: profile).recordVisit(title: webView.title ?? url.host ?? "Page", address: url.absoluteString) }
     }
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) { showError(error, web: webView) }
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) { showError(error, web: webView) }
@@ -1139,18 +1128,25 @@ import QuartzCore
         guard let url = navigationAction.request.url else { decisionHandler(.cancel); return }
         let scheme = url.scheme?.lowercased() ?? ""
         if navigationAction.shouldPerformDownload, ["http", "https", "blob", "data"].contains(scheme) { decisionHandler(.download); return }
-        if scheme == "orbit", url.host == "newtab" { decisionHandler(.cancel); navigate("orbit://newtab"); return }
+        if scheme == "orbit", url.host == "newtab" {
+            decisionHandler(.cancel)
+            guard navigationAction.targetFrame?.isMainFrame == true,
+                  let sourceID = browsers.first(where: { $0.value === webView })?.key else { return }
+            navigatePane(sourceID, address: "orbit://newtab")
+            return
+        }
         if scheme == "file" {
             guard let resources = Bundle.main.resourceURL, url.standardizedFileURL.path.hasPrefix(resources.standardizedFileURL.path + "/") else { decisionHandler(.cancel); return }
+        } else if scheme == "webkit-extension" {
+            guard let profile = profileID(of: webView), allowsExtensionPage(url, profileID: profile) else { decisionHandler(.cancel); return }
         } else if !["http", "https", "about"].contains(scheme) { decisionHandler(.cancel); return }
         if navigationAction.navigationType == .linkActivated, let address = URLInput.directURL(url.absoluteString) {
             let modifiers = navigationAction.modifierFlags
-            if modifiers.contains([.command, .option]) { openLittleOrbit(url: address); decisionHandler(.cancel); return }
+            if modifiers.contains([.command, .option]) { openLittleOrbit(url: address, profileID: profileID(of: webView)); decisionHandler(.cancel); return }
             if modifiers.contains(.command) {
-                let previous = session.activeID
-                let id = session.add(address: address.absoluteString)
-                if modifiers.contains(.shift) { select(id) }
-                else { session.select(previous); if let tab = session.tabs.first(where: { $0.id == id }) { _ = self.webView(for: tab) }; refresh(); save() }
+                if let profile = profileID(of: webView) {
+                    _ = openProfileTab(address, profileID: profile, active: modifiers.contains(.shift))
+                }
                 decisionHandler(.cancel); return
             }
             let sourceID = browsers.first(where: { $0.value === webView })?.key
@@ -1164,6 +1160,13 @@ import QuartzCore
             }
         }
         if navigationAction.targetFrame?.isMainFrame == true, let id = browsers.first(where: { $0.value === webView })?.key {
+            let newOrigin = scheme == "webkit-extension" ? url.host?.lowercased() : nil
+            if browserExtensionOrigins[id] != newOrigin {
+                // Do not replay a form submission across renderer configurations.
+                guard navigationAction.request.httpMethod?.uppercased() == "GET" else { decisionHandler(.cancel); return }
+                decisionHandler(.cancel)
+                navigatePane(id, address: url.absoluteString); return
+            }
             if ["http", "https"].contains(scheme) { TabActivityProbe.install(in: webView.configuration) }
             tabActivityProbe.invalidate(webView)
             // Classify the new document only after commit. A failed GET must
@@ -1175,7 +1178,9 @@ import QuartzCore
         decisionHandler(.allow)
     }
     func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
-        if navigationAction.targetFrame == nil, let url = navigationAction.request.url, let safe = URLInput.directURL(url.absoluteString) { let id = session.add(address: safe.absoluteString); select(id) }
+        if navigationAction.targetFrame == nil, let url = navigationAction.request.url, let profile = profileID(of: webView) {
+            _ = openProfileTab(url, profileID: profile, active: true)
+        }
         return nil
     }
     func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping () -> Void) {

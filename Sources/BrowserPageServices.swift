@@ -5,14 +5,16 @@ import WebKit
     @objc func showDownloads(_ sender: Any?) { downloads.showWindow(relativeTo: view.window) }
     @objc func showHistory(_ sender: Any?) { library.showHistory(relativeTo: view.window) }
     @objc func showArchive(_ sender: Any?) { library.showArchive(relativeTo: view.window) }
-    func restoreClosed(_ record: ClosedRecord) {
+    func restoreClosed(_ record: ClosedRecord, profileID: UUID? = nil) {
+        let profileID = profileID ?? session.currentProfileID
+        guard selectSpace(forProfile: profileID) else { return }
         cancelPaging(); dismissAddress()
         var restored: [BrowserTab] = []
         for var tab in record.tabs {
             tab.id = UUID()
             // Closed records retain stable Space IDs; a removed Space must not
             // be recreated or accidentally resolve to a newly created one.
-            if session.spaceDefinition(tab.space) == nil { tab.space = session.space }
+            if session.spaceDefinition(tab.space)?.profileID != profileID { tab.space = session.space }
             restored.append(tab); session.tabs.append(tab)
         }
         guard let first = restored.first else { return }

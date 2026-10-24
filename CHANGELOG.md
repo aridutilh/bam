@@ -1,18 +1,37 @@
 # Changelog
 
-## Unreleased — 0.11.0 local draft, build 25
+## Unreleased — 0.12.0 local draft, build 26
 
-- Add two Space appearances beyond the six flat colors: **Prism**, a slowly shifting spectrum (a 24-second curated hue cycle that skips the muddy yellow-green band; static under Reduce Motion), and **Clear**, which turns the window translucent over a behind-window blur so the desktop shows through. Both are picked anywhere colors are — Manage Spaces, the onboarding color step (with a rainbow and a glass swatch) — persist as ordinary colorIndex values, and carry fallback gradients so Space swipes still blend toward them.
-- Sanitize repairs out-of-range color indices to a flat color; Prism and Clear apply only by explicit choice. The onboarding stage previews both live (Clear keeps a stronger wash there so text stays readable over light wallpapers), and the finale says "dressed in every color at once" or "dressed in glass".
-- Local only; installation and publication remain on hold. Verification is recorded in [VALIDATION.md](VALIDATION.md).
+Two parallel draft lines each used the 0.10–0.11 numbers; this merge renumbers them as one release. Both lines' entries follow.
+
+### Onboarding and Space appearances line (formerly 0.10.0–0.11.0, builds 24–25)
+
+- Add two Space appearances beyond the six flat colors: **Prism**, a slowly shifting spectrum (a 24-second curated hue cycle that skips the muddy yellow-green band; static under Reduce Motion), and **Clear**, which turns the window translucent over a behind-window blur so the desktop shows through. Both are picked anywhere colors are — Manage Spaces, the onboarding color step (with a rainbow and a glass swatch) — persist as ordinary colorIndex values, and carry fallback gradients so Space swipes still blend toward them. New Spaces cycle the flat colors only; sanitize repairs out-of-range indices to a flat color, so the appearances apply only by explicit choice.
+- Add a first-run onboarding: a full-screen stage window with a popping icon welcome, Space color choice that retints the stage live, first-Space naming with symbol choice, optional Chrome bookmark-bar favorite import, interactive ⌘T/⌘S training, a user-initiated default-browser offer (Return skips; the change takes a deliberate click) and a confetti finale. Keyboard-first, with native minimize/close controls (close skips), Reduce Motion fades and a progress-dot/back cluster kept clear of the menu-bar corner.
+- Gate onboarding to true first launches; existing profiles are grandfathered silently, fixtures never see it, and a welcome cut short by quitting returns on the next launch. `--onboarding` forces it anywhere (demo: `bash scripts/preview-onboarding.sh`), and Bam ▸ “Welcome to Bam…” replays it. Finishing updates the first Space and adds chosen favorites as unloaded Favorites within the cap; skipping changes nothing. Browser swipes and chrome menu items stand down while the stage is up.
+
+
+### Command palette, login profiles and extensions line (formerly 0.10.0–0.11.0, builds 24–25)
+
+- Redesign the command palette as a single translucent card in the system appearance: icon-led input row, separator, and Arc-style single-line results with a full-width accent selection, inline dimmed addresses and trailing Space labels. The forced-light card, heading and shortcut footer are removed.
+- Offer Tab-to-search for nineteen sites (YouTube, Google, Google Maps, Gmail, Google Drive, Wikipedia, Amazon, Reddit, GitHub, X, Spotify, Netflix, IMDb, Hacker News, Stack Overflow, ChatGPT, Claude, Perplexity, DuckDuckGo). Typing a site name, domain or alias shows a trailing “Search <Site> ⇥” hint; Tab scopes the palette with a pill, bloom and interior wash in the site’s color, Return searches the site, and Backspace in an empty field removes the pill. Pasted URLs with paths, bare “www” prefixes and multi-word text never trigger the hint.
+- Keep typed addresses out of remote autocomplete: URL-shaped text (a scheme, or a dotted single word, including the ⌘L-prefilled current address) never reaches a suggestion endpoint, and a generation counter drops in-flight responses once the query, scope or palette changes.
+- Fetch debounced autocomplete suggestions while typing: site-scoped suggestions for engines with a suggestion endpoint, and DuckDuckGo suggestions after tab results otherwise. Suggestions are best-effort over the network and never block typing or submission.
+- Local only; publication and installation remain on hold. See [VALIDATION.md](VALIDATION.md).
 
 ## Unreleased — 0.10.0 local draft, build 24
 
-- Add a first-run onboarding: a full-screen stage window with a popping icon welcome, Space color choice that retints the stage live, first-Space naming with symbol choice, optional Chrome bookmark-bar favorite import, interactive ⌘T/⌘S training, a user-initiated default-browser offer and a confetti finale. Keyboard-first (Return advances, Escape goes back, arrows pick colors), with native minimize/close controls (close skips), Reduce Motion fades and a progress-dot/back cluster kept clear of the menu-bar corner.
-- Gate it to true first launches (no session file); existing profiles are grandfathered silently and fixtures never see it, while a welcome cut short by quitting returns on the next launch. `--onboarding` forces it anywhere (demo: `bash scripts/preview-onboarding.sh`), and Bam ▸ “Welcome to Bam…” replays it. Finishing updates the first Space and adds chosen favorites as unloaded Favorites within the cap; skipping changes nothing, and Return never triggers the default-browser change — that takes a deliberate click. Browser swipes and chrome menu items stand down while the stage is up.
-- Local only; installation and publication remain on hold. Verification is recorded in [VALIDATION.md](VALIDATION.md).
+- Add named login profiles to Manage Spaces. Shared-profile Spaces intentionally share website data; separate profiles isolate cookies/local storage, Favorites, history/archive and extensions. Legacy sessions keep the existing Default store.
+- Confirm before replacing loaded pages on a cross-profile move or Space reassignment; preserve cancellation, current metadata, Split pairs and source profiles when promoting Peek/Little Bam.
+- Add the macOS 15.4+ WebKit extension runtime, per-profile host adapters, local-folder import, permission review/revocation, actions and own-origin setup tabs. Delay first navigation until restored extensions are ready. No Chrome Web Store/CRX/archive installer, updates or native messaging.
+- Prepare Manifest V2 background scripts as an explicit UTF-8 page in the private package copy, preserving JavaScript bytes and the original manifest backup.
+- Add loopback native tests for real website-data isolation and extension background/content/popup execution, plus a separate bounded vendor probe. Real vendor compatibility remains individually assessed.
+- Keep notification compatibility out of the build after its experimental bridge failed inbound-message checks. Dashlane reaches onboarding; 1Password remains blocked, and neither vendor is certified for login/autofill.
+- Bind internal Home navigation to the originating main-frame tab so a background profile cannot replace another profile’s active page.
+- Final build: all twelve component suites pass; all eight exact-package native suites have passing results across reruns. Intermittent PiP focus and Space-state failures remain documented in VALIDATION.md.
+- Keep the draft local; no installation, push, tag or release.
 
-## Unreleased — 0.9.0 local draft, build 23
+## Earlier local draft — 0.9.0, build 23
 
 - Ask “Are you sure you want to quit Bam?” for application quit requests, including fresh previews. Cancel/Escape keeps the live session; Quit Bam proceeds through the existing asynchronous save barrier. Repeated requests share one pending decision.
 - Retain the main window so cancelling last-window termination restores it. Ordinary Little Bam close and PiP Return keep their existing behavior.

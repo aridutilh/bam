@@ -4,9 +4,13 @@ import WebKit
 /// Independent implementation informed by Arc's public product documentation:
 /// https://resources.arc.net/hc/en-us/sections/19211965457687-Multitask
 /// The parent owns one coordinator per source tab and calls setVisible on selection.
+typealias PreviewNavigationReadiness = @MainActor (@escaping @MainActor () -> Void) -> Void
+
 @MainActor final class PreviewWKWebView: WKWebView {
     var requestedURL: URL?
     var isProvisionalNavigation = false
+    /// Retained only while readiness delays a requested navigation; follows adoption.
+    var pendingReadyURL: URL?
     var promotionURL: URL? {
         isProvisionalNavigation ? (requestedURL ?? url) : (url ?? requestedURL)
     }
@@ -31,14 +35,15 @@ import WebKit
     private weak var hostWindow: NSWindow?
 
     @discardableResult
-    func present(url: URL, in hostView: NSView, websiteDataStore: WKWebsiteDataStore) -> Bool {
+    func present(url: URL, in hostView: NSView, websiteDataStore: WKWebsiteDataStore, configure: ((WKWebViewConfiguration) -> Void)? = nil, beforeLoad: PreviewNavigationReadiness? = nil) -> Bool {
         guard PreviewURLPolicy.allows(url) else { return false }
         _ = detach(notify: false, stop: true)
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = websiteDataStore
         configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
+        configure?(configuration)
         let browser = PreviewWKWebView(frame: .zero, configuration: configuration)
-        let content = PreviewWebContent(webView: browser)
+        let content = PreviewWebContent(webView: browser, beforeLoad: beforeLoad)
         self.content = content
         content.onDownload = onDownload
         content.onVisit = onVisit
@@ -259,9 +264,12 @@ enum PreviewURLPolicy {
     private var uploadCompletion: (([URL]?) -> Void)?
     private var expectedDownloadNavigation = false
     private var observations: [NSKeyValueObservation] = []
+    private let beforeLoad: PreviewNavigationReadiness?
+    private var loadGeneration = UUID()
 
-    init(webView: WKWebView) {
+    init(webView: WKWebView, beforeLoad: PreviewNavigationReadiness? = nil) {
         self.webView = webView
+        self.beforeLoad = beforeLoad
         super.init()
         webView.navigationDelegate = self; webView.uiDelegate = self
         webView.allowsBackForwardNavigationGestures = true
@@ -278,15 +286,25 @@ enum PreviewURLPolicy {
 
     @discardableResult func load(url: URL) -> Bool {
         guard PreviewURLPolicy.allows(url) else { status = "Only HTTP and HTTPS pages can open here"; onChange?(); return false }
+        guard let web = webView else { return false }
         status = nil
-        (webView as? PreviewWKWebView)?.requestedURL = url
-        (webView as? PreviewWKWebView)?.isProvisionalNavigation = true
-        webView?.load(URLRequest(url: url))
+        let token = UUID(); loadGeneration = token
+        (web as? PreviewWKWebView)?.requestedURL = url
+        (web as? PreviewWKWebView)?.isProvisionalNavigation = true
+        (web as? PreviewWKWebView)?.pendingReadyURL = url
+        let navigate: @MainActor () -> Void = { [weak self, weak web] in
+            guard let self, let web, self.webView === web, self.loadGeneration == token else { return }
+            (web as? PreviewWKWebView)?.pendingReadyURL = nil
+            web.load(URLRequest(url: url))
+            self.onChange?()
+        }
+        if let beforeLoad { beforeLoad(navigate) } else { navigate() }
         onChange?()
-        return webView != nil
+        return true
     }
 
     func takeWebView() -> WKWebView? {
+        loadGeneration = UUID()
         cancelFileSelection()
         observations.removeAll()
         let web = webView
