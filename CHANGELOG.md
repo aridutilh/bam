@@ -4,6 +4,14 @@
 
 Remaining work is tracked with acceptance criteria in [FEATURE-INVENTORY.md](FEATURE-INVENTORY.md). An inventory item is complete only after its full behavior is verified.
 
+## 0.5.4 prerelease — build 17
+
+All seven component suites passed. The unchanged release ZIP passed all five runtime suites on a second attempt; the first stopped at a combined PiP return playback/focus assertion whose cause remains unisolated. Installation, strict signature and exact tested executable/icon identity passed. All 13 tabs, active page/Space, sidebar and Split state were retained, and native main-window/menu/About checks confirmed Bam 0.5.4 build 17. Releases below retain their historical Ark identity and evidence.
+
+- Rename the public application to Bam, package `Bam.app` with executable `BamBrowser`, and move the public repository to [aridutilh/bam](https://github.com/aridutilh/bam).
+- Use the approved generated red burst sticker with a peeled corner on a light matte pink tile as `Resources/BamIcon.png`.
+- Preserve bundle identifier `com.ari.orbitprototype`, profile directory `OrbitPrototype`, and the legacy `Ark` diagnostic cache path. Keep `ARK_ARCH`/`ARK_BUILD_DIR` as aliases for the new `BAM_ARCH`/`BAM_BUILD_DIR` overrides.
+
 ## 0.5.3 prerelease — build 16
 
 Build 16 passed all seven component and five packaged runtime suites, including 207 feature checks (previously 137). New coverage checks top-right placement, compact-host text fit and confirmation lifecycle across replacement, cancellation and host changes. All 54 tracked source/resource/test/build inputs matched the isolated copy. Installation, strict signature and tested-executable identity passed; all 12 tabs and the original selection state were preserved. Actual copy/refresh shortcuts on one bright page showed complete, readable top-right cards, and later dismissal was confirmed. Broader themes, accessibility preferences and frame-by-frame pop timing were not visually measured. Earlier release evidence below remains historical.

@@ -8,7 +8,7 @@ import WebKit
     enum Failure: Error { case assertion(String) }
     func start() {
         Task { @MainActor in
-            do { try await run(); finish(true, "\(checks) checks: per-tab Peek, same-page promotion, Little Ark, cross-window Find, preview history, split focus/navigation, persisted groups, close/reopen, unsplit and focused-page copy/hard refresh") }
+            do { try await run(); finish(true, "\(checks) checks: per-tab Peek, same-page promotion, Little Bam, cross-window Find, preview history, split focus/navigation, persisted groups, close/reopen, unsplit and focused-page copy/hard refresh") }
             catch { finish(false, String(describing: error)) }
         }
     }
@@ -45,7 +45,7 @@ import WebKit
         }
     }
     func run() async throws {
-        guard let raw = ProcessInfo.processInfo.environment["ORBIT_TEST_URL"], let url = URLInput.directURL(raw) else { throw Failure.assertion("Set ORBIT_TEST_URL to a local fixture") }
+        guard let raw = (ProcessInfo.processInfo.environment["BAM_TEST_URL"] ?? ProcessInfo.processInfo.environment["ARK_TEST_URL"] ?? ProcessInfo.processInfo.environment["ORBIT_TEST_URL"]), let url = URLInput.directURL(raw) else { throw Failure.assertion("Set BAM_TEST_URL (or ARK_TEST_URL / ORBIT_TEST_URL) to a local fixture") }
         let destination = FileManager.default.temporaryDirectory.appendingPathComponent("Ark-feature-download-\(UUID().uuidString).bin")
         defer { try? FileManager.default.removeItem(at: destination) }
         let downloadManager = DownloadCoordinator(destinationChooser: { _, _, completion in completion(destination) })
@@ -103,29 +103,29 @@ import WebKit
         try await wait("little fixture") { !littleWeb.isLoading && littleWeb.title == "Orbit Feature Fixture" }
         littlePreview.openInLittleOrbit()
         guard let little = controller.littleWindows.values.first else { throw Failure.assertion("Little window retained") }
-        try check(little.webView === littleWeb && controller.peeks[group.secondaryID] == nil, "Peek transfers to Little Ark")
+        try check(little.webView === littleWeb && controller.peeks[group.secondaryID] == nil, "Peek transfers to Little Bam")
         var littleComponents = URLComponents(url: url, resolvingAgainstBaseURL: false)!
         littleComponents.queryItems = [URLQueryItem(name: "ark_little_visit", value: "1")]
         let littleURL = littleComponents.url!
-        try check(little.open(url: littleURL), "Little Ark accepts its local visit fixture")
-        try await wait("Little Ark visit finishes") { !littleWeb.isLoading && littleWeb.url == littleURL }
-        try await wait("Little Ark visit enters history") { self.controller.library.history.contains { $0.address == littleURL.absoluteString } }
+        try check(little.open(url: littleURL), "Little Bam accepts its local visit fixture")
+        try await wait("Little Bam visit finishes") { !littleWeb.isLoading && littleWeb.url == littleURL }
+        try await wait("Little Bam visit enters history") { self.controller.library.history.contains { $0.address == littleURL.absoluteString } }
         _ = try await js(littleWeb, "window.littleSentinel=43; document.body.insertAdjacentHTML('beforeend','<p>OnlyInLittleArk</p>'); true")
-        guard let littleWindow = little.window else { throw Failure.assertion("Little Ark has a native window") }
-        try await establishKeyWindow(littleWindow, label: "Little Ark before Find")
+        guard let littleWindow = little.window else { throw Failure.assertion("Little Bam has a native window") }
+        try await establishKeyWindow(littleWindow, label: "Little Bam before Find")
         controller.findInPage(nil); controller.findBar.searchText = "OnlyInLittleArk"
-        try await wait("Little Ark find match") { self.controller.findBar.matchFound == true }
+        try await wait("Little Bam find match") { self.controller.findBar.matchFound == true }
         try await establishKeyWindow(window, label: "main browser before Find Next")
         controller.findNext(nil)
         try await wait("Find Next changes page and host") { self.controller.findBar.matchFound == false && self.controller.findBar.view.window === self.window }
-        try await establishKeyWindow(littleWindow, label: "Little Ark before Find Previous")
+        try await establishKeyWindow(littleWindow, label: "Little Bam before Find Previous")
         controller.findPrevious(nil)
         try await wait("Find Previous changes page and host") { self.controller.findBar.matchFound == true && self.controller.findBar.view.window === little.window }
         controller.findBar.hide()
         let promotedURL = try await js(littleWeb, "history.pushState(null,'','?ark_tab_promoted=1'); location.href") as! String
-        try await wait("Little Ark address updated") { littleWeb.url?.absoluteString == promotedURL }
+        try await wait("Little Bam address updated") { littleWeb.url?.absoluteString == promotedURL }
         little.promoteToOrbit()
-        try check(controller.littleWindows.isEmpty && controller.activeWebView === littleWeb, "Little Ark promotes same view and cleans up window")
+        try check(controller.littleWindows.isEmpty && controller.activeWebView === littleWeb, "Little Bam promotes same view and cleans up window")
         try check(controller.session.active?.address == promotedURL, "Tab promotion persists the settled pushState URL")
         try check((try await js(littleWeb, "littleSentinel===43")) as? Bool == true, "Little promotion preserves script state")
         controller.splitWithNewPage(nil)

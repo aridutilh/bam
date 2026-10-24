@@ -38,7 +38,7 @@ import WebKit
         web.navigationDelegate = self
         web.autoresizingMask = [.width, .height]
         window = NSWindow(contentRect: web.frame, styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
-        window.title = "Ark — local PiP smoke test"
+        window.title = "Bam — local PiP smoke test"
         window.contentView = host
         host.addSubview(web); web.frame = host.bounds
         window.makeKeyAndOrderFront(nil)

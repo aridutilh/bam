@@ -5,7 +5,7 @@ import QuartzCore
 @MainActor extension FeatureSmokeTest {
     /// Uses its own browser and pasteboard; the user's clipboard is never read or changed.
     func runPageCommands() async throws {
-        guard let raw = ProcessInfo.processInfo.environment["ORBIT_TEST_URL"],
+        guard let raw = (ProcessInfo.processInfo.environment["BAM_TEST_URL"] ?? ProcessInfo.processInfo.environment["ARK_TEST_URL"] ?? ProcessInfo.processInfo.environment["ORBIT_TEST_URL"]),
               let fixtureURL = URLInput.directURL(raw) else {
             throw Failure.assertion("Page commands need the local HTTP fixture")
         }
@@ -23,7 +23,7 @@ import QuartzCore
         let commandWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1120, height: 720),
                                      styleMask: [.titled, .resizable, .closable], backing: .buffered, defer: false)
         commandWindow.isReleasedWhenClosed = false
-        commandWindow.title = "Ark page command fixture"
+        commandWindow.title = "Bam page command fixture"
         commandWindow.contentViewController = commands
         commandWindow.setContentSize(NSSize(width: 1120, height: 720))
         defer {
@@ -269,17 +269,17 @@ import QuartzCore
 
         commands.openLittleOrbit(url: url("little"))
         guard let little = commands.littleWindows.values.first, let littleWindow = little.window,
-              let littleWeb = little.webView else { throw Failure.assertion("Page command Little Ark created") }
-        try await establishKeyWindow(littleWindow, label: "Little Ark page commands")
-        try await wait("Little Ark command fixture") { !littleWeb.isLoading && littleWeb.title == "Orbit Feature Fixture" }
-        try copy(littleWeb, label: "Little Ark", window: littleWindow)
-        try await hardRefresh(littleWeb, label: "Little Ark", window: littleWindow)
-        try check(try await retained(main, "behind-peek-left"), "Little Ark refresh changed the main left pane")
-        try check(try await retained(right, "behind-peek-right"), "Little Ark refresh changed the main right pane")
+              let littleWeb = little.webView else { throw Failure.assertion("Page command Little Bam created") }
+        try await establishKeyWindow(littleWindow, label: "Little Bam page commands")
+        try await wait("Little Bam command fixture") { !littleWeb.isLoading && littleWeb.title == "Orbit Feature Fixture" }
+        try copy(littleWeb, label: "Little Bam", window: littleWindow)
+        try await hardRefresh(littleWeb, label: "Little Bam", window: littleWindow)
+        try check(try await retained(main, "behind-peek-left"), "Little Bam refresh changed the main left pane")
+        try check(try await retained(right, "behind-peek-right"), "Little Bam refresh changed the main right pane")
 
         let utility = NSWindow(contentRect: NSRect(x: 50, y: 50, width: 360, height: 180),
                                styleMask: [.titled, .closable], backing: .buffered, defer: false)
-        utility.title = "Ark page command utility fixture"
+        utility.title = "Bam page command utility fixture"
         utility.isReleasedWhenClosed = false
         defer { utility.close() }
         try await establishKeyWindow(utility, label: "utility before page commands")
@@ -291,7 +291,7 @@ import QuartzCore
         await pause()
         try check(pasteboard.string(forType: .string) == "utility-must-not-copy" && !commands.pageFeedback.isVisible,
                   "A key utility window copied a background URL or displayed page feedback")
-        try check(try await retained(littleWeb, "behind-utility"), "A key utility window refreshed background Little Ark")
+        try check(try await retained(littleWeb, "behind-utility"), "A key utility window refreshed background Little Bam")
         try check(try await retained(main, "behind-peek-left"), "A key utility window refreshed the background main page")
         try check(try await retained(right, "behind-peek-right"), "A key utility window refreshed the background split page")
         try check(right.originReloads == beforeUtilityRefresh, "A key utility window dispatched an origin reload")

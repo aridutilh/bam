@@ -247,7 +247,7 @@ import QuartzCore
         if address == "orbit://newtab" || address == "orbit://video" {
             pendingHome.insert(id)
             if let file = Bundle.main.url(forResource: address == "orbit://video" ? "PiPDemo" : "Home", withExtension: "html") { browser.loadFileURL(file, allowingReadAccessTo: file.deletingLastPathComponent()) }
-            else { browser.loadHTMLString("<h1>Ark</h1><p>Press Command-L to explore.</p>", baseURL: nil) }
+            else { browser.loadHTMLString("<h1>Bam</h1><p>Press Command-L to explore.</p>", baseURL: nil) }
         } else if let url = URLInput.directURL(address) {
             pendingHome.remove(id); browser.load(URLRequest(url: url))
         }
@@ -391,11 +391,11 @@ import QuartzCore
         }
         if let tab = session.active {
             let host = URL(string: tab.address)?.host ?? tab.address
-            location.title = tabErrors[tab.id] ?? (tab.isHome ? "Ark  /  New tab" : host)
+            location.title = tabErrors[tab.id] ?? (tab.isHome ? "Bam  /  New tab" : host)
             location.toolTip = tab.isHome ? "Search or enter a URL ⌘L" : tab.address
             sidebar.setAddress(tab.address, title: tabErrors[tab.id] ?? (tab.isHome ? "Search or enter URL" : host))
             pin.image = NSImage(systemSymbolName: tab.pinned ? "pin.fill" : "pin", accessibilityDescription: "Pin tab")
-            view.window?.title = "\(tab.title) — Ark"
+            view.window?.title = "\(tab.title) — Bam"
         }
         refreshSplitMetadata()
         refreshFindTarget()

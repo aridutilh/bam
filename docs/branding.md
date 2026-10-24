@@ -1,26 +1,15 @@
-# Ark branding
+# Bam branding
 
-Ark’s icon is a crayon-drawn reinterpretation of Arc’s familiar A and curved crossbar, drawn as though a child remembered it: an off-center peak, mismatched legs and a lopsided crossbar, with uneven wax strokes in red, blue, purple and pink plus yellow and turquoise corrections. The warm paper tile has transparent outer corners.
+Bam’s icon is a vivid textured red sale-burst sticker with a peeled white lower-right corner, centered on a light matte pink rounded square. It has no lettering. The generated master was approved for the 0.5.4 rename. Build 17 packaging and exact approved-master identity passed; native main-window, menu and About checks confirmed the installed Bam branding. Broader Dock/Home appearance and display-scale coverage remain open.
 
-The PNG was generated with the built-in image-generation tool on October 23, 2026. The installed Arc app icon was used only as a visual reference and is not included in this repository. Ark is independent and is not affiliated with The Browser Company; Arc’s name and marks remain associated with their owners.
+The artwork was created with the built-in image-generation tool on October 23, 2026. The final refinement used an earlier Bam icon draft as its edit target, brightening the pink tile and softening the sticker’s shadow while preserving the red burst and peeled corner. The prompt below records the requested edit; it is not a claim that every requested pixel detail was independently verified.
 
-The master is [Resources/ArkIcon.png](../Resources/ArkIcon.png). Run `bash scripts/generate-icon.sh` to mechanically resize and package it into the ten standard macOS icon representations. The normal app build runs that script automatically; regeneration does not require an image service or API key. The generated ICNS is a build artifact.
+The public master is [Resources/BamIcon.png](../Resources/BamIcon.png). Run `bash scripts/generate-icon.sh` to resize and package it into the ten standard macOS icon representations. The normal build runs that script automatically; packaging does not require an image service or API key. Generated ICNS files are build artifacts.
 
-## Initial generation prompt
-
-Use case: logo-brand.
-Asset type: production macOS app icon for the independent browser Ark, square 1024 x 1024.
-Image 1 is a visual reference for the recognisable Arc browser logo's shape only. Make a NEW playful drawing: as if a young kid looked at this real Arc logo and carefully but imperfectly copied it using several different wax crayons.
-Keep the recognisable rounded capital-A mountain shape with the wide curved smile/swoosh crossing its lower half, similar overall silhouette and stroke arrangement to the reference. Draw everything by hand with thick wobbly wax-crayon strokes: lumpy outlines, visible paper grain showing through, irregular pressure, overlapping scribbled passes, a few strokes going slightly outside the intended lines. It should feel made by a child and endearing, not a slick vector with a texture filter.
-Use distinct crayon colors across the strokes: warm red/coral for much of the arch, purple on the lower left, saturated blue for the smile/swoosh, pink toward the upward right tip, and a little turquoise or yellow in overlapping retraced marks. Strong legible silhouette at small Dock size; colorful but simple. No letters or wordmark besides the abstract A shape, no objects such as actual crayons or hands.
-Place the mark large and centered on a warm off-white paper-like macOS rounded-square tile, with comfortably rounded corners and a small transparent outer margin. The tile should be nearly flat, with very subtle depth at most; preserve the handmade color and wax texture rather than glossy 3D extrusion. Genuine transparent pixels outside the rounded-square tile, no checkerboard drawn into the image, no surrounding scene, no text or watermark.
+Bam is an independent project, not affiliated with Arc, The Browser Company or Yab. Releases through 0.5.3 used the former Ark name and icon; their historical changelog and validation entries remain dated evidence.
 
 ## Final refinement prompt
 
-The refinement used the first generated draft as its only input image.
-
-Edit the supplied Ark crayon icon. The user wants it noticeably less identical to the real Arc logo: rougher drawing, as if a young kid were drawing that logo FROM MEMORY, without the logo in front of them.
-Change the actual geometry, not just the surface texture. Keep only the rough idea of an A/tent shape with a curved line across it. Make the A crooked and asymmetric: a slightly off-center sharp wonky peak, one shorter leg, the other too long, irregular widths. Make the crossing curve lopsided, too low on one side, with a small kink or correction; its tip should not reproduce the original logo's perfect upward curl. The shapes must feel casually misremembered.
-Imagine a five-year-old doing this in 10 seconds with several wax crayons: a few fast, unsteady gestures, uneven pressure, small gaps, retraced correction strokes and a little scribbling outside the shape. No carefully filled smooth rounded vector forms, no geometric precision, no faithful tracing, no glossy rendering.
-Use red, blue, purple, pink and a couple of yellow/turquoise correction strokes, but let color placement feel chosen spontaneously rather than copied exactly from Arc. The overall mark should still be bold and readable as a playful A at Dock-icon size.
-Keep a warm off-white paper rounded-square app-icon tile with transparent outer corners, centered composition and generous breathing room. Keep the crayon texture, but make this drawing simpler, looser and more naive than the supplied icon. No words, no actual crayons, no hands, no extra objects, no watermark. True transparent pixels outside the tile.
+```text
+Use case: precise-object-edit. Asset type: macOS Dock application icon, local draft. Input image 1 is the exact edit target. Change only the rounded-square pink tile color and associated shadows: make the tile a considerably lighter, brighter, fresh candy pink, approximately #FFD0E3, so the red burst pops vividly at small Dock sizes. Keep the tile matte and flat, almost uniform pale pink, with only subtle dimensional edge shading; no glossy shine or strong gradient. Reduce the dark muddy shadow underneath the red sticker to a short, soft, subtle warm shadow. Preserve exactly the current size, position, silhouette, vivid red color, textured paper surface, thin rim, and curled/peeled white lower-right corner of the smaller red sale sticker. Preserve tile shape and transparent outer padding. Clean antialiased edges: remove any isolated red/pink/white specks or fringe outside the tile, making everything outside its rounded-square silhouette fully transparent. Keep the artwork centered and square, no text, no letters, no extra shapes or objects. Output the icon by itself with a transparent background.
+```

@@ -65,7 +65,7 @@ struct SidebarTabItem: Equatable {
 
     override init(frame: NSRect) {
         super.init(frame: frame); wantsLayer = true
-        setAccessibilityLabel("Ark sidebar")
+        setAccessibilityLabel("Bam sidebar")
         clip.wantsLayer = true; clip.layer?.masksToBounds = true
         [toggle, back, forward, reload, search, clip, library, plus, pip].forEach(addSubview)
         spaces.forEach(addSubview); clip.addSubview(page); connect(page); cachedPages[0] = page

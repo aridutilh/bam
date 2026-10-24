@@ -1,7 +1,7 @@
 import AppKit
 import WebKit
 
-/// Ark's compact browser window, named Little Ark in the UI.
+/// Bam's compact browser window, named Little Bam in the UI.
 /// Product reference: Arc's official 2021 release notes describe a compact lookup
 /// window and Command-O promotion into the main browser:
 /// https://resources.arc.net/hc/en-us/articles/20498463803799-Arc-for-macOS-2021-Release-Notes
@@ -20,7 +20,7 @@ import WebKit
         let window = LittleOrbitWindow(contentRect: NSRect(x: 0, y: 0, width: 760, height: 620),
                                        styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         super.init(window: window)
-        window.title = "Little Ark"; window.contentMinSize = NSSize(width: 500, height: 320)
+        window.title = "Little Bam"; window.contentMinSize = NSSize(width: 500, height: 320)
         window.isReleasedWhenClosed = false; window.delegate = self
         window.contentView = root; window.appearance = NSAppearance(named: .darkAqua)
         window.onEscape = { [weak self] in self?.close() }
@@ -121,10 +121,10 @@ import WebKit
     }
     private func refresh() {
         guard let content, let web = content.webView else { return }
-        let title = web.title?.isEmpty == false ? web.title! : "Little Ark"
-        window?.title = title == "Little Ark" ? title : "\(title) — Little Ark"
+        let title = web.title?.isEmpty == false ? web.title! : "Little Bam"
+        window?.title = title == "Little Bam" ? title : "\(title) — Little Bam"
         if root.address.currentEditor() == nil { root.address.stringValue = web.url?.absoluteString ?? "" }
-        root.status.stringValue = content.status ?? web.title ?? "Quick lookup · ⌘O opens this page in Ark"
+        root.status.stringValue = content.status ?? web.title ?? "Quick lookup · ⌘O opens this page in Bam"
         root.back.isEnabled = web.canGoBack; root.forward.isEnabled = web.canGoForward
         root.reload.title = web.isLoading ? "✕" : "↻"
         root.reload.toolTip = web.isLoading ? "Stop loading" : "Reload (⌘R)"
@@ -167,8 +167,8 @@ import WebKit
     let back = NSButton(title: "‹", target: nil, action: nil)
     let forward = NSButton(title: "›", target: nil, action: nil)
     let reload = NSButton(title: "↻", target: nil, action: nil)
-    let promote = NSButton(title: "Open in Ark", target: nil, action: nil)
-    let status = NSTextField(labelWithString: "Quick lookup · ⌘O opens this page in Ark")
+    let promote = NSButton(title: "Open in Bam", target: nil, action: nil)
+    let status = NSTextField(labelWithString: "Quick lookup · ⌘O opens this page in Bam")
     let progress = NSProgressIndicator()
     override var isFlipped: Bool { true }
     override init(frame: NSRect) {
@@ -177,9 +177,9 @@ import WebKit
         [browserHost, address, back, forward, reload, promote, status, progress].forEach(addSubview)
         for button in [back, forward, reload, promote] { button.bezelStyle = .rounded }
         back.setAccessibilityLabel("Back"); forward.setAccessibilityLabel("Forward"); reload.setAccessibilityLabel("Reload or stop")
-        address.placeholderString = "Search or enter a web address"; address.setAccessibilityLabel("Little Ark address")
+        address.placeholderString = "Search or enter a web address"; address.setAccessibilityLabel("Little Bam address")
         address.font = .systemFont(ofSize: 12); address.bezelStyle = .roundedBezel
-        promote.toolTip = "Move this same page into Ark (⌘O)"; promote.font = .systemFont(ofSize: 11)
+        promote.toolTip = "Move this same page into Bam (⌘O)"; promote.font = .systemFont(ofSize: 11)
         status.font = .systemFont(ofSize: 10); status.textColor = .secondaryLabelColor; status.lineBreakMode = .byTruncatingTail
         progress.style = .bar; progress.isIndeterminate = false; progress.minValue = 0; progress.maxValue = 1
     }

@@ -2,7 +2,7 @@ import AppKit
 import WebKit
 import QuartzCore
 
-/// Ark's own feature: a floating panel rehosts the existing web view and
+/// Bam's own feature: a floating panel rehosts the existing web view and
 /// reversibly isolates its HTML5 video. This is not recovered Arc code or AVKit PiP.
 @MainActor final class PictureInPictureCoordinator: NSObject, NSWindowDelegate {
     private(set) var activeTabID: UUID?
@@ -325,7 +325,7 @@ import QuartzCore
         var style: NSWindow.StyleMask = [.borderless, .resizable]
         if automatic { style.insert(.nonactivatingPanel) }
         let videoPanel = ArkVideoPanel(contentRect: target, styleMask: style, backing: .buffered, defer: false)
-        videoPanel.title = "Picture in Picture — Ark"
+        videoPanel.title = "Picture in Picture — Bam"
         videoPanel.setAccessibilityLabel("Picture in Picture")
         let minimumWidth: CGFloat = ratio >= 1 ? 320 : 180
         videoPanel.contentMinSize = NSSize(width: minimumWidth, height: minimumWidth / ratio)

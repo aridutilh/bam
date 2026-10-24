@@ -30,7 +30,7 @@ import WebKit
         selectedSpaceOneTab = one.id; alternateSpaceOneTab = alternate.id
         controller.session = BrowserSession(tabs: [zero, one, alternate, two], activeID: zero.id)
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 720), styleMask: [.titled, .closable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
-        window.title = "Ark — local interaction smoke test"
+        window.title = "Bam — local interaction smoke test"
         window.contentViewController = controller
         // AppKit adopts the controller root view’s initial size (1×1 here).
         // Match App.swift by sizing the content after installing the controller.

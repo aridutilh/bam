@@ -65,7 +65,7 @@ private final class AnimationFrameClock: NSObject {
 /// A small analytical spring driver, evaluated against monotonic elapsed time.
 /// The measured collection-layout pairs are (response: 0.55, ratio: 0.94)
 /// and (response: 0.30, ratio: 0.99). They are response parameters, not durations.
-/// Ark chooses the latter pair for space paging; its original symbol animations
+/// Bam chooses the latter pair for space paging; its original symbol animations
 /// use their own parameters. Sidebar presentation uses the cubic driver below.
 final class SpringAnimator {
     weak var animationView: NSView?
@@ -290,7 +290,7 @@ final class CubicAnimator {
 
 /// Native AppKit resize handling and an originally drawn grip.
 /// Numeric width thresholds, snap gates, haptic delay, and pulse timing were
-/// informed by local measurements; drawing and event handling are Ark code.
+/// informed by local measurements; drawing and event handling are Bam code.
 final class ResizeHandleView: NSView {
     var onResize: ((CGFloat, Bool) -> Void)?
     var onCollapse: (() -> Void)?

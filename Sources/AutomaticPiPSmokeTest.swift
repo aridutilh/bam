@@ -65,7 +65,7 @@ import WebKit
         let player = WKWebView(frame: .zero, configuration: config)
         controller.register(player, id: video.id)
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 700), styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
-        window.title = "Ark — automatic PiP fixture"
+        window.title = "Bam — automatic PiP fixture"
         window.contentViewController = controller; window.setContentSize(NSSize(width: 1000, height: 700))
         try await establishKeyWindow(window, label: "initial browser")
         controller.load("orbit://video", in: player, id: video.id)
@@ -129,7 +129,7 @@ import WebKit
             !self.controller.pictureInPicture.isRestoring(player) && !self.controller.automaticProbeInFlight
         }
         _ = try await js(player, "__orbitTestVideo.play(); true")
-        guard let fixtureURL = ProcessInfo.processInfo.environment["ORBIT_TEST_URL"].flatMap(URL.init(string:)) else {
+        guard let fixtureURL = (ProcessInfo.processInfo.environment["BAM_TEST_URL"] ?? ProcessInfo.processInfo.environment["ARK_TEST_URL"] ?? ProcessInfo.processInfo.environment["ORBIT_TEST_URL"]).flatMap(URL.init(string:)) else {
             throw Failure.assertion("Missing local Peek URL")
         }
         controller.openPeek(fixtureURL)
@@ -144,7 +144,7 @@ import WebKit
         }
         let utility = NSWindow(contentRect: NSRect(x: 40, y: 40, width: 380, height: 220),
                                styleMask: [.titled, .closable], backing: .buffered, defer: false)
-        utility.title = "Ark — automatic PiP utility"
+        utility.title = "Bam — automatic PiP utility"
         utility.isReleasedWhenClosed = false
         defer { utility.close() }
         try await establishKeyWindow(window, label: "source browser before minimizing")
@@ -302,7 +302,7 @@ import WebKit
 
         let utility = NSWindow(contentRect: NSRect(x: 40, y: 40, width: 380, height: 220),
                                styleMask: [.titled, .closable], backing: .buffered, defer: false)
-        utility.title = "Ark — utility close test"; utility.isReleasedWhenClosed = false
+        utility.title = "Bam — utility close test"; utility.isReleasedWhenClosed = false
         let tabIDs = controller.session.tabs.map(\.id)
         let activeID = controller.session.activeID
         try await establishKeyWindow(utility, label: "utility close routing")

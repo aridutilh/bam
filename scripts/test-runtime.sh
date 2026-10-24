@@ -1,8 +1,14 @@
 #!/bin/bash
 set -euo pipefail
 ROOT=$(cd -- "$(dirname -- "$0")/.." && pwd)
-APP=${ARK_TEST_APP:-"$ROOT/Ark.app"}
-RUN_DIR=$(mktemp -d /private/tmp/ark-tests.XXXXXX)
+APP=${BAM_TEST_APP:-${ARK_TEST_APP:-${ORBIT_TEST_APP:-"$ROOT/Bam.app"}}}
+# Honor older app bundles supplied through a legacy test-app override too.
+EXECUTABLE=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP/Contents/Info.plist")
+if [[ "$EXECUTABLE" == */* || ! -x "$APP/Contents/MacOS/$EXECUTABLE" ]]; then
+    echo "FAIL: Runtime app has no valid executable: $APP" >&2
+    exit 1
+fi
+RUN_DIR=$(mktemp -d /private/tmp/bam-tests.XXXXXX)
 SERVER_PID=''
 cleanup() { if [ -n "$SERVER_PID" ]; then kill "$SERVER_PID" 2>/dev/null || true; wait "$SERVER_PID" 2>/dev/null || true; fi; rm -rf "$RUN_DIR"; }
 trap cleanup EXIT
@@ -15,7 +21,9 @@ server.serve_forever()
 PY
 SERVER_PID=$!
 for attempt in {1..50}; do [ -s "$RUN_DIR/port" ] && break; sleep 0.1; done
-export ORBIT_TEST_URL="http://127.0.0.1:$(cat "$RUN_DIR/port")/index.html"
+export BAM_TEST_URL="http://127.0.0.1:$(cat "$RUN_DIR/port")/index.html"
+export ARK_TEST_URL="$BAM_TEST_URL"
+export ORBIT_TEST_URL="$BAM_TEST_URL"
 for test in --web-test --pip-test --interaction-test --auto-pip-test --feature-test; do
     case "$test" in
         --web-test) marker='PASS: WebKit — ' ;;
@@ -25,7 +33,7 @@ for test in --web-test --pip-test --interaction-test --auto-pip-test --feature-t
         --feature-test) marker='PASS: Features — ' ;;
     esac
     log="$RUN_DIR/${test#--}.log"
-    if ! "$APP/Contents/MacOS/ArkBrowser" "$test" 2>&1 | tee "$log"; then
+    if ! "$APP/Contents/MacOS/$EXECUTABLE" "$test" 2>&1 | tee "$log"; then
         echo "FAIL: Runtime $test exited unsuccessfully" >&2
         exit 1
     fi

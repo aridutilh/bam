@@ -180,7 +180,7 @@ import WebKit
     let closeButton = NSButton(title: "✕", target: nil, action: nil)
     let tabButton = NSButton(title: "Open in Tab", target: nil, action: nil)
     let splitButton = NSButton(title: "Split View", target: nil, action: nil)
-    let littleButton = NSButton(title: "Little Ark", target: nil, action: nil)
+    let littleButton = NSButton(title: "Little Bam", target: nil, action: nil)
     let progress = NSProgressIndicator()
     override var isFlipped: Bool { true }
 
@@ -225,7 +225,7 @@ import WebKit
     override func mouseDown(with event: NSEvent) { /* Blank card area is not the dimmed backdrop. */ }
 }
 
-/// Shared by Peek and Little Ark; no external URL is handed to NSWorkspace.
+/// Shared by Peek and Little Bam; no external URL is handed to NSWorkspace.
 enum PreviewURLPolicy {
     static func allows(_ url: URL) -> Bool {
         guard let scheme = url.scheme?.lowercased(), ["http", "https"].contains(scheme),

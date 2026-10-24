@@ -10,4 +10,6 @@ Resources/Recovered/
 RECOVERY-NOTES.md
 
 # Generated from the committed master PNG by the build.
+/Resources/BamIcon.icns
+# Ignore the previous generated icon while upgrading an existing checkout.
 /Resources/ArkIcon.icns

@@ -13,23 +13,25 @@ if [ "$VERSION" != "$BUNDLE_VERSION" ]; then
     exit 1
 fi
 bash "$PROJECT_DIR/scripts/generate-icon.sh"
-BUILD_DIR=${ARK_BUILD_DIR:-${ORBIT_BUILD_DIR:-"$PROJECT_DIR/.build"}}
-DELIVERABLE_APP="$PROJECT_DIR/Ark.app"
+BUILD_DIR=${BAM_BUILD_DIR:-${ARK_BUILD_DIR:-${ORBIT_BUILD_DIR:-"$PROJECT_DIR/.build"}}}
+DELIVERABLE_APP="$PROJECT_DIR/Bam.app"
 # Sign outside iCloud/File Provider folders, which may add FinderInfo during signing.
-STAGING_DIR=$(mktemp -d /private/tmp/ark-native.XXXXXX)
+STAGING_DIR=$(mktemp -d /private/tmp/bam-native.XXXXXX)
 trap 'rm -rf "$STAGING_DIR"' EXIT
-APP="$STAGING_DIR/Ark.app"
+APP="$STAGING_DIR/Bam.app"
 SDK=$(xcrun --sdk macosx --show-sdk-path)
 SWIFTC=$(xcrun --find swiftc)
 mkdir -p "$BUILD_DIR/module-cache" "$APP/Contents/MacOS" "$APP/Contents/Resources"
 # Scope the installed CLT duplicate SwiftBridging module-map workaround to this build.
 printf '// Empty legacy module map; current SwiftBridging is supplied by the toolchain.\n' > "$BUILD_DIR/empty.modulemap"
 python3 -c 'import json,sys; from pathlib import Path; p=Path(sys.argv[1]); (p/"overlay.json").write_text(json.dumps({"version":0,"case-sensitive":"true","roots":[{"type":"file","name":"/Library/Developer/CommandLineTools/usr/include/swift/module.modulemap","external-contents":str(p/"empty.modulemap")}]},indent=2))' "$BUILD_DIR"
-ARCH=${ARK_ARCH:-$(uname -m)}
+ARCH=${BAM_ARCH:-${ARK_ARCH:-${ORBIT_ARCH:-$(uname -m)}}}
 COMMON=(-swift-version 5 -sdk "$SDK" -target "$ARCH-apple-macosx14.0" -module-cache-path "$BUILD_DIR/module-cache" -vfsoverlay "$BUILD_DIR/overlay.json" -Xcc -ivfsoverlay -Xcc "$BUILD_DIR/overlay.json")
-"$SWIFTC" "${COMMON[@]}" -O -parse-as-library -framework AppKit -framework WebKit -framework QuartzCore "$PROJECT_DIR"/Sources/*.swift -o "$APP/Contents/MacOS/ArkBrowser"
+"$SWIFTC" "${COMMON[@]}" -O -parse-as-library -framework AppKit -framework WebKit -framework QuartzCore "$PROJECT_DIR"/Sources/*.swift -o "$APP/Contents/MacOS/BamBrowser"
 cp -X "$PROJECT_DIR/Info.plist" "$APP/Contents/Info.plist"
 /usr/bin/ditto --norsrc --noextattr "$PROJECT_DIR/Resources/" "$APP/Contents/Resources/"
+# Exclude the previous generated icon from upgraded working copies.
+rm -f "$APP/Contents/Resources/ArkIcon.icns"
 # Finder/iCloud may attach metadata to newly created .app folders in Documents.
 # Remove only signing-incompatible metadata on this generated bundle.
 /usr/bin/xattr -dr com.apple.FinderInfo "$APP" 2>/dev/null || true
@@ -37,9 +39,9 @@ cp -X "$PROJECT_DIR/Info.plist" "$APP/Contents/Info.plist"
 /usr/bin/codesign --force --sign - --timestamp=none "$APP"
 /usr/bin/codesign --verify --strict --verbose=2 "$APP"
 # Package the verified staging bundle before File Provider can add metadata.
-/usr/bin/ditto --norsrc --noextattr -c -k --keepParent "$APP" "$PROJECT_DIR/Ark-macOS.zip"
+/usr/bin/ditto --norsrc --noextattr -c -k --keepParent "$APP" "$PROJECT_DIR/Bam-macOS.zip"
 # Replace this generated bundle rather than merging into an old File Provider inode.
-if [ -d "$DELIVERABLE_APP" ]; then mv "$DELIVERABLE_APP" "$STAGING_DIR/previous-Ark.app"; fi
+if [ -d "$DELIVERABLE_APP" ]; then mv "$DELIVERABLE_APP" "$STAGING_DIR/previous-Bam.app"; fi
 /usr/bin/ditto --norsrc --noextattr "$APP" "$DELIVERABLE_APP"
 # File Provider can reattach FinderInfo asynchronously just after the copy.
 VERIFIED=false
