@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased — 0.13.2 local startup fix, build 29
+
+- Use WebKit’s default persistent extension configuration for Bam’s Default login profile. The existing internal Default ID is a reserved WebKit UUID value and crashes the identifier-based configuration initializer during ordinary startup. Preserve saved profile IDs, website data stores, cookies and tab sessions. Private and named-profile configurations retain their existing behavior.
+- Add regression coverage for persistent Default configuration, alongside named and private profiles. This local patch is not published as a release.
+
 ## 0.13.1 — build 28
 
 - Replace repeated extension surface-list reconstruction with one fresh list per window enumeration. Preserve ordering, active selection and live profile/controller/data-store ownership checks; direct tab actions resolve current state.

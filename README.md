@@ -6,6 +6,8 @@ A small, fast, slightly obsessive macOS browser prototype. Native Swift + AppKit
 
 Bam explores the things that make sidebar browsers feel good: a compact sidebar with **Spaces**, a **Peek** overlay for glancing at links, **Split View**, a pocket-sized **Little Bam** window, and a **floating video panel** you can flick into a corner. It's an independent open-source experiment — not affiliated with Arc, The Browser Company, or Yab, and not claiming feature parity with any of them. Think of it as a love letter written in its own handwriting.
 
+**Local startup correction:** 0.13.2 build 29 addresses a confirmed ordinary-startup crash in 0.13.1 and 0.13.0 for the Default profile; it is currently unpublished. See [validation](VALIDATION.md).
+
 **Latest download:** [v0.13.1 prerelease](https://github.com/aridutilh/bam/releases/tag/v0.13.1) · [all releases](https://github.com/aridutilh/bam/releases) · [changelog](CHANGELOG.md)
 
 **Released: Bam 0.13.1 (build 28).** This version includes overscroll Space creation, Favorites, kept tabs, performance improvements, login profiles, a local extension host, the redesigned command palette with Tab-to-search, a full-screen first-run onboarding (replay it from Bam ▸ "Welcome to Bam…", or demo with `bash scripts/preview-onboarding.sh`), and two new Space appearances: **Prism**, a slowly shifting spectrum, and **Clear**, a translucent window that lets your desktop show through. See [CHANGELOG.md](CHANGELOG.md) and [VALIDATION.md](VALIDATION.md).
