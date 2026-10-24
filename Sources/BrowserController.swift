@@ -99,6 +99,8 @@ import QuartzCore
     var paletteIcon: NSImageView?
     var paletteHint: NSTextField?
     var paletteSeparator: NSBox?
+    var paletteGlow: NSView?
+    var paletteTint: NSView?
     var paletteEnginePill: PaletteEnginePill?
     var paletteEngine: SiteSearchEngine?
     var paletteHintEngine: SiteSearchEngine?

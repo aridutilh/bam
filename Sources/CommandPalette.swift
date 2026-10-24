@@ -71,10 +71,19 @@ extension BrowserController {
         let overlay = DismissView(); overlay.wantsLayer = true
         overlay.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.18).cgColor
         overlay.dismiss = { [weak self] in self?.dismissAddress() }
+        // The card clips to rounded corners, so a sibling behind it carries the
+        // site-colored glow as a shadow path once a search engine is scoped.
+        let glow = NSView(); glow.wantsLayer = true
+        glow.layer?.shadowOpacity = 0; glow.layer?.shadowOffset = .zero
+        overlay.addSubview(glow)
         let box = PaletteCard()
         box.material = .popover; box.blendingMode = .withinWindow; box.state = .active
         box.wantsLayer = true
         box.layer?.cornerRadius = 16; box.layer?.masksToBounds = true
+        let tint = NSView(); tint.wantsLayer = true
+        tint.alphaValue = 0
+        tint.setAccessibilityElement(false)
+        box.addSubview(tint)
         let icon = NSImageView()
         icon.image = NSImage(systemSymbolName: "magnifyingglass", accessibilityDescription: nil)
         icon.imageScaling = .scaleProportionallyDown
@@ -102,6 +111,7 @@ extension BrowserController {
         overlay.addSubview(box); root.addSubview(overlay)
         addressOverlay = overlay; addressField = field; addressCard = box; tabSearchResults = results
         paletteIcon = icon; paletteHint = hint; paletteSeparator = line
+        paletteGlow = glow; paletteTint = tint
         refreshPaletteResults(); layoutBrowser()
         box.alphaValue = 0
         NSAnimationContext.runAnimationGroup { context in context.duration = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 0 : 0.12; box.animator().alphaValue = 1 }
@@ -115,6 +125,10 @@ extension BrowserController {
         let inputHeight: CGFloat = 54
         let rowsHeight = tabSearchResults?.preferredHeight ?? 44
         content.frame = NSRect(x: (w - cw) / 2, y: min(110, h * 0.12), width: cw, height: inputHeight + 7 + rowsHeight + 8)
+        paletteGlow?.frame = content.frame
+        paletteGlow?.layer?.shadowPath = CGPath(roundedRect: CGRect(origin: .zero, size: content.frame.size),
+                                                cornerWidth: 16, cornerHeight: 16, transform: nil)
+        paletteTint?.frame = content.bounds
         paletteIcon?.frame = NSRect(x: 22, y: (inputHeight - 16) / 2, width: 16, height: 16)
         var fieldX: CGFloat = 50
         if let pill = paletteEnginePill {
@@ -196,7 +210,44 @@ extension BrowserController {
         paletteHint?.stringValue = ""
         refreshPaletteResults()
         popInEnginePill(pill)
+        igniteEngineGlow(engine)
         return true
+    }
+    /// Arc-style scope flash: the panel blooms in the site's color and settles
+    /// into a subtle halo and interior wash while the engine stays scoped.
+    private func igniteEngineGlow(_ engine: SiteSearchEngine) {
+        guard let glow = paletteGlow?.layer, let tint = paletteTint else { return }
+        glow.shadowColor = engine.color.cgColor
+        tint.layer?.backgroundColor = engine.color.cgColor
+        glow.shadowOpacity = 0.4; glow.shadowRadius = 26
+        tint.alphaValue = 0.12
+        guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { return }
+        let bloom = CAKeyframeAnimation(keyPath: "shadowOpacity")
+        bloom.values = [0, 0.85, 0.4]; bloom.keyTimes = [0, 0.3, 1]
+        let spread = CAKeyframeAnimation(keyPath: "shadowRadius")
+        spread.values = [12, 52, 26]; spread.keyTimes = [0, 0.3, 1]
+        for animation in [bloom, spread] {
+            animation.duration = 0.55
+            animation.timingFunctions = [CAMediaTimingFunction(name: .easeOut), CAMediaTimingFunction(name: .easeInEaseOut)]
+            glow.add(animation, forKey: animation.keyPath)
+        }
+        let wash = CAKeyframeAnimation(keyPath: "opacity")
+        wash.values = [0, 0.3, 0.12]; wash.keyTimes = [0, 0.3, 1]; wash.duration = 0.55
+        tint.layer?.add(wash, forKey: "wash")
+    }
+    private func extinguishEngineGlow() {
+        guard let glow = paletteGlow?.layer, let tint = paletteTint else { return }
+        if !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            let fade = CABasicAnimation(keyPath: "shadowOpacity")
+            fade.fromValue = glow.presentation()?.shadowOpacity ?? glow.shadowOpacity
+            fade.toValue = 0; fade.duration = 0.2
+            glow.add(fade, forKey: "shadowOpacity")
+        }
+        glow.shadowOpacity = 0
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 0 : 0.2
+            tint.animator().alphaValue = 0
+        }
     }
     /// Springs the pill in from the left once layout has given it its frame.
     private func popInEnginePill(_ pill: PaletteEnginePill) {
@@ -228,6 +279,7 @@ extension BrowserController {
                 pill.animator().alphaValue = 0
             }, completionHandler: { pill.removeFromSuperview() })
         } else { pill?.removeFromSuperview() }
+        extinguishEngineGlow()
         addressField?.placeholderString = "Search or Enter URL…"
         refreshPaletteResults()
     }
@@ -262,6 +314,7 @@ extension BrowserController {
         addressOverlay?.removeFromSuperview()
         addressOverlay = nil; addressField = nil; addressCard = nil; tabSearchResults = nil
         paletteIcon = nil; paletteHint = nil; paletteSeparator = nil; paletteEnginePill = nil
+        paletteGlow = nil; paletteTint = nil
         paletteEngine = nil; paletteHintEngine = nil; paletteSuggestions = []
         view.window?.makeFirstResponder(commandWebView)
     }
