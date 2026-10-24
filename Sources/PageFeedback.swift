@@ -105,7 +105,7 @@ import QuartzCore
         icon.contentTintColor = .labelColor
         icon.imageScaling = .scaleProportionallyUpOrDown
         icon.setAccessibilityElement(false)
-        label.font = .systemFont(ofSize: 13, weight: .semibold)
+        label.font = .systemFont(ofSize: 14, weight: .semibold)
         label.textColor = .labelColor
         label.lineBreakMode = .byTruncatingTail
         label.maximumNumberOfLines = 1
@@ -121,7 +121,7 @@ import QuartzCore
     func configure(message: String, symbol: String) {
         label.stringValue = message
         icon.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
-            .withSymbolConfiguration(.init(pointSize: 13, weight: .medium))
+            .withSymbolConfiguration(.init(pointSize: 16, weight: .medium))
     }
 
     override func layout() {
@@ -129,21 +129,24 @@ import QuartzCore
         // Intrinsic width can omit text-cell drawing padding and truncate a
         // short confirmation even when its host has ample room. Measure the
         // actual font and reserve padding inside the label as well as the pill.
-        let font = label.font ?? .systemFont(ofSize: 13, weight: .semibold)
+        let font = label.font ?? .systemFont(ofSize: 14, weight: .semibold)
         let textWidth = ceil((label.stringValue as NSString).size(withAttributes: [.font: font]).width) + 12
         // Omit the redundant symbol when a narrow Split pane needs the space.
-        let compact = textWidth + 66 > bounds.width - 32
-        let insetX = min(compact ? 8 : 16, max(0, bounds.width / 8))
+        let compact = textWidth + 66 > bounds.width - 16
+        // Logical points keep the proportions stable on Retina displays. A
+        // short confirmation has a consistent footprint; narrow panes shrink
+        // the card and omit the symbol before sacrificing readable text.
+        let insetX = min(8, max(0, bounds.width / 8))
         let leading: CGFloat = compact ? 22 : 44
         let padding: CGFloat = compact ? 44 : 66
-        let insetY = min(16, max(0, bounds.height / 8))
-        let width = max(0, min(textWidth + padding, min(420, bounds.width - 2 * insetX)))
+        let insetY = min(8, max(0, bounds.height / 8))
+        let width = max(0, min(max(196, textWidth + padding), min(420, bounds.width - 2 * insetX)))
         let height = min(46, max(0, bounds.height - 2 * insetY))
         // Flipped overlay coordinates keep the tag at the visual bottom-right
         // of this page, including an individual Split pane or a preview window.
         pill.frame = NSRect(x: max(0, bounds.width - insetX - width),
                             y: bounds.maxY - insetY - height, width: width, height: height)
-        let iconSize = min(14, height)
+        let iconSize = min(16, height)
         icon.isHidden = compact
         icon.frame = NSRect(x: min(22, width), y: (height - iconSize) / 2,
                             width: min(iconSize, max(0, width - 22)), height: iconSize)

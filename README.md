@@ -1,4 +1,4 @@
-# Bam — 0.8.0 local draft
+# Bam — 0.8.1 local draft
 
 <img src="Resources/BamIcon.png" width="128" alt="Bam’s red burst sticker on a light pink tile">
 
@@ -8,7 +8,7 @@ The original application code is available under the [MIT license](LICENSE). The
 
 [Bam v0.6.0 prerelease](https://github.com/aridutilh/bam/releases/tag/v0.6.0) · [Previous Bam v0.5.5](https://github.com/aridutilh/bam/releases/tag/v0.5.5) · [Bam source repository](https://github.com/aridutilh/bam) · [Feature checklist](FEATURE-INVENTORY.md) · [Validation status](VALIDATION.md)
 
-**Local draft: Bam 0.8.0 (build 21), unreleased.** This includes the preceding shared-Favorites/kept-tabs draft, reusable sidebar rows for large tab lists, background session writes, and conservative tab sleeping under critical memory pressure. The installed and published app remains 0.6.0; local builds and commits are not a release.
+**Local draft: Bam 0.8.1 (build 22), unreleased.** This adds screenshot-calibrated sidebar and confirmation-card proportions to the 0.8.0 performance work. Sidebar labels are 14 points, tab rows are 36 points high with 5-point gaps, and Favorites fit four columns at normal widths. Short confirmations use a 196 × 46-point card at the page’s bottom-right, with 8-point insets. Bam’s glass burst style, retained sidebar widths and row reuse stay intact. See [VALIDATION.md](VALIDATION.md) for verification and [performance results](docs/tab-performance.md) for the preceding measurements. All ten component and six native suites passed, followed by a limited native visual check. Published and installed Bam remains 0.6.0; this draft is not installed or published.
 
 Sleeping starts with ordinary static HTTP(S) documents idle for at least ten minutes and keeps the three most recent loaded pages warm. Saved tabs, Split members, PiP, media/capture, forms, scripts, interaction, history, previews, navigation, errors and unknown activity remain protected. Downloads pause sleeping. View → Keep This Site Awake exempts the exact current hostname; View → Sleep Idle Pages Under Memory Pressure toggles the policy. These preferences apply to the main browser, not Peek/Little Bam.
 

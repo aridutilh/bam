@@ -50,8 +50,8 @@ struct SidebarTabItem: Equatable {
     var onPictureInPicture: (() -> Void)?
     var onSpaceScroll: ((NSEvent, SpaceScrollSource) -> Bool)?
     override var isFlipped: Bool { true }
-    private let back = ArkIconButton(symbol: "chevron.left", label: "Go back")
-    private let forward = ArkIconButton(symbol: "chevron.right", label: "Go forward")
+    private let back = ArkIconButton(symbol: "arrow.left", label: "Go back")
+    private let forward = ArkIconButton(symbol: "arrow.right", label: "Go forward")
     private let reload = ArkIconButton(symbol: "arrow.clockwise", label: "Reload page")
     private let toggle = ArkIconButton(symbol: "sidebar.left", label: "Hide sidebar")
     private let search = ArkSearchButton()
@@ -312,24 +312,29 @@ struct SidebarTabItem: Equatable {
     override func layout() {
         super.layout(); let w = bounds.width
         // Native traffic lights occupy the first 78 points of the top strip.
-        toggle.frame = NSRect(x: 81, y: 10, width: 25, height: 25)
-        let start = max(108, w - 88)
-        for (i, button) in [back, forward, reload].enumerated() { button.frame = NSRect(x: start + CGFloat(i)*27, y: 10, width: 25, height: 25) }
-        // At the 164-point minimum, navigation moves into the address strip.
-        let compact = w < 208
-        forward.isHidden = compact; back.isHidden = compact
-        if compact { reload.frame.origin.x = w - 33 }
-        search.frame = NSRect(x: 8, y: 46, width: w-16, height: 34)
-        let favoriteRows = (favorites.count + 2) / 3
-        let favoriteHeight = favoriteRows == 0 ? CGFloat.zero : CGFloat(favoriteRows) * 47 + CGFloat(favoriteRows - 1) * 7
-        favoritesHost.isHidden = favorites.isEmpty
-        favoritesHost.frame = NSRect(x: 0, y: 90, width: w, height: favoriteHeight)
-        let tileWidth = max(0, (w - 30) / 3)
-        for (index, button) in favorites.enumerated() {
-            button.frame = NSRect(x: 8 + CGFloat(index % 3) * (tileWidth + 7),
-                                  y: CGFloat(index / 3) * 54, width: tileWidth, height: 47)
+        toggle.frame = NSRect(x: 80, y: 10, width: 28, height: 28)
+        let start = w - 104
+        for (i, button) in [back, forward, reload].enumerated() {
+            button.frame = NSRect(x: start + CGFloat(i) * 34, y: 10, width: 28, height: 28)
         }
-        let pageTop: CGFloat = 90 + favoriteHeight + (favorites.isEmpty ? 0 : 14)
+        // Keep navigation clear of the traffic lights and sidebar toggle.
+        let compact = w < 218
+        forward.isHidden = compact; back.isHidden = compact
+        search.frame = NSRect(x: 8, y: 46, width: max(0, w - 16), height: 36)
+        // Four 47-point tiles fit the normal 228-point sidebar. Keep three
+        // columns at narrow widths (44-point tiles at the 164-point minimum)
+        // so twelve Favorites still leave room for the scrolling tab list.
+        let columns = w >= 224 ? 4 : 3
+        let favoriteRows = (favorites.count + columns - 1) / columns
+        let favoriteHeight = favoriteRows == 0 ? CGFloat.zero : CGFloat(favoriteRows) * 47 + CGFloat(favoriteRows - 1) * 8
+        favoritesHost.isHidden = favorites.isEmpty
+        favoritesHost.frame = NSRect(x: 0, y: 92, width: w, height: favoriteHeight)
+        let tileWidth = max(0, (w - 16 - CGFloat(columns - 1) * 8) / CGFloat(columns))
+        for (index, button) in favorites.enumerated() {
+            button.frame = NSRect(x: 8 + CGFloat(index % columns) * (tileWidth + 8),
+                                  y: CGFloat(index / columns) * 55, width: tileWidth, height: 47)
+        }
+        let pageTop: CGFloat = 92 + favoriteHeight + (favorites.isEmpty ? 0 : 8)
         clip.frame = NSRect(x: 0, y: pageTop, width: w, height: max(0, bounds.height - pageTop - 45))
         setPagingOffset(offset)
         let y = bounds.height-36
@@ -337,7 +342,7 @@ struct SidebarTabItem: Equatable {
         // Keep footer actions separate at the minimum width. Overflow uses a
         // native menu, so horizontal input still belongs to Space paging.
         let selectorStart: CGFloat = 43
-        let selectorEnd = w - (w < 220 ? 39 : 68)
+        let selectorEnd = w - (w < 220 ? 40 : 72)
         let selectorWidth = max(0, selectorEnd - selectorStart)
         let capacity = max(1, Int(selectorWidth / 28))
         let overflowing = spaces.count > capacity
@@ -354,8 +359,8 @@ struct SidebarTabItem: Equatable {
         }
         spaceOverflow.isHidden = !overflowing
         spaceOverflow.frame = NSRect(x: x + CGFloat(visibleCount) * 28, y: y, width: 26, height: 28)
-        pip.frame = NSRect(x: w-62, y: y, width: 25, height: 28)
-        plus.frame = NSRect(x: w-33, y: y, width: 25, height: 28)
+        pip.frame = NSRect(x: w-68, y: y, width: 28, height: 28)
+        plus.frame = NSRect(x: w-36, y: y, width: 28, height: 28)
         pip.isHidden = w < 220
     }
 }
@@ -393,8 +398,8 @@ struct SidebarTabItem: Equatable {
         column.resizingMask = .autoresizingMask
         table.addTableColumn(column)
         table.headerView = nil; table.backgroundColor = .clear
-        table.style = .plain; table.intercellSpacing = NSSize(width: 0, height: 4)
-        table.rowSizeStyle = .custom; table.rowHeight = 33
+        table.style = .plain; table.intercellSpacing = NSSize(width: 0, height: 5)
+        table.rowSizeStyle = .custom; table.rowHeight = 36
         table.usesAutomaticRowHeights = false; table.selectionHighlightStyle = .none
         table.focusRingType = .none; table.allowsEmptySelection = true
         table.allowsMultipleSelection = false; table.allowsColumnSelection = false
@@ -484,7 +489,7 @@ struct SidebarTabItem: Equatable {
     }
     func numberOfRows(in tableView: NSTableView) -> Int { entries.count }
     func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
-        switch entries[row] { case .tab: return 33; case .divider: return 14; case .newTab: return 32 }
+        switch entries[row] { case .tab: return 36; case .divider: return 20; case .newTab: return 36 }
     }
     func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool {
         guard entries.indices.contains(row) else { return false }
@@ -514,8 +519,8 @@ struct SidebarTabItem: Equatable {
     }
     override func layout() {
         super.layout(); let w = bounds.width
-        heading.frame = NSRect(x: 12, y: 1, width: max(0, w-24), height: 26)
-        scroll.frame = NSRect(x: 7, y: 32, width: max(0,w-14), height: max(0,bounds.height-32))
+        heading.frame = NSRect(x: 12, y: 0, width: max(0, w-24), height: 32)
+        scroll.frame = NSRect(x: 8, y: 39, width: max(0,w-16), height: max(0,bounds.height-39))
         let width = scroll.contentSize.width
         if table.frame.width != width { table.setFrameSize(NSSize(width: width, height: table.frame.height)) }
         if column.width != width { column.width = width }
@@ -619,8 +624,9 @@ private class ArkHoverButton: NSButton {
 @MainActor
 private final class ArkIconButton: ArkHoverButton {
     private var symbolName: String
-    init(symbol: String, label: String) {
-        symbolName = symbol
+    private let glyphSize: CGFloat
+    init(symbol: String, label: String, glyphSize: CGFloat = 16) {
+        symbolName = symbol; self.glyphSize = glyphSize
         super.init(frame: .zero)
         toolTip = label
         setAccessibilityLabel(label)
@@ -634,7 +640,7 @@ private final class ArkIconButton: ArkHoverButton {
     }
     override func draw(_ dirtyRect: NSRect) {
         if (hovered || isHighlighted) && isEnabled { fill(NSColor.white.withAlphaComponent(isHighlighted ? 0.20 : 0.10), radius: 7) }
-        symbol(symbolName, rect: NSRect(x: (bounds.width - 13) / 2, y: (bounds.height - 13) / 2, width: 13, height: 13), color: ArkPalette.ink, size: 13)
+        symbol(symbolName, rect: NSRect(x: (bounds.width - glyphSize) / 2, y: (bounds.height - glyphSize) / 2, width: glyphSize, height: glyphSize), color: ArkPalette.ink, size: glyphSize)
     }
 }
 
@@ -644,8 +650,8 @@ private final class ArkIconButton: ArkHoverButton {
     required init?(coder: NSCoder) { fatalError() }
     override func draw(_ dirtyRect: NSRect) {
         fill(NSColor.black.withAlphaComponent(hovered ? 0.25 : 0.18), radius: 10)
-        text(address, rect: NSRect(x: 12, y: 9, width: bounds.width-34, height: 18), size: 12, color: ArkPalette.ink)
-        symbol("ellipsis", rect: NSRect(x: bounds.width-23, y: 10, width: 13, height: 13), color: ArkPalette.secondary, size: 12)
+        text(address, rect: NSRect(x: 12, y: 9, width: max(0, bounds.width - 38), height: 20), size: 14, color: ArkPalette.ink)
+        symbol("ellipsis", rect: NSRect(x: bounds.width-25, y: 11, width: 14, height: 14), color: ArkPalette.secondary, size: 14)
     }
 }
 
@@ -720,8 +726,8 @@ private final class ArkNewTabButton: ArkHoverButton {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     override func draw(_ dirtyRect: NSRect) {
         if hovered { fill(NSColor.white.withAlphaComponent(0.08)) }
-        symbol("plus", rect: NSRect(x: 12, y: 10, width: 13, height: 13), color: ArkPalette.secondary, size: 12)
-        text("New Tab", rect: NSRect(x: 35, y: 9, width: max(0, bounds.width - 48), height: 18), size: 12, color: ArkPalette.secondary)
+        symbol("plus", rect: NSRect(x: 10, y: 10, width: 16, height: 16), color: ArkPalette.secondary, size: 16)
+        text("New Tab", rect: NSRect(x: 36, y: 9, width: max(0, bounds.width - 48), height: 20), size: 14, color: ArkPalette.secondary)
     }
 }
 
@@ -772,9 +778,9 @@ private final class ArkSpaceHeading: ArkHoverButton {
     }
     override func draw(_ dirtyRect: NSRect) {
         if hovered { fill(NSColor.white.withAlphaComponent(0.06), radius: 6) }
-        symbol(symbolName, rect: NSRect(x: 4, y: 6, width: 14, height: 14), color: tint, size: 13)
-        text(name, rect: NSRect(x: 26, y: 5, width: max(0, bounds.width - 44), height: 18), size: 12, weight: .semibold)
-        if hovered { symbol("chevron.down", rect: NSRect(x: bounds.width - 15, y: 8, width: 10, height: 10), color: ArkPalette.secondary, size: 10) }
+        symbol(symbolName, rect: NSRect(x: 4, y: 8, width: 16, height: 16), color: tint, size: 16)
+        text(name, rect: NSRect(x: 32, y: 7, width: max(0, bounds.width - 50), height: 20), size: 14, weight: .medium)
+        if hovered { symbol("chevron.down", rect: NSRect(x: bounds.width - 15, y: 11, width: 10, height: 10), color: ArkPalette.secondary, size: 10) }
     }
 }
 
@@ -797,19 +803,19 @@ private final class ArkTabRow: ArkFlippedView {
     private let titleLabel: NSTextField
     private let subtitleLabel: NSTextField
     private let iconView = NSImageView()
-    private let closeButton = ArkIconButton(symbol: "xmark", label: "Close tab")
+    private let closeButton = ArkIconButton(symbol: "xmark", label: "Close tab", glyphSize: 12)
     private var hovered = false
     private var area: NSTrackingArea?
     private var configured = false
     init(item: SidebarTabItem) {
         self.item = item
-        titleLabel = arkLabel(item.title.isEmpty ? "New Tab" : item.title, size: 12, weight: item.isActive ? .medium : .regular)
+        titleLabel = arkLabel(item.title.isEmpty ? "New Tab" : item.title, size: 14, weight: item.isActive ? .medium : .regular)
         subtitleLabel = arkLabel(item.subtitle, size: 9, weight: .regular)
         super.init(frame: .zero)
         wantsLayer = true
         subtitleLabel.textColor = ArkPalette.secondary.withAlphaComponent(0.84)
         iconView.image = NSImage(systemSymbolName: item.symbol, accessibilityDescription: nil) ?? NSImage(systemSymbolName: "globe", accessibilityDescription: nil)
-        iconView.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 15, weight: .regular)
+        iconView.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 16, weight: .regular)
         iconView.contentTintColor = item.isActive ? spaceTint : ArkPalette.secondary
         for view in [titleLabel, subtitleLabel, iconView, closeButton] as [NSView] { addSubview(view) }
         closeButton.isHidden = !item.isActive
@@ -829,7 +835,7 @@ private final class ArkTabRow: ArkFlippedView {
             identifier = NSUserInterfaceItemIdentifier("tab-row-\(item.id.uuidString)")
         }
         if first || old.title != item.title { titleLabel.stringValue = item.title.isEmpty ? "New Tab" : item.title; setAccessibilityLabel(item.title) }
-        if first || old.isActive != item.isActive { titleLabel.font = .systemFont(ofSize: 12, weight: item.isActive ? .medium : .regular) }
+        if first || old.isActive != item.isActive { titleLabel.font = .systemFont(ofSize: 14, weight: item.isActive ? .medium : .regular) }
         if first || old.isUnloaded != item.isUnloaded || old.isSleeping != item.isSleeping {
             titleLabel.textColor = item.isUnloaded || item.isSleeping ? ArkPalette.secondary : ArkPalette.ink
             iconView.alphaValue = item.isUnloaded || item.isSleeping ? 0.55 : 1
@@ -864,13 +870,13 @@ private final class ArkTabRow: ArkFlippedView {
     }
     override func layout() {
         super.layout()
-        iconView.frame = NSRect(x: 10, y: 8, width: 16, height: 16)
-        let textWidth = max(0, bounds.width - 68)
+        iconView.frame = NSRect(x: 10, y: (bounds.height - 16) / 2, width: 16, height: 16)
+        let textWidth = max(0, bounds.width - 72)
         let hasSubtitle = false
-        titleLabel.frame = NSRect(x: 35, y: 8, width: textWidth, height: 17)
+        titleLabel.frame = NSRect(x: 36, y: (bounds.height - 20) / 2, width: textWidth, height: 20)
         subtitleLabel.frame = NSRect(x: 37, y: 23, width: textWidth, height: 12)
         subtitleLabel.isHidden = !hasSubtitle
-        closeButton.frame = NSRect(x: bounds.width - 27, y: 6, width: 20, height: 20)
+        closeButton.frame = NSRect(x: bounds.width - 30, y: (bounds.height - 24) / 2, width: 24, height: 24)
     }
     override func draw(_ dirtyRect: NSRect) {
         if window?.firstResponder === self {

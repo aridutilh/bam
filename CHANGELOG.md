@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased — 0.8.1 local draft, build 22
+
+- Match the reference screenshot’s native point scale with 14-point sidebar labels, larger toolbar symbols, 36-point tab rows and four-column Favorites at normal sidebar widths. Narrow sidebars retain an adaptive grid.
+- Give short page confirmations a 196 × 46-point footprint, 14-point text and 8-point page-edge insets. Keep Bam’s translucent burst shape, pop animation, bottom-right placement and click-through behavior; compact panes continue fitting the message.
+- Preserve saved sidebar widths and native row reuse. Local only; installation and publication remain on hold. Verification is recorded in [VALIDATION.md](VALIDATION.md). All ten component and six native suites passed, followed by a limited native visual check.
+
 ## Unreleased — 0.8.0 local draft, build 21
 
 Local only; publication and installation remain on hold. Includes the preceding 0.7.0 Favorites/kept-tabs draft. All ten component and six exact-package native suites passed; all 70 frozen inputs match. Independent reviews and the synthetic benchmark are detailed in [VALIDATION.md](VALIDATION.md) and [the performance report](docs/tab-performance.md).
