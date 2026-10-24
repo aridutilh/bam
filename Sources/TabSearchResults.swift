@@ -67,12 +67,18 @@ enum TabSearchMatcher {
     private var rows: [TabSearchResultRow] = []
     private var lastQuery = ""
     private var accent: NSColor = .controlAccentColor
+    // One shared highlight glides between rows instead of each row repainting.
+    private let highlight = NSView()
     private let emptyLabel = NSTextField(labelWithString: "No matching tabs")
     override var isFlipped: Bool { true }
 
     override init(frame: NSRect) {
         super.init(frame: frame)
         setAccessibilityElement(false)
+        highlight.wantsLayer = true
+        highlight.layer?.cornerRadius = 8
+        highlight.setAccessibilityElement(false)
+        addSubview(highlight)
         emptyLabel.font = .systemFont(ofSize: 12)
         emptyLabel.textColor = .secondaryLabelColor
         emptyLabel.alignment = .center
@@ -107,7 +113,6 @@ enum TabSearchMatcher {
         rows.forEach { $0.removeFromSuperview() }
         rows = entries.enumerated().map { index, entry in
             let row = TabSearchResultRow(frame: .zero)
-            row.accent = accent
             switch entry {
             case .query(let text):
                 row.configure(title: text, detail: "", badge: "Open or Search", symbol: "magnifyingglass")
@@ -128,16 +133,18 @@ enum TabSearchMatcher {
             row.onActivate = { [weak self] in
                 guard let self else { return }
                 self.selectedIndex = index
-                self.refreshSelection()
+                self.refreshSelection(animated: false)
                 _ = self.activateSelection()
             }
             row.onHover = { [weak self] in
                 guard let self, self.selectedIndex != index else { return }
-                self.selectedIndex = index; self.refreshSelection()
+                self.selectedIndex = index; self.refreshSelection(animated: true)
             }
             addSubview(row)
             return row
         }
+        highlight.layer?.backgroundColor = accent.cgColor
+        moveHighlight(animated: false)
         emptyLabel.isHidden = !entries.isEmpty
         if engine != nil {
             emptyLabel.stringValue = trimmed.isEmpty ? "Suggestions appear as you type" : "Press Return to search"
@@ -152,7 +159,7 @@ enum TabSearchMatcher {
         guard !entries.isEmpty, delta != 0 else { return }
         let amount = delta % entries.count
         selectedIndex = (selectedIndex + amount + entries.count) % entries.count
-        refreshSelection()
+        refreshSelection(animated: true)
     }
 
     @discardableResult func activateSelection() -> Bool {
@@ -174,18 +181,38 @@ enum TabSearchMatcher {
         return true
     }
 
-    private func refreshSelection() {
+    private func refreshSelection(animated: Bool = false) {
         for (index, row) in rows.enumerated() { row.isSelected = index == selectedIndex }
+        moveHighlight(animated: animated)
         if rows.indices.contains(selectedIndex) {
             NSAccessibility.post(element: rows[selectedIndex], notification: .selectedChildrenChanged)
+        }
+    }
+    private func rowFrame(at index: Int) -> NSRect {
+        NSRect(x: 0, y: CGFloat(index) * Self.rowHeight, width: bounds.width, height: Self.rowHeight - 2)
+    }
+    /// Glides the shared highlight to the selected row; a held arrow key
+    /// retargets the in-flight animation instead of snapping row to row.
+    private func moveHighlight(animated: Bool) {
+        guard rows.indices.contains(selectedIndex) else { highlight.isHidden = true; return }
+        highlight.isHidden = false
+        let destination = rowFrame(at: selectedIndex)
+        if animated && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.18
+                context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                context.allowsImplicitAnimation = true
+                highlight.animator().frame = destination
+            }
+        } else {
+            highlight.frame = destination
         }
     }
     override var intrinsicContentSize: NSSize { NSSize(width: NSView.noIntrinsicMetric, height: preferredHeight) }
     override func layout() {
         super.layout()
-        for (index, row) in rows.enumerated() {
-            row.frame = NSRect(x: 0, y: CGFloat(index) * Self.rowHeight, width: bounds.width, height: Self.rowHeight - 2)
-        }
+        for (index, row) in rows.enumerated() { row.frame = rowFrame(at: index) }
+        moveHighlight(animated: false)
         emptyLabel.frame = NSRect(x: 8, y: 14, width: max(0, bounds.width - 16), height: 18)
     }
 }
@@ -195,7 +222,6 @@ enum TabSearchMatcher {
 @MainActor private final class TabSearchResultRow: NSView {
     var onActivate: (() -> Void)?
     var onHover: (() -> Void)?
-    var accent: NSColor = .controlAccentColor
     var isSelected = false { didSet { applySelection(); setAccessibilitySelected(isSelected) } }
     private let icon = NSImageView()
     private let title = NSTextField(labelWithString: "")
@@ -233,8 +259,7 @@ enum TabSearchMatcher {
         needsLayout = true
     }
     private func applySelection() {
-        layer?.backgroundColor = isSelected ? accent.cgColor : NSColor.clear.cgColor
-        layer?.cornerRadius = 8
+        // The parent's shared highlight view paints the selection background.
         let primary: NSColor = isSelected ? .white : .labelColor
         let secondary: NSColor = isSelected ? NSColor.white.withAlphaComponent(0.75) : .tertiaryLabelColor
         title.textColor = primary
