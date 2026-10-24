@@ -173,11 +173,7 @@ import QuartzCore
     let handle = ResizeHandleView(frame: .zero)
     let card = FlippedContainer()
     let webHost = FlippedContainer()
-    let topbar = FlippedContainer()
     let progress = NSView()
-    let location = NSButton(title: "New tab", target: nil, action: nil)
-    let reveal = NSButton()
-    let pin = NSButton()
     let animator = CubicAnimator()
     let pagingAnimator = SpringAnimator()
     let pictureInPicture = PictureInPictureCoordinator()
@@ -308,16 +304,7 @@ import QuartzCore
         card.wantsLayer = true; card.layer?.backgroundColor = NSColor(white: 0.10, alpha: 1).cgColor
         card.layer?.cornerRadius = 9; card.layer?.masksToBounds = true
         card.layer?.borderWidth = 1; card.layer?.borderColor = NSColor.white.withAlphaComponent(0.30).cgColor
-        card.addSubview(webHost); card.addSubview(topbar)
-        topbar.wantsLayer = true; topbar.layer?.backgroundColor = NSColor(white: 0.13, alpha: 1).cgColor
-        topbar.addSubview(location); topbar.addSubview(reveal); topbar.addSubview(pin)
-        for button in [location, reveal, pin] { button.isBordered = false; button.bezelStyle = .inline; button.contentTintColor = NSColor(white: 0.86, alpha: 1) }
-        location.font = .systemFont(ofSize: 11, weight: .medium); location.target = self; location.action = #selector(focusAddress)
-        location.setAccessibilityLabel("Address — click to navigate")
-        reveal.image = NSImage(systemSymbolName: "sidebar.left", accessibilityDescription: "Toggle sidebar")
-        reveal.target = self; reveal.action = #selector(toggleSidebar); reveal.toolTip = "Toggle sidebar ⌘S"
-        pin.image = NSImage(systemSymbolName: "pin", accessibilityDescription: "Pin tab")
-        pin.target = self; pin.action = #selector(togglePin); pin.toolTip = "Keep or unkeep this tab"
+        card.addSubview(webHost)
         progress.wantsLayer = true; progress.layer?.backgroundColor = NSColor(srgbRed: 0.47, green: 0.39, blue: 0.66, alpha: 1).cgColor
         card.addSubview(progress)
         configureFavicons()
@@ -391,22 +378,19 @@ import QuartzCore
         sidebar.layer?.transform = CATransform3DIdentity
         sidebar.alphaValue = 1
         sidebar.isHidden = width < 0.5 || spaceCreationPanel != nil
-        card.frame = NSRect(x: width + 8, y: 8, width: max(100, w - width - 16), height: h - 16)
-        // The strip grows continuously as the sidebar collapses. A threshold
-        // switch here used to resize the webpage by 36 points in a single frame.
-        let toolbarFraction = 1 - min(1, max(0, width / 80))
-        let toolbarHeight: CGFloat = 36 * toolbarFraction
-        topbar.isHidden = toolbarFraction == 0
-        topbar.alphaValue = toolbarFraction
-        topbar.frame = NSRect(x: 0, y: 0, width: card.bounds.width, height: toolbarHeight)
-        webHost.frame = NSRect(x: 0, y: toolbarHeight, width: card.bounds.width, height: max(0, card.bounds.height - toolbarHeight))
+        // With the sidebar away the page owns the whole window, like Arc: the
+        // card's margin, corner and border fade out continuously over the last
+        // 80 points so nothing jumps, and no toolbar strip appears.
+        let collapse = 1 - min(1, max(0, width / 80))
+        let inset = 8 * (1 - collapse)
+        card.frame = NSRect(x: width + inset, y: inset, width: max(100, w - width - 2 * inset), height: h - 2 * inset)
+        card.layer?.cornerRadius = 9 * (1 - collapse)
+        card.layer?.borderColor = NSColor.white.withAlphaComponent(0.30 * (1 - collapse)).cgColor
+        webHost.frame = card.bounds
         if let web = activeWebView, web.superview === webHost { web.frame = webHost.bounds }
         for child in webHost.subviews where !(child is WKWebView) { child.frame = webHost.bounds }
-        reveal.frame = NSRect(x: 84, y: 6, width: 25, height: 24)
-        location.frame = NSRect(x: 115, y: 6, width: max(60, card.bounds.width - 160), height: 24)
-        pin.frame = NSRect(x: card.bounds.width - 34, y: 6, width: 24, height: 24)
         progress.isHidden = !(activeWebView?.isLoading ?? false)
-        progress.frame = NSRect(x: 0, y: toolbarHeight, width: card.bounds.width * CGFloat(activeWebView?.estimatedProgress ?? 0), height: 2)
+        progress.frame = NSRect(x: 0, y: 0, width: card.bounds.width * CGFloat(activeWebView?.estimatedProgress ?? 0), height: 2)
         handle.frame = NSRect(x: max(0, width - 5), y: 44, width: 10, height: max(0, h - 60))
         handle.currentWidth = targetWidth; handle.isHidden = !session.sidebarVisible || width < 100
         if addressOverlay != nil { layoutPalette(width: w, height: h) }
@@ -684,14 +668,7 @@ import QuartzCore
         }
         if let tab = session.active {
             let host = URL(string: tab.address)?.host ?? tab.address
-            location.title = tabErrors[tab.id] ?? (tab.isHome ? "Bam  /  New tab" : host)
-            location.toolTip = tab.isHome ? "Search or enter a URL ⌘L" : tab.address
             sidebar.setAddress(tab.address, title: tabErrors[tab.id] ?? (tab.isHome ? "Search or enter URL" : host))
-            let retentionTarget = session.tabs.first(where: { $0.id == focusedTabID }) ?? tab
-            let keepLabel = retentionTarget.saved?.kind == .kept ? "Unkeep this tab" : "Keep this tab"
-            pin.image = NSImage(systemSymbolName: retentionTarget.isFavorite ? "star.fill" : retentionTarget.pinned ? "pin.fill" : "pin", accessibilityDescription: keepLabel)
-            pin.toolTip = keepLabel; pin.setAccessibilityLabel(keepLabel)
-            pin.setAccessibilityValue(retentionTarget.isFavorite ? "Favorite" : retentionTarget.isSaved ? "Kept" : "Ordinary")
             view.window?.title = "\(tab.displayTitle) — Bam"
         }
         refreshSplitMetadata()

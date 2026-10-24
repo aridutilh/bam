@@ -452,11 +452,13 @@ import WebKit
         let before = controller.webHost.frame.minY
         controller.displayedWidth = 79; controller.layoutBrowser()
         let after = controller.webHost.frame.minY
-        guard check(abs(after - before) < 1 && after > before,
+        guard check(abs(after - before) < 1,
                     "Crossing width 80 abruptly moved webpage content: \(before) → \(after)") else { return }
         controller.displayedWidth = 0; controller.layoutBrowser()
-        guard check(abs(controller.webHost.frame.minY - 36) < 0.001 && !controller.topbar.isHidden,
-                    "Fully collapsed sidebar did not expose the 36-point toolbar") else { return }
+        let page = controller.card.frame, window = controller.view.bounds
+        guard check(abs(page.minX) < 0.001 && abs(page.minY) < 0.001 && abs(page.width - window.width) < 0.001 && abs(page.height - window.height) < 0.001
+                    && controller.webHost.frame == controller.card.bounds && (controller.card.layer?.cornerRadius ?? 1) == 0,
+                    "Fully collapsed sidebar did not give the page the whole window: card \(page) in \(window)") else { return }
         controller.displayedWidth = savedWidth; controller.layoutBrowser()
         testIgnoredScrollRoutes()
     }
