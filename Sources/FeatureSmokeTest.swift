@@ -8,7 +8,7 @@ import WebKit
     enum Failure: Error { case assertion(String) }
     func start() {
         Task { @MainActor in
-            do { try await run(); finish(true, "\(checks) checks: per-tab Peek, same-page promotion, Little Bam, cross-window Find, preview history, split focus/navigation, persisted groups, close/reopen, unsplit focused-page copy/hard refresh and editable Spaces") }
+            do { try await run(); finish(true, "\(checks) checks: per-tab Peek, same-page promotion, Little Bam, cross-window Find, preview history, split focus/navigation, persisted groups, close/reopen, unsplit focused-page copy/hard refresh, editable Spaces and saved tabs") }
             catch { finish(false, String(describing: error)) }
         }
     }
@@ -163,6 +163,7 @@ import WebKit
         try check(!controller.library.closedRecords.isEmpty, "Closed tabs remain in archive")
         try await runPageCommands()
         try await runEditableSpaces()
+        try await runSavedTabs()
     }
     func finish(_ success: Bool, _ detail: String) {
         controller?.prepareToClose()

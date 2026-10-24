@@ -183,7 +183,7 @@ import WebKit
               let moveMenu = rowMenu.items.first(where: { $0.title == "Move to Space" })?.submenu else {
             throw Failure.assertion("Native tab row has no Move to Space submenu")
         }
-        try check(rowMenu.items.contains { $0.title == "Unpin Tab" } && moveMenu.items.count == browser.session.spaces.count,
+        try check(rowMenu.items.contains { $0.title == "Unkeep Left Tab" } && moveMenu.items.count == browser.session.spaces.count,
                   "Move menu changed pin semantics or omitted Space destinations")
         try check(moveMenu.items.first(where: { $0.tag == 70 })?.isEnabled == false,
                   "Move menu enabled the current Space")

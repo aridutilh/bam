@@ -204,7 +204,7 @@ expect(migratedSpaces.spaces == BrowserSpace.defaults && migratedSpaces.spaceIDs
 expect(migratedSpaces.tabs == editableLegacy.tabs && migratedSpaces.splits == editableLegacy.splits && migratedSpaces.activeID == editableLegacy.activeID, "Space migration preserves tab identity, content, split grouping, and active selection")
 expect(migratedSpaces.lastSelectedTabIDsBySpace == editableLegacy.lastSelectedTabIDsBySpace && migratedSpaces.sidebarWidth == 311 && !migratedSpaces.sidebarVisible, "Space migration preserves remembered tabs and sidebar preferences")
 let migratedJSON = try JSONSerialization.jsonObject(with: JSONEncoder().encode(migratedSpaces)) as! [String: Any]
-expect(migratedJSON["version"] as? Int == 2 && migratedJSON["spaces"] != nil, "Subsequent saves explicitly version the editable-Space format")
+expect(migratedJSON["version"] as? Int == 3 && migratedJSON["spaces"] != nil, "Subsequent saves explicitly version the editable-Space format")
 var futureJSON = migratedJSON; futureJSON["version"] = 999
 let futureData = try JSONSerialization.data(withJSONObject: futureJSON)
 expect((try? JSONDecoder().decode(BrowserSession.self, from: futureData)) == nil, "A future session format is not silently decoded as current state")
@@ -307,5 +307,171 @@ damagedSpaces.sanitize()
 expect(damagedSpaces.spaceIDs == [42] && damagedSpaces.active?.space == 42 && damagedSpaces.active?.isHome == true && damagedSpaces.sidebarWidth == 303 && !damagedSpaces.sidebarVisible, "An empty repaired session retains its edited Spaces and preferences while adding a safe home")
 var exhaustedIDs = BrowserSession(tabs: [valid], activeID: valid.id, spaces: BrowserSpace.defaults + [BrowserSpace(id: Int.max, name: "Last possible ID", symbol: "globe", colorIndex: 0)])
 expect(exhaustedIDs.createSpace(name: "Cannot overflow", symbol: "globe", colorIndex: 0) == nil, "Space ID allocation cannot overflow or wrap to a reused ID")
+
+// Saved-tab migration preserves old pin identity and the original saved URL.
+let oldPinID = UUID()
+let oldPinJSON: [String: Any] = ["id": oldPinID.uuidString, "title": "Old pin", "address": "https://example.com/original", "space": 1, "pinned": true]
+let migratedPin = try JSONDecoder().decode(BrowserTab.self, from: JSONSerialization.data(withJSONObject: oldPinJSON))
+expect(migratedPin.id == oldPinID && migratedPin.pinned && migratedPin.saved?.kind == .kept && migratedPin.saved?.address == "https://example.com/original", "Legacy pinned JSON migrates to a kept tab with its original address")
+expect(!migratedPin.isFavorite && !migratedPin.isUnloaded && migratedPin.saved?.customTitle == nil && migratedPin.displayTitle == "Old pin", "Migration does not fabricate Favorites, unloaded state or a custom label")
+var oldOrdinaryJSON = oldPinJSON; oldOrdinaryJSON["pinned"] = false
+let migratedOrdinary = try JSONDecoder().decode(BrowserTab.self, from: JSONSerialization.data(withJSONObject: oldOrdinaryJSON))
+expect(!migratedOrdinary.isSaved, "Legacy ordinary tabs stay ordinary")
+var compatibility = BrowserTab(title: "Compatibility", address: "https://example.com/start", space: 0)
+compatibility.pinned = true; compatibility.address = "https://example.com/later"; compatibility.pinned = true
+expect(compatibility.saved?.kind == .kept && compatibility.saved?.address == "https://example.com/start", "Repeated legacy pinned=true cannot replace the original saved URL")
+compatibility.pinned = false
+expect(compatibility.saved == nil && !compatibility.isSaved, "Legacy pinned=false removes saved state")
+let missingUnloadedJSON: [String: Any] = ["kind": "favorite", "address": "https://example.com"]
+let defaultSaved = try JSONDecoder().decode(SavedTabState.self, from: JSONSerialization.data(withJSONObject: missingUnloadedJSON))
+expect(!defaultSaved.isUnloaded && defaultSaved.customTitle == nil && defaultSaved.customSymbol == nil, "Missing optional saved metadata decodes with live/default presentation")
+var malformedSavedJSON = oldOrdinaryJSON; malformedSavedJSON["saved"] = ["kind": "unknown", "address": 123]
+let malformedSavedTab = try JSONDecoder().decode(BrowserTab.self, from: JSONSerialization.data(withJSONObject: malformedSavedJSON))
+expect(malformedSavedTab.saved == nil && malformedSavedTab.id == oldPinID, "Malformed saved metadata does not invalidate an otherwise valid ordinary tab")
+for version in [1, 2, 3] {
+    var versioned = try JSONSerialization.jsonObject(with: JSONEncoder().encode(BrowserSession.fresh())) as! [String: Any]
+    versioned["version"] = version
+    let decoded = try JSONDecoder().decode(BrowserSession.self, from: JSONSerialization.data(withJSONObject: versioned))
+    expect(decoded.tabs.count == 6 && decoded.spaces == BrowserSpace.defaults, "Session format \(version) remains readable")
+}
+
+// Global Favorites retain a single identity while selections belong to each Space.
+var retainedTabs = BrowserSession.fresh()
+let originalFavorite = retainedTabs.add(address: "https://example.com/favorite-original", title: "Live title")
+expect(retainedTabs.setRetention(id: originalFavorite, kind: .favorite), "An ordinary page can become a Favorite")
+expect(retainedTabs.space == 0 && retainedTabs.activeID == originalFavorite && retainedTabs.favoriteTabs.map(\.id) == [originalFavorite], "Favoriting a selected page preserves selection and the current Space")
+expect(retainedTabs.visibleTabs.first?.id == originalFavorite, "Global Favorites precede local kept and ordinary tabs")
+retainedTabs.changeSpace(1)
+let ordinaryLife = retainedTabs.activeID
+expect(ordinaryLife != originalFavorite && retainedTabs.active?.space == 1 && retainedTabs.visibleTabs.contains(where: { $0.id == originalFavorite }), "A new Space prefers its local ordinary page while still exposing global Favorites")
+retainedTabs.select(originalFavorite)
+expect(retainedTabs.space == 1 && retainedTabs.activeID == originalFavorite && retainedTabs.lastSelectedTabIDsBySpace?[1] == originalFavorite, "Selecting a Favorite retains the current Space and remembers it there")
+retainedTabs.changeSpace(2); let ordinaryExplore = retainedTabs.activeID
+retainedTabs.select(originalFavorite); retainedTabs.changeSpace(1)
+expect(retainedTabs.activeID == originalFavorite && retainedTabs.space == 1 && retainedTabs.lastSelectedTabIDsBySpace?[2] == originalFavorite, "One Favorite can be independently remembered in multiple Spaces")
+retainedTabs.sanitize()
+expect(retainedTabs.space == 1 && retainedTabs.activeID == originalFavorite && retainedTabs.lastSelectedTabIDsBySpace?[2] == originalFavorite, "Sanitation does not jump a selected Favorite back to its home Space")
+expect(!retainedTabs.moveTab(id: originalFavorite, toSpace: 2) && retainedTabs.tabs.first(where: { $0.id == originalFavorite })?.space == 0, "A globally shared Favorite cannot be moved as a local Space tab")
+expect(!retainedTabs.makeSplit(primary: originalFavorite, secondary: retainedTabs.tabs.first(where: { $0.space == 0 && !$0.isSaved })!.id), "Favorites cannot become Split primaries")
+let favoriteIndex = retainedTabs.tabs.firstIndex(where: { $0.id == originalFavorite })!
+retainedTabs.tabs[favoriteIndex].address = "https://example.com/navigated"
+retainedTabs.tabs[favoriteIndex].title = "New live title"
+expect(retainedTabs.updateSavedTab(id: originalFavorite, customTitle: "  My favorite  ", customSymbol: " heart "), "Saved titles and symbols can be explicitly customized")
+expect(retainedTabs.active?.displayTitle == "My favorite" && retainedTabs.active?.symbol == "heart" && retainedTabs.active?.saved?.address == "https://example.com/favorite-original", "Custom presentation does not overwrite the original saved URL")
+let customBeforeInvalid = retainedTabs.active!.saved
+expect(!retainedTabs.updateSavedTab(id: originalFavorite, customTitle: "Changed", customSymbol: "invalid.symbol") && retainedTabs.active?.saved == customBeforeInvalid, "Invalid custom symbols do not partially change a saved label")
+expect(!retainedTabs.updateSavedTab(id: originalFavorite, customTitle: String(repeating: "x", count: 81), customSymbol: nil) && !retainedTabs.updateSavedTab(id: originalFavorite, customTitle: "Bad\nLabel", customSymbol: nil), "Saved custom titles reject excessive length and control characters")
+let closedFavorite = retainedTabs.close(originalFavorite)
+expect(closedFavorite?.id == originalFavorite && retainedTabs.tabs.contains(where: { $0.id == originalFavorite && $0.isUnloaded && $0.address == "https://example.com/favorite-original" && $0.displayTitle == "My favorite" }), "Closing a Favorite unloads and resets it but retains its ID and custom label")
+expect(retainedTabs.space == 1 && retainedTabs.activeID == ordinaryLife && retainedTabs.lastSelectedTabIDsBySpace?[1] != originalFavorite && retainedTabs.lastSelectedTabIDsBySpace?[2] != originalFavorite, "Closing a global Favorite repairs every remembered reference without selecting an unloaded page")
+retainedTabs.changeSpace(2)
+expect(retainedTabs.activeID == ordinaryExplore && retainedTabs.activeID != originalFavorite, "Space fallback does not wake an unloaded Favorite")
+retainedTabs.select(originalFavorite)
+expect(!retainedTabs.active!.isUnloaded && retainedTabs.space == 2 && retainedTabs.activeID == originalFavorite, "Explicitly selecting the same Favorite wakes it in the current Space")
+expect(retainedTabs.updateSavedTab(id: originalFavorite, customTitle: "  ", customSymbol: nil) && retainedTabs.active?.displayTitle == "New live title" && retainedTabs.active?.symbol == "globe", "Clearing custom presentation restores the current page title and derived symbol")
+expect(retainedTabs.setRetention(id: originalFavorite, kind: nil) && retainedTabs.active?.space == 2 && !retainedTabs.active!.isSaved && retainedTabs.space == 2, "Removing the selected Favorite makes it an ordinary tab in the current Space")
+expect(retainedTabs.favoriteTabs.isEmpty && retainedTabs.lastSelectedTabIDsBySpace?[1] != originalFavorite, "Unfavoriting removes global presence and invalid cross-Space remembered choices")
+
+// Kept tabs retain their saved destination across navigation, moves, close and reset.
+let keptID = retainedTabs.add(address: "https://example.com/kept", title: "Kept")
+expect(retainedTabs.setRetention(id: keptID, kind: .kept), "An ordinary page can become a kept tab")
+retainedTabs.tabs[retainedTabs.tabs.firstIndex(where: { $0.id == keptID })!].address = "https://example.com/kept-navigation"
+expect(retainedTabs.moveTab(id: keptID, toSpace: 1) && retainedTabs.space == 1 && retainedTabs.active?.saved?.address == "https://example.com/kept", "Moving a selected kept tab follows its same identity without changing its saved URL")
+expect(retainedTabs.setRetention(id: keptID, kind: .favorite) && retainedTabs.space == 1 && retainedTabs.active?.saved?.address == "https://example.com/kept", "Kept-to-Favorite conversion retains the original saved destination")
+retainedTabs.changeSpace(2); retainedTabs.select(keptID)
+expect(retainedTabs.setRetention(id: keptID, kind: .kept) && retainedTabs.space == 2 && retainedTabs.active?.space == 2 && retainedTabs.active?.saved?.address == "https://example.com/kept", "Favorite-to-kept conversion moves the record to the current Space without replacing its URL")
+_ = retainedTabs.close(keptID)
+let fallbackAfterKeptClose = retainedTabs.activeID
+expect(retainedTabs.tabs.first(where: { $0.id == keptID })?.isUnloaded == true && fallbackAfterKeptClose != keptID, "Closing kept content retains an unloaded row and selects another loaded page")
+expect(retainedTabs.resetSavedTab(id: keptID) && retainedTabs.tabs.first(where: { $0.id == keptID })?.isUnloaded == false && retainedTabs.activeID == fallbackAfterKeptClose, "Reset wakes the saved URL without implicitly selecting it")
+retainedTabs.select(keptID)
+expect(retainedTabs.active?.address == "https://example.com/kept", "Explicit reset and selection return to the original saved address")
+expect(!retainedTabs.resetSavedTab(id: originalFavorite) && !retainedTabs.updateSavedTab(id: originalFavorite, customTitle: "Ordinary", customSymbol: nil), "Ordinary pages reject saved-only commands")
+
+// Favorites cap at twelve without silently replacing existing shortcuts.
+var capState = BrowserSession.fresh()
+for index in 0..<12 {
+    let id = capState.add(address: "https://example.com/favorite-\(index)")
+    expect(capState.setRetention(id: id, kind: .favorite), "Favorite \(index + 1) fits within the limit")
+}
+let excessID = capState.add(address: "https://example.com/excess")
+let capSnapshot = capState.tabs
+expect(!capState.setRetention(id: excessID, kind: .favorite) && capState.tabs == capSnapshot && capState.favoriteTabs.count == 12, "A thirteenth Favorite is rejected without changing any tab")
+expect(capState.setRetention(id: capState.favoriteTabs[0].id, kind: .favorite) && capState.favoriteTabs.count == 12, "Reapplying Favorite retention is harmless at the limit")
+
+// Split close applies each member's retention independently and never archives a kept identity away.
+let splitKept = BrowserTab(title: "Kept primary", address: "https://example.com/primary", space: 0, pinned: true)
+let splitOrdinary = BrowserTab(title: "Ordinary companion", address: "https://example.com/companion", space: 0)
+var keptSplit = BrowserSession(tabs: [splitKept, splitOrdinary], activeID: splitKept.id)
+expect(keptSplit.makeSplit(primary: splitKept.id, secondary: splitOrdinary.id), "Kept and ordinary pages can form a Split")
+expect(!keptSplit.setRetention(id: splitKept.id, kind: .favorite) && !keptSplit.setRetention(id: splitOrdinary.id, kind: .favorite), "Neither member of an existing Split can become a Favorite")
+_ = keptSplit.close(splitKept.id)
+expect(keptSplit.tabs.contains(where: { $0.id == splitKept.id && $0.isUnloaded }) && !keptSplit.tabs.contains(where: { $0.id == splitOrdinary.id }) && keptSplit.splits?.isEmpty == true, "Closing a kept Split primary retains its saved row, removes its ordinary companion and dissolves the pair")
+expect(keptSplit.active?.isHome == true && !keptSplit.active!.isUnloaded && keptSplit.activeID != splitKept.id, "A closed saved-only Space gets an ordinary home rather than reopening the saved row")
+let savedCompanion = BrowserTab(title: "Saved companion", address: "https://example.com/saved-companion", space: 0, pinned: true)
+var reverseRetention = BrowserSession(tabs: [splitOrdinary, savedCompanion], activeID: splitOrdinary.id)
+_ = reverseRetention.makeSplit(primary: splitOrdinary.id, secondary: savedCompanion.id)
+_ = reverseRetention.close(splitOrdinary.id)
+expect(!reverseRetention.tabs.contains(where: { $0.id == splitOrdinary.id }) && reverseRetention.tabs.contains(where: { $0.id == savedCompanion.id && $0.isUnloaded }) && reverseRetention.splits?.isEmpty == true, "Closing an ordinary primary cannot delete its saved companion")
+var bothSaved = BrowserSession(tabs: [splitKept, savedCompanion], activeID: splitKept.id)
+_ = bothSaved.makeSplit(primary: splitKept.id, secondary: savedCompanion.id)
+_ = bothSaved.close(savedCompanion.id)
+expect(bothSaved.activeID == splitKept.id && bothSaved.tabs.first(where: { $0.id == splitKept.id })?.isUnloaded == false && bothSaved.tabs.first(where: { $0.id == savedCompanion.id })?.isUnloaded == true && bothSaved.splits?.isEmpty == true, "Closing only a saved Split secondary unloads it while leaving the primary active")
+bothSaved.select(savedCompanion.id)
+_ = bothSaved.makeSplit(primary: splitKept.id, secondary: savedCompanion.id)
+_ = bothSaved.close(splitKept.id)
+expect([splitKept.id, savedCompanion.id].allSatisfy { id in bothSaved.tabs.contains(where: { $0.id == id && $0.isUnloaded }) }, "Closing a fully saved Split retains both unloaded identities")
+
+// Reorder within the correct retention group without moving ordinary pages or changing selection.
+let orderA = BrowserTab(title: "A", address: "https://example.com/a", space: 0, pinned: true)
+let orderB = BrowserTab(title: "B", address: "https://example.com/b", space: 0, pinned: true)
+let otherKept = BrowserTab(title: "Other Space", address: "https://example.com/other", space: 1, pinned: true)
+let orderFavoriteA = BrowserTab(title: "Favorite A", address: "https://example.com/fa", space: 2, saved: SavedTabState(kind: .favorite, address: "https://example.com/fa"))
+let orderFavoriteB = BrowserTab(title: "Favorite B", address: "https://example.com/fb", space: 1, saved: SavedTabState(kind: .favorite, address: "https://example.com/fb"))
+var savedOrder = BrowserSession(tabs: [orderA, splitOrdinary, otherKept, orderFavoriteA, orderB, orderFavoriteB], activeID: orderA.id)
+_ = savedOrder.makeSplit(primary: orderA.id, secondary: splitOrdinary.id)
+expect(savedOrder.reorderSavedTab(id: splitOrdinary.id, by: 1) && savedOrder.visibleTabs.filter { !$0.isFavorite }.map(\.id) == [orderB.id, orderA.id], "Reordering a kept Split member moves its primary row among local kept rows")
+expect(savedOrder.split(for: orderA.id)?.secondaryID == splitOrdinary.id && savedOrder.activeID == orderA.id && savedOrder.tabs.first(where: { $0.id == otherKept.id })?.space == 1, "Saved-row ordering preserves Split membership, active selection and another Space's kept tabs")
+expect(savedOrder.reorderSavedTab(id: orderFavoriteB.id, by: -1) && savedOrder.favoriteTabs.map(\.id) == [orderFavoriteB.id, orderFavoriteA.id], "Favorite ordering is global and independent from home Space IDs")
+let beforeBadOrder = savedOrder.tabs
+expect(!savedOrder.reorderSavedTab(id: orderFavoriteB.id, by: -1) && !savedOrder.reorderSavedTab(id: orderA.id, by: Int.max) && savedOrder.tabs == beforeBadOrder, "Out-of-range or overflowing saved-row moves are harmless")
+
+// A Favorite's home Space may disappear without changing the user's selected context.
+var favoriteSpaceEdits = BrowserSession.fresh()
+let globalID = favoriteSpaceEdits.add(address: "https://example.com/global")
+_ = favoriteSpaceEdits.setRetention(id: globalID, kind: .favorite)
+favoriteSpaceEdits.changeSpace(2); favoriteSpaceEdits.select(globalID)
+expect(favoriteSpaceEdits.deleteSpace(id: 0, movingTabsTo: 1) && favoriteSpaceEdits.space == 2 && favoriteSpaceEdits.activeID == globalID && favoriteSpaceEdits.active?.space == 1, "Deleting a Favorite's old home Space remaps metadata without switching the current Space")
+expect(favoriteSpaceEdits.deleteSpace(id: 2, movingTabsTo: 1) && favoriteSpaceEdits.space == 1 && favoriteSpaceEdits.activeID == globalID, "Deleting the selected Space preserves a global Favorite in the chosen destination context")
+
+// Repair damaged saved fields without executing unsafe original destinations or losing shortcuts.
+var repairedSaved = BrowserSession(tabs: [BrowserTab(title: "Safe live title", address: "https://example.com/safe", space: 0,
+    saved: SavedTabState(kind: .kept, address: "javascript:alert(1)", customTitle: String(repeating: "x", count: 81), customSymbol: "invalid", isUnloaded: true))], activeID: UUID())
+let repairedID = repairedSaved.tabs[0].id
+repairedSaved.activeID = repairedID; repairedSaved.lastSelectedTabIDsBySpace = [0: repairedID]
+repairedSaved.sanitize()
+expect(repairedSaved.tabs.first(where: { $0.id == repairedID })?.saved?.address == "https://example.com/safe" && repairedSaved.tabs.first(where: { $0.id == repairedID })?.saved?.customTitle == nil && repairedSaved.tabs.first(where: { $0.id == repairedID })?.saved?.customSymbol == nil, "Invalid original URL and custom presentation are repaired from safe live metadata")
+expect(repairedSaved.activeID != repairedID && repairedSaved.active?.isHome == true && repairedSaved.tabs.first(where: { $0.id == repairedID })?.isUnloaded == true, "Restoring an unloaded active saved ID chooses a loaded home without waking it")
+var damagedFavoriteCap = capState
+let excessIndex = damagedFavoriteCap.tabs.firstIndex(where: { $0.id == excessID })!
+damagedFavoriteCap.tabs[excessIndex].saved = SavedTabState(kind: .favorite, address: damagedFavoriteCap.tabs[excessIndex].address)
+damagedFavoriteCap.sanitize()
+expect(damagedFavoriteCap.favoriteTabs.count == 12 && damagedFavoriteCap.tabs.first(where: { $0.id == excessID })?.saved?.kind == .kept && damagedFavoriteCap.tabs.count == capState.tabs.count, "Sanitation demotes excess Favorites to kept rows without losing tabs")
+var invalidFavoriteSplit = savedOrder
+invalidFavoriteSplit.splits = [BrowserSplit(primaryID: orderFavoriteA.id, secondaryID: orderA.id)]
+invalidFavoriteSplit.sanitize()
+expect(invalidFavoriteSplit.splits?.isEmpty == true && invalidFavoriteSplit.tabs.count == savedOrder.tabs.count, "Persisted Split groups containing a Favorite dissolve without deleting either page")
+let globalBadSpace = BrowserTab(title: "Global", address: "https://example.com/global-safe", space: 999,
+                               saved: SavedTabState(kind: .favorite, address: "https://example.com/global-safe"))
+var repairedGlobal = BrowserSession(tabs: [globalBadSpace], activeID: globalBadSpace.id, space: 2, lastSelectedTabIDsBySpace: [1: globalBadSpace.id, 2: globalBadSpace.id])
+repairedGlobal.sanitize()
+expect(repairedGlobal.activeID == globalBadSpace.id && repairedGlobal.space == 2 && repairedGlobal.active?.space == 2 && repairedGlobal.lastSelectedTabIDsBySpace?[1] == globalBadSpace.id, "A global Favorite with a stale home ID survives and remains remembered across valid Spaces")
+_ = retainedTabs.updateSavedTab(id: keptID, customTitle: "Persisted label", customSymbol: "book")
+_ = retainedTabs.close(keptID)
+try SessionFile.save(retainedTabs, to: spacesFile)
+let savedReload = SessionFile.load(spacesFile)
+expect(savedReload.tabs == retainedTabs.tabs && savedReload.activeID == retainedTabs.activeID && savedReload.lastSelectedTabIDsBySpace == retainedTabs.lastSelectedTabIDsBySpace, "Saved state, unloaded rows, original URLs, custom labels and selection survive file persistence")
+let savedVersion = try JSONSerialization.jsonObject(with: Data(contentsOf: spacesFile)) as! [String: Any]
+expect(savedVersion["version"] as? Int == 3, "Sessions with retention metadata save as format 3")
 
 print("PASS: \(count) model, URL, space, and persistence checks")

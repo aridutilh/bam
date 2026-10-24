@@ -22,13 +22,21 @@ struct SidebarTabItem: Equatable {
     let symbol: String
     let isPinned: Bool
     let isActive: Bool
+    var isFavorite: Bool = false
+    var isUnloaded: Bool = false
+    var isSplit: Bool = false
+    var canFavorite: Bool = true
 }
 
-/// Native paging keeps the header and space dock fixed while both pages follow the fingers.
+/// Shared Favorites and chrome stay fixed while each Space's heading and rows page.
 @MainActor final class SidebarView: NSView {
     var onSelectTab: ((UUID) -> Void)?
     var onCloseTab: ((UUID) -> Void)?
     var onPinTab: ((UUID) -> Void)?
+    var onFavoriteTab: ((UUID) -> Void)?
+    var onEditSavedTab: ((UUID) -> Void)?
+    var onResetSavedTab: ((UUID) -> Void)?
+    var onReorderSavedTab: ((UUID, Int) -> Void)?
     var onNewTab: (() -> Void)?
     var onSearch: (() -> Void)?
     var onBack: (() -> Void)?
@@ -52,6 +60,9 @@ struct SidebarTabItem: Equatable {
     private let spaceOverflow = ArkIconButton(symbol: "ellipsis", label: "Choose Space")
     private var spaceDefinitions: [BrowserSpace] = []
     private var spaces: [ArkSpaceButton] = []
+    private let favoritesHost = ArkFlippedView()
+    private var favorites: [ArkFavoriteButton] = []
+    private var favoriteItems: [SidebarTabItem] = []
     private let clip = ArkFlippedView()
     private var page = SidebarPage()
     private var departing: SidebarPage?
@@ -71,7 +82,9 @@ struct SidebarTabItem: Equatable {
         super.init(frame: frame); wantsLayer = true
         setAccessibilityLabel("Bam sidebar")
         clip.wantsLayer = true; clip.layer?.masksToBounds = true
-        [toggle, back, forward, reload, search, clip, library, plus, pip, spaceOverflow].forEach(addSubview)
+        favoritesHost.setAccessibilityLabel("Favorites")
+        favoritesHost.setAccessibilityRole(.group)
+        [toggle, back, forward, reload, search, favoritesHost, clip, library, plus, pip, spaceOverflow].forEach(addSubview)
         clip.addSubview(page); connect(page); cachedPages[0] = page
         back.handler = { [weak self] in self?.onBack?() }
         forward.handler = { [weak self] in self?.onForward?() }
@@ -165,12 +178,49 @@ struct SidebarTabItem: Equatable {
         page.select = { [weak self] in self?.onSelectTab?($0) }
         page.close = { [weak self] in self?.onCloseTab?($0) }
         page.pin = { [weak self] in self?.onPinTab?($0) }
+        page.favorite = { [weak self] in self?.onFavoriteTab?($0) }
+        page.editSaved = { [weak self] in self?.onEditSavedTab?($0) }
+        page.resetSaved = { [weak self] in self?.onResetSavedTab?($0) }
+        page.reorderSaved = { [weak self] in self?.onReorderSavedTab?($0, $1) }
         page.newTab = { [weak self] in self?.onNewTab?() }
         page.manageSpaces = { [weak self] in self?.onManageSpaces?() }
         page.move = { [weak self] in self?.onMoveTab?($0, $1) }
     }
+    private func configureFavorites(_ allItems: [SidebarTabItem]) {
+        var seen = Set<UUID>()
+        let updated = Array(allItems.filter { $0.isFavorite && seen.insert($0.id).inserted }.prefix(12))
+        guard updated != favoriteItems else { return }
+        favoriteItems = updated
+        let existing = Dictionary(uniqueKeysWithValues: favorites.map { ($0.item.id, $0) })
+        let ids = Set(updated.map(\.id))
+        favorites.filter { !ids.contains($0.item.id) }.forEach { $0.removeFromSuperview() }
+        favorites = updated.enumerated().map { index, item in
+            let button = existing[item.id] ?? ArkFavoriteButton(item: item)
+            button.configure(item, canMoveEarlier: index > 0, canMoveLater: index + 1 < updated.count)
+            button.handler = { [weak self] in self?.onSelectTab?(item.id) }
+            button.close = { [weak self] in self?.onCloseTab?(item.id) }
+            button.keep = { [weak self] in self?.onPinTab?(item.id) }
+            button.favorite = { [weak self] in self?.onFavoriteTab?(item.id) }
+            button.editSaved = { [weak self] in self?.onEditSavedTab?(item.id) }
+            button.resetSaved = { [weak self] in self?.onResetSavedTab?(item.id) }
+            button.reorderSaved = { [weak self] in self?.onReorderSavedTab?(item.id, $0) }
+            if button.superview == nil { favoritesHost.addSubview(button) }
+            return button
+        }
+        // A newly promoted Favorite may still have a row in a cached page.
+        // Remove that duplicate without replacing its NSScrollView or other rows.
+        for (spaceID, cached) in cachedPages where cached.tabs.contains(where: { ids.contains($0.id) }) {
+            guard let definition = definition(for: spaceID) else { continue }
+            cached.configure(cached.tabs.filter { !ids.contains($0.id) }, space: definition, destinations: spaceDefinitions)
+            if spaceID == selectedSpace { items = cached.tabs }
+        }
+        nextItems.removeAll { ids.contains($0.id) }
+        needsLayout = true
+    }
     func update(tabs: [SidebarTabItem], space: Int, canGoBack: Bool, canGoForward: Bool, isLoading: Bool) {
         guard let definition = definition(for: space) else { return }
+        configureFavorites(tabs)
+        let tabs = tabs.filter { !$0.isFavorite }
         // A commit can reach refresh() before the controller explicitly finishes
         // paging. Adopt the incoming view here too, without rebuilding either page.
         let spaceChanged = selectedSpace != space
@@ -203,6 +253,9 @@ struct SidebarTabItem: Equatable {
     func setAddress(_ address: String, title: String) { search.address = title; search.toolTip = address }
     func beginPaging(tabs: [SidebarTabItem], space: Int, direction: CGFloat) {
         guard space != selectedSpace, let definition = definition(for: space) else { return }
+        // Preview data may describe a different selected tab. Shared Favorite
+        // selection changes only when update() receives the committed session.
+        let tabs = tabs.filter { !$0.isFavorite }
         if let next, nextSpace == space, pageDirection == direction {
             // Loading/title/selection updates may arrive while fingers are down.
             // Keep the page and offset; only reconcile its changing row data.
@@ -266,7 +319,17 @@ struct SidebarTabItem: Equatable {
         forward.isHidden = compact; back.isHidden = compact
         if compact { reload.frame.origin.x = w - 33 }
         search.frame = NSRect(x: 8, y: 46, width: w-16, height: 34)
-        clip.frame = NSRect(x: 0, y: 90, width: w, height: max(0, bounds.height-135))
+        let favoriteRows = (favorites.count + 2) / 3
+        let favoriteHeight = favoriteRows == 0 ? CGFloat.zero : CGFloat(favoriteRows) * 47 + CGFloat(favoriteRows - 1) * 7
+        favoritesHost.isHidden = favorites.isEmpty
+        favoritesHost.frame = NSRect(x: 0, y: 90, width: w, height: favoriteHeight)
+        let tileWidth = max(0, (w - 30) / 3)
+        for (index, button) in favorites.enumerated() {
+            button.frame = NSRect(x: 8 + CGFloat(index % 3) * (tileWidth + 7),
+                                  y: CGFloat(index / 3) * 54, width: tileWidth, height: 47)
+        }
+        let pageTop: CGFloat = 90 + favoriteHeight + (favorites.isEmpty ? 0 : 14)
+        clip.frame = NSRect(x: 0, y: pageTop, width: w, height: max(0, bounds.height - pageTop - 45))
         setPagingOffset(offset)
         let y = bounds.height-36
         library.frame = NSRect(x: 9, y: y, width: 28, height: 28)
@@ -300,7 +363,10 @@ struct SidebarTabItem: Equatable {
     var select: ((UUID)->Void)?; var close: ((UUID)->Void)?; var pin: ((UUID)->Void)?; var newTab: (()->Void)?
     var manageSpaces: (() -> Void)?
     var move: ((UUID, Int) -> Void)?
-    let favorites = (0..<3).map { _ in ArkFavoriteButton() }
+    var favorite: ((UUID) -> Void)?
+    var editSaved: ((UUID) -> Void)?
+    var resetSaved: ((UUID) -> Void)?
+    var reorderSaved: ((UUID, Int) -> Void)?
     let heading = ArkSpaceHeading()
     let scroll = SidebarScrollView(); let content = ArkFlippedView(); let newButton = ArkNewTabButton()
     let divider = NSView()
@@ -308,7 +374,7 @@ struct SidebarTabItem: Equatable {
     var tabs: [SidebarTabItem] = []
     override init(frame: NSRect) {
         super.init(frame: frame); wantsLayer = true
-        favorites.forEach(addSubview); addSubview(heading); addSubview(scroll)
+        addSubview(heading); addSubview(scroll)
         scroll.drawsBackground = false; scroll.hasVerticalScroller = true; scroll.autohidesScrollers = true; scroll.scrollerStyle = .overlay
         // The tab list has no horizontal content. Unclaimed startup movement
         // must not bounce just the rows and look like an attempted Space switch.
@@ -322,7 +388,9 @@ struct SidebarTabItem: Equatable {
     }
     required init?(coder: NSCoder) { fatalError() }
     func configure(_ items: [SidebarTabItem], space: BrowserSpace, destinations: [BrowserSpace]) {
+        let items = items.filter { !$0.isFavorite }
         tabs = items
+        let keptIDs = items.filter(\.isPinned).map(\.id)
         let scrollOrigin = scroll.contentView.bounds.origin
         let existing = Dictionary(uniqueKeysWithValues: rows.map { ($0.item.id, $0) })
         let surviving = Set(items.map(\.id))
@@ -332,6 +400,12 @@ struct SidebarTabItem: Equatable {
             row.update(item)
             row.select = { [weak self] in self?.select?(item.id) }; row.close = { [weak self] in self?.close?(item.id) }; row.pin = { [weak self] in self?.pin?(item.id) }
             row.move = { [weak self] destination in self?.move?(item.id, destination) }
+            row.favorite = { [weak self] in self?.favorite?(item.id) }
+            row.editSaved = { [weak self] in self?.editSaved?(item.id) }
+            row.resetSaved = { [weak self] in self?.resetSaved?(item.id) }
+            row.reorderSaved = { [weak self] in self?.reorderSaved?(item.id, $0) }
+            row.canMoveEarlier = keptIDs.first != item.id
+            row.canMoveLater = keptIDs.last != item.id
             if row.superview == nil { content.addSubview(row) }; return row
         }
         configureAppearance(space: space, destinations: destinations)
@@ -342,25 +416,18 @@ struct SidebarTabItem: Equatable {
         heading.configure(space)
         let tint = ArkPalette.spaceColor(space.colorIndex)
         for row in rows { row.configureSpace(id: space.id, tint: tint, destinations: destinations) }
-        for (i, button) in favorites.enumerated() {
-            if i < tabs.count {
-                let item = tabs[i]; button.configure(symbol: item.symbol, title: item.title, active: item.isActive, tint: tint)
-                button.handler = { [weak self] in self?.select?(item.id) }
-            } else {
-                button.configure(symbol: ["sparkles", "globe", "plus"][i], title: "New tab", active: false, tint: ArkPalette.secondary)
-                button.handler = { [weak self] in self?.newTab?() }
-            }
-        }
     }
     override func layout() {
-        super.layout(); let w = bounds.width; let tile = (w-30)/3
-        for (i, button) in favorites.enumerated() { button.frame = NSRect(x: 8+CGFloat(i)*(tile+7), y: 0, width: tile, height: 47) }
-        heading.frame = NSRect(x: 12, y: 62, width: max(0, w-24), height: 26)
-        scroll.frame = NSRect(x: 7, y: 93, width: w-14, height: max(0,bounds.height-93))
+        super.layout(); let w = bounds.width
+        heading.frame = NSRect(x: 12, y: 1, width: max(0, w-24), height: 26)
+        scroll.frame = NSRect(x: 7, y: 32, width: w-14, height: max(0,bounds.height-32))
         let rw = scroll.contentSize.width
         var y: CGFloat = 0
         for row in rows.filter({$0.item.isPinned}) { row.frame = NSRect(x: 0, y: y, width: rw, height: 33); y += 37 }
-        divider.frame = NSRect(x: 9, y: y+8, width: max(0,rw-18), height: 0.5); y += 18
+        divider.isHidden = !rows.contains { $0.item.isPinned }
+        if !divider.isHidden {
+            divider.frame = NSRect(x: 9, y: y+8, width: max(0,rw-18), height: 0.5); y += 18
+        }
         newButton.frame = NSRect(x: 0, y: y, width: rw, height: 32); y += 36
         for row in rows.filter({!$0.item.isPinned}) { row.frame = NSRect(x: 0, y: y, width: rw, height: 33); y += 37 }
         content.frame = NSRect(x: 0, y: 0, width: rw, height: max(scroll.contentSize.height,y+8))
@@ -474,25 +541,67 @@ private final class ArkIconButton: ArkHoverButton {
 
 @MainActor
 private final class ArkFavoriteButton: ArkHoverButton {
-    private var symbolName = "globe"
-    private var caption = ""
-    private var active = false
-    private var tint = NSColor.systemPurple
-    init() { super.init(frame: .zero) }
+    private(set) var item: SidebarTabItem
+    var close: (() -> Void)?
+    var keep: (() -> Void)?
+    var favorite: (() -> Void)?
+    var editSaved: (() -> Void)?
+    var resetSaved: (() -> Void)?
+    var reorderSaved: ((Int) -> Void)?
+    private var canMoveEarlier = false
+    private var canMoveLater = false
+    init(item: SidebarTabItem) {
+        self.item = item
+        super.init(frame: .zero)
+        configure(item, canMoveEarlier: false, canMoveLater: false)
+    }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-    func configure(symbol: String, title: String, active: Bool, tint: NSColor) {
-        symbolName = symbol
-        caption = title
-        self.active = active
-        self.tint = tint
-        setAccessibilityLabel(title)
-        toolTip = title
+    func configure(_ item: SidebarTabItem, canMoveEarlier: Bool, canMoveLater: Bool) {
+        self.item = item; self.canMoveEarlier = canMoveEarlier; self.canMoveLater = canMoveLater
+        identifier = NSUserInterfaceItemIdentifier("favorite-\(item.id.uuidString)")
+        setAccessibilityLabel(item.title.isEmpty ? "Favorite" : item.title)
+        setAccessibilityValue([item.isActive ? "Selected" : nil, item.isUnloaded ? "Unloaded" : nil].compactMap { $0 }.joined(separator: ", "))
+        setAccessibilityHelp("Favorite shared by all Spaces. \(item.isUnloaded ? "Select to open its saved page." : "Select to show its page.")")
+        toolTip = [item.title, item.subtitle, item.isUnloaded ? "Unloaded — opens saved page" : "Favorite"].filter { !$0.isEmpty }.joined(separator: "\n")
         needsDisplay = true
     }
-    override func draw(_ dirtyRect: NSRect) {
-        fill(NSColor.white.withAlphaComponent(active ? 0.18 : hovered ? 0.14 : 0.08), radius: 9)
-        symbol(symbolName, rect: NSRect(x: (bounds.width - 19) / 2, y: (bounds.height - 19) / 2, width: 19, height: 19), color: tint, size: 18)
+    override var acceptsFirstResponder: Bool { true }
+    override func keyDown(with event: NSEvent) {
+        if event.keyCode == 36 || event.keyCode == 76 || event.keyCode == 49 { performClick(nil) }
+        else { super.keyDown(with: event) }
     }
+    override func draw(_ dirtyRect: NSRect) {
+        fill(NSColor.white.withAlphaComponent(item.isActive ? 0.18 : hovered ? 0.14 : 0.08), radius: 9)
+        symbol(item.symbol, rect: NSRect(x: (bounds.width - 19) / 2, y: (bounds.height - 19) / 2, width: 19, height: 19),
+               color: item.isUnloaded ? ArkPalette.secondary.withAlphaComponent(0.66) : ArkPalette.ink, size: 18)
+        if item.isUnloaded {
+            symbol("moon", rect: NSRect(x: bounds.width - 13, y: bounds.height - 13, width: 8, height: 8), color: ArkPalette.secondary, size: 8)
+        }
+    }
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let menu = NSMenu(); menu.autoenablesItems = false
+        func add(_ title: String, _ action: Selector, enabled: Bool = true) {
+            let entry = NSMenuItem(title: title, action: action, keyEquivalent: "")
+            entry.target = self; entry.isEnabled = enabled; menu.addItem(entry)
+        }
+        add("Remove from Favorites", #selector(favoriteFromMenu))
+        add("Keep Tab", #selector(keepFromMenu))
+        menu.addItem(.separator())
+        add("Edit Saved Tab…", #selector(editFromMenu))
+        add("Reset to Saved Page", #selector(resetFromMenu))
+        add("Move Earlier", #selector(earlierFromMenu), enabled: canMoveEarlier)
+        add("Move Later", #selector(laterFromMenu), enabled: canMoveLater)
+        menu.addItem(.separator())
+        add("Unload Favorite", #selector(closeFromMenu), enabled: !item.isUnloaded)
+        return menu
+    }
+    @objc private func favoriteFromMenu() { favorite?() }
+    @objc private func keepFromMenu() { keep?() }
+    @objc private func editFromMenu() { editSaved?() }
+    @objc private func resetFromMenu() { resetSaved?() }
+    @objc private func earlierFromMenu() { reorderSaved?(-1) }
+    @objc private func laterFromMenu() { reorderSaved?(1) }
+    @objc private func closeFromMenu() { close?() }
 }
 
 @MainActor
@@ -566,6 +675,12 @@ private final class ArkTabRow: ArkFlippedView {
     var close: (() -> Void)?
     var pin: (() -> Void)?
     var move: ((Int) -> Void)?
+    var favorite: (() -> Void)?
+    var editSaved: (() -> Void)?
+    var resetSaved: (() -> Void)?
+    var reorderSaved: ((Int) -> Void)?
+    var canMoveEarlier = false
+    var canMoveLater = false
     private var currentSpace = 0
     private var destinations: [BrowserSpace] = []
     private var spaceTint = ArkPalette.spaceColor(0)
@@ -591,19 +706,27 @@ private final class ArkTabRow: ArkFlippedView {
         setAccessibilityRole(.button)
         setAccessibilityLabel(item.title)
         setAccessibilityValue(item.isActive ? "Selected" : "")
-        toolTip = item.subtitle.isEmpty ? item.title : "\(item.title) — \(item.subtitle)"
+        update(item)
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     func update(_ newItem: SidebarTabItem) {
         item = newItem
+        identifier = NSUserInterfaceItemIdentifier("tab-row-\(item.id.uuidString)")
         titleLabel.stringValue = item.title.isEmpty ? "New Tab" : item.title
         titleLabel.font = .systemFont(ofSize: 12, weight: item.isActive ? .medium : .regular)
+        titleLabel.textColor = item.isUnloaded ? ArkPalette.secondary : ArkPalette.ink
         subtitleLabel.stringValue = item.subtitle
         iconView.image = NSImage(systemSymbolName: item.symbol, accessibilityDescription: nil)
         iconView.contentTintColor = item.isActive ? spaceTint : ArkPalette.secondary
-        closeButton.isHidden = !hovered && !item.isActive
-        setAccessibilityLabel(item.title); setAccessibilityValue(item.isActive ? "Selected" : "")
-        toolTip = item.subtitle; needsDisplay = true
+        iconView.alphaValue = item.isUnloaded ? 0.55 : 1
+        closeButton.setSymbol("xmark", label: item.isSplit ? "Close Split" : item.isPinned ? "Unload tab" : "Close tab")
+        closeButton.setAccessibilityHelp(item.isSplit ? "Saved panes unload and remain in the sidebar; ordinary panes close." : nil)
+        closeButton.isHidden = item.isUnloaded || (!hovered && !item.isActive)
+        setAccessibilityLabel(item.title)
+        setAccessibilityValue([item.isActive ? "Selected" : nil, item.isUnloaded ? "Unloaded" : nil].compactMap { $0 }.joined(separator: ", "))
+        setAccessibilityHelp(item.isSplit ? "Split. Closing unloads saved panes and keeps their saved tabs; ordinary panes close." : item.isPinned ? "Kept tab. Closing unloads its page and keeps the saved tab." : "Tab")
+        toolTip = [item.title, item.subtitle, item.isUnloaded ? "Unloaded — opens saved page" : ""].filter { !$0.isEmpty }.joined(separator: "\n")
+        needsDisplay = true
     }
     func configureSpace(id: Int, tint: NSColor, destinations: [BrowserSpace]) {
         currentSpace = id; spaceTint = tint; self.destinations = destinations
@@ -648,8 +771,8 @@ private final class ArkTabRow: ArkFlippedView {
         addTrackingArea(next)
         area = next
     }
-    override func mouseEntered(with event: NSEvent) { hovered = true; closeButton.isHidden = false; needsDisplay = true }
-    override func mouseExited(with event: NSEvent) { hovered = false; closeButton.isHidden = !item.isActive; needsDisplay = true }
+    override func mouseEntered(with event: NSEvent) { hovered = true; closeButton.isHidden = item.isUnloaded; needsDisplay = true }
+    override func mouseExited(with event: NSEvent) { hovered = false; closeButton.isHidden = item.isUnloaded || !item.isActive; needsDisplay = true }
     override func hitTest(_ point: NSPoint) -> NSView? {
         guard let hit = super.hitTest(point) else { return nil }
         // Labels and symbols belong to the row's selection target; the close
@@ -659,11 +782,26 @@ private final class ArkTabRow: ArkFlippedView {
     override func mouseDown(with event: NSEvent) { select?() }
     override func accessibilityPerformPress() -> Bool { select?(); return true }
     override func menu(for event: NSEvent) -> NSMenu? {
-        let menu = NSMenu()
-        let pinItem = NSMenuItem(title: item.isPinned ? "Unpin Tab" : "Pin Tab", action: #selector(pinFromMenu), keyEquivalent: "")
+        let menu = NSMenu(); menu.autoenablesItems = false
+        let keepTitle = item.isSplit ? (item.isPinned ? "Unkeep Left Tab" : "Keep Left Tab") : (item.isPinned ? "Unkeep Tab" : "Keep Tab")
+        let pinItem = NSMenuItem(title: keepTitle, action: #selector(pinFromMenu), keyEquivalent: "")
         pinItem.image = NSImage(systemSymbolName: item.isPinned ? "pin.slash" : "pin", accessibilityDescription: nil)
-        pinItem.target = self
-        menu.addItem(pinItem)
+        pinItem.target = self; menu.addItem(pinItem)
+        let favoriteItem = NSMenuItem(title: "Add to Favorites", action: #selector(favoriteFromMenu), keyEquivalent: "")
+        favoriteItem.image = NSImage(systemSymbolName: "star", accessibilityDescription: nil)
+        favoriteItem.target = self; favoriteItem.isEnabled = item.canFavorite && !item.isSplit
+        menu.addItem(favoriteItem)
+        if item.isPinned {
+            for (title, action, enabled) in [
+                (item.isSplit ? "Edit Left Saved Tab…" : "Edit Saved Tab…", #selector(editFromMenu), true),
+                (item.isSplit ? "Reset Left Saved Page" : "Reset to Saved Page", #selector(resetFromMenu), true),
+                ("Move Earlier", #selector(earlierFromMenu), canMoveEarlier),
+                ("Move Later", #selector(laterFromMenu), canMoveLater)
+            ] {
+                let entry = NSMenuItem(title: title, action: action, keyEquivalent: "")
+                entry.target = self; entry.isEnabled = enabled; menu.addItem(entry)
+            }
+        }
         if destinations.count > 1 {
             let moveItem = NSMenuItem(title: "Move to Space", action: nil, keyEquivalent: "")
             let submenu = NSMenu(title: "Move to Space"); submenu.autoenablesItems = false
@@ -678,14 +816,20 @@ private final class ArkTabRow: ArkFlippedView {
             moveItem.submenu = submenu; menu.addItem(moveItem)
         }
         menu.addItem(.separator())
-        let closeItem = NSMenuItem(title: "Close Tab", action: #selector(closeFromMenu), keyEquivalent: "")
+        let closeItem = NSMenuItem(title: item.isSplit ? "Close Split" : item.isPinned ? "Unload Tab" : "Close Tab", action: #selector(closeFromMenu), keyEquivalent: "")
         closeItem.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: nil)
-        closeItem.target = self
+        closeItem.target = self; closeItem.isEnabled = !item.isPinned || !item.isUnloaded
+        closeItem.toolTip = item.isSplit ? "Saved panes unload and remain in the sidebar; ordinary panes close." : nil
         menu.addItem(closeItem)
         return menu
     }
     @objc private func moveFromMenu(_ sender: NSMenuItem) { move?(sender.tag) }
     @objc private func pinFromMenu() { pin?() }
+    @objc private func favoriteFromMenu() { favorite?() }
+    @objc private func editFromMenu() { editSaved?() }
+    @objc private func resetFromMenu() { resetSaved?() }
+    @objc private func earlierFromMenu() { reorderSaved?(-1) }
+    @objc private func laterFromMenu() { reorderSaved?(1) }
     @objc private func closeFromMenu() { close?() }
 }
 

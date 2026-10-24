@@ -1,4 +1,4 @@
-# Bam 0.6.0 prerelease
+# Bam — 0.7.0 local draft
 
 <img src="Resources/BamIcon.png" width="128" alt="Bam’s red burst sticker on a light pink tile">
 
@@ -8,7 +8,11 @@ The original application code is available under the [MIT license](LICENSE). The
 
 [Bam v0.6.0 prerelease](https://github.com/aridutilh/bam/releases/tag/v0.6.0) · [Previous Bam v0.5.5](https://github.com/aridutilh/bam/releases/tag/v0.5.5) · [Bam source repository](https://github.com/aridutilh/bam) · [Feature checklist](FEATURE-INVENTORY.md) · [Validation status](VALIDATION.md)
 
-**Current prerelease: Bam 0.6.0 (build 19).** Spaces can be created, renamed, recolored, given an icon, reordered and removed through Manage Spaces. Changes are staged until Save; Cancel leaves the session unchanged. Removing a Space requires a destination for its tabs, and a tab row can move its page or whole Split pair to another Space. Space IDs and live tab identities remain stable. All seven component and five final-package runtime suites passed, including 268 feature checks with 61 for editable Spaces. A first runtime attempt exposed a test selector that expected a Split row’s primary title instead of its combined title; the selector was corrected and the final rerun passed. All 56 inputs match. Installation, signature/executable identity and migration checks passed, preserving all 13 existing tabs and session state. Native preview checks covered editing/cancel, creation, arrow reorder, ordered shortcut selection, moving a page and removing the empty test Space. Table-drag reordering, physical swipes and broader accessibility/theme coverage were not manually tested. This release does not add isolated sign-ins, Favorites, folders, tab reordering or import.
+**Local draft: Bam 0.7.0 (build 20), unreleased.** Up to twelve shared Favorites stay above the paging sidebar; kept rows stay in their own Space. Closing either unloads its page while retaining its saved address, optional name/icon and identity. Selecting wakes it; Reset returns to the saved address. Menus edit, convert and order saved tabs. Favorites cannot join Split View or move between Spaces.
+
+All seven component and five final-draft runtime suites passed, including 192 model and 325 feature checks (57 saved tabs). A fresh native preview verified creating/editing a Favorite, keeping it across Spaces, unloading/reopening the same identity, and converting it to a kept row. The final pass followed a fixture-only media-readiness correction; [validation](VALIDATION.md) records it and the remaining manual limits. No draft install, real-profile migration, push, tag or release occurred. The installed executable still matches verified 0.6.0; publishing remains on hold for user approval.
+
+**Latest published prerelease: Bam 0.6.0 (build 19).** Spaces can be created, renamed, recolored, given an icon, reordered and removed through Manage Spaces. Changes are staged until Save; Cancel leaves the session unchanged. Removing a Space requires a destination for its tabs, and a tab row can move its page or whole Split pair to another Space. Space IDs and live tab identities remain stable. All seven component and five final-package runtime suites passed, including 268 feature checks with 61 for editable Spaces. A first runtime attempt exposed a test selector that expected a Split row’s primary title instead of its combined title; the selector was corrected and the final rerun passed. All 56 inputs match. Installation, signature/executable identity and migration checks passed, preserving all 13 existing tabs and session state. Native preview checks covered editing/cancel, creation, arrow reorder, ordered shortcut selection, moving a page and removing the empty test Space. Table-drag reordering, physical swipes and broader accessibility/theme coverage were not manually tested. This release does not add isolated sign-ins, Favorites, folders, tab reordering or import.
 
 **Previous verified release: Bam 0.5.5 (build 18).** Copy and hard-refresh confirmations move to the active page’s bottom-right. The translucent burst card, pop animation, shortcuts, focus preservation and click-through behavior are unchanged. All seven component and five packaged runtime suites passed on the first attempt. Installation and tested-executable/icon identity passed, with all 13 tabs and existing layout/selection state preserved. Actual shortcuts showed both complete bottom-right messages on one main-window page; later dismissal was confirmed. Other page surfaces are covered by automated placement checks; broader themes, accessibility preferences and animation timing were not rechecked.
 
@@ -20,8 +24,10 @@ Requirements: macOS 14 or later, Xcode Command Line Tools with Swift, and Python
 
 ```sh
 bash build.sh
-open Bam.app
+bash scripts/preview-draft.sh
 ```
+
+The draft preview starts a fresh in-memory session with a nonpersistent website-data store. It does not install the app or migrate the normal profile. Use `BAM_PREVIEW_APP` to select a different locally built bundle.
 
 The build targets the current host architecture by default, locally signs `Bam.app`, creates `Bam-macOS.zip`, and runs the model, motion, swipe, tab-search, find, library, and sidebar-symbol rendering suites. `BAM_ARCH` can override the architecture, and `BAM_BUILD_DIR` can override the build directory; the corresponding `ARK_*` and `ORBIT_*` variables remain fallback aliases, in that order. The release target is Apple Silicon; Intel compatibility has not been established. The app is a development build, not a notarized distribution.
 
@@ -37,11 +43,12 @@ This starts a loopback fixture server and runs the packaged app's WebKit, manual
 
 The bundled video is a generated test pattern. To regenerate it, install FFmpeg and run `bash scripts/generate-demo.sh`; FFmpeg is not needed for an ordinary build.
 
-## Implemented browser features
+## Browser features in the local draft
 
-- **Browsing and tabs:** URL entry, DuckDuckGo search, navigation history, reload/stop, zoom, titles, pin/unpin, context menus, and reopen closed tabs.
+- **Browsing and tabs:** URL entry, DuckDuckGo search, navigation history, reload/stop, zoom, titles, context menus, and reopen closed ordinary tabs.
+- **Favorites and kept tabs (unreleased):** up to twelve shared Favorite tiles plus per-Space kept rows. Closing unloads a saved page; selecting wakes it. Original addresses and optional custom names/icons persist independently of the live page title and URL. Context menus edit, reset, convert or order saved tabs; removing retention leaves an ordinary tab. Closing a Split handles each member according to its own retention.
 - **Sidebar and Spaces:** up to 32 editable Spaces with names, twelve icons, six colors and an explicit order. Manage Spaces stages changes for Save/Cancel; deleting a Space moves its tabs to a chosen destination. Tab-row menus move single pages or whole Split pairs, following the selected page when it moves. Per-Space selection, width/visibility, native resize/collapse and sidebar swiping persist. Footer overflow exposes every Space at narrow widths. The integrated fixture passed 61 editable-Spaces checks; limited native editing checks also passed.
-- **Tab search:** ⌘T opens a palette before creating a tab. Type a URL/search or select an existing tab across Spaces using the arrows and Return. Existing-tab results include Space and URL labels.
+- **Tab search:** ⌘T opens a palette before creating a tab. Type a URL/search or select an existing tab across Spaces using the arrows and Return. Existing-tab results include Space and URL labels; draft Favorite results use “Favorite · All Spaces” and custom saved names participate in search.
 - **Peek:** Shift-click a link, or follow a cross-host link from a pinned page, to open a retained overlay. Close it or transfer the same page into a tab, Split View, or Little Bam.
 - **Little Bam:** a compact browsing window with address/navigation controls and promotion into the main browser. HTTP(S) URLs delivered by macOS open here. Bam does not automatically make itself the default browser.
 - **Split View:** two live pages, draggable divider, per-pane address/navigation controls, focused-pane commands, close-one-pane, and separate-into-tabs. Pair membership is saved.
@@ -68,7 +75,7 @@ These are implementation subsets, not a complete browser compatibility claim. Se
 | Split with a new page | ⌥⌘= |
 | Close one Split pane | Its × button |
 | Separate Split into tabs | View → Separate Split into Tabs |
-| Close entire Split group | ⌘W or its sidebar row close button |
+| Close entire Split group | ⌘W or its sidebar row close button; saved panes unload, ordinary panes close |
 | Find / next / previous | ⌘F / ⌘G / ⇧⌘G |
 | Copy current URL | ⇧⌘C — “Page copied” |
 | Hard refresh | ⇧⌘R — “Hard refreshing…” |
@@ -77,7 +84,9 @@ These are implementation subsets, not a complete browser compatibility claim. Se
 | Recently closed records | History → Recently Closed |
 | Toggle / reset sidebar width | ⌘S / ⇧⌘S; double-click its right edge to reset |
 | Resize / collapse | Drag the sidebar's right edge |
-| Pin / unpin | ⌘D or tab context menu |
+| Keep / stop keeping a tab | ⌘D, View menu or tab context menu; a Split row targets its left tab |
+| Favorite / remove Favorite | ⇧⌘D, View menu or tab/tile context menu |
+| Edit, reset or order a saved tab | Saved-tab context menu |
 | Back / forward / reload or stop | ⌘[ / ⌘] / ⌘R |
 | Next / previous tab | Control-Tab / Control-Shift-Tab; sidebar order, not MRU |
 | Next / previous Space | Sidebar swipe, or ⌥⌘→ / ⌥⌘← |
@@ -95,7 +104,7 @@ These are implementation subsets, not a complete browser compatibility claim. Se
 | Zoom | ⌘+ / ⌘− / ⌘0 |
 
 
-Manage Spaces supports up to 32 entries. Choose a name, one of twelve symbols and one of six colors; drag a table row or use the arrows to reorder. Removing a Space requires another Space to receive its tabs, and the final Space cannot be removed. Save applies the staged plan to the latest tab metadata; Cancel discards it. These are organizational groups sharing one website-data store. Reordering changes navigation order, not the stored identities of Spaces or tabs. Session format 2 migrates older files forward; releases before 0.6.0 do not understand custom Space IDs, so this is not a downgrade-compatible format.
+Manage Spaces supports up to 32 entries. Choose a name, one of twelve symbols and one of six colors; drag a table row or use the arrows to reorder. Removing a Space requires another Space to receive its tabs, and the final Space cannot be removed. Save applies the staged plan to the latest tab metadata; Cancel discards it. These are organizational groups sharing one website-data store. Reordering changes navigation order, not the stored identities of Spaces or tabs. The draft uses session format 3, migrating versions 1–2 and treating legacy pinned tabs as kept tabs. Migration is forward-only: older builds do not understand the complete saved-tab state, and releases before 0.6.0 do not understand custom Space IDs. The fresh preview does not migrate the normal profile.
 
 Copy and hard refresh target the page in the key browser window: the visible Peek, focused Split pane, Little Bam page, or main tab. They do nothing while an unrelated utility window or the floating-video panel is key. URL copy preserves the current HTTP(S) address, including its query and fragment.
 
@@ -123,9 +132,9 @@ Floating video uses Bam's own `NSPanel` with reversible HTML5-video isolation in
 
 Peek, Split, and Little Bam promotions transfer the existing view rather than intentionally reload it. A retained Peek lasts only for the current session. Split membership persists; divider position and focused side do not. After quitting, URLs and browser metadata restore, but full back/forward stacks, forms, page memory, and scroll state do not.
 
-All Spaces share website cookies; editing Spaces does not create isolated browser profiles. Top tiles mirror visible tabs rather than a distinct Favorites collection; closing a pinned row removes it. Local tab search has no network suggestions, history results, or general command execution. Find reports found/no match rather than an exact count and uses one shared query. Downloads are not resumed across app relaunch. The recently closed archive is metadata restoration, not a saved live page.
+All Spaces share website cookies; editing Spaces does not create isolated browser profiles. The local draft separates shared Favorites from kept rows and ordinary tabs. It does not add per-Space Favorite collections or profile isolation. Local tab search has no network suggestions, history results, or general command execution. Find reports found/no match rather than an exact count and uses one shared query. Downloads are not resumed across app relaunch. The recently closed archive is metadata restoration, not a saved live page.
 
-Important unfinished areas include isolated profiles, true Favorites and kept-tab semantics, folders, tab reordering, browser import, automatic archive/sleep, production private browsing, extensions, content blocking, password management, sync, Boosts, settings, and an updater. Force Click, Air Traffic Control rules, a system-wide Little Bam hotkey, and four-pane splits are also outside the current subset. WebKit reuse does not supply those browser-host features automatically.
+Important unfinished areas include isolated profiles, folders, general tab drag/reordering, browser import, automatic archive/sleep, production private browsing, extensions, content blocking, password management, sync, Boosts, settings, and an updater. Force Click, Air Traffic Control rules, a system-wide Little Bam hotkey, and four-pane splits are also outside the current subset. WebKit reuse does not supply those browser-host features automatically.
 
 ## Local data
 

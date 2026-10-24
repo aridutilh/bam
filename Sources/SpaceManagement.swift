@@ -46,7 +46,7 @@ struct SpaceEditPlan {
             guard let destination = destinations[id] else { return nil }
             let destinationExists = result.spaceDefinition(destination) != nil && spaces.contains { $0.id == destination }
             let target = destinationExists ? destination : survivor
-            if !destinationExists { pendingMoves += result.tabs.filter { $0.space == id }.map { ($0.id, destination) } }
+            if !destinationExists { pendingMoves += result.tabs.filter { $0.space == id && !$0.isFavorite }.map { ($0.id, destination) } }
             guard result.deleteSpace(id: id, movingTabsTo: target) else { return nil }
         }
         if removedIDs.contains(survivor) {

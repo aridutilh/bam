@@ -4,7 +4,7 @@ import WebKit
 @MainActor extension BrowserController {
     func sidebarItem(_ tab: BrowserTab, activeID: UUID) -> SidebarTabItem {
         let companion = session.split(for: tab.id).flatMap { group in session.tabs.first { $0.id == group.secondaryID } }
-        return SidebarTabItem(id: tab.id, title: companion.map { "\(tab.title) · \($0.title)" } ?? tab.title, subtitle: companion.map { "\(tab.address) | \($0.address)" } ?? tab.address, symbol: companion == nil ? tab.symbol : "rectangle.split.2x1", isPinned: tab.pinned, isActive: tab.id == activeID)
+        return SidebarTabItem(id: tab.id, title: companion.map { "\(tab.displayTitle) · \($0.displayTitle)" } ?? tab.displayTitle, subtitle: companion.map { "\(tab.address) | \($0.address)" } ?? tab.address, symbol: companion == nil ? tab.symbol : "rectangle.split.2x1", isPinned: tab.pinned, isActive: tab.id == activeID, isFavorite: tab.isFavorite, isUnloaded: tab.isUnloaded, isSplit: companion != nil, canFavorite: companion == nil && (tab.isFavorite || session.favoriteTabs.count < 12))
     }
     func showSplit(_ group: BrowserSplit) {
         guard let left = session.tabs.first(where: { $0.id == group.primaryID }), let right = session.tabs.first(where: { $0.id == group.secondaryID }) else { return }
@@ -38,7 +38,7 @@ import WebKit
         for (side, id) in [(SplitViewCoordinator.Side.left, group.primaryID), (.right, group.secondaryID)] {
             guard let tab = session.tabs.first(where: { $0.id == id }) else { continue }
             let web = browsers[id]
-            split.updateMetadata(side: side, address: tab.address, title: tab.title, canGoBack: web?.canGoBack ?? false, canGoForward: web?.canGoForward ?? false, isLoading: web?.isLoading ?? false)
+            split.updateMetadata(side: side, address: tab.address, title: tab.displayTitle, canGoBack: web?.canGoBack ?? false, canGoForward: web?.canGoForward ?? false, isLoading: web?.isLoading ?? false)
         }
     }
     func returnPaneVideo(_ id: UUID) {
@@ -53,6 +53,9 @@ import WebKit
     }
     func openSplit(adopting web: WKWebView, beside owner: UUID) {
         guard let primary = session.tabs.first(where: { $0.id == owner }) else { _ = adoptWebView(web); return }
+        // A shared Favorite cannot belong to a Space-specific Split. Promote
+        // its Peek to a normal tab instead, preserving the already loaded page.
+        guard !primary.isFavorite else { _ = adoptWebView(web); return }
         cancelPaging(); dismissAddress(); session.select(primary.id)
         if session.split(for: primary.id) != nil { unsplit(primary.id) }
         let address = ((web as? PreviewWKWebView)?.promotionURL ?? web.url).flatMap { URLInput.directURL($0.absoluteString) }?.absoluteString ?? "orbit://newtab"
@@ -70,7 +73,7 @@ import WebKit
     }
     @objc func splitWithNewPage(_ sender: Any?) {
         let primary = session.activeID
-        if session.split(for: primary) != nil { return }
+        if session.split(for: primary) != nil || session.active?.isFavorite == true { return }
         let id = session.add()
         session.makeSplit(primary: primary, secondary: id); showActive(); save()
         splitCoordinators[primary]?.focusAddress(.right)

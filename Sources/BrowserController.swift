@@ -100,6 +100,7 @@ import QuartzCore
     var newTabOnSubmit = false
     var privateMode: Bool
     var spaceManager: SpaceManagementController?
+    var savedTabEditor: SavedTabEditorController?
     var onSpacesChanged: (() -> Void)?
     var saveWork: DispatchWorkItem?
     var tabErrors: [UUID: String] = [:]
@@ -133,12 +134,16 @@ import QuartzCore
         reveal.image = NSImage(systemSymbolName: "sidebar.left", accessibilityDescription: "Toggle sidebar")
         reveal.target = self; reveal.action = #selector(toggleSidebar); reveal.toolTip = "Toggle sidebar ⌘S"
         pin.image = NSImage(systemSymbolName: "pin", accessibilityDescription: "Pin tab")
-        pin.target = self; pin.action = #selector(togglePin); pin.toolTip = "Pin or unpin this tab"
+        pin.target = self; pin.action = #selector(togglePin); pin.toolTip = "Keep or unkeep this tab"
         progress.wantsLayer = true; progress.layer?.backgroundColor = NSColor(srgbRed: 0.47, green: 0.39, blue: 0.66, alpha: 1).cgColor
         card.addSubview(progress)
         sidebar.onSelectTab = { [weak self] id in self?.select(id) }
         sidebar.onCloseTab = { [weak self] id in self?.close(id) }
         sidebar.onPinTab = { [weak self] id in self?.pinTab(id) }
+        sidebar.onFavoriteTab = { [weak self] id in self?.favoriteTab(id) }
+        sidebar.onEditSavedTab = { [weak self] id in self?.editSavedTab(id) }
+        sidebar.onResetSavedTab = { [weak self] id in self?.resetSavedTab(id) }
+        sidebar.onReorderSavedTab = { [weak self] id, direction in self?.reorderSavedTab(id, by: direction) }
         sidebar.onNewTab = { [weak self] in self?.newTab(nil) }
         sidebar.onSearch = { [weak self] in self?.focusAddress(nil) }
         sidebar.onBack = { [weak self] in self?.goBack(nil) }
@@ -370,6 +375,7 @@ import QuartzCore
     }
     func prepareToClose() {
         spaceManager?.cancel(nil)
+        savedTabEditor?.cancel(nil)
         isShuttingDown = true; cancelAutomaticDepartures(); findBar.hide(); pageFeedback.hide(); downloads.cancelAll(); pictureInPicture.restore()
         for peek in Array(peeks.values) { peek.dismiss() }
         for little in Array(littleWindows.values) { little.close() }
@@ -403,8 +409,12 @@ import QuartzCore
             location.title = tabErrors[tab.id] ?? (tab.isHome ? "Bam  /  New tab" : host)
             location.toolTip = tab.isHome ? "Search or enter a URL ⌘L" : tab.address
             sidebar.setAddress(tab.address, title: tabErrors[tab.id] ?? (tab.isHome ? "Search or enter URL" : host))
-            pin.image = NSImage(systemSymbolName: tab.pinned ? "pin.fill" : "pin", accessibilityDescription: "Pin tab")
-            view.window?.title = "\(tab.title) — Bam"
+            let retentionTarget = session.tabs.first(where: { $0.id == focusedTabID }) ?? tab
+            let keepLabel = retentionTarget.saved?.kind == .kept ? "Unkeep this tab" : "Keep this tab"
+            pin.image = NSImage(systemSymbolName: retentionTarget.isFavorite ? "star.fill" : retentionTarget.pinned ? "pin.fill" : "pin", accessibilityDescription: keepLabel)
+            pin.toolTip = keepLabel; pin.setAccessibilityLabel(keepLabel)
+            pin.setAccessibilityValue(retentionTarget.isFavorite ? "Favorite" : retentionTarget.isSaved ? "Kept" : "Ordinary")
+            view.window?.title = "\(tab.displayTitle) — Bam"
         }
         refreshSplitMetadata()
         refreshFindTarget()
@@ -412,11 +422,12 @@ import QuartzCore
     }
     func select(_ id: UUID) { cancelPaging(); session.select(id); dismissAddress(); showActive(); save() }
     func close(_ id: UUID) {
-        cancelPaging()
+        cancelPaging(); cancelAutomaticDepartures()
         let group = session.split(for: id)
         let closingIDs = group?.primaryID == id ? [id, group!.secondaryID] : [id]
         let closed = closingIDs.compactMap { closingID in session.tabs.first { $0.id == closingID } }
-        library.recordClosed(tabs: closed, split: closed.count == 2)
+        let removed = closed.filter { !$0.isSaved }
+        library.recordClosed(tabs: removed, split: removed.count == 2)
         _ = session.close(id)
         if let group, let split = splitCoordinators.removeValue(forKey: group.primaryID) {
             split.detach(); split.view.removeFromSuperview()
@@ -424,21 +435,25 @@ import QuartzCore
         }
         for closingID in closingIDs {
             peeks[closingID]?.dismiss()
-            if let web = browsers[closingID], pictureInPicture.references(web) { pictureInPicture.restore() }
             observations.removeValue(forKey: closingID)
-            browsers[closingID]?.stopLoading(); browsers[closingID]?.navigationDelegate = nil; browsers[closingID]?.uiDelegate = nil
-            if let web = browsers[closingID] {
+            let web = browsers.removeValue(forKey: closingID)
+            web?.navigationDelegate = nil; web?.uiDelegate = nil; web?.stopLoading()
+            // PiP restoration can synchronously re-enter showActive. The closed
+            // view must no longer be discoverable by metadata or return callbacks.
+            if let web, pictureInPicture.references(web) { pictureInPicture.restore() }
+            if let web {
+                web.pauseAllMediaPlayback(completionHandler: nil)
                 retiringViews.removeValue(forKey: ObjectIdentifier(web)); web.removeFromSuperview()
             }
-            browsers.removeValue(forKey: closingID)
             pendingHome.remove(closingID); tabErrors.removeValue(forKey: closingID); pendingLoads.remove(closingID); requestedAddresses.removeValue(forKey: closingID)
         }
         showActive(); save()
     }
     func pinTab(_ id: UUID) {
         cancelPaging()
-        guard let i = session.tabs.firstIndex(where: { $0.id == id }) else { return }
-        session.tabs[i].pinned.toggle(); refresh(); save()
+        guard let tab = session.tabs.first(where: { $0.id == id }),
+              session.setRetention(id: id, kind: tab.saved?.kind == .kept ? nil : .kept) else { return }
+        refresh(); refreshPaletteResults(); save()
     }
     func sidebarItems(for space: Int) -> [SidebarTabItem] {
         var preview = session; preview.changeSpace(space)
@@ -533,7 +548,7 @@ import QuartzCore
         spaceScrollRoute = "hidden"
         guard session.sidebarVisible else { return false }
         spaceScrollRoute = "overlay"
-        guard addressOverlay == nil, spaceManager == nil else { return false }
+        guard addressOverlay == nil, spaceManager == nil, savedTabEditor == nil else { return false }
         spaceScrollRoute = "wheel"
         guard isPrecise || phase != .none else { return false }
         if phase == .began || phase == .mayBegin {
@@ -742,7 +757,7 @@ import QuartzCore
         close(session.activeID)
     }
     @objc func reopenTab(_ sender: Any?) { if let record = library.popClosed() { restoreClosed(record) } }
-    @objc func togglePin(_ sender: Any?) { pinTab(session.activeID) }
+    @objc func togglePin(_ sender: Any?) { pinTab(focusedTabID) }
     @objc func goBack(_ sender: Any?) { returnActiveVideo(); commandWebView?.goBack() }
     @objc func goForward(_ sender: Any?) { returnActiveVideo(); commandWebView?.goForward() }
     @objc func reload(_ sender: Any?) {

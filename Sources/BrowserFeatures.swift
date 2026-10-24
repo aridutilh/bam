@@ -138,6 +138,16 @@ extension BrowserController: NSMenuItemValidation {
             return pageCommandSurface.flatMap { copyableURL(for: $0.web) } != nil
         case #selector(hardReload(_:)):
             return pageCommandSurface != nil
+        case #selector(togglePin(_:)), #selector(toggleFavorite(_:)), #selector(editCurrentSavedTab(_:)), #selector(resetCurrentSavedTab(_:)):
+            guard NSApp.keyWindow === view.window, peeks[session.activeID]?.isPresented != true,
+                  let tab = session.tabs.first(where: { $0.id == focusedTabID }) else { return false }
+            if menuItem.action == #selector(toggleFavorite(_:)) {
+                return tab.isFavorite || (session.split(for: tab.id) == nil && session.favoriteTabs.count < 12)
+            }
+            if menuItem.action == #selector(editCurrentSavedTab(_:)) || menuItem.action == #selector(resetCurrentSavedTab(_:)) { return tab.isSaved }
+            return true
+        case #selector(splitWithNewPage(_:)):
+            return NSApp.keyWindow === view.window && session.active?.isFavorite != true && session.split(for: session.activeID) == nil
         default: return true
         }
     }

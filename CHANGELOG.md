@@ -1,6 +1,14 @@
 # Changelog
 
-## Unreleased
+## Unreleased — 0.7.0 local draft, build 20
+
+This is a local-only draft. Published and installed Bam remains 0.6.0; no draft install, real-profile migration, push, tag or release occurred. All seven component and five final-draft runtime suites passed, including 192 model and 325 feature checks (57 saved tabs and 61 editable Spaces); all 59 inputs match. A fixture-only correction moved the demo-video decoded-frame wait until after playback started, followed by a complete rebuild/rerun. Native fresh-preview checks verified Favorite creation, name/Heart editing by keyboard, cross-Space sharing, retained unload/reopen and conversion to a kept row. Physical trackpad behavior, a full twelve-tile grid and a broader accessibility matrix were not manually checked. See [VALIDATION.md](VALIDATION.md) for detailed evidence. `bash scripts/preview-draft.sh` opens the fresh nonpersistent preview; publication remains on hold for user approval.
+
+- Separate up to twelve global Favorites from per-Space kept tabs. Shared tiles stay fixed while Space rows page.
+- Retain saved tabs when closed: unload the live page, restore its original saved address, and keep its identity and optional name/icon. Selecting wakes it; Reset returns a live saved tab to its original page.
+- Add saved-tab editing and earlier/later order controls. Favorite selection preserves the current Space; converting a Favorite to an ordinary or kept tab places it in the current Space. Favorites cannot join Split View or move between Spaces.
+- Preserve each Split member's retention on close, remove ordinary members, and dissolve the group. Split-row keep actions explicitly name the left tab; the toolbar pin icon follows the focused pane and its command. Search uses custom saved names and labels Favorites as shared across Spaces.
+- Migrate session versions 1–2 to format 3, interpreting old `pinned: true` as kept. Validate metadata, cap Favorites, and repair unloaded selections without deleting saved records. This is not a downgrade-compatible format.
 
 Remaining work is tracked with acceptance criteria in [FEATURE-INVENTORY.md](FEATURE-INVENTORY.md). An inventory item is complete only after its full behavior is verified.
 

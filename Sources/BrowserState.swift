@@ -1,20 +1,88 @@
 import Foundation
 
+enum SavedTabKind: String, Codable { case kept, favorite }
+
+struct SavedTabState: Codable, Equatable {
+    var kind: SavedTabKind
+    var address: String
+    var customTitle: String?
+    var customSymbol: String?
+    var isUnloaded: Bool
+
+    init(kind: SavedTabKind, address: String, customTitle: String? = nil,
+         customSymbol: String? = nil, isUnloaded: Bool = false) {
+        self.kind = kind; self.address = address; self.customTitle = customTitle
+        self.customSymbol = customSymbol; self.isUnloaded = isUnloaded
+    }
+    private enum CodingKeys: String, CodingKey { case kind, address, customTitle, customSymbol, isUnloaded }
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        kind = try values.decode(SavedTabKind.self, forKey: .kind)
+        address = try values.decode(String.self, forKey: .address)
+        customTitle = try? values.decodeIfPresent(String.self, forKey: .customTitle)
+        customSymbol = try? values.decodeIfPresent(String.self, forKey: .customSymbol)
+        isUnloaded = (try? values.decodeIfPresent(Bool.self, forKey: .isUnloaded)) ?? false
+    }
+}
+
 struct BrowserTab: Codable, Identifiable, Equatable {
-    var id = UUID()
+    var id: UUID
     var title: String
     var address: String
     var space: Int
-    var pinned = false
+    var saved: SavedTabState?
+
+    init(id: UUID = UUID(), title: String, address: String, space: Int,
+         pinned: Bool = false, saved: SavedTabState? = nil) {
+        self.id = id; self.title = title; self.address = address; self.space = space
+        self.saved = saved ?? (pinned ? SavedTabState(kind: .kept, address: address) : nil)
+    }
+    var pinned: Bool {
+        get { saved != nil }
+        set {
+            if !newValue { saved = nil }
+            else if saved == nil { saved = SavedTabState(kind: .kept, address: address) }
+        }
+    }
+    var isFavorite: Bool { saved?.kind == .favorite }
+    var isSaved: Bool { saved != nil }
+    var isUnloaded: Bool { saved?.isUnloaded == true }
+    var displayTitle: String { saved?.customTitle ?? title }
     var isHome: Bool { address == "orbit://newtab" }
     var isVideoDemo: Bool { address == "orbit://video" }
     var symbol: String {
+        if let symbol = saved?.customSymbol { return symbol }
         if isHome { return "sparkle" }
         if isVideoDemo { return "play.rectangle.fill" }
         if address.contains("developer.apple.com") { return "apple.logo" }
         if address.contains("github.com") { return "chevron.left.forwardslash.chevron.right" }
         if address.contains("wikipedia.org") { return "book.closed" }
         return "globe"
+    }
+    fileprivate static func validAddress(_ address: String) -> Bool {
+        address == "orbit://newtab" || address == "orbit://video" || URLInput.directURL(address) != nil
+    }
+    fileprivate static func validCustomTitle(_ title: String) -> Bool {
+        title.count <= 80 && !title.unicodeScalars.contains { CharacterSet.controlCharacters.contains($0) }
+    }
+    private enum CodingKeys: String, CodingKey { case id, title, address, space, pinned, saved }
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decode(UUID.self, forKey: .id)
+        title = try values.decode(String.self, forKey: .title)
+        address = try values.decode(String.self, forKey: .address)
+        space = try values.decode(Int.self, forKey: .space)
+        saved = try? values.decodeIfPresent(SavedTabState.self, forKey: .saved)
+        if saved == nil, (try? values.decodeIfPresent(Bool.self, forKey: .pinned)) == true {
+            saved = SavedTabState(kind: .kept, address: address)
+        }
+    }
+    func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(id, forKey: .id); try values.encode(title, forKey: .title)
+        try values.encode(address, forKey: .address); try values.encode(space, forKey: .space)
+        try values.encode(pinned, forKey: .pinned)
+        try values.encodeIfPresent(saved, forKey: .saved)
     }
 }
 
@@ -66,7 +134,8 @@ struct BrowserSession: Codable {
     // metadata can never accidentally refer to a different newly created Space.
     private var lastIssuedSpaceID: Int
     static let maximumSpaces = 32
-    private static let formatVersion = 2
+    private static let formatVersion = 3
+    static let maximumFavorites = 12
 
     init(tabs: [BrowserTab], activeID: UUID, space: Int = 0,
          sidebarWidth: Double = 228, sidebarVisible: Bool = true,
@@ -124,6 +193,7 @@ struct BrowserSession: Codable {
     }
     var active: BrowserTab? { tabs.first { $0.id == activeID } }
     var visibleTabs: [BrowserTab] { orderedTabs(in: space) }
+    var favoriteTabs: [BrowserTab] { tabs.filter(\.isFavorite) }
     var spaceIDs: [Int] { spaces.map(\.id) }
     func spaceIndex(_ id: Int) -> Int? { spaces.firstIndex { $0.id == id } }
     func spaceDefinition(_ id: Int) -> BrowserSpace? { spaces.first { $0.id == id } }
@@ -166,7 +236,7 @@ struct BrowserSession: Codable {
     /// A split is one movable item. Stable tab IDs let the controller retain the
     /// existing WKWebViews; moving changes only their Space membership.
     @discardableResult mutating func moveTab(id: UUID, toSpace destination: Int) -> Bool {
-        guard spaceDefinition(destination) != nil, let tab = tabs.first(where: { $0.id == id }) else { return false }
+        guard spaceDefinition(destination) != nil, let tab = tabs.first(where: { $0.id == id }), !tab.isFavorite else { return false }
         guard tab.space != destination else { return true }
         rememberActiveSelection()
         let group = split(for: id)
@@ -180,20 +250,84 @@ struct BrowserSession: Codable {
         return true
     }
 
+    @discardableResult mutating func setRetention(id: UUID, kind: SavedTabKind?) -> Bool {
+        guard let index = tabs.firstIndex(where: { $0.id == id }) else { return false }
+        if kind == .favorite {
+            guard split(for: id) == nil,
+                  tabs[index].isFavorite || favoriteTabs.count < Self.maximumFavorites else { return false }
+        }
+        rememberActiveSelection()
+        let wasFavorite = tabs[index].isFavorite
+        if let kind {
+            if tabs[index].saved == nil {
+                guard BrowserTab.validAddress(tabs[index].address) else { return false }
+                tabs[index].saved = SavedTabState(kind: kind, address: tabs[index].address)
+            } else { tabs[index].saved?.kind = kind }
+        } else { tabs[index].saved = nil }
+        if wasFavorite && kind != .favorite { tabs[index].space = space }
+        repairRememberedSelections()
+        repairActiveSelection()
+        return true
+    }
+    @discardableResult mutating func resetSavedTab(id: UUID) -> Bool {
+        guard let index = tabs.firstIndex(where: { $0.id == id }), let saved = tabs[index].saved,
+              BrowserTab.validAddress(saved.address) else { return false }
+        tabs[index].address = saved.address
+        tabs[index].saved?.isUnloaded = false
+        return true
+    }
+    @discardableResult mutating func updateSavedTab(id: UUID, customTitle: String?, customSymbol: String?) -> Bool {
+        guard let index = tabs.firstIndex(where: { $0.id == id }), tabs[index].isSaved else { return false }
+        let title = customTitle?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let symbol = customSymbol?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard title.map(BrowserTab.validCustomTitle) ?? true,
+              symbol.map({ $0.isEmpty || BrowserSpace.symbols.contains($0) }) ?? true else { return false }
+        tabs[index].saved?.customTitle = title?.isEmpty == false ? title : nil
+        tabs[index].saved?.customSymbol = symbol?.isEmpty == false ? symbol : nil
+        return true
+    }
+    @discardableResult mutating func reorderSavedTab(id: UUID, by offset: Int) -> Bool {
+        let primaryID = split(for: id)?.primaryID ?? id
+        guard let source = tabs.first(where: { $0.id == primaryID }), let kind = source.saved?.kind else { return false }
+        let secondaryIDs = Set((splits ?? []).map(\.secondaryID))
+        let candidates = tabs.indices.filter {
+            !secondaryIDs.contains(tabs[$0].id) && tabs[$0].saved?.kind == kind
+                && (kind == .favorite || tabs[$0].space == source.space)
+        }
+        guard let current = candidates.firstIndex(where: { tabs[$0].id == primaryID }) else { return false }
+        let (target, overflow) = current.addingReportingOverflow(offset)
+        guard !overflow, candidates.indices.contains(target) else { return false }
+        // Only primary positions determine row order. Secondary identities and
+        // the pair itself remain intact even when a saved split row is moved.
+        tabs.swapAt(candidates[current], candidates[target])
+        return true
+    }
     private func orderedTabs(in space: Int) -> [BrowserTab] {
         let grouped = Set((splits ?? []).map(\.secondaryID))
-        return tabs.filter { $0.space == space && !grouped.contains($0.id) }.sorted { $0.pinned && !$1.pinned }
+        let local = tabs.filter { $0.space == space && !$0.isFavorite && !grouped.contains($0.id) }
+        return favoriteTabs + local.filter(\.isSaved) + local.filter { !$0.isSaved }
+    }
+    private func selectable(_ tab: BrowserTab, in space: Int) -> Bool {
+        !tab.isUnloaded && (tab.isFavorite || tab.space == space)
+    }
+    private func fallbackTab(in space: Int, last: Bool = false) -> UUID? {
+        let visible = orderedTabs(in: space).filter { !$0.isUnloaded }
+        let ordinary = visible.filter { !$0.isSaved }
+        let kept = visible.filter { $0.isSaved && !$0.isFavorite }
+        let preferred = !ordinary.isEmpty ? ordinary : !kept.isEmpty ? kept : visible
+        return (last ? preferred.last : preferred.first)?.id
     }
     private func rememberedTab(in space: Int) -> UUID? {
         guard let id = lastSelectedTabIDsBySpace?[space],
-              tabs.contains(where: { $0.id == id && $0.space == space }) else { return nil }
+              let tab = tabs.first(where: { $0.id == id }), selectable(tab, in: space) else { return nil }
         return split(for: id)?.primaryID ?? id
     }
     private mutating func rememberActiveSelection() {
-        guard let tab = active, spaceDefinition(tab.space) != nil else { return }
+        guard let tab = active, !tab.isUnloaded, spaceDefinition(space) != nil else { return }
         if lastSelectedTabIDsBySpace == nil { lastSelectedTabIDsBySpace = [:] }
         let selectedID = split(for: tab.id)?.primaryID ?? tab.id
-        lastSelectedTabIDsBySpace?[tab.space] = selectedID
+        let context = tab.isFavorite ? space : tab.space
+        lastSelectedTabIDsBySpace?[context] = selectedID
     }
     private mutating func repairRememberedSelection(in id: Int, preferred: UUID? = nil) {
         guard spaceDefinition(id) != nil else { lastSelectedTabIDsBySpace?[id] = nil; return }
@@ -202,18 +336,26 @@ struct BrowserSession: Codable {
             return
         }
         let preferred = preferred.flatMap { candidate in
-            tabs.contains(where: { $0.id == candidate && $0.space == id }) ? candidate : nil
+            tabs.first(where: { $0.id == candidate && selectable($0, in: id) })?.id
         }
-        let replacement = preferred ?? orderedTabs(in: id).last?.id
+        let replacement = preferred ?? fallbackTab(in: id, last: true)
         if lastSelectedTabIDsBySpace == nil { lastSelectedTabIDsBySpace = [:] }
         lastSelectedTabIDsBySpace?[id] = replacement
     }
+    private mutating func repairRememberedSelections() {
+        for id in Array((lastSelectedTabIDsBySpace ?? [:]).keys) { repairRememberedSelection(in: id) }
+    }
     private mutating func repairActiveSelection() {
-        if let selected = active, spaceDefinition(selected.space) != nil {
+        if let selected = active, !selected.isUnloaded,
+           selected.isFavorite || spaceDefinition(selected.space) != nil {
             activeID = split(for: selected.id)?.primaryID ?? selected.id
-            space = selected.space
+            if !selected.isFavorite { space = selected.space }
             rememberActiveSelection()
-        } else { changeSpace(spaceDefinition(space) != nil ? space : spaces[0].id) }
+        } else {
+            if spaceDefinition(space) == nil { space = spaces[0].id }
+            if let id = rememberedTab(in: space) ?? fallbackTab(in: space, last: true) { activeID = id; rememberActiveSelection() }
+            else { add() }
+        }
     }
     @discardableResult mutating func add(address: String = "orbit://newtab", title: String? = nil) -> UUID {
         rememberActiveSelection()
@@ -224,17 +366,21 @@ struct BrowserSession: Codable {
         return tab.id
     }
     mutating func select(_ id: UUID) {
-        let selectedID = (splits ?? []).first(where: { $0.secondaryID == id })?.primaryID ?? id
-        guard let tab = tabs.first(where: { $0.id == selectedID }), spaceDefinition(tab.space) != nil else { return }
+        let selectedID = split(for: id)?.primaryID ?? id
+        guard let index = tabs.firstIndex(where: { $0.id == selectedID }),
+              tabs[index].isFavorite || spaceDefinition(tabs[index].space) != nil else { return }
         rememberActiveSelection()
-        activeID = selectedID; space = tab.space
+        let members = split(for: selectedID).map { [$0.primaryID, $0.secondaryID] } ?? [selectedID]
+        for index in tabs.indices where members.contains(tabs[index].id) { tabs[index].saved?.isUnloaded = false }
+        activeID = selectedID
+        if !tabs[index].isFavorite { space = tabs[index].space }
         rememberActiveSelection()
     }
     mutating func changeSpace(_ value: Int) {
         guard spaceDefinition(value) != nil else { return }
         rememberActiveSelection()
         space = value
-        if let id = rememberedTab(in: space) ?? visibleTabs.first(where: { !$0.pinned })?.id ?? visibleTabs.first?.id {
+        if let id = rememberedTab(in: space) ?? fallbackTab(in: space) {
             activeID = id
             rememberActiveSelection()
         } else { add() }
@@ -243,30 +389,26 @@ struct BrowserSession: Codable {
     @discardableResult mutating func makeSplit(primary: UUID, secondary: UUID) -> Bool {
         guard primary != secondary, let left = tabs.first(where: { $0.id == primary }),
               let right = tabs.first(where: { $0.id == secondary }), left.space == right.space,
+              !left.isFavorite, !right.isFavorite, !left.isUnloaded, !right.isUnloaded,
               spaceDefinition(left.space) != nil else { return false }
         splits = (splits ?? []).filter { ![primary,secondary].contains($0.primaryID) && ![primary,secondary].contains($0.secondaryID) }
         splits?.append(BrowserSplit(primaryID: primary, secondaryID: secondary)); select(primary); return true
     }
     mutating func removeSplit(containing id: UUID) { splits = (splits ?? []).filter { $0.primaryID != id && $0.secondaryID != id } }
     @discardableResult mutating func close(_ id: UUID) -> BrowserTab? {
-        guard let index = tabs.firstIndex(where: { $0.id == id }) else { return nil }
+        guard let closing = tabs.first(where: { $0.id == id }) else { return nil }
         rememberActiveSelection()
-        let removed = tabs.remove(at: index)
-        if let group = split(for: id) {
-            if group.primaryID == id { tabs.removeAll { $0.id == group.secondaryID } }
-            removeSplit(containing: id)
+        let group = split(for: id)
+        let members = Set(group?.primaryID == id ? [id, group!.secondaryID] : [id])
+        removeSplit(containing: id)
+        for index in tabs.indices where members.contains(tabs[index].id) && tabs[index].isSaved {
+            tabs[index].address = tabs[index].saved!.address
+            tabs[index].saved?.isUnloaded = true
         }
-        if activeID == id {
-            if let next = visibleTabs.last?.id { activeID = next } else { add() }
-        }
-        // A remembered tab can be closed while a different space is visible.
-        // Repair only that space's choice and leave the active tab alone.
-        if lastSelectedTabIDsBySpace?[removed.space] == id {
-            let replacementID = orderedTabs(in: removed.space).last?.id
-            lastSelectedTabIDsBySpace?[removed.space] = replacementID
-        }
-        rememberActiveSelection()
-        return removed
+        tabs.removeAll { members.contains($0.id) && !$0.isSaved }
+        repairRememberedSelections()
+        repairActiveSelection()
+        return closing
     }
     mutating func sanitize() {
         lastIssuedSpaceID = max(lastIssuedSpaceID, spaces.map(\.id).max() ?? 2)
@@ -288,24 +430,45 @@ struct BrowserSession: Codable {
         }
         sidebarWidth = sidebarWidth.isFinite ? min(500, max(164, sidebarWidth)) : 228
         var seen = Set<UUID>()
-        tabs = tabs.filter { tab in
-            validSpaceIDs.contains(tab.space) && seen.insert(tab.id).inserted && (tab.isHome || tab.isVideoDemo || URLInput.directURL(tab.address) != nil)
+        var favoriteCount = 0
+        tabs = tabs.compactMap { original in
+            var tab = original
+            guard seen.insert(tab.id).inserted else { return nil }
+            if var saved = tab.saved {
+                if !BrowserTab.validAddress(saved.address) {
+                    guard BrowserTab.validAddress(tab.address) else { return nil }
+                    saved.address = tab.address
+                }
+                let title = saved.customTitle?.trimmingCharacters(in: .whitespacesAndNewlines)
+                saved.customTitle = title.map { !$0.isEmpty && BrowserTab.validCustomTitle($0) } == true ? title : nil
+                let symbol = saved.customSymbol?.trimmingCharacters(in: .whitespacesAndNewlines)
+                saved.customSymbol = symbol.map { BrowserSpace.symbols.contains($0) } == true ? symbol : nil
+                if saved.kind == .favorite {
+                    if !validSpaceIDs.contains(tab.space) { tab.space = space }
+                    favoriteCount += 1
+                    if favoriteCount > Self.maximumFavorites { saved.kind = .kept }
+                }
+                tab.saved = saved
+                if saved.isUnloaded || !BrowserTab.validAddress(tab.address) { tab.address = saved.address }
+            }
+            guard validSpaceIDs.contains(tab.space), BrowserTab.validAddress(tab.address) else { return nil }
+            return tab
         }
-        let tabSpaces = Dictionary(uniqueKeysWithValues: tabs.map { ($0.id, $0.space) })
+        let tabByID = Dictionary(uniqueKeysWithValues: tabs.map { ($0.id, $0) })
         var grouped = Set<UUID>()
         splits = (splits ?? []).filter { group in
-            guard group.primaryID != group.secondaryID, let space = tabSpaces[group.primaryID], tabSpaces[group.secondaryID] == space,
+            guard group.primaryID != group.secondaryID,
+                  let left = tabByID[group.primaryID], let right = tabByID[group.secondaryID], left.space == right.space,
+                  !left.isFavorite, !right.isFavorite, !left.isUnloaded, !right.isUnloaded,
                   !grouped.contains(group.primaryID), !grouped.contains(group.secondaryID) else { return false }
             grouped.insert(group.primaryID); grouped.insert(group.secondaryID); return true
         }
         if let group = split(for: activeID) { activeID = group.primaryID }
         lastSelectedTabIDsBySpace = (lastSelectedTabIDsBySpace ?? [:]).filter { entry in
-            validSpaceIDs.contains(entry.key) && tabSpaces[entry.value] == entry.key
+            validSpaceIDs.contains(entry.key) && tabByID[entry.value].map { selectable($0, in: entry.key) } == true
         }.mapValues { split(for: $0)?.primaryID ?? $0 }
-        if let selected = active { space = selected.space }
-        else if let id = rememberedTab(in: space) ?? visibleTabs.first?.id { activeID = id }
-        else { add() }
-        rememberActiveSelection()
+        repairActiveSelection()
+
     }
 }
 

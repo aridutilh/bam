@@ -29,7 +29,8 @@ import WebKit
         window.contentViewController = controller
         let available = NSScreen.main?.visibleFrame.size ?? NSSize(width: 1440, height: 900)
         window.setContentSize(NSSize(width: min(1260, available.width - 60), height: min(800, available.height - 60)))
-        window.center(); window.setFrameAutosaveName("OrbitPrototypeWindow")
+        window.center()
+        if !preview { window.setFrameAutosaveName("OrbitPrototypeWindow") }
         window.appearance = NSAppearance(named: .darkAqua)
         controller.onSpacesChanged = { [weak self] in self?.rebuildSpacesMenu() }
         buildMenus(); window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
@@ -105,7 +106,10 @@ import WebKit
         let view = menu("View")
         item(view, "Toggle Sidebar", #selector(BrowserController.toggleSidebar(_:)), "s", .command, controller)
         item(view, "Reset Sidebar Width", #selector(BrowserController.resetSidebar(_:)), "s", [.command, .shift], controller)
-        item(view, "Pin / Unpin Tab", #selector(BrowserController.togglePin(_:)), "d", .command, controller)
+        item(view, "Keep / Unkeep Tab", #selector(BrowserController.togglePin(_:)), "d", .command, controller)
+        item(view, "Add / Remove Favorite", #selector(BrowserController.toggleFavorite(_:)), "d", [.command, .shift], controller)
+        item(view, "Edit Saved Tab…", #selector(BrowserController.editCurrentSavedTab(_:)), "", .command, controller)
+        item(view, "Reset to Saved Page", #selector(BrowserController.resetCurrentSavedTab(_:)), "", .command, controller)
         view.addItem(.separator()); item(view, "Reload / Stop", #selector(BrowserController.reload(_:)), "r", .command, controller)
         item(view, "Hard Refresh", #selector(BrowserController.hardReload(_:)), "r", [.command, .shift], controller)
         item(view, "Zoom In", #selector(BrowserController.zoomIn(_:)), "+", .command, controller)

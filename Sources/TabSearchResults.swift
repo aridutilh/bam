@@ -9,16 +9,20 @@ enum TabSearchMatcher {
         let tokens = query.split(separator: " ").map(String.init)
         return tabs.enumerated().compactMap { index, tab -> (BrowserTab, Int, Int)? in
             guard !query.isEmpty else { return (tab, tab.id == activeID ? 0 : 1, index) }
-            let title = normalized(tab.title)
-            let address = normalized(tab.address.removingPercentEncoding ?? tab.address)
-            let site = address.replacingOccurrences(of: #"^https?://"#, with: "", options: .regularExpression)
+            let title = normalized(tab.displayTitle)
+            // A kept page may navigate away from its saved destination. Both
+            // addresses remain useful local search keys without adding a duplicate result.
+            let addresses = [tab.address, tab.saved?.address].compactMap { $0 }.map {
+                normalized($0.removingPercentEncoding ?? $0)
+            }
+            let sites = addresses.map { $0.replacingOccurrences(of: #"^https?://"#, with: "", options: .regularExpression) }
             let rank: Int
             if title == query { rank = 0 }
             else if title.hasPrefix(query) { rank = 1 }
             else if title.contains(query) { rank = 2 }
-            else if site.hasPrefix(query) || address.hasPrefix(query) { rank = 3 }
-            else if address.contains(query) { rank = 4 }
-            else if tokens.allSatisfy({ title.contains($0) || address.contains($0) }) { rank = 5 }
+            else if sites.contains(where: { $0.hasPrefix(query) }) || addresses.contains(where: { $0.hasPrefix(query) }) { rank = 3 }
+            else if addresses.contains(where: { $0.contains(query) }) { rank = 4 }
+            else if tokens.allSatisfy({ token in title.contains(token) || addresses.contains(where: { $0.contains(token) }) }) { rank = 5 }
             else { return nil }
             return (tab, rank, index)
         }.sorted { lhs, rhs in
@@ -52,7 +56,7 @@ enum TabSearchMatcher {
     private var entries: [Entry] = []
     private var rows: [TabSearchResultRow] = []
     private var lastQuery = ""
-    private let emptyLabel = NSTextField(labelWithString: "No matching open tabs")
+    private let emptyLabel = NSTextField(labelWithString: "No matching tabs")
     override var isFlipped: Bool { true }
 
     override init(frame: NSRect) {
@@ -86,9 +90,10 @@ enum TabSearchMatcher {
             case .tab(let tab):
                 // IDs remain stable when Spaces are renamed, reordered or deleted.
                 let space = spaces.first(where: { $0.id == tab.space })?.name ?? "Unknown Space"
-                let badge = tab.id == activeID ? "\(space) · Current" : space
-                let subtitle = tab.isHome ? "New tab" : tab.isVideoDemo ? "Picture in Picture demo" : tab.address
-                row.configure(title: tab.title.isEmpty ? subtitle : tab.title, subtitle: subtitle, badge: badge, symbol: tab.symbol)
+                let badge = tab.isFavorite ? "Favorite · All Spaces" : (tab.id == activeID ? "\(space) · Current" : space)
+                let address = tab.isHome ? "New tab" : tab.isVideoDemo ? "Picture in Picture demo" : tab.address
+                let subtitle = tab.isUnloaded ? "Sleeping · \(address)" : address
+                row.configure(title: tab.displayTitle.isEmpty ? address : tab.displayTitle, subtitle: subtitle, badge: badge, symbol: tab.symbol)
             }
             row.isSelected = index == selectedIndex
             row.onActivate = { [weak self] in
@@ -105,7 +110,7 @@ enum TabSearchMatcher {
             return row
         }
         emptyLabel.isHidden = !entries.isEmpty
-        emptyLabel.stringValue = trimmed.isEmpty ? "No open tabs" : "No matching open tabs"
+        emptyLabel.stringValue = trimmed.isEmpty ? "No tabs" : "No matching tabs"
         needsLayout = true
         invalidateIntrinsicContentSize()
     }
