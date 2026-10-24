@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased — 0.8.0 local draft, build 21
+
+Local only; publication and installation remain on hold. Includes the preceding 0.7.0 Favorites/kept-tabs draft. All ten component and six exact-package native suites passed; all 70 frozen inputs match. Independent reviews and the synthetic benchmark are detailed in [VALIDATION.md](VALIDATION.md) and [the performance report](docs/tab-performance.md).
+
+- Virtualize sidebar rows with native table reuse, preserve per-Space scrolling, update only changed visible row content, and coalesce metadata chrome refreshes.
+- Coalesce session snapshots on an ordered background writer. JSON encoding and atomic file replacement leave the main thread; asynchronous quit flush includes edits made while waiting and offers Retry/Cancel if saving fails.
+- Add conservative pressure-driven sleeping for ordinary static HTTP(S) pages idle at least ten minutes. Keep the three most recent loaded pages, saved tabs, Split members, PiP, loading/failed pages, history, retained previews, non-GET responses and keep-awake sites protected. Active downloads block a sleep pass.
+- Require fresh isolated-world activity evidence; protect forms, editable content, trusted interaction, executable scripts, frames, service workers, media and capture. Missing or stale evidence leaves the page alive.
+- Preserve current URL and scroll on sleep; show a distinct sleeping row and reload on selection. Saved-tab Close/Reset still returns to its original saved address. Session format 4 accepts older formats; downgrade is unsupported.
+- Defer background GET renderer-crash reloads until selection, and require explicit retry for terminated non-GET responses. Crash recovery cannot preserve already-lost renderer state.
+
+Verification and measured limits are recorded in [VALIDATION.md](VALIDATION.md).
+
 ## Unreleased — 0.7.0 local draft, build 20
 
 This is a local-only draft. Published and installed Bam remains 0.6.0; no draft install, real-profile migration, push, tag or release occurred. All seven component and five final-draft runtime suites passed, including 192 model and 325 feature checks (57 saved tabs and 61 editable Spaces); all 59 inputs match. A fixture-only correction moved the demo-video decoded-frame wait until after playback started, followed by a complete rebuild/rerun. Native fresh-preview checks verified Favorite creation, name/Heart editing by keyboard, cross-Space sharing, retained unload/reopen and conversion to a kept row. Physical trackpad behavior, a full twelve-tile grid and a broader accessibility matrix were not manually checked. See [VALIDATION.md](VALIDATION.md) for detailed evidence. `bash scripts/preview-draft.sh` opens the fresh nonpersistent preview; publication remains on hold for user approval.

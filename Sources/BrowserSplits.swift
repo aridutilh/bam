@@ -14,7 +14,7 @@ import WebKit
             return SidebarTabItem(id: tab.id, title: companion.map { "\(tab.displayTitle) · \($0.displayTitle)" } ?? tab.displayTitle,
                 subtitle: companion.map { "\(tab.address) | \($0.address)" } ?? tab.address,
                 symbol: companion == nil ? tab.symbol : "rectangle.split.2x1", isPinned: tab.pinned,
-                isActive: tab.id == snapshot.activeID, isFavorite: tab.isFavorite, isUnloaded: tab.isUnloaded,
+                isActive: tab.id == snapshot.activeID, isFavorite: tab.isFavorite, isUnloaded: tab.isUnloaded, isSleeping: tab.isSleeping,
                 isSplit: companion != nil, canFavorite: companion == nil && (tab.isFavorite || favoriteCount < BrowserSession.maximumFavorites))
         }
     }

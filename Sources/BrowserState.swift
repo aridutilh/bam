@@ -25,17 +25,33 @@ struct SavedTabState: Codable, Equatable {
     }
 }
 
+/// Memory sleeping resumes the current page; it is distinct from closing a
+/// saved tab, which resets that tab to its original saved address.
+struct TabSleepState: Codable, Equatable {
+    var address: String
+    var scrollX: Double
+    var scrollY: Double
+
+    fileprivate func matches(_ currentAddress: String) -> Bool {
+        address == currentAddress && URLInput.directURL(address) != nil
+            && scrollX.isFinite && scrollY.isFinite
+            && abs(scrollX) <= 10_000_000 && abs(scrollY) <= 10_000_000
+    }
+}
+
 struct BrowserTab: Codable, Identifiable, Equatable {
     var id: UUID
     var title: String
     var address: String
     var space: Int
     var saved: SavedTabState?
+    var sleepState: TabSleepState?
 
     init(id: UUID = UUID(), title: String, address: String, space: Int,
-         pinned: Bool = false, saved: SavedTabState? = nil) {
+         pinned: Bool = false, saved: SavedTabState? = nil, sleepState: TabSleepState? = nil) {
         self.id = id; self.title = title; self.address = address; self.space = space
         self.saved = saved ?? (pinned ? SavedTabState(kind: .kept, address: address) : nil)
+        self.sleepState = sleepState
     }
     var pinned: Bool {
         get { saved != nil }
@@ -47,6 +63,7 @@ struct BrowserTab: Codable, Identifiable, Equatable {
     var isFavorite: Bool { saved?.kind == .favorite }
     var isSaved: Bool { saved != nil }
     var isUnloaded: Bool { saved?.isUnloaded == true }
+    var isSleeping: Bool { sleepState != nil }
     var displayTitle: String { saved?.customTitle ?? title }
     var isHome: Bool { address == "orbit://newtab" }
     var isVideoDemo: Bool { address == "orbit://video" }
@@ -65,7 +82,7 @@ struct BrowserTab: Codable, Identifiable, Equatable {
     fileprivate static func validCustomTitle(_ title: String) -> Bool {
         title.count <= 80 && !title.unicodeScalars.contains { CharacterSet.controlCharacters.contains($0) }
     }
-    private enum CodingKeys: String, CodingKey { case id, title, address, space, pinned, saved }
+    private enum CodingKeys: String, CodingKey { case id, title, address, space, pinned, saved, sleepState }
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         id = try values.decode(UUID.self, forKey: .id)
@@ -73,6 +90,7 @@ struct BrowserTab: Codable, Identifiable, Equatable {
         address = try values.decode(String.self, forKey: .address)
         space = try values.decode(Int.self, forKey: .space)
         saved = try? values.decodeIfPresent(SavedTabState.self, forKey: .saved)
+        sleepState = try? values.decodeIfPresent(TabSleepState.self, forKey: .sleepState)
         if saved == nil, (try? values.decodeIfPresent(Bool.self, forKey: .pinned)) == true {
             saved = SavedTabState(kind: .kept, address: address)
         }
@@ -83,6 +101,7 @@ struct BrowserTab: Codable, Identifiable, Equatable {
         try values.encode(address, forKey: .address); try values.encode(space, forKey: .space)
         try values.encode(pinned, forKey: .pinned)
         try values.encodeIfPresent(saved, forKey: .saved)
+        try values.encodeIfPresent(sleepState, forKey: .sleepState)
     }
 }
 
@@ -134,7 +153,7 @@ struct BrowserSession: Codable {
     // metadata can never accidentally refer to a different newly created Space.
     private var lastIssuedSpaceID: Int
     static let maximumSpaces = 32
-    private static let formatVersion = 3
+    private static let formatVersion = 4
     static let maximumFavorites = 12
 
     init(tabs: [BrowserTab], activeID: UUID, space: Int = 0,
@@ -274,6 +293,7 @@ struct BrowserSession: Codable {
               BrowserTab.validAddress(saved.address) else { return false }
         tabs[index].address = saved.address
         tabs[index].saved?.isUnloaded = false
+        tabs[index].sleepState = nil
         return true
     }
     @discardableResult mutating func updateSavedTab(id: UUID, customTitle: String?, customSymbol: String?) -> Bool {
@@ -404,6 +424,7 @@ struct BrowserSession: Codable {
         for index in tabs.indices where members.contains(tabs[index].id) && tabs[index].isSaved {
             tabs[index].address = tabs[index].saved!.address
             tabs[index].saved?.isUnloaded = true
+            tabs[index].sleepState = nil
         }
         tabs.removeAll { members.contains($0.id) && !$0.isSaved }
         repairRememberedSelections()
@@ -452,6 +473,7 @@ struct BrowserSession: Codable {
                 if saved.isUnloaded || !BrowserTab.validAddress(tab.address) { tab.address = saved.address }
             }
             guard validSpaceIDs.contains(tab.space), BrowserTab.validAddress(tab.address) else { return nil }
+            if let sleep = tab.sleepState, tab.isUnloaded || !sleep.matches(tab.address) { tab.sleepState = nil }
             return tab
         }
         let tabByID = Dictionary(uniqueKeysWithValues: tabs.map { ($0.id, $0) })

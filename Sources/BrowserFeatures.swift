@@ -134,6 +134,13 @@ extension BrowserController: NSMenuItemValidation {
         // Editing a Space sheet must not close or navigate a background tab.
         if isViewLoaded, view.window?.attachedSheet != nil { return false }
         switch menuItem.action {
+        case #selector(toggleAutomaticTabSleeping(_:)):
+            menuItem.state = automaticTabSleeping ? .on : .off
+            return true
+        case #selector(toggleSiteKeepAwake(_:)):
+            guard let host = currentSleepProtectionHost else { return false }
+            menuItem.state = keepAwakeHosts.contains(host) ? .on : .off
+            return NSApp.keyWindow === view.window && commandWebView === activeWebView
         case #selector(copyCurrentURL(_:)):
             return pageCommandSurface.flatMap { copyableURL(for: $0.web) } != nil
         case #selector(hardReload(_:)):

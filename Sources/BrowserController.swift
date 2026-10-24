@@ -109,6 +109,18 @@ import QuartzCore
     var pendingHome: Set<UUID> = []
     var pendingLoads: Set<UUID> = []
     var requestedAddresses: [UUID: String] = [:]
+    let tabActivityProbe = TabActivityProbe()
+    let tabResourcePolicy = TabResourcePolicy()
+    var tabLastUsed: [UUID: TimeInterval] = [:]
+    var sleepRestores: [UUID: TabSleepState] = [:]
+    var nonGetDocuments: Set<UUID> = []
+    var pendingNonGetDocuments: [UUID: Bool] = [:]
+    var memoryPressure: TabResourcePolicy.Pressure = .normal
+    var memoryPressureSource: DispatchSourceMemoryPressure?
+    var sleepTask: Task<Void, Never>?
+    var sleepPassID: UUID?
+    var automaticTabSleeping = true
+    var keepAwakeHosts: Set<String> = []
 
     init(sessionURL: URL, ephemeral: Bool = false, downloadCoordinator: DownloadCoordinator? = nil) {
         self.downloads = downloadCoordinator ?? DownloadCoordinator()
@@ -188,7 +200,7 @@ import QuartzCore
         }
         handle.onCollapse = { [weak self] in self?.setSidebar(false) }
         handle.onReset = { [weak self] in self?.resetSidebar(nil) }
-        showActive(); refresh()
+        startTabResourceMonitoring(); showActive(); refresh()
     }
 
     var focusedTabID: UUID {
@@ -249,6 +261,10 @@ import QuartzCore
         let browser = WKWebView(frame: .zero, configuration: configuration)
         register(browser, id: tab.id)
         load(tab.address, in: browser, id: tab.id)
+        if let state = tab.sleepState, state.address == tab.address {
+            sleepRestores[tab.id] = state
+            if let index = session.tabs.firstIndex(where: { $0.id == tab.id }) { session.tabs[index].sleepState = nil }
+        }
         return browser
     }
     func register(_ browser: WKWebView, id: UUID) {
@@ -257,6 +273,7 @@ import QuartzCore
         browser.autoresizingMask = [.width, .height]
         browser.setAccessibilityLabel("Web content")
         browsers[id] = browser
+        tabLastUsed[id] = ProcessInfo.processInfo.systemUptime
         observations[id] = [
             browser.observe(\.title, options: [.new]) { [weak self] web, _ in DispatchQueue.main.async { self?.updateMetadata(web) } },
             browser.observe(\.url, options: [.new]) { [weak self] web, _ in DispatchQueue.main.async { self?.updateMetadata(web) } },
@@ -269,6 +286,7 @@ import QuartzCore
         ]
     }
     func load(_ address: String, in browser: WKWebView, id: UUID) {
+        tabActivityProbe.invalidate(browser); sleepRestores.removeValue(forKey: id)
         tabErrors.removeValue(forKey: id)
         requestedAddresses[id] = address; pendingLoads.insert(id)
         if address == "orbit://newtab" || address == "orbit://video" {
@@ -276,13 +294,16 @@ import QuartzCore
             if let file = Bundle.main.url(forResource: address == "orbit://video" ? "PiPDemo" : "Home", withExtension: "html") { browser.loadFileURL(file, allowingReadAccessTo: file.deletingLastPathComponent()) }
             else { browser.loadHTMLString("<h1>Bam</h1><p>Press Command-L to explore.</p>", baseURL: nil) }
         } else if let url = URLInput.directURL(address) {
+            TabActivityProbe.install(in: browser.configuration)
             pendingHome.remove(id); browser.load(URLRequest(url: url))
         }
     }
     func showActive() {
         guard let tab = session.active, !isShuttingDown else { return }
         let arriving = visibleMemberIDs
+        for id in arriving { tabLastUsed[id] = ProcessInfo.processInfo.systemUptime }
         let outgoing = displayedMemberIDs.filter { !arriving.contains($0) }
+        for id in outgoing { tabLastUsed[id] = ProcessInfo.processInfo.systemUptime }
         let switched = displayedTabID != nil && displayedTabID != tab.id
         if switched { pageFeedback.hide() }
         // Capture actual hosts before restore callbacks or model changes can re-enter.
@@ -392,6 +413,7 @@ import QuartzCore
         guard !isShuttingDown else { return }
         saveWork?.cancel(); saveWork = nil
         chromeRefreshWork?.cancel(); chromeRefreshWork = nil
+        stopTabResourceMonitoring()
         spaceManager?.cancel(nil)
         savedTabEditor?.cancel(nil)
         isShuttingDown = true; cancelAutomaticDepartures(); findBar.hide(); pageFeedback.hide(); downloads.cancelAll(); pictureInPicture.restore()
@@ -468,6 +490,8 @@ import QuartzCore
             peeks[closingID]?.dismiss()
             observations.removeValue(forKey: closingID)
             let web = browsers.removeValue(forKey: closingID)
+            if let web { tabActivityProbe.invalidate(web) }
+            tabLastUsed.removeValue(forKey: closingID); sleepRestores.removeValue(forKey: closingID); nonGetDocuments.remove(closingID); pendingNonGetDocuments.removeValue(forKey: closingID)
             web?.navigationDelegate = nil; web?.uiDelegate = nil; web?.stopLoading()
             // PiP restoration can synchronously re-enter showActive. The closed
             // view must no longer be discoverable by metadata or return callbacks.
@@ -922,16 +946,23 @@ import QuartzCore
     }
 
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+        tabActivityProbe.invalidate(webView)
         if let id = browsers.first(where: { $0.value === webView })?.key { tabErrors.removeValue(forKey: id); pendingLoads.insert(id) }
-        refresh()
+        if visibleMemberIDs.contains(where: { browsers[$0] === webView }) { scheduleChromeRefresh() }
     }
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
-        if let id = browsers.first(where: { $0.value === webView })?.key { pendingLoads.remove(id) }
+        if let id = browsers.first(where: { $0.value === webView })?.key {
+            pendingLoads.remove(id)
+            if let nonGet = pendingNonGetDocuments.removeValue(forKey: id) {
+                if nonGet { nonGetDocuments.insert(id) } else { nonGetDocuments.remove(id) }
+            }
+        }
         updateMetadata(webView)
     }
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         if let id = browsers.first(where: { $0.value === webView })?.key { tabErrors.removeValue(forKey: id); pendingLoads.remove(id) }
         updateMetadata(webView)
+        restoreSleepingPage(webView)
         if let url = webView.url { library.recordVisit(title: webView.title ?? url.host ?? "Page", address: url.absoluteString) }
     }
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) { showError(error, web: webView) }
@@ -939,12 +970,29 @@ import QuartzCore
     func showError(_ error: Error, web: WKWebView) {
         guard (error as NSError).code != NSURLErrorCancelled else { return }
         if let id = browsers.first(where: { $0.value === web })?.key {
-            pendingLoads.remove(id)
+            pendingLoads.remove(id); pendingNonGetDocuments.removeValue(forKey: id)
             if let failed = (error as NSError).userInfo[NSURLErrorFailingURLStringErrorKey] as? String, URLInput.directURL(failed) != nil { requestedAddresses[id] = failed }
             tabErrors[id] = "Couldn’t load page — ⌘R to retry"; refresh()
         }
     }
-    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) { if pictureInPicture.owns(webView) { pictureInPicture.restore() }; webView.reload() }
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        tabActivityProbe.invalidate(webView)
+        guard let id = browsers.first(where: { $0.value === webView })?.key else { return }
+        if nonGetDocuments.contains(id) {
+            if pictureInPicture.references(webView) { pictureInPicture.restore() }
+            pendingLoads.remove(id)
+            tabErrors[id] = "Page process ended — reload manually to retry"
+            refresh(); return
+        }
+        if visibleMemberIDs.contains(id) || pictureInPicture.references(webView) || session.split(for: id) != nil {
+            if pictureInPicture.references(webView) { pictureInPicture.restore() }
+            webView.reload()
+        } else if let address = webView.url?.absoluteString, ["http", "https"].contains(webView.url?.scheme ?? "") {
+            // The process is already gone. Avoid resurrecting every background
+            // renderer under pressure; selection performs a fresh load.
+            releaseSleepingPage(id, web: webView, state: TabSleepState(address: address, scrollX: 0, scrollY: 0))
+        }
+    }
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
         guard let url = navigationAction.request.url else { decisionHandler(.cancel); return }
         let scheme = url.scheme?.lowercased() ?? ""
@@ -974,6 +1022,12 @@ import QuartzCore
             }
         }
         if navigationAction.targetFrame?.isMainFrame == true, let id = browsers.first(where: { $0.value === webView })?.key {
+            if ["http", "https"].contains(scheme) { TabActivityProbe.install(in: webView.configuration) }
+            tabActivityProbe.invalidate(webView)
+            // Classify the new document only after commit. A failed GET must
+            // not erase protection for the POST response still displayed.
+            pendingNonGetDocuments[id] = navigationAction.request.httpMethod?.uppercased() != "GET"
+            if sleepRestores[id]?.address != url.absoluteString { sleepRestores.removeValue(forKey: id) }
             requestedAddresses[id] = scheme == "file" ? (url.lastPathComponent == "PiPDemo.html" ? "orbit://video" : "orbit://newtab") : url.absoluteString
         }
         decisionHandler(.allow)

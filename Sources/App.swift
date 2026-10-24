@@ -4,6 +4,7 @@ import WebKit
 @MainActor final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     var window: NSWindow!
     var controller: BrowserController!
+    var resourceSmoke: TabResourceSmokeTest?
     var featureSmoke: FeatureSmokeTest?
     var smoke: WebSmokeTest?
     var pipSmoke: PictureInPictureSmokeTest?
@@ -13,6 +14,7 @@ import WebKit
     var spacesMenu: NSMenu?
     private var quitPending = false
     func applicationDidFinishLaunching(_ notification: Notification) {
+        if CommandLine.arguments.contains("--resource-test") { resourceSmoke = TabResourceSmokeTest(); resourceSmoke?.start(); return }
         if CommandLine.arguments.contains("--feature-test") { featureSmoke = FeatureSmokeTest(); featureSmoke?.start(); return }
         if CommandLine.arguments.contains("--auto-pip-test") { autoPiPSmoke = AutomaticPiPSmokeTest(); autoPiPSmoke?.start(); return }
         if CommandLine.arguments.contains("--interaction-test") { interactionSmoke = InteractionSmokeTest(); interactionSmoke?.start(); return }
@@ -40,7 +42,7 @@ import WebKit
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         // Fixtures deliberately minimize, replace, and close their windows.
         // Only their explicit terminal result may finish a smoke-test process.
-        let testArguments: Set<String> = ["--web-test", "--pip-test", "--interaction-test", "--auto-pip-test", "--feature-test"]
+        let testArguments: Set<String> = ["--web-test", "--pip-test", "--interaction-test", "--auto-pip-test", "--feature-test", "--resource-test"]
         return !CommandLine.arguments.contains { testArguments.contains($0) }
     }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
@@ -148,6 +150,8 @@ import WebKit
         item(view, "Automatically Show Playing Videos", #selector(BrowserController.toggleAutomaticVideo(_:)), "", .command, controller)
         view.items.last?.state = controller.automaticallyShowsVideo ? .on : .off
         item(view, "Picture in Picture", #selector(BrowserController.togglePictureInPicture(_:)), "p", [.command, .option], controller)
+        item(view, "Sleep Idle Pages Under Memory Pressure", #selector(BrowserController.toggleAutomaticTabSleeping(_:)), "", .command, controller)
+        item(view, "Keep This Site Awake", #selector(BrowserController.toggleSiteKeepAwake(_:)), "", .command, controller)
         item(view, "Open Video Demo", #selector(BrowserController.openVideoDemo(_:)), "", .command, controller)
         view.addItem(.separator())
         item(view, "Split View with New Page", #selector(BrowserController.splitWithNewPage(_:)), "=", [.command, .option], controller)

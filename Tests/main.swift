@@ -204,7 +204,7 @@ expect(migratedSpaces.spaces == BrowserSpace.defaults && migratedSpaces.spaceIDs
 expect(migratedSpaces.tabs == editableLegacy.tabs && migratedSpaces.splits == editableLegacy.splits && migratedSpaces.activeID == editableLegacy.activeID, "Space migration preserves tab identity, content, split grouping, and active selection")
 expect(migratedSpaces.lastSelectedTabIDsBySpace == editableLegacy.lastSelectedTabIDsBySpace && migratedSpaces.sidebarWidth == 311 && !migratedSpaces.sidebarVisible, "Space migration preserves remembered tabs and sidebar preferences")
 let migratedJSON = try JSONSerialization.jsonObject(with: JSONEncoder().encode(migratedSpaces)) as! [String: Any]
-expect(migratedJSON["version"] as? Int == 3 && migratedJSON["spaces"] != nil, "Subsequent saves explicitly version the editable-Space format")
+expect(migratedJSON["version"] as? Int == 4 && migratedJSON["spaces"] != nil, "Subsequent saves explicitly version the editable-Space format")
 var futureJSON = migratedJSON; futureJSON["version"] = 999
 let futureData = try JSONSerialization.data(withJSONObject: futureJSON)
 expect((try? JSONDecoder().decode(BrowserSession.self, from: futureData)) == nil, "A future session format is not silently decoded as current state")
@@ -328,7 +328,7 @@ expect(!defaultSaved.isUnloaded && defaultSaved.customTitle == nil && defaultSav
 var malformedSavedJSON = oldOrdinaryJSON; malformedSavedJSON["saved"] = ["kind": "unknown", "address": 123]
 let malformedSavedTab = try JSONDecoder().decode(BrowserTab.self, from: JSONSerialization.data(withJSONObject: malformedSavedJSON))
 expect(malformedSavedTab.saved == nil && malformedSavedTab.id == oldPinID, "Malformed saved metadata does not invalidate an otherwise valid ordinary tab")
-for version in [1, 2, 3] {
+for version in [1, 2, 3, 4] {
     var versioned = try JSONSerialization.jsonObject(with: JSONEncoder().encode(BrowserSession.fresh())) as! [String: Any]
     versioned["version"] = version
     let decoded = try JSONDecoder().decode(BrowserSession.self, from: JSONSerialization.data(withJSONObject: versioned))
@@ -472,6 +472,94 @@ try SessionFile.save(retainedTabs, to: spacesFile)
 let savedReload = SessionFile.load(spacesFile)
 expect(savedReload.tabs == retainedTabs.tabs && savedReload.activeID == retainedTabs.activeID && savedReload.lastSelectedTabIDsBySpace == retainedTabs.lastSelectedTabIDsBySpace, "Saved state, unloaded rows, original URLs, custom labels and selection survive file persistence")
 let savedVersion = try JSONSerialization.jsonObject(with: Data(contentsOf: spacesFile)) as! [String: Any]
-expect(savedVersion["version"] as? Int == 3, "Sessions with retention metadata save as format 3")
+expect(savedVersion["version"] as? Int == 4, "Sessions with retention metadata save as current format 4")
+
+// Sleeping is recoverable current-page state, not the saved-tab close/unload state.
+let sleepAddress = "https://example.com/current?query=1#position"
+let sleepPosition = TabSleepState(address: sleepAddress, scrollX: -120.5, scrollY: 840.25)
+let sleepingTab = BrowserTab(title: "Sleeping page", address: sleepAddress, space: 1, sleepState: sleepPosition)
+expect(sleepingTab.isSleeping && !sleepingTab.isUnloaded && !sleepingTab.isSaved, "An ordinary sleeping tab remains distinct from saved unloading")
+let defaultAwake = BrowserTab(title: "Awake", address: "https://example.com/awake", space: 0)
+expect(defaultAwake.sleepState == nil && !defaultAwake.isSleeping, "Existing initializer calls create awake records without sleep metadata")
+let sleepDecoded = try JSONDecoder().decode(BrowserTab.self, from: JSONEncoder().encode(sleepingTab))
+expect(sleepDecoded == sleepingTab && sleepDecoded.sleepState == sleepPosition, "Sleep destination and fractional/RTL scroll offsets round-trip")
+var oldAwakeJSON = try JSONSerialization.jsonObject(with: JSONEncoder().encode(sleepingTab)) as! [String: Any]
+oldAwakeJSON.removeValue(forKey: "sleepState")
+let oldAwakeDecoded = try JSONDecoder().decode(BrowserTab.self, from: JSONSerialization.data(withJSONObject: oldAwakeJSON))
+expect(!oldAwakeDecoded.isSleeping && oldAwakeDecoded.id == sleepingTab.id, "Legacy records without sleep state keep their identity and remain awake")
+oldAwakeJSON["sleepState"] = ["address": sleepAddress, "scrollX": "malformed", "scrollY": 1]
+let malformedSleepDecoded = try JSONDecoder().decode(BrowserTab.self, from: JSONSerialization.data(withJSONObject: oldAwakeJSON))
+expect(!malformedSleepDecoded.isSleeping && malformedSleepDecoded.address == sleepAddress, "Malformed optional sleep metadata does not discard a valid tab")
+
+var sleepSelection = BrowserSession(tabs: [defaultAwake, sleepingTab], activeID: defaultAwake.id,
+                                   lastSelectedTabIDsBySpace: [0: defaultAwake.id, 1: sleepingTab.id])
+sleepSelection.changeSpace(1)
+expect(sleepSelection.activeID == sleepingTab.id && sleepSelection.active?.sleepState == sleepPosition, "Remembered Space selection retains sleep state for controller wake")
+sleepSelection.select(defaultAwake.id); sleepSelection.select(sleepingTab.id)
+expect(sleepSelection.space == 1 && sleepSelection.active?.isSleeping == true, "Direct selection preserves current-page resume metadata until a view is created")
+sleepSelection.sanitize()
+expect(sleepSelection.activeID == sleepingTab.id && sleepSelection.active?.isSleeping == true && sleepSelection.lastSelectedTabIDsBySpace?[1] == sleepingTab.id, "Sanitation does not discard an active or remembered sleeping page")
+var sleepingFavorite = sleepingTab
+sleepingFavorite.saved = SavedTabState(kind: .favorite, address: "https://example.com/original")
+var favoriteSleepSelection = BrowserSession(tabs: [defaultAwake, sleepingFavorite], activeID: defaultAwake.id, space: 0)
+favoriteSleepSelection.select(sleepingFavorite.id)
+expect(favoriteSleepSelection.space == 0 && favoriteSleepSelection.active?.sleepState == sleepPosition, "Sleeping Favorite selection keeps current Space and current-page resume URL")
+favoriteSleepSelection.sanitize()
+expect(favoriteSleepSelection.space == 0 && favoriteSleepSelection.activeID == sleepingFavorite.id && favoriteSleepSelection.active?.isSleeping == true, "Sleeping global selection survives sanitation independently of its home Space")
+
+let invalidSleepStates = [
+    TabSleepState(address: "https://example.com/old", scrollX: 0, scrollY: 0),
+    TabSleepState(address: sleepAddress, scrollX: .nan, scrollY: 0),
+    TabSleepState(address: sleepAddress, scrollX: 0, scrollY: .infinity),
+    TabSleepState(address: sleepAddress, scrollX: -.infinity, scrollY: 0),
+    TabSleepState(address: sleepAddress, scrollX: 10_000_001, scrollY: 0),
+    TabSleepState(address: sleepAddress, scrollX: 0, scrollY: -10_000_001)
+]
+for (index, invalidSleep) in invalidSleepStates.enumerated() {
+    var bad = sleepingTab; bad.sleepState = invalidSleep
+    var state = BrowserSession(tabs: [bad], activeID: bad.id, space: 1)
+    state.sanitize()
+    expect(state.activeID == bad.id && state.active?.sleepState == nil && state.active?.address == sleepAddress, "Invalid sleep metadata case \(index) drops only resume state")
+}
+var boundarySleep = sleepingTab
+boundarySleep.sleepState = TabSleepState(address: sleepAddress, scrollX: -10_000_000, scrollY: 10_000_000)
+var boundarySleepSession = BrowserSession(tabs: [boundarySleep], activeID: boundarySleep.id, space: 1)
+boundarySleepSession.sanitize()
+expect(boundarySleepSession.active?.sleepState == boundarySleep.sleepState, "Finite scroll offsets at the documented bounds survive")
+for address in ["orbit://newtab", "orbit://video"] {
+    let internalSleep = BrowserTab(title: "Internal", address: address, space: 0,
+                                  sleepState: TabSleepState(address: address, scrollX: 0, scrollY: 12))
+    var state = BrowserSession(tabs: [internalSleep], activeID: internalSleep.id)
+    state.sanitize()
+    expect(state.activeID == internalSleep.id && !state.active!.isSleeping, "Internal page \(address) cannot carry HTTP resume state")
+}
+var conflictingSleep = sleepingTab
+conflictingSleep.saved = SavedTabState(kind: .kept, address: "https://example.com/saved", isUnloaded: true)
+var conflictingSleepSession = BrowserSession(tabs: [defaultAwake, conflictingSleep], activeID: defaultAwake.id)
+conflictingSleepSession.sanitize()
+let repairedSleepingSaved = conflictingSleepSession.tabs.first { $0.id == conflictingSleep.id }!
+expect(repairedSleepingSaved.isUnloaded && !repairedSleepingSaved.isSleeping && repairedSleepingSaved.address == "https://example.com/saved", "Saved unload takes precedence over incompatible current-page sleep")
+
+var savedSleep = sleepingTab
+savedSleep.saved = SavedTabState(kind: .kept, address: "https://example.com/original", customTitle: "Retained")
+var savedSleepSession = BrowserSession(tabs: [defaultAwake, savedSleep], activeID: savedSleep.id, space: 1)
+expect(savedSleepSession.resetSavedTab(id: savedSleep.id) && savedSleepSession.active?.sleepState == nil
+       && savedSleepSession.active?.address == "https://example.com/original" && savedSleepSession.active?.displayTitle == "Retained", "Explicit saved reset clears sleep and uses original address without losing its label")
+savedSleepSession.tabs[savedSleepSession.tabs.firstIndex { $0.id == savedSleep.id }!] = savedSleep
+_ = savedSleepSession.close(savedSleep.id)
+let closedSleepingSaved = savedSleepSession.tabs.first { $0.id == savedSleep.id }!
+expect(closedSleepingSaved.isUnloaded && !closedSleepingSaved.isSleeping && closedSleepingSaved.address == "https://example.com/original", "Closing a sleeping kept tab clears resume state and retains the saved original")
+var ordinarySleepClose = sleepSelection
+let closedSleepingOrdinary = ordinarySleepClose.close(sleepingTab.id)
+expect(closedSleepingOrdinary?.sleepState == sleepPosition && !ordinarySleepClose.tabs.contains { $0.id == sleepingTab.id }, "Closing a sleeping ordinary tab still removes its identity")
+var movedSleep = sleepSelection
+expect(movedSleep.moveTab(id: sleepingTab.id, toSpace: 2) && movedSleep.active?.sleepState == sleepPosition && movedSleep.space == 2, "Moving a sleeping page keeps its resume state and selected identity")
+expect(movedSleep.deleteSpace(id: 2, movingTabsTo: 0) && movedSleep.active?.sleepState == sleepPosition && movedSleep.space == 0, "Deleting a sleeping page's Space remaps membership without losing resume state")
+try SessionFile.save(sleepSelection, to: spacesFile)
+let sleepReloaded = SessionFile.load(spacesFile)
+expect(sleepReloaded.tabs == sleepSelection.tabs && sleepReloaded.activeID == sleepingTab.id
+       && sleepReloaded.lastSelectedTabIDsBySpace?[1] == sleepingTab.id, "Session file round-trip preserves sleeping selected and remembered pages")
+let sleepVersion = try JSONSerialization.jsonObject(with: Data(contentsOf: spacesFile)) as! [String: Any]
+expect(sleepVersion["version"] as? Int == 4, "Current-page sleeping metadata uses session format 4")
 
 print("PASS: \(count) model, URL, space, and persistence checks")
