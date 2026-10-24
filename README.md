@@ -6,9 +6,9 @@ A small, fast, slightly obsessive macOS browser prototype. Native Swift + AppKit
 
 Bam explores the things that make sidebar browsers feel good: a compact sidebar with **Spaces**, a **Peek** overlay for glancing at links, **Split View**, a pocket-sized **Little Bam** window, and a **floating video panel** you can flick into a corner. It's an independent open-source experiment — not affiliated with Arc, The Browser Company, or Yab, and not claiming feature parity with any of them. Think of it as a love letter written in its own handwriting.
 
-**Published source:** [0.15.0](https://github.com/aridutilh/bam/tree/ac89dc3b1b3bb77195f71ea361990fc367a1a87c) · [downloads and releases](https://github.com/aridutilh/bam/releases) · [changelog](CHANGELOG.md)
+**Latest download:** [v0.15.1 prerelease](https://github.com/aridutilh/bam/releases/tag/v0.15.1) · [all releases](https://github.com/aridutilh/bam/releases) · [changelog](CHANGELOG.md)
 
-The local Bam Preview combines the published 0.15.0 Settings and palette commands with the tab-search, history and extension-host improvements in [performance round 2](docs/performance-round2.md). Those performance improvements remain unpublished.
+**Bam 0.15.1 (build 32)** retains the 0.15.0 Settings and palette commands and improves tab search, history saving and extension queries. [Performance round 2](docs/performance-round2.md) records the measured gains and the remaining memory and cross-browser questions.
 
 **Bam 0.14.0 (build 30)** adds full-color website favicons to sidebar rows, Favorites and command-palette results. Icons load asynchronously, stay cached per login profile, and preserve your custom saved icons. This version also includes the Default-profile startup correction for 0.13.1. See [CHANGELOG.md](CHANGELOG.md) and [VALIDATION.md](VALIDATION.md).
 

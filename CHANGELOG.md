@@ -1,15 +1,14 @@
 # Changelog
 
-## Unreleased — performance round 2
+## 0.15.1 prerelease — build 32
 
-- Integrate the published 0.15.0 Settings, default search engine and command-palette features into the local performance candidate.
-
+- Retain the published 0.15.0 Settings, default search engine and command-palette features.
 - Reuse validated normalized tab-search fields and avoid sorting an empty query.
 - Decode normal history files once, move visit encoding/atomic writes to a coalescing background writer, and wait for session plus history saves during quit. Explicit clear/archive operations retain synchronous durable results.
 - Cache revision-bound extension tab topology and adapter arrays while checking live ownership on every access; Peek and Little Bam keep the uncached path.
 - Resolve an extension backup's existing parent before validating its location, so macOS temporary-directory aliases cannot bypass the requirement to keep the backup outside the package.
 - Preserve an already attached page or Split host during repeated presentation, including PiP callbacks, while still installing a replacement renderer under the same tab ID.
-- Add a reproducible local renderer/cadence fixture and report the measured gains and remaining Arc/Yab gaps in [performance round 2](docs/performance-round2.md). Available only as a local Bam Preview; no performance changes have been published.
+- Add a reproducible local renderer/cadence fixture and report the measured gains and remaining Arc/Yab gaps in [performance round 2](docs/performance-round2.md). The release preserves the existing background-page and tab-sleeping policies.
 
 ## 0.15.0 prerelease — build 31
 

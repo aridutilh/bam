@@ -1,6 +1,6 @@
 # Local tab performance work
 
-The current unpublished candidate and the newer six-block Arc/Yab comparison are documented in [performance round 2](performance-round2.md). The following records retain their historical build and measurement scope.
+The 0.15.1 performance changes and the newer six-block Arc/Yab comparison are documented in [performance round 2](performance-round2.md). The following records retain their historical build and measurement scope.
 
 ## Measured 0.10.2 candidate; shipped in 0.13.1: extension and PiP overhead
 
