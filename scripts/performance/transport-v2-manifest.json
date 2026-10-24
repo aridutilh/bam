@@ -1,0 +1,44 @@
+{
+  "revision": "perf-round2-v2",
+  "change": "Transport only: ordinary fetch, consumed response body, verified event acknowledgment; no automatic retries",
+  "predecessor_revision": "perf-round2-v1",
+  "source_sha256": {
+    "fixture.html": "a061f94f4d48bfbbeb0b7af10e4ba7c1c389b89a1e8165ac169f0892849477b8",
+    "fixture.js": "3c791f9a07ffdf42af18d450e06ddf82b66e337a3d0ef8d1a0dc55ea3e01f3f5",
+    "style.css": "90ddb97e6c8981166caa2bb748bdd088cc9d4e6edd51b979702a575bcb10aa80",
+    "frame.html": "cd8c4136b91522458a0193653c3537cb2651caf337caa0bb1af9b9ff1b0c9592",
+    "frame.js": "0c90fa087f3c4a2600782ade4ebc539b1c4a787843d0697aaa2797622b9160cb",
+    "server.py": "07a4b39fd27224259877894a536c8fddfde19402e9b1edd5f5d9b0de52686410",
+    "report.py": "eefbecc0dfb090f62dfc16d12f84baa0aa93ef587ced392886af53e3073243d6",
+    "plan.py": "3f1392aa72aba71b30025a2ce469e4f838c3d985dba17d56c979e6666158f0ba",
+    "selfcheck.py": "a56212d2ec7b864b5200d12b3aefb80a4abf270ae61983572f59d7d086b91a70",
+    "selfcheck-auto.cjs": "43b1be60ca2ba086b23abf757c47c325709b614994297b3bae910bde8831273a",
+    "selfcheck-transport.cjs": "8b644fbe4c76a0d439c9286ab1b1a987bfe510b2b1c658e012ff92ee32d57f84"
+  },
+  "v1_fixture_sha256": {
+    "fixture.html": "a061f94f4d48bfbbeb0b7af10e4ba7c1c389b89a1e8165ac169f0892849477b8",
+    "fixture.js": "41f98145ac8fa80c734c0d8cac3dcf77f5df630ac83714c5a47815cac16c4893",
+    "style.css": "90ddb97e6c8981166caa2bb748bdd088cc9d4e6edd51b979702a575bcb10aa80"
+  },
+  "workload": {
+    "article_rows": 400,
+    "article_width_css_px": 760,
+    "allocation_bytes": 4194304,
+    "allocation_pattern": "(index * 17 + 31) % 251, every byte written",
+    "renderer_repetitions": 3,
+    "trials_per_repetition": 10,
+    "warmups_per_repetition": 2,
+    "cpu_iterations_per_trial": 20000000,
+    "cadence_intervals": 120,
+    "maximum_live_pages": 10
+  },
+  "unchanged_js_outside_publish_and_revision_sha256": "93f79571c6eb293ce94ee0f3fcc2cf688d5db193781b6ad644ad3c5021df651f",
+  "wrapper_condition": {
+    "name": "fixed-frame",
+    "width_css_px": 800,
+    "height_css_px": 640,
+    "scope": "Same-origin embedded renderer/cadence only; not native tab handoff or top-level page performance."
+  },
+  "validation_status": "passed: 12 Python collector/report tests; auto-gate and transport Node suites; fixture JS syntax check; independent source review",
+  "validation_scope": "Synthetic loopback and fake-fetch checks at transport preparation; native measurements and their limitations are reported separately in docs/performance-round2.md. No timed workload was part of these synthetic checks."
+}

@@ -8,6 +8,8 @@ Bam explores the things that make sidebar browsers feel good: a compact sidebar 
 
 **Latest download:** [v0.14.0 prerelease](https://github.com/aridutilh/bam/releases/tag/v0.14.0) · [all releases](https://github.com/aridutilh/bam/releases) · [changelog](CHANGELOG.md)
 
+Local performance work after 0.14.0 is documented in [performance round 2](docs/performance-round2.md). It includes tab-search, history and extension-host improvements; it is not part of the current download.
+
 **Bam 0.14.0 (build 30)** adds full-color website favicons to sidebar rows, Favorites and command-palette results. Icons load asynchronously, stay cached per login profile, and preserve your custom saved icons. This version also includes the Default-profile startup correction for 0.13.1. See [CHANGELOG.md](CHANGELOG.md) and [VALIDATION.md](VALIDATION.md).
 
 ## Try it

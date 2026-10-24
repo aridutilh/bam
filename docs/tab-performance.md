@@ -1,5 +1,7 @@
 # Local tab performance work
 
+The current unpublished candidate and the newer six-block Arc/Yab comparison are documented in [performance round 2](performance-round2.md). The following records retain their historical build and measurement scope.
+
 ## Measured 0.10.2 candidate; shipped in 0.13.1: extension and PiP overhead
 
 An optimized method-level harness reproduced repeated full-list reconstruction in the extension host with many listed tabs. Five measured repetitions after a warmup used the actual BrowserSession model, extracted production adapter methods, one profile, unloaded tabs and the active tab at the end. No WebViews or third-party extension processes were created for these timings.

@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased — performance round 2
+
+- Reuse validated normalized tab-search fields and avoid sorting an empty query.
+- Decode normal history files once, move visit encoding/atomic writes to a coalescing background writer, and wait for session plus history saves during quit. Explicit clear/archive operations retain synchronous durable results.
+- Cache revision-bound extension tab topology and adapter arrays while checking live ownership on every access; Peek and Little Bam keep the uncached path.
+- Resolve an extension backup's existing parent before validating its location, so macOS temporary-directory aliases cannot bypass the requirement to keep the backup outside the package.
+- Preserve an already attached page or Split host during repeated presentation, including PiP callbacks, while still installing a replacement renderer under the same tab ID.
+- Add a reproducible local renderer/cadence fixture and report the measured gains and remaining Arc/Yab gaps in [performance round 2](docs/performance-round2.md). This candidate has not been published or installed.
+
 ## 0.14.0 — Website favicons
 
 - Display full-color website favicons in sidebar tab rows, Favorite tiles, existing-tab search results and site-scoped searches. Cached typed URLs show their icon without contacting an unsubmitted address.

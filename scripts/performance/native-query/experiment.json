@@ -1,0 +1,13 @@
+{
+  "baseline_revision": "8dec99c87f77436eefc50f0615abbf3855186e83",
+  "harness": "original-extension-query-v1",
+  "entry_sha256": "57b1c2ac614c5f03d8924bb97acc5f64e174e7ad2998d44e540a53fba4d8ac60",
+  "fixture_sha256": {
+    "bench.html": "2d599baf7f62528f2b1a09ec9db24ae4adbdaad090a05cd5d3aa3a131350e6a1",
+    "bench.js": "3e4382330340c510918d85a212093bc9e16250e03929c50842742679eeeb0871",
+    "manifest.json": "775c429a5b97eafdd30c066e10c295f440ab9822d613e2b91c4823b6ead6d4ce",
+    "spare.html": "1012e8f3505fdb7b71a7298dc5649d8526d0c78f1e763d747ec5278d0fe9f952"
+  },
+  "measurement": "JavaScript browser.tabs.query promise completion; original uninstrumented entry and fixture",
+  "note": "Build driver is portable packaging; entry and fixture bytes are identical to the original experiment."
+}
