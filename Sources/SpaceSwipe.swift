@@ -12,7 +12,7 @@ struct SpaceSwipeStateMachine {
         var didLock = false
         /// Nil means the caller should leave its current visual state unchanged.
         var previewOffset: CGFloat?
-        /// An adjacent space in 0...2. Nil on cancellation or insufficient travel.
+        /// An adjacent order index, not a stable Space ID. Nil on cancellation or insufficient travel.
         var committedSpace: Int?
         var finished = false
         /// Points per second in displayed coordinates, for the settling spring.
@@ -34,6 +34,7 @@ struct SpaceSwipeStateMachine {
     private struct MotionSample { let time: TimeInterval; let position: CGFloat }
     private var axis = Axis.idle
     private var originSpace = 0
+    private var spaceCount = 3
     private var pageWidth: CGFloat = 228
     private var accumulatedX: CGFloat = 0
     private var baseOffset: CGFloat = 0
@@ -47,6 +48,7 @@ struct SpaceSwipeStateMachine {
     /// Positive scrollingDeltaX moves content right and selects the previous space.
     /// Negative scrollingDeltaX moves content left and selects the next space.
     /// Feed physical scroll phase separately from whether momentumPhase is nonempty.
+    /// Space values are order indices; reset when the caller reorders Spaces.
     mutating func handle(
         deltaX: CGFloat,
         deltaY: CGFloat,
@@ -55,7 +57,8 @@ struct SpaceSwipeStateMachine {
         timestamp: TimeInterval,
         space: Int,
         width: CGFloat,
-        initialOffset: CGFloat = 0
+        initialOffset: CGFloat = 0,
+        spaceCount: Int = 3
     ) -> Result {
         // Momentum must never initiate or advance a page swipe. Once this gesture
         // has been claimed, keep consuming its tail so it cannot scroll other UI.
@@ -69,9 +72,14 @@ struct SpaceSwipeStateMachine {
             return finish(commitAllowed: false, timestamp: previousTime)
         }
         if phase == .began || (axis == .idle && phase == .changed) {
-            begin(space: space, width: width, timestamp: timestamp)
+            begin(space: space, spaceCount: spaceCount, width: width, timestamp: timestamp)
         }
         guard axis != .idle else { return Result() }
+        // A deleted/added Space invalidates the captured ordered destination.
+        // Return to the current page rather than commit a stale adjacent index.
+        if axis == .horizontal, max(1, spaceCount) != self.spaceCount {
+            return finish(commitAllowed: false, timestamp: timestamp)
+        }
         if phase == .cancelled {
             return finish(commitAllowed: false, timestamp: timestamp)
         }
@@ -97,7 +105,8 @@ struct SpaceSwipeStateMachine {
                 // keep this baseline fixed throughout the finger-driven drag.
                 // The previous transition may have committed since finger-down.
                 // Its current page/width, like its position, become authoritative.
-                originSpace = min(2, max(0, space))
+                self.spaceCount = max(1, spaceCount)
+                originSpace = min(self.spaceCount - 1, max(0, space))
                 pageWidth = width.isFinite && width > 0 ? max(1, width) : 228
                 baseOffset = rawOffset(forDisplayedOffset: initialOffset.isFinite ? initialOffset : 0)
             } else if vertical >= 12 && vertical >= horizontal * 1.25 {
@@ -125,10 +134,11 @@ struct SpaceSwipeStateMachine {
         suppressMomentum = false
     }
 
-    private mutating func begin(space: Int, width: CGFloat, timestamp: TimeInterval) {
+    private mutating func begin(space: Int, spaceCount: Int, width: CGFloat, timestamp: TimeInterval) {
         reset()
         axis = .undecided
-        originSpace = min(2, max(0, space))
+        self.spaceCount = max(1, spaceCount)
+        originSpace = min(self.spaceCount - 1, max(0, space))
         pageWidth = width.isFinite && width > 0 ? max(1, width) : 228
         previousTime = timestamp
         lastMovementTime = timestamp
@@ -201,7 +211,7 @@ struct SpaceSwipeStateMachine {
     private var rawOffset: CGFloat { baseOffset + accumulatedX }
 
     private func isBlocked(_ offset: CGFloat) -> Bool {
-        (offset > 0 && originSpace == 0) || (offset < 0 && originSpace == 2)
+        (offset > 0 && originSpace == 0) || (offset < 0 && originSpace == spaceCount - 1)
     }
 
     private func rawOffset(forDisplayedOffset offset: CGFloat) -> CGFloat {
@@ -238,7 +248,7 @@ struct SpaceSwipeStateMachine {
         let fastFlick = abs(accumulatedX) >= 12 && abs(speed) >= 650 && matchingDirection
         let direction = raw > 0 ? -1 : 1
         let candidate = originSpace + direction
-        let target = commitAllowed && (enoughDistance || fastFlick) && (0...2).contains(candidate)
+        let target = commitAllowed && (enoughDistance || fastFlick) && (0..<spaceCount).contains(candidate)
             ? candidate : nil
         var releaseSpeed = min(2400, max(-2400, speed))
         if isBlocked(raw) {

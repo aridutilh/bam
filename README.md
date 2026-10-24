@@ -1,4 +1,4 @@
-# Bam 0.5.5 prerelease
+# Bam 0.6.0 prerelease
 
 <img src="Resources/BamIcon.png" width="128" alt="Bam’s red burst sticker on a light pink tile">
 
@@ -6,11 +6,13 @@ An open-source macOS browser prototype built with Swift, AppKit, Core Animation,
 
 The original application code is available under the [MIT license](LICENSE). The public source includes no extracted Arc artwork, animation frames, fonts, textures, binaries, or decompiler output. The approved app icon is a textured red burst sticker with a peeled corner on a light matte pink tile; [branding notes](docs/branding.md) record its generation and final refinement prompt. Sidebar controls use macOS SF Symbols, and the Spaces button uses an original native animation.
 
-[Bam v0.5.5 prerelease](https://github.com/aridutilh/bam/releases/tag/v0.5.5) · [Previous Bam v0.5.4](https://github.com/aridutilh/bam/releases/tag/v0.5.4) · [Bam source repository](https://github.com/aridutilh/bam) · [Feature checklist](FEATURE-INVENTORY.md) · [Validation status](VALIDATION.md)
+[Bam v0.6.0 prerelease](https://github.com/aridutilh/bam/releases/tag/v0.6.0) · [Previous Bam v0.5.5](https://github.com/aridutilh/bam/releases/tag/v0.5.5) · [Bam source repository](https://github.com/aridutilh/bam) · [Feature checklist](FEATURE-INVENTORY.md) · [Validation status](VALIDATION.md)
 
-**Current prerelease: Bam 0.5.5 (build 18).** Copy and hard-refresh confirmations move to the active page’s bottom-right. The translucent burst card, pop animation, shortcuts, focus preservation and click-through behavior are unchanged. All seven component and five packaged runtime suites passed on the first attempt. Installation and tested-executable/icon identity passed, with all 13 tabs and existing layout/selection state preserved. Actual shortcuts showed both complete bottom-right messages on one main-window page; later dismissal was confirmed. Other page surfaces are covered by automated placement checks; broader themes, accessibility preferences and animation timing were not rechecked.
+**Current prerelease: Bam 0.6.0 (build 19).** Spaces can be created, renamed, recolored, given an icon, reordered and removed through Manage Spaces. Changes are staged until Save; Cancel leaves the session unchanged. Removing a Space requires a destination for its tabs, and a tab row can move its page or whole Split pair to another Space. Space IDs and live tab identities remain stable. All seven component and five final-package runtime suites passed, including 268 feature checks with 61 for editable Spaces. A first runtime attempt exposed a test selector that expected a Split row’s primary title instead of its combined title; the selector was corrected and the final rerun passed. All 56 inputs match. Installation, signature/executable identity and migration checks passed, preserving all 13 existing tabs and session state. Native preview checks covered editing/cancel, creation, arrow reorder, ordered shortcut selection, moving a page and removing the empty test Space. Table-drag reordering, physical swipes and broader accessibility/theme coverage were not manually tested. This release does not add isolated sign-ins, Favorites, folders, tab reordering or import.
 
-**Previous release: Bam 0.5.4 (build 17).** The rename preserved the legacy profile identifiers and all 13 tabs with their selection/sidebar/Split state. Seven component suites passed; the unchanged ZIP passed all five runtime suites on a second attempt, after an unisolated combined PiP playback/focus failure. Installation, executable/icon identity and native Bam branding checks passed. The persistent Dock pin’s Bam name and app path were verified in its original slot. See [validation](VALIDATION.md) for the failure and verification limits, and the [changelog](CHANGELOG.md) for earlier releases.
+**Previous verified release: Bam 0.5.5 (build 18).** Copy and hard-refresh confirmations move to the active page’s bottom-right. The translucent burst card, pop animation, shortcuts, focus preservation and click-through behavior are unchanged. All seven component and five packaged runtime suites passed on the first attempt. Installation and tested-executable/icon identity passed, with all 13 tabs and existing layout/selection state preserved. Actual shortcuts showed both complete bottom-right messages on one main-window page; later dismissal was confirmed. Other page surfaces are covered by automated placement checks; broader themes, accessibility preferences and animation timing were not rechecked.
+
+**Earlier rename: Bam 0.5.4 (build 17).** The rename preserved the legacy profile identifiers and all 13 tabs with their selection/sidebar/Split state. Seven component suites passed; the unchanged ZIP passed all five runtime suites on a second attempt, after an unisolated combined PiP playback/focus failure. Installation, executable/icon identity and native Bam branding checks passed. The persistent Dock pin’s Bam name and app path were verified in its original slot. See [validation](VALIDATION.md) for the failure and verification limits, and the [changelog](CHANGELOG.md) for earlier releases.
 
 ## Build and run
 
@@ -31,14 +33,14 @@ Run the integrated local fixtures after building:
 bash scripts/test-runtime.sh
 ```
 
-This starts a loopback fixture server and runs the packaged app's WebKit, manual PiP, native interaction, automatic PiP, and feature tests. Tests open native windows. Each run must exit successfully and emit exactly one matching terminal PASS; a subtest PASS or an early zero exit is insufficient. Fixture windows cannot trigger the normal last-window autoquit behavior. **Build 18 passed all seven component and five exact-package runtime suites on the first attempt**, including 70 PiP positioning, 162 controller interaction, 85 automatic PiP and 207 feature checks. All 54 source/resource/test/build inputs matched the tested manifest, with no source edits during the tests. [VALIDATION.md](VALIDATION.md) records the results and retains build 17’s unexplained first PiP return failure as historical evidence. These fixtures do not reproduce every device's physical input.
+This starts a loopback fixture server and runs the packaged app's WebKit, manual PiP, native interaction, automatic PiP, and feature tests. Tests open native windows. Each run must exit successfully and emit exactly one matching terminal PASS; a subtest PASS or an early zero exit is insufficient. Fixture windows cannot trigger the normal last-window autoquit behavior. **Build 19 passed all seven component and five final-package runtime suites**, including 70 PiP positioning, 162 controller interaction, 85 automatic PiP and 268 feature checks (61 editable Spaces). All 56 source/resource/test/build inputs matched the final tested manifest. The final run followed a fixture-only Split-row selector correction; this was not a first-attempt full pass. [VALIDATION.md](VALIDATION.md) records the results and retains build 17’s unexplained first PiP return failure as historical evidence. These fixtures do not reproduce every device's physical input.
 
 The bundled video is a generated test pattern. To regenerate it, install FFmpeg and run `bash scripts/generate-demo.sh`; FFmpeg is not needed for an ordinary build.
 
 ## Implemented browser features
 
 - **Browsing and tabs:** URL entry, DuckDuckGo search, navigation history, reload/stop, zoom, titles, pin/unpin, context menus, and reopen closed tabs.
-- **Sidebar and Spaces:** three fixed Spaces, remembered selection, persistent width/visibility, native resize/collapse, and horizontal swiping over the sidebar. The header and bottom controls stay fixed while tab collections follow the gesture.
+- **Sidebar and Spaces:** up to 32 editable Spaces with names, twelve icons, six colors and an explicit order. Manage Spaces stages changes for Save/Cancel; deleting a Space moves its tabs to a chosen destination. Tab-row menus move single pages or whole Split pairs, following the selected page when it moves. Per-Space selection, width/visibility, native resize/collapse and sidebar swiping persist. Footer overflow exposes every Space at narrow widths. The integrated fixture passed 61 editable-Spaces checks; limited native editing checks also passed.
 - **Tab search:** ⌘T opens a palette before creating a tab. Type a URL/search or select an existing tab across Spaces using the arrows and Return. Existing-tab results include Space and URL labels.
 - **Peek:** Shift-click a link, or follow a cross-host link from a pinned page, to open a retained overlay. Close it or transfer the same page into a tab, Split View, or Little Bam.
 - **Little Bam:** a compact browsing window with address/navigation controls and promotion into the main browser. HTTP(S) URLs delivered by macOS open here. Bam does not automatically make itself the default browser.
@@ -79,7 +81,9 @@ These are implementation subsets, not a complete browser compatibility claim. Se
 | Back / forward / reload or stop | ⌘[ / ⌘] / ⌘R |
 | Next / previous tab | Control-Tab / Control-Shift-Tab; sidebar order, not MRU |
 | Next / previous Space | Sidebar swipe, or ⌥⌘→ / ⌥⌘← |
-| Select Space | ⌥⌘1 / 2 / 3, or bottom buttons |
+| Select Space | ⌥⌘1…9 for the first nine in the current order; footer buttons or overflow menu |
+| Edit Spaces | Tabs → Manage Spaces, the sidebar Space heading, or its stack button |
+| Move tab or Split pair | Tab-row context menu → Move to Space |
 | Manual floating video | ⌥⌘P or View → Picture in Picture |
 | Automatic floating video setting | View → Automatically Show Playing Videos |
 | Video demo | View → Open Video Demo |
@@ -90,6 +94,8 @@ These are implementation subsets, not a complete browser compatibility claim. Se
 | Resize floating video | Drag its bottom-right grip; Tab to the grip and use arrow keys |
 | Zoom | ⌘+ / ⌘− / ⌘0 |
 
+
+Manage Spaces supports up to 32 entries. Choose a name, one of twelve symbols and one of six colors; drag a table row or use the arrows to reorder. Removing a Space requires another Space to receive its tabs, and the final Space cannot be removed. Save applies the staged plan to the latest tab metadata; Cancel discards it. These are organizational groups sharing one website-data store. Reordering changes navigation order, not the stored identities of Spaces or tabs. Session format 2 migrates older files forward; releases before 0.6.0 do not understand custom Space IDs, so this is not a downgrade-compatible format.
 
 Copy and hard refresh target the page in the key browser window: the visible Peek, focused Split pane, Little Bam page, or main tab. They do nothing while an unrelated utility window or the floating-video panel is key. URL copy preserves the current HTTP(S) address, including its query and fragment.
 
@@ -117,9 +123,9 @@ Floating video uses Bam's own `NSPanel` with reversible HTML5-video isolation in
 
 Peek, Split, and Little Bam promotions transfer the existing view rather than intentionally reload it. A retained Peek lasts only for the current session. Split membership persists; divider position and focused side do not. After quitting, URLs and browser metadata restore, but full back/forward stacks, forms, page memory, and scroll state do not.
 
-The three Spaces share website cookies. Top tiles mirror visible tabs rather than a distinct Favorites collection; closing a pinned row removes it. Local tab search has no network suggestions, history results, or general command execution. Find reports found/no match rather than an exact count and uses one shared query. Downloads are not resumed across app relaunch. The recently closed archive is metadata restoration, not a saved live page.
+All Spaces share website cookies; editing Spaces does not create isolated browser profiles. Top tiles mirror visible tabs rather than a distinct Favorites collection; closing a pinned row removes it. Local tab search has no network suggestions, history results, or general command execution. Find reports found/no match rather than an exact count and uses one shared query. Downloads are not resumed across app relaunch. The recently closed archive is metadata restoration, not a saved live page.
 
-Important unfinished areas include editable Spaces/profiles, true Favorites and kept-tab semantics, folders/reordering, automatic archive/sleep, production private browsing, extensions, content blocking, password management, sync, Boosts, settings, and an updater. Force Click, Air Traffic Control rules, a system-wide Little Bam hotkey, and four-pane splits are also outside the current subset. WebKit reuse does not supply those browser-host features automatically.
+Important unfinished areas include isolated profiles, true Favorites and kept-tab semantics, folders, tab reordering, browser import, automatic archive/sleep, production private browsing, extensions, content blocking, password management, sync, Boosts, settings, and an updater. Force Click, Air Traffic Control rules, a system-wide Little Bam hotkey, and four-pane splits are also outside the current subset. WebKit reuse does not supply those browser-host features automatically.
 
 ## Local data
 

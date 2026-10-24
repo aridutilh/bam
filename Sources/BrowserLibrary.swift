@@ -168,7 +168,7 @@ struct ClosedRecord: Codable, Identifiable, Equatable {
               Set(record.tabs.map(\.id)).count == record.tabs.count else { return false }
         if record.split, record.tabs[0].space != record.tabs[1].space { return false }
         return record.tabs.allSatisfy { tab in
-            (0...2).contains(tab.space) && (tab.address == "orbit://newtab" || tab.address == "orbit://video" || webURL(tab.address) != nil)
+            tab.space >= 0 && (tab.address == "orbit://newtab" || tab.address == "orbit://video" || webURL(tab.address) != nil)
         }
     }
     private static func queryWords(_ query: String) -> [String] { query.split(whereSeparator: \.isWhitespace).map(String.init) }

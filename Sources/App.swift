@@ -10,6 +10,7 @@ import WebKit
     var interactionSmoke: InteractionSmokeTest?
     var autoPiPSmoke: AutomaticPiPSmokeTest?
     var pendingExternalURLs: [URL] = []
+    var spacesMenu: NSMenu?
     func applicationDidFinishLaunching(_ notification: Notification) {
         if CommandLine.arguments.contains("--feature-test") { featureSmoke = FeatureSmokeTest(); featureSmoke?.start(); return }
         if CommandLine.arguments.contains("--auto-pip-test") { autoPiPSmoke = AutomaticPiPSmokeTest(); autoPiPSmoke?.start(); return }
@@ -30,6 +31,7 @@ import WebKit
         window.setContentSize(NSSize(width: min(1260, available.width - 60), height: min(800, available.height - 60)))
         window.center(); window.setFrameAutosaveName("OrbitPrototypeWindow")
         window.appearance = NSAppearance(named: .darkAqua)
+        controller.onSpacesChanged = { [weak self] in self?.rebuildSpacesMenu() }
         buildMenus(); window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
         for url in pendingExternalURLs { controller.openLittleOrbit(url: url) }; pendingExternalURLs.removeAll()
     }
@@ -46,13 +48,25 @@ import WebKit
         }
     }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { window?.makeKeyAndOrderFront(nil); return true }
-    @objc func spaceOne(_ sender: Any?) { controller.changeSpace(0) }
-    @objc func spaceTwo(_ sender: Any?) { controller.changeSpace(1) }
-    @objc func spaceThree(_ sender: Any?) { controller.changeSpace(2) }
+    @objc func selectSpace(_ sender: NSMenuItem) { controller.changeSpace(sender.tag) }
+    func rebuildSpacesMenu() {
+        guard let spacesMenu, let controller else { return }
+        spacesMenu.removeAllItems()
+        for (index, space) in controller.session.spaces.enumerated() {
+            let item = NSMenuItem(title: space.name, action: #selector(selectSpace(_:)), keyEquivalent: index < 9 ? String(index + 1) : "")
+            item.keyEquivalentModifierMask = [.command, .option]; item.target = self; item.tag = space.id
+            item.image = NSImage(systemSymbolName: space.symbol, accessibilityDescription: nil)
+            spacesMenu.addItem(item)
+        }
+    }
     @objc func goHome(_ sender: Any?) { controller.showHome(sender) }
     @objc func recordSpaceSwipes(_ sender: Any?) { SpaceSwipeDiagnostics.shared.start() }
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
-        if menuItem.action == #selector(goHome(_:)) { return controller?.littleWindows.values.contains(where: { $0.window?.isKeyWindow == true }) != true }
+        if menuItem.action == #selector(selectSpace(_:)) {
+            menuItem.state = controller?.session.space == menuItem.tag ? .on : .off
+            return controller?.session.spaceDefinition(menuItem.tag) != nil && window?.attachedSheet == nil
+        }
+        if menuItem.action == #selector(goHome(_:)) { return window?.attachedSheet == nil && controller?.littleWindows.values.contains(where: { $0.window?.isKeyWindow == true }) != true }
         if menuItem.action == #selector(recordSpaceSwipes(_:)) {
             return !SpaceSwipeDiagnostics.shared.isRecording && !SpaceSwipeDiagnostics.shared.isStarting
         }
@@ -121,9 +135,11 @@ import WebKit
         item(tabs, "Previous Tab", #selector(BrowserController.previousTab(_:)), "\t", [.control, .shift], controller)
         item(tabs, "Next Space", #selector(BrowserController.nextSpace(_:)), String(UnicodeScalar(NSRightArrowFunctionKey)!), [.command, .option], controller)
         item(tabs, "Previous Space", #selector(BrowserController.previousSpace(_:)), String(UnicodeScalar(NSLeftArrowFunctionKey)!), [.command, .option], controller)
-        tabs.addItem(.separator()); item(tabs, "Studio", #selector(spaceOne), "1", [.command, .option], self)
-        item(tabs, "Life", #selector(spaceTwo), "2", [.command, .option], self)
-        item(tabs, "Explore", #selector(spaceThree), "3", [.command, .option], self)
+        tabs.addItem(.separator())
+        item(tabs, "Manage Spaces…", #selector(BrowserController.manageSpaces(_:)), "", .command, controller)
+        let chooseSpace = NSMenuItem(title: "Go to Space", action: nil, keyEquivalent: "")
+        let submenu = NSMenu(title: "Go to Space"); chooseSpace.submenu = submenu; tabs.addItem(chooseSpace)
+        spacesMenu = submenu; rebuildSpacesMenu()
         let windowMenu = menu("Window"); NSApp.windowsMenu = windowMenu
         item(windowMenu, "Minimize", #selector(NSWindow.performMiniaturize(_:)), "m")
         item(windowMenu, "Zoom", #selector(NSWindow.performZoom(_:)))

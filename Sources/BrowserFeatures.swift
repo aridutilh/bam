@@ -131,6 +131,8 @@ import WebKit
 
 extension BrowserController: NSMenuItemValidation {
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        // Editing a Space sheet must not close or navigate a background tab.
+        if isViewLoaded, view.window?.attachedSheet != nil { return false }
         switch menuItem.action {
         case #selector(copyCurrentURL(_:)):
             return pageCommandSurface.flatMap { copyableURL(for: $0.web) } != nil

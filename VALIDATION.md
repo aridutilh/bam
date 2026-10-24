@@ -1,6 +1,14 @@
-# Validation — Bam 0.5.5 prerelease
+# Validation — Bam 0.6.0 prerelease
 
-**Bam 0.5.5 build 18: integrated verification and installation passed; bottom-right confirmations checked natively.** All seven component and five exact-package runtime suites passed on the first attempt. Component results were model 69, motion, symbols 63, swipe 20, tab search 15, find and library 28. Runtime results were WebKit, PiP with 70 positioning checks, 162 controller interactions, 85 automatic PiP and 207 feature checks. No source edits occurred during testing; all 54 source/resource/test/build inputs matched the tested manifest.
+**Bam 0.6.0 build 19: final-package verification, installation and limited native editing checks passed.** All seven component suites passed: model 120, motion, symbols 63, swipe 22 scenarios, tab search 20, native Find and library 32. All five runtime suites passed on the final package: WebKit, PiP with 70 positioning checks, 162 controller interactions, 85 automatic PiP and 268 feature checks, including 61 editable-Spaces checks. All 56 frozen source/resource/build/test inputs match the final tested manifest. The existing cleanup/retry removed File Provider FinderInfo after its first deliverable signature check; the final app and isolated release ZIP passed strict verification.
+
+**First runtime attempt and correction:** WebKit, PiP, controller and automatic PiP passed. The feature suite stopped when its new Split-row lookup expected only the primary page title; the actual row intentionally combines both titles. The test selector was corrected to match the primary prefix plus separator, retaining the actual native menu/action assertions. No product code change was needed. A rebuild and complete final-package rerun then passed; this is not a first-attempt full pass.
+
+The model suite includes 69 existing and 51 new checks for legacy migration, definitions, nonsequential IDs/order, selected/background and whole-Split moves, deletion without tab loss, remembered-selection repair, persistence, the 32-Space limit and allocation overflow. The 61 integrated editing checks cover staged Save/Cancel with latest metadata, names/icons/colors, ordered navigation, native row-menu actions, retained WKWebView/document state, deletion chains, replacement of all 32 Spaces and footer overflow at supported widths. These fixtures do not establish physical gesture feel or every native interaction.
+
+The installed native preview passed the editing checks detailed below, and the real saved profile migrated to session format 2 without losing its 13 tabs or layout/selection state. All Spaces continue sharing cookies; isolated profiles, true Favorites, folders, tab reordering and import are not included. Legacy-file migration is forward-only: older releases sanitize away unknown Space IDs and are not compatible with a saved custom-Space session.
+
+**Historical Bam 0.5.5 build 18: integrated verification and installation passed; bottom-right confirmations checked natively.** All seven component and five exact-package runtime suites passed on the first attempt. Component results were model 69, motion, symbols 63, swipe 20, tab search 15, find and library 28. Runtime results were WebKit, PiP with 70 positioning checks, 162 controller interactions, 85 automatic PiP and 207 feature checks. No source edits occurred during testing; all 54 source/resource/test/build inputs matched the tested manifest.
 
 The patch moves page-command cards to the active page’s bottom-right. Style, pop animation, command text/routing, click-through behavior, focus preservation and announcements are unchanged. Passing placement assertions cover the main page, focused Split panes, Peek and Little Bam, including compact hosts, flipped/unflipped coordinates and resizing. Installed native shortcuts and screenshots confirmed both complete messages on one main-window page; later accessibility inspection confirmed dismissal. Broader themes, accessibility preferences and frame-by-frame animation timing were not rechecked. This change does not add a link-hover URL display.
 
@@ -66,7 +74,13 @@ Additional standalone fixtures in `Tests/DownloadTests.swift` and `Tests/Preview
 
 ## Installed-app checks
 
-**Current verified installation: Bam 0.5.5 (build 18) in `/Applications/Bam.app`.** Strict signature verification passed; the executable matched the tested package and the icon matched the approved master exactly. All 13 existing tab identifiers, active page/Space, sidebar state and Split groups were retained. The Bam Dock pin’s name, app path and order were preserved.
+**Current verified installation: Bam 0.6.0 (build 19) in `/Applications/Bam.app`.** The exact tested package was installed; strict signature and executable identity passed, with the approved icon unchanged.
+
+A native `--fresh-preview` check opened Manage Spaces from the heading and showed a readable, unclipped sheet. Editing text and pressing Escape cancelled. A new “Bam check” Space used the Heart symbol and Amber color, moved earlier with the arrow control, and saved. Actual ⌥⌘3 selected that new third Space with the expected header and accent. The actual tab-row context menu’s Move to Space → Life followed the page. Reopening the manager, removing the now-empty test Space and saving succeeded. The preview returned to Life, then quit; the normal app reopened the original page and Space. These checks exercised arrow reordering, not table drag, and did not test physical swipes or a wider accessibility/theme matrix.
+
+The real profile migrated to version 2 while preserving all 13 tab IDs, URLs, pin states and Space IDs, plus the active ID, selected Space, sidebar width/visibility, Split groups and remembered selections. The three default Space names were retained.
+
+**Previous verified installation: Bam 0.5.5 (build 18) in `/Applications/Bam.app`.** Strict signature verification passed; the executable matched the tested package and the icon matched the approved master exactly. All 13 existing tab identifiers, active page/Space, sidebar state and Split groups were retained. The Bam Dock pin’s name, app path and order were preserved.
 
 Actual ⇧⌘C and ⇧⌘R on the restored main-window page produced complete, readable “Page copied” and “Hard refreshing…” cards at the page’s bottom-right in native screenshots. Later accessibility inspection confirmed dismissal, and the original page was retained. This is one-page installed visual evidence; multi-surface coverage is automated. Broader themes, system preferences and frame-by-frame animation timing were not rechecked.
 
@@ -105,6 +119,8 @@ All original events in the new capture were recorded through the local monitor; 
 Earlier v0.3.0 native UI checks confirmed the Ark branding, readable sidebar symbols and home page, and new-tab palette dismissal. On one accessible YouTube player, switching to another tab opened the floating video panel, and selecting the source tab returned the same page while playback continued. This is a single-site observation, not universal video compatibility. Session restoration saves URLs and layout; it does not promise to restore media playhead position across an app restart.
 
 ## Manual checks still required
+
+- Extend build 19’s native editing check to actual table-drag reordering, physical trackpad navigation after edits, and broader accessibility/theme settings. Automated stable-ID, retained-document, deletion-chain, 32-Space and overflow checks passed; the installed native check used arrow reordering and one limited creation/move/delete flow.
 
 - Isolate build 17’s first-run PiP automatic-return playback/focus failure by reporting playback delta, key-window state and first responder independently. Do not treat the unchanged-package rerun as a diagnosis.
 

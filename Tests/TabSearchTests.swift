@@ -41,6 +41,32 @@ import AppKit
         require(!results.activateSelection() && results.preferredHeight == 44, "Empty list remains safely inert")
         results.moveSelection(delta: Int.min)
         require(results.selectedIndex == 0, "Arrow handling on empty list is safe")
+        // Read the actual native labels, not a parallel naming helper.
+        func labels(in view: NSView) -> [String] {
+            view.subviews.flatMap { child -> [String] in
+                let own = (child as? NSTextField).map { [$0.stringValue] } ?? []
+                return own + labels(in: child)
+            }
+        }
+        let research = BrowserTab(title: "Research tab", address: "https://example.com/research", space: 41)
+        let personal = BrowserTab(title: "Personal tab", address: "https://example.com/personal", space: 7)
+        let customSpaces = [BrowserSpace(id: 7, name: "Personal", symbol: "sun.max", colorIndex: 1),
+                            BrowserSpace(id: 41, name: "Research", symbol: "book", colorIndex: 2)]
+        results.update(tabs: [research, personal], query: "tab", activeID: research.id, canCreate: false, spaces: customSpaces)
+        require(labels(in: results).contains("Research · Current") && labels(in: results).contains("Personal"),
+                "Search labels must resolve non-contiguous stable Space IDs")
+        results.moveSelection(delta: 1)
+        let renamedSpaces = [BrowserSpace(id: 41, name: "Lab", symbol: "book", colorIndex: 2), customSpaces[0]]
+        results.update(tabs: [research, personal], query: "tab", activeID: research.id, canCreate: false, spaces: renamedSpaces)
+        require(labels(in: results).contains("Lab · Current") && !labels(in: results).contains("Research · Current"),
+                "Rename/reorder refresh must show the current Space name")
+        require(results.activateSelection() && chosen == personal.id,
+                "Renaming or reordering Spaces must retain the selected tab identity")
+        results.update(tabs: [research], query: "", activeID: research.id, canCreate: false, spaces: [])
+        require(labels(in: results).contains("Unknown Space · Current"),
+                "An absent Space definition must not label a tab with another Space's name")
+        results.update(tabs: [prefix], query: "", activeID: prefix.id, canCreate: false)
+        require(labels(in: results).contains("Studio · Current"), "Legacy callers retain default Space names")
         print("PASS: \(checks) tab search ranking and selection checks")
     }
 }

@@ -38,7 +38,7 @@ import AppKit
         memory.recordClosed(tabs: [first, second], split: true)
         check(memory.closedRecords.count == 1 && memory.closedRecords[0].tabs == [first, second] && memory.closedRecords[0].split, "Split archive preserves all tab values in order")
         check(memory.searchClosed("SECOND example.org").count == 1, "Archive search finds the second pane")
-        for (tabs, split) in [([first, first], true), ([first], true), ([first, second], false), ([], false), ([first, tab(space: 2)], true), ([tab("https://user:password@example.com")], false), ([tab(space: 9)], false)] {
+        for (tabs, split) in [([first, first], true), ([first], true), ([first, second], false), ([], false), ([first, tab(space: 2)], true), ([tab("https://user:password@example.com")], false), ([tab(space: -1)], false)] {
             memory.recordClosed(tabs: tabs, split: split)
         }
         check(memory.closedRecords.count == 1, "Invalid archives cannot corrupt the valid split record")
@@ -46,6 +46,21 @@ import AppKit
         memory.recordClosed(tabs: [home], split: false)
         check(memory.popClosed()?.tabs == [home], "Closed records reopen last-in first-out")
         check(memory.popClosed()?.tabs == [first, second] && memory.popClosed() == nil, "A split consumes one archive record containing both panes")
+
+        let customFile = root.appendingPathComponent("custom-spaces/library.json")
+        let custom = BrowserLibrary(storageURL: customFile)
+        let customLeft = tab("https://example.com/custom", "Custom Space", space: 1042)
+        let customRight = tab("https://example.org/custom", "Custom second", space: 1042)
+        custom.recordClosed(tabs: [customLeft], split: false)
+        custom.recordClosed(tabs: [customLeft, customRight], split: true)
+        check(custom.closedRecords.count == 2, "New nonnegative Space IDs can archive ordinary and split tabs")
+        let customLoaded = BrowserLibrary(storageURL: customFile)
+        check(customLoaded.closedRecords.first?.tabs == [customLeft, customRight],
+              "Reload preserves stable Space IDs without requiring an existing Space definition")
+        check(customLoaded.popClosed()?.tabs == [customLeft, customRight] && customLoaded.popClosed()?.tabs == [customLeft],
+              "Restoration supplies the original Space ID for the caller's deleted-Space fallback")
+        customLoaded.recordClosed(tabs: [customLeft, tab(space: 1043)], split: true)
+        check(customLoaded.closedRecords.isEmpty, "A split still cannot cross two different custom Spaces")
 
         let file = root.appendingPathComponent("nested/library.json")
         let persisted = BrowserLibrary(storageURL: file)
@@ -83,8 +98,9 @@ import AppKit
         var unsafeEntry = try object(entry); unsafeEntry["id"] = UUID().uuidString; unsafeEntry["address"] = "https://name:pass@example.com"
         let closed = ClosedRecord(tabs: [first, second], split: true)
         var invalidClosed = try object(closed); invalidClosed["id"] = UUID().uuidString; invalidClosed["split"] = false
+        let negativeSpace = ClosedRecord(tabs: [tab(space: -1)], split: false)
         let mixedFile = root.appendingPathComponent("mixed.json")
-        let mixed: [String: Any] = ["version": 1, "history": [try object(entry), ["broken": true], "wrong shape", unsafeEntry, try object(entry)], "closedRecords": [try object(closed), invalidClosed, ["broken": true], try object(closed)]]
+        let mixed: [String: Any] = ["version": 1, "history": [try object(entry), ["broken": true], "wrong shape", unsafeEntry, try object(entry)], "closedRecords": [try object(closed), invalidClosed, try object(negativeSpace), ["broken": true], try object(closed)]]
         try JSONSerialization.data(withJSONObject: mixed).write(to: mixedFile)
         let mixedLoaded = BrowserLibrary(storageURL: mixedFile)
         check(mixedLoaded.history.count == 1 && mixedLoaded.history[0].id == entry.id && mixedLoaded.history[0].address == entry.address && mixedLoaded.closedRecords.count == 1 && mixedLoaded.closedRecords[0].id == closed.id && mixedLoaded.closedRecords[0].tabs == closed.tabs, "Load skips malformed, unsafe and duplicate records independently")

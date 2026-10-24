@@ -8,7 +8,13 @@ import WebKit
     func restoreClosed(_ record: ClosedRecord) {
         cancelPaging(); dismissAddress()
         var restored: [BrowserTab] = []
-        for var tab in record.tabs { tab.id = UUID(); restored.append(tab); session.tabs.append(tab) }
+        for var tab in record.tabs {
+            tab.id = UUID()
+            // Closed records retain stable Space IDs; a removed Space must not
+            // be recreated or accidentally resolve to a newly created one.
+            if session.spaceDefinition(tab.space) == nil { tab.space = session.space }
+            restored.append(tab); session.tabs.append(tab)
+        }
         guard let first = restored.first else { return }
         session.select(first.id)
         if record.split, restored.count == 2 { session.makeSplit(primary: first.id, secondary: restored[1].id) }

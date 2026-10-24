@@ -26,7 +26,9 @@ struct SpaceSwipeTests {
             try velocityIsIndependentOfEventCoalescing()
             try singleMovementPacketCanFlickWithoutGuessingAfterHold()
             try deliberateReversalUsesRecentDirection()
-            print("PASS: swipe intent/axis lock, live animation handoff, release velocity, distance/flick commits, boundaries, real trackpad phases, cancellation, and momentum")
+            try variableSpaceCountsHonorOrderedBoundaries()
+            try collectionChangesBeforeAndAfterLockAreSafe()
+            print("PASS: swipe intent/axis lock, live animation handoff, release velocity, distance/flick commits, variable-count boundaries, real trackpad phases, cancellation, and momentum")
         } catch {
             FileHandle.standardError.write(Data("FAIL: \(error)\n".utf8))
             exit(1)
@@ -39,15 +41,15 @@ struct SpaceSwipeTests {
 
     private static func send(_ machine: inout SpaceSwipeStateMachine, _ x: CGFloat, _ y: CGFloat,
                              _ phase: SpaceSwipeStateMachine.Phase, _ time: TimeInterval,
-                             space: Int = 1, momentum: Bool = false, initialOffset: CGFloat = 0) -> SpaceSwipeStateMachine.Result {
+                             space: Int = 1, momentum: Bool = false, initialOffset: CGFloat = 0, spaceCount: Int = 3) -> SpaceSwipeStateMachine.Result {
         machine.handle(deltaX: x, deltaY: y, phase: phase, isMomentum: momentum,
-                       timestamp: time, space: space, width: 228, initialOffset: initialOffset)
+                       timestamp: time, space: space, width: 228, initialOffset: initialOffset, spaceCount: spaceCount)
     }
 
     private static func send(_ machine: inout SpaceSwipeStateMachine,
                              _ phase: SpaceSwipeStateMachine.Phase, _ time: TimeInterval,
-                             space: Int = 1, momentum: Bool = false) -> SpaceSwipeStateMachine.Result {
-        send(&machine, 0, 0, phase, time, space: space, momentum: momentum)
+                             space: Int = 1, momentum: Bool = false, spaceCount: Int = 3) -> SpaceSwipeStateMachine.Result {
+        send(&machine, 0, 0, phase, time, space: space, momentum: momentum, spaceCount: spaceCount)
     }
 
     private static func verticalMotionIsNotClaimed() throws {
@@ -323,6 +325,55 @@ struct SpaceSwipeTests {
         _ = send(&machine, 1, 0, .changed, 1.11)
         let noise = send(&machine, .ended, 1.12)
         try check(noise.committedSpace == 2, "One point of opposite-direction pickup noise cancelled a complete swipe")
+    }
+
+
+    private static func variableSpaceCountsHonorOrderedBoundaries() throws {
+        for count in [1, 2, 4, 32] {
+            for index in 0..<count {
+                for delta: CGFloat in [-70, 70] {
+                    var machine = SpaceSwipeStateMachine()
+                    _ = send(&machine, .began, 0, space: index, spaceCount: count)
+                    let drag = send(&machine, delta, 0, .changed, 0.1, space: index, spaceCount: count)
+                    let end = send(&machine, .ended, 0.3, space: index, spaceCount: count)
+                    let adjacent = index + (delta < 0 ? 1 : -1)
+                    let expected: Int? = (0..<count).contains(adjacent) ? adjacent : nil
+                    try check(end.finished && end.committedSpace == expected,
+                              "Swipe from index \(index) in \(count) Spaces chose an invalid destination")
+                    guard let offset = drag.previewOffset else { throw Failure(description: "Horizontal drag lost its preview") }
+                    try check(expected == nil ? abs(offset) < abs(delta) : offset == delta,
+                              "Elasticity did not match the ordered boundary for \(count) Spaces")
+                }
+            }
+        }
+        for count in [0, -1] {
+            var machine = SpaceSwipeStateMachine()
+            _ = send(&machine, -80, 0, .began, 0, space: 999, spaceCount: count)
+            let end = send(&machine, .ended, 0.2, space: 999, spaceCount: count)
+            try check(end.finished && end.committedSpace == nil,
+                      "An empty or invalid Space count invented a destination")
+        }
+    }
+
+    private static func collectionChangesBeforeAndAfterLockAreSafe() throws {
+        var machine = SpaceSwipeStateMachine()
+        _ = send(&machine, .began, 0, space: 0, spaceCount: 1)
+        _ = send(&machine, -2, 0, .changed, 0.01, space: 0, spaceCount: 1)
+        let lock = send(&machine, -68, 0, .changed, 0.1, space: 4, spaceCount: 6)
+        let end = send(&machine, .ended, 0.3, space: 4, spaceCount: 6)
+        try check(lock.didLock && lock.previewOffset == -70 && end.committedSpace == 5,
+                  "Horizontal lock did not adopt the current ordered Space count and index")
+
+        _ = send(&machine, -80, 0, .began, 1, space: 30, spaceCount: 32)
+        let removed = send(&machine, .ended, 1.2, space: 0, spaceCount: 1)
+        try check(removed.finished && removed.committedSpace == nil && removed.releaseVelocity == 0,
+                  "Removing Spaces during a gesture committed a stale destination")
+        let tail = send(&machine, -80, 0, .changed, 1.3, space: 0, momentum: true, spaceCount: 1)
+        try check(tail.shouldConsume && !tail.finished && tail.committedSpace == nil,
+                  "A cancelled collection-change gesture leaked its momentum tail")
+        _ = send(&machine, -80, 0, .began, 2, space: 2, spaceCount: 4)
+        let next = send(&machine, .ended, 2.2, space: 2, spaceCount: 4)
+        try check(next.committedSpace == 3, "A fresh gesture retained the previous collection's boundary")
     }
 
 }

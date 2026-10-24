@@ -36,6 +36,8 @@ struct SidebarTabItem: Equatable {
     var onReload: (() -> Void)?
     var onToggleSidebar: (() -> Void)?
     var onSpaceChange: ((Int) -> Void)?
+    var onManageSpaces: (() -> Void)?
+    var onMoveTab: ((UUID, Int) -> Void)?
     var onPictureInPicture: (() -> Void)?
     var onSpaceScroll: ((NSEvent, SpaceScrollSource) -> Bool)?
     override var isFlipped: Bool { true }
@@ -47,7 +49,9 @@ struct SidebarTabItem: Equatable {
     private let pip = ArkIconButton(symbol: "pip", label: "Picture in Picture (⌥⌘P)")
     private let library = ArkSpacesButton()
     private let plus = ArkIconButton(symbol: "plus", label: "New tab")
-    private let spaces = ["Studio", "Life", "Explore"].enumerated().map { ArkSpaceButton(index: $0.offset, name: $0.element) }
+    private let spaceOverflow = ArkIconButton(symbol: "ellipsis", label: "Choose Space")
+    private var spaceDefinitions: [BrowserSpace] = []
+    private var spaces: [ArkSpaceButton] = []
     private let clip = ArkFlippedView()
     private var page = SidebarPage()
     private var departing: SidebarPage?
@@ -67,8 +71,8 @@ struct SidebarTabItem: Equatable {
         super.init(frame: frame); wantsLayer = true
         setAccessibilityLabel("Bam sidebar")
         clip.wantsLayer = true; clip.layer?.masksToBounds = true
-        [toggle, back, forward, reload, search, clip, library, plus, pip].forEach(addSubview)
-        spaces.forEach(addSubview); clip.addSubview(page); connect(page); cachedPages[0] = page
+        [toggle, back, forward, reload, search, clip, library, plus, pip, spaceOverflow].forEach(addSubview)
+        clip.addSubview(page); connect(page); cachedPages[0] = page
         back.handler = { [weak self] in self?.onBack?() }
         forward.handler = { [weak self] in self?.onForward?() }
         reload.handler = { [weak self] in self?.onReload?() }
@@ -76,10 +80,77 @@ struct SidebarTabItem: Equatable {
         search.handler = { [weak self] in self?.onSearch?() }
         plus.handler = { [weak self] in self?.onNewTab?() }
         pip.handler = { [weak self] in self?.onPictureInPicture?() }
-        library.handler = { [weak self] in self?.library.playSelection(); self?.onSpaceChange?(((self?.selectedSpace ?? 0) + 1) % 3) }
-        for button in spaces { button.handler = { [weak self, weak button] in guard let button else { return }; self?.onSpaceChange?(button.index) } }
+        library.handler = { [weak self] in self?.onManageSpaces?() }
+        spaceOverflow.handler = { [weak self] in self?.showSpaceMenu() }
+        configureSpaces([
+            BrowserSpace(id: 0, name: "Studio", symbol: "sparkles", colorIndex: 0),
+            BrowserSpace(id: 1, name: "Life", symbol: "sun.max", colorIndex: 1),
+            BrowserSpace(id: 2, name: "Explore", symbol: "globe", colorIndex: 2)
+        ])
     }
     required init?(coder: NSCoder) { fatalError() }
+
+    /// Space IDs identify cached pages; their order is supplied separately by the session.
+    func configureSpaces(_ definitions: [BrowserSpace]) {
+        var seen = Set<Int>()
+        let definitions = Array(definitions.filter { seen.insert($0.id).inserted }.prefix(32))
+        guard !definitions.isEmpty else { return }
+        guard !definitions.elementsEqual(spaceDefinitions, by: {
+            $0.id == $1.id && $0.name == $1.name && $0.symbol == $1.symbol && $0.colorIndex == $1.colorIndex
+        }) else { return }
+        spaceDefinitions = definitions
+        let ids = Set(definitions.map(\.id))
+        // Deleted transition pages cannot remain attached or be reused by a later gesture.
+        if !ids.contains(selectedSpace) || nextSpace.map({ !ids.contains($0) }) == true
+            || departingSpace.map({ !ids.contains($0) }) == true { endPaging() }
+        if !ids.contains(selectedSpace) {
+            page.removeFromSuperview()
+            selectedSpace = definitions[0].id
+            page = pageForSpace(selectedSpace)
+            items = page.tabs
+            clip.addSubview(page)
+        }
+        for id in Array(cachedPages.keys) where !ids.contains(id) {
+            cachedPages.removeValue(forKey: id)?.removeFromSuperview()
+        }
+        let existing = Dictionary(uniqueKeysWithValues: spaces.map { ($0.index, $0) })
+        spaces.filter { !ids.contains($0.index) }.forEach { $0.removeFromSuperview() }
+        spaces = definitions.map { definition in
+            let button = existing[definition.id] ?? ArkSpaceButton(space: definition)
+            button.configure(definition)
+            button.selected = definition.id == selectedSpace
+            button.handler = { [weak self, weak button] in
+                guard let button else { return }; self?.onSpaceChange?(button.index)
+            }
+            button.manage = { [weak self] in self?.onManageSpaces?() }
+            if button.superview == nil { addSubview(button) }
+            return button
+        }
+        for definition in definitions {
+            cachedPages[definition.id]?.configureAppearance(space: definition, destinations: definitions)
+        }
+        needsLayout = true
+    }
+
+    private func definition(for id: Int) -> BrowserSpace? { spaceDefinitions.first { $0.id == id } }
+
+    private func showSpaceMenu() {
+        let menu = NSMenu(title: "Choose Space")
+        for definition in spaceDefinitions {
+            let item = NSMenuItem(title: definition.name, action: #selector(chooseSpaceFromMenu(_:)), keyEquivalent: "")
+            item.target = self; item.tag = definition.id
+            item.state = definition.id == selectedSpace ? .on : .off
+            item.image = SidebarSymbol.image(named: definition.symbol, color: ArkPalette.spaceColor(definition.colorIndex), pointSize: 14)
+            menu.addItem(item)
+        }
+        menu.addItem(.separator())
+        let manage = NSMenuItem(title: "Manage Spaces…", action: #selector(manageSpacesFromMenu), keyEquivalent: "")
+        manage.target = self; menu.addItem(manage)
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: spaceOverflow.bounds.maxY), in: spaceOverflow)
+    }
+    @objc private func chooseSpaceFromMenu(_ sender: NSMenuItem) { onSpaceChange?(sender.tag) }
+    @objc private func manageSpacesFromMenu() { onManageSpaces?() }
+
     // A vertical tab list is always at its horizontal edge. Ask AppKit to
     // forward that axis through its responder chain, including tracked events.
     override func wantsForwardedScrollEvents(for axis: NSEvent.GestureAxis) -> Bool {
@@ -95,8 +166,11 @@ struct SidebarTabItem: Equatable {
         page.close = { [weak self] in self?.onCloseTab?($0) }
         page.pin = { [weak self] in self?.onPinTab?($0) }
         page.newTab = { [weak self] in self?.onNewTab?() }
+        page.manageSpaces = { [weak self] in self?.onManageSpaces?() }
+        page.move = { [weak self] in self?.onMoveTab?($0, $1) }
     }
     func update(tabs: [SidebarTabItem], space: Int, canGoBack: Bool, canGoForward: Bool, isLoading: Bool) {
+        guard let definition = definition(for: space) else { return }
         // A commit can reach refresh() before the controller explicitly finishes
         // paging. Adopt the incoming view here too, without rebuilding either page.
         let spaceChanged = selectedSpace != space
@@ -112,7 +186,7 @@ struct SidebarTabItem: Equatable {
                 library.playSelection()
             }
         }
-        if items != tabs || spaceChanged { items = tabs; page.configure(tabs, space: space) }
+        if items != tabs || spaceChanged { items = tabs; page.configure(tabs, space: definition, destinations: spaceDefinitions) }
         back.isEnabled = canGoBack; forward.isEnabled = canGoForward
         reload.setSymbol(isLoading ? "xmark" : "arrow.clockwise", label: isLoading ? "Stop loading" : "Reload page")
         for button in spaces { button.selected = button.index == space }
@@ -121,21 +195,24 @@ struct SidebarTabItem: Equatable {
     private func pageForSpace(_ space: Int) -> SidebarPage {
         if let cached = cachedPages[space] { return cached }
         let created = SidebarPage(); connect(created); cachedPages[space] = created
+        if let definition = definition(for: space) {
+            created.configureAppearance(space: definition, destinations: spaceDefinitions)
+        }
         return created
     }
     func setAddress(_ address: String, title: String) { search.address = title; search.toolTip = address }
     func beginPaging(tabs: [SidebarTabItem], space: Int, direction: CGFloat) {
-        guard space != selectedSpace else { return }
+        guard space != selectedSpace, let definition = definition(for: space) else { return }
         if let next, nextSpace == space, pageDirection == direction {
             // Loading/title/selection updates may arrive while fingers are down.
             // Keep the page and offset; only reconcile its changing row data.
-            if nextItems != tabs { nextItems = tabs; next.configure(tabs, space: space) }
+            if nextItems != tabs { nextItems = tabs; next.configure(tabs, space: definition, destinations: spaceDefinitions) }
             return
         }
         departing?.removeFromSuperview(); departing = nil; departingSpace = nil
         next?.removeFromSuperview()
         let incoming = pageForSpace(space)
-        incoming.configure(tabs, space: space)
+        incoming.configure(tabs, space: definition, destinations: spaceDefinitions)
         nextSpace = space; nextItems = tabs; pageDirection = direction
         clip.addSubview(incoming); next = incoming
         layoutSubtreeIfNeeded(); setPagingOffset(offset)
@@ -193,7 +270,26 @@ struct SidebarTabItem: Equatable {
         setPagingOffset(offset)
         let y = bounds.height-36
         library.frame = NSRect(x: 9, y: y, width: 28, height: 28)
-        for (i, button) in spaces.enumerated() { button.frame = NSRect(x: (w-84)/2 + CGFloat(i)*28, y: y, width: 26, height: 28) }
+        // Keep footer actions separate at the minimum width. Overflow uses a
+        // native menu, so horizontal input still belongs to Space paging.
+        let selectorStart: CGFloat = 43
+        let selectorEnd = w - (w < 220 ? 39 : 68)
+        let selectorWidth = max(0, selectorEnd - selectorStart)
+        let capacity = max(1, Int(selectorWidth / 28))
+        let overflowing = spaces.count > capacity
+        let visibleCount = min(spaces.count, max(1, capacity - (overflowing ? 1 : 0)))
+        let selectedIndex = spaces.firstIndex { $0.index == selectedSpace } ?? 0
+        let startIndex = max(0, min(selectedIndex - visibleCount / 2, spaces.count - visibleCount))
+        let totalWidth = CGFloat(visibleCount + (overflowing ? 1 : 0)) * 28
+        let x = selectorStart + max(0, (selectorWidth - totalWidth) / 2)
+        for (index, button) in spaces.enumerated() {
+            button.isHidden = index < startIndex || index >= startIndex + visibleCount
+            if !button.isHidden {
+                button.frame = NSRect(x: x + CGFloat(index - startIndex) * 28, y: y, width: 26, height: 28)
+            }
+        }
+        spaceOverflow.isHidden = !overflowing
+        spaceOverflow.frame = NSRect(x: x + CGFloat(visibleCount) * 28, y: y, width: 26, height: 28)
         pip.frame = NSRect(x: w-62, y: y, width: 25, height: 28)
         plus.frame = NSRect(x: w-33, y: y, width: 25, height: 28)
         pip.isHidden = w < 220
@@ -202,8 +298,10 @@ struct SidebarTabItem: Equatable {
 
 @MainActor private final class SidebarPage: ArkFlippedView {
     var select: ((UUID)->Void)?; var close: ((UUID)->Void)?; var pin: ((UUID)->Void)?; var newTab: (()->Void)?
+    var manageSpaces: (() -> Void)?
+    var move: ((UUID, Int) -> Void)?
     let favorites = (0..<3).map { _ in ArkFavoriteButton() }
-    let heading = arkLabel("◈  Studio", size: 12, weight: .semibold)
+    let heading = ArkSpaceHeading()
     let scroll = SidebarScrollView(); let content = ArkFlippedView(); let newButton = ArkNewTabButton()
     let divider = NSView()
     var rows: [ArkTabRow] = []
@@ -220,11 +318,11 @@ struct SidebarTabItem: Equatable {
         divider.wantsLayer = true; divider.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.13).cgColor
         content.addSubview(divider); content.addSubview(newButton)
         newButton.handler = { [weak self] in self?.newTab?() }
+        heading.handler = { [weak self] in self?.manageSpaces?() }
     }
     required init?(coder: NSCoder) { fatalError() }
-    func configure(_ items: [SidebarTabItem], space: Int) {
+    func configure(_ items: [SidebarTabItem], space: BrowserSpace, destinations: [BrowserSpace]) {
         tabs = items
-        heading.stringValue = ["✦  Studio", "☀︎  Life", "◉  Explore"][space]
         let scrollOrigin = scroll.contentView.bounds.origin
         let existing = Dictionary(uniqueKeysWithValues: rows.map { ($0.item.id, $0) })
         let surviving = Set(items.map(\.id))
@@ -233,23 +331,31 @@ struct SidebarTabItem: Equatable {
             let row = existing[item.id] ?? ArkTabRow(item: item)
             row.update(item)
             row.select = { [weak self] in self?.select?(item.id) }; row.close = { [weak self] in self?.close?(item.id) }; row.pin = { [weak self] in self?.pin?(item.id) }
+            row.move = { [weak self] destination in self?.move?(item.id, destination) }
             if row.superview == nil { content.addSubview(row) }; return row
         }
+        configureAppearance(space: space, destinations: destinations)
+        needsLayout = true; layoutSubtreeIfNeeded(); scroll.contentView.scroll(to: scrollOrigin); scroll.reflectScrolledClipView(scroll.contentView)
+    }
+    func configureAppearance(space: BrowserSpace, destinations: [BrowserSpace]) {
+        identifier = NSUserInterfaceItemIdentifier("sidebar-space-\(space.id)")
+        heading.configure(space)
+        let tint = ArkPalette.spaceColor(space.colorIndex)
+        for row in rows { row.configureSpace(id: space.id, tint: tint, destinations: destinations) }
         for (i, button) in favorites.enumerated() {
-            if i < items.count {
-                let item = items[i]; button.configure(symbol: item.symbol, title: item.title, active: item.isActive, tint: ArkPalette.spaceColors[space])
+            if i < tabs.count {
+                let item = tabs[i]; button.configure(symbol: item.symbol, title: item.title, active: item.isActive, tint: tint)
                 button.handler = { [weak self] in self?.select?(item.id) }
             } else {
                 button.configure(symbol: ["sparkles", "globe", "plus"][i], title: "New tab", active: false, tint: ArkPalette.secondary)
                 button.handler = { [weak self] in self?.newTab?() }
             }
         }
-        needsLayout = true; layoutSubtreeIfNeeded(); scroll.contentView.scroll(to: scrollOrigin); scroll.reflectScrolledClipView(scroll.contentView)
     }
     override func layout() {
         super.layout(); let w = bounds.width; let tile = (w-30)/3
         for (i, button) in favorites.enumerated() { button.frame = NSRect(x: 8+CGFloat(i)*(tile+7), y: 0, width: tile, height: 47) }
-        heading.frame = NSRect(x: 16, y: 66, width: w-32, height: 18)
+        heading.frame = NSRect(x: 12, y: 62, width: max(0, w-24), height: 26)
         scroll.frame = NSRect(x: 7, y: 93, width: w-14, height: max(0,bounds.height-93))
         let rw = scroll.contentSize.width
         var y: CGFloat = 0
@@ -262,10 +368,18 @@ struct SidebarTabItem: Equatable {
 }
 
 @MainActor
-private enum ArkPalette {
+enum ArkPalette {
     static let ink = NSColor(white: 0.94, alpha: 1)
     static let secondary = NSColor(white: 0.73, alpha: 1)
-    static let spaceColors = [NSColor(calibratedRed: 0.80, green: 0.72, blue: 0.96, alpha: 1), NSColor(calibratedRed: 0.88, green: 0.75, blue: 0.60, alpha: 1), NSColor(calibratedRed: 0.62, green: 0.81, blue: 0.86, alpha: 1)]
+    static let spaceColors = [
+        NSColor(calibratedRed: 0.80, green: 0.72, blue: 0.96, alpha: 1),
+        NSColor(calibratedRed: 0.88, green: 0.75, blue: 0.60, alpha: 1),
+        NSColor(calibratedRed: 0.62, green: 0.81, blue: 0.86, alpha: 1),
+        NSColor(calibratedRed: 0.94, green: 0.65, blue: 0.73, alpha: 1),
+        NSColor(calibratedRed: 0.96, green: 0.79, blue: 0.47, alpha: 1),
+        NSColor(calibratedRed: 0.70, green: 0.74, blue: 0.80, alpha: 1)
+    ]
+    static func spaceColor(_ index: Int) -> NSColor { spaceColors[min(spaceColors.count - 1, max(0, index))] }
 }
 
 @MainActor
@@ -395,18 +509,53 @@ private final class ArkNewTabButton: ArkHoverButton {
 @MainActor
 private final class ArkSpaceButton: ArkHoverButton {
     let index: Int
-    private let name: String
+    private var name = ""
+    private var symbolName = "globe"
+    private var tint = ArkPalette.ink
+    var manage: (() -> Void)?
     var selected = false { didSet { needsDisplay = true; setAccessibilityValue(selected ? "Selected" : "Not selected") } }
-    init(index: Int, name: String) {
-        self.index = index
-        self.name = name
+    init(space: BrowserSpace) {
+        index = space.id
         super.init(frame: .zero)
-        setAccessibilityLabel("Switch to \(name) space")
+        configure(space)
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    func configure(_ space: BrowserSpace) {
+        name = space.name; symbolName = space.symbol; tint = ArkPalette.spaceColor(space.colorIndex)
+        setAccessibilityLabel("Switch to \(name) space")
+        toolTip = name
+        needsDisplay = true
+    }
     override func draw(_ dirtyRect: NSRect) {
         if selected || hovered { fill(NSColor.white.withAlphaComponent(selected ? 0.14 : 0.07), radius: 7) }
-        text(["✦", "☀︎", "◉"][index], rect: NSRect(x: 2, y: 4, width: bounds.width-4, height: 20), size: 16, color: selected ? ArkPalette.ink : ArkPalette.secondary, alignment: .center)
+        symbol(symbolName, rect: NSRect(x: (bounds.width - 16) / 2, y: (bounds.height - 16) / 2, width: 16, height: 16),
+               color: tint.withAlphaComponent(selected ? 1 : 0.78), size: 16)
+    }
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let menu = NSMenu()
+        let item = NSMenuItem(title: "Manage Spaces…", action: #selector(manageFromMenu), keyEquivalent: "")
+        item.target = self; menu.addItem(item); return menu
+    }
+    @objc private func manageFromMenu() { manage?() }
+}
+
+@MainActor
+private final class ArkSpaceHeading: ArkHoverButton {
+    private var name = "Studio"
+    private var symbolName = "sparkles"
+    private var tint = ArkPalette.ink
+    init() { super.init(frame: .zero); toolTip = "Manage Spaces" }
+    required init?(coder: NSCoder) { fatalError() }
+    func configure(_ space: BrowserSpace) {
+        name = space.name; symbolName = space.symbol; tint = ArkPalette.spaceColor(space.colorIndex)
+        setAccessibilityLabel("Manage Spaces — \(name)")
+        needsDisplay = true
+    }
+    override func draw(_ dirtyRect: NSRect) {
+        if hovered { fill(NSColor.white.withAlphaComponent(0.06), radius: 6) }
+        symbol(symbolName, rect: NSRect(x: 4, y: 6, width: 14, height: 14), color: tint, size: 13)
+        text(name, rect: NSRect(x: 26, y: 5, width: max(0, bounds.width - 44), height: 18), size: 12, weight: .semibold)
+        if hovered { symbol("chevron.down", rect: NSRect(x: bounds.width - 15, y: 8, width: 10, height: 10), color: ArkPalette.secondary, size: 10) }
     }
 }
 
@@ -416,6 +565,10 @@ private final class ArkTabRow: ArkFlippedView {
     var select: (() -> Void)?
     var close: (() -> Void)?
     var pin: (() -> Void)?
+    var move: ((Int) -> Void)?
+    private var currentSpace = 0
+    private var destinations: [BrowserSpace] = []
+    private var spaceTint = ArkPalette.spaceColor(0)
     private let titleLabel: NSTextField
     private let subtitleLabel: NSTextField
     private let iconView = NSImageView()
@@ -431,7 +584,7 @@ private final class ArkTabRow: ArkFlippedView {
         subtitleLabel.textColor = ArkPalette.secondary.withAlphaComponent(0.84)
         iconView.image = NSImage(systemSymbolName: item.symbol, accessibilityDescription: nil) ?? NSImage(systemSymbolName: "globe", accessibilityDescription: nil)
         iconView.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 15, weight: .regular)
-        iconView.contentTintColor = item.isActive ? ArkPalette.spaceColors[0] : ArkPalette.secondary
+        iconView.contentTintColor = item.isActive ? spaceTint : ArkPalette.secondary
         for view in [titleLabel, subtitleLabel, iconView, closeButton] as [NSView] { addSubview(view) }
         closeButton.isHidden = !item.isActive
         closeButton.handler = { [weak self] in self?.close?() }
@@ -447,10 +600,14 @@ private final class ArkTabRow: ArkFlippedView {
         titleLabel.font = .systemFont(ofSize: 12, weight: item.isActive ? .medium : .regular)
         subtitleLabel.stringValue = item.subtitle
         iconView.image = NSImage(systemSymbolName: item.symbol, accessibilityDescription: nil)
-        iconView.contentTintColor = item.isActive ? ArkPalette.spaceColors[0] : ArkPalette.secondary
+        iconView.contentTintColor = item.isActive ? spaceTint : ArkPalette.secondary
         closeButton.isHidden = !hovered && !item.isActive
         setAccessibilityLabel(item.title); setAccessibilityValue(item.isActive ? "Selected" : "")
         toolTip = item.subtitle; needsDisplay = true
+    }
+    func configureSpace(id: Int, tint: NSColor, destinations: [BrowserSpace]) {
+        currentSpace = id; spaceTint = tint; self.destinations = destinations
+        iconView.contentTintColor = item.isActive ? tint : ArkPalette.secondary
     }
     override var acceptsFirstResponder: Bool { true }
     override func becomeFirstResponder() -> Bool { needsDisplay = true; return true }
@@ -507,6 +664,19 @@ private final class ArkTabRow: ArkFlippedView {
         pinItem.image = NSImage(systemSymbolName: item.isPinned ? "pin.slash" : "pin", accessibilityDescription: nil)
         pinItem.target = self
         menu.addItem(pinItem)
+        if destinations.count > 1 {
+            let moveItem = NSMenuItem(title: "Move to Space", action: nil, keyEquivalent: "")
+            let submenu = NSMenu(title: "Move to Space"); submenu.autoenablesItems = false
+            for space in destinations {
+                let destination = NSMenuItem(title: space.name, action: #selector(moveFromMenu(_:)), keyEquivalent: "")
+                destination.target = self; destination.tag = space.id
+                destination.state = space.id == currentSpace ? .on : .off
+                destination.isEnabled = space.id != currentSpace && move != nil
+                destination.image = SidebarSymbol.image(named: space.symbol, color: ArkPalette.spaceColor(space.colorIndex), pointSize: 14)
+                submenu.addItem(destination)
+            }
+            moveItem.submenu = submenu; menu.addItem(moveItem)
+        }
         menu.addItem(.separator())
         let closeItem = NSMenuItem(title: "Close Tab", action: #selector(closeFromMenu), keyEquivalent: "")
         closeItem.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: nil)
@@ -514,6 +684,7 @@ private final class ArkTabRow: ArkFlippedView {
         menu.addItem(closeItem)
         return menu
     }
+    @objc private func moveFromMenu(_ sender: NSMenuItem) { move?(sender.tag) }
     @objc private func pinFromMenu() { pin?() }
     @objc private func closeFromMenu() { close?() }
 }
@@ -527,8 +698,8 @@ private final class ArkTabRow: ArkFlippedView {
 
     init() {
         super.init(frame: .zero)
-        toolTip = "Cycle spaces — two-finger swipe over sidebar"
-        setAccessibilityLabel("Cycle spaces")
+        toolTip = "Manage Spaces — add, rename and reorder"
+        setAccessibilityLabel("Manage Spaces")
     }
     required init?(coder: NSCoder) { fatalError() }
 

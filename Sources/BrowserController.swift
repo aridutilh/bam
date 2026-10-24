@@ -13,11 +13,14 @@ import QuartzCore
         let palettes: [[NSColor]] = [
             [NSColor(srgbRed: 0.20, green: 0.17, blue: 0.25, alpha: 1), NSColor(srgbRed: 0.29, green: 0.23, blue: 0.29, alpha: 1)],
             [NSColor(srgbRed: 0.17, green: 0.24, blue: 0.22, alpha: 1), NSColor(srgbRed: 0.27, green: 0.29, blue: 0.22, alpha: 1)],
-            [NSColor(srgbRed: 0.16, green: 0.22, blue: 0.29, alpha: 1), NSColor(srgbRed: 0.26, green: 0.23, blue: 0.34, alpha: 1)]
+            [NSColor(srgbRed: 0.16, green: 0.22, blue: 0.29, alpha: 1), NSColor(srgbRed: 0.26, green: 0.23, blue: 0.34, alpha: 1)],
+            [NSColor(srgbRed: 0.29, green: 0.17, blue: 0.23, alpha: 1), NSColor(srgbRed: 0.34, green: 0.23, blue: 0.27, alpha: 1)],
+            [NSColor(srgbRed: 0.28, green: 0.22, blue: 0.15, alpha: 1), NSColor(srgbRed: 0.34, green: 0.28, blue: 0.21, alpha: 1)],
+            [NSColor(srgbRed: 0.18, green: 0.19, blue: 0.21, alpha: 1), NSColor(srgbRed: 0.28, green: 0.29, blue: 0.31, alpha: 1)]
         ]
-        let base = palettes[min(2, max(0, space))]
+        let base = palettes[min(palettes.count - 1, max(0, space))]
         let colors: [NSColor]
-        if let previewSpace { colors = zip(base, palettes[min(2, max(0, previewSpace))]).map { $0.blended(withFraction: min(1,max(0,previewProgress)), of: $1) ?? $0 } }
+        if let previewSpace { colors = zip(base, palettes[min(palettes.count - 1, max(0, previewSpace))]).map { $0.blended(withFraction: min(1,max(0,previewProgress)), of: $1) ?? $0 } }
         else { colors = base }
         NSGradient(colors: colors)?.draw(in: bounds, angle: 65)
     }
@@ -96,6 +99,8 @@ import QuartzCore
     var paletteShortcuts: NSTextField?
     var newTabOnSubmit = false
     var privateMode: Bool
+    var spaceManager: SpaceManagementController?
+    var onSpacesChanged: (() -> Void)?
     var saveWork: DispatchWorkItem?
     var tabErrors: [UUID: String] = [:]
     var pendingHome: Set<UUID> = []
@@ -141,6 +146,8 @@ import QuartzCore
         sidebar.onReload = { [weak self] in self?.reload(nil) }
         sidebar.onToggleSidebar = { [weak self] in self?.toggleSidebar(nil) }
         sidebar.onSpaceChange = { [weak self] space in self?.changeSpace(space) }
+        sidebar.onManageSpaces = { [weak self] in self?.manageSpaces(nil) }
+        sidebar.onMoveTab = { [weak self] id, space in self?.moveTab(id, toSpace: space) }
         sidebar.onPictureInPicture = { [weak self] in self?.togglePictureInPicture(nil) }
         sidebar.onSpaceScroll = { [weak self] event, source in
             guard let self else { return false }
@@ -362,6 +369,7 @@ import QuartzCore
         retiringViews.removeAll()
     }
     func prepareToClose() {
+        spaceManager?.cancel(nil)
         isShuttingDown = true; cancelAutomaticDepartures(); findBar.hide(); pageFeedback.hide(); downloads.cancelAll(); pictureInPicture.restore()
         for peek in Array(peeks.values) { peek.dismiss() }
         for little in Array(littleWindows.values) { little.close() }
@@ -383,11 +391,12 @@ import QuartzCore
     }
     func refresh() {
         guard isViewLoaded else { return }
-        root.space = session.space
+        root.space = session.spaceDefinition(session.space)?.colorIndex ?? 0
+        sidebar.configureSpaces(session.spaces)
         let tabs = session.visibleTabs.map { sidebarItem($0, activeID: session.activeID) }
         sidebar.update(tabs: tabs, space: session.space, canGoBack: activeWebView?.canGoBack ?? false, canGoForward: activeWebView?.canGoForward ?? false, isLoading: activeWebView?.isLoading ?? false)
         if let target = pagingTarget, target != session.space {
-            sidebar.beginPaging(tabs: sidebarItems(for: target), space: target, direction: target > session.space ? 1 : -1)
+            sidebar.beginPaging(tabs: sidebarItems(for: target), space: target, direction: spaceDirection(to: target))
         }
         if let tab = session.active {
             let host = URL(string: tab.address)?.host ?? tab.address
@@ -446,7 +455,7 @@ import QuartzCore
         root.previewSpace = nil; root.previewProgress = 0
     }
     func changeSpace(_ space: Int) {
-        guard (0...2).contains(space) else { return }
+        guard session.spaceDefinition(space) != nil else { return }
         dismissAddress()
         quarantineActiveSpaceGesture()
         swipe.reset(); trackingSwipe = false
@@ -471,7 +480,7 @@ import QuartzCore
         }
         swipe.reset(); trackingSwipe = false
         unphasedScrollEnd?.cancel(); unphasedScrollEnd = nil
-        let direction: CGFloat = space > session.space ? 1 : -1
+        let direction = spaceDirection(to: space)
         sidebar.beginPaging(tabs: sidebarItems(for: space), space: space, direction: direction)
         pagingTarget = space
         finishPaging(commit: space, initialVelocity: velocity)
@@ -524,7 +533,7 @@ import QuartzCore
         spaceScrollRoute = "hidden"
         guard session.sidebarVisible else { return false }
         spaceScrollRoute = "overlay"
-        guard addressOverlay == nil else { return false }
+        guard addressOverlay == nil, spaceManager == nil else { return false }
         spaceScrollRoute = "wheel"
         guard isPrecise || phase != .none else { return false }
         if phase == .began || phase == .mayBegin {
@@ -604,10 +613,10 @@ import QuartzCore
                                   isMomentum: Bool, timestamp: TimeInterval) -> Bool {
         let before = SpaceSwipeDiagnostics.shared.isRecording ? swipe.diagnostics : nil
         let result = swipe.handle(deltaX: deltaX, deltaY: deltaY, phase: phase, isMomentum: isMomentum,
-                                  timestamp: timestamp, space: session.space, width: sidebar.bounds.width,
+                                  timestamp: timestamp, space: session.spaceIndex(session.space) ?? 0, width: sidebar.bounds.width,
                                   // A committed page's remaining entrance offset is
                                   // visual only, not travel toward the previous Space.
-                                  initialOffset: pagingCommit == nil ? pagingOffset : 0)
+                                  initialOffset: pagingCommit == nil ? pagingOffset : 0, spaceCount: session.spaces.count)
         SpaceSwipeDiagnostics.shared.record(["kind": "result", "phase": String(describing: phase),
             "momentum": isMomentum, "didLock": result.didLock, "consumed": result.shouldConsume,
             "finished": result.finished, "target": result.committedSpace ?? -1,
@@ -625,20 +634,21 @@ import QuartzCore
         if let offset = result.previewOffset {
             pagingOffset = offset
             let direction: CGFloat = offset < 0 ? 1 : -1
-            let target = session.space + Int(direction)
-            if (0...2).contains(target) {
+            let targetIndex = (session.spaceIndex(session.space) ?? 0) + Int(direction)
+            if session.spaces.indices.contains(targetIndex) {
+                let target = session.spaces[targetIndex].id
                 if pagingTarget != target {
                     sidebar.beginPaging(tabs: sidebarItems(for: target), space: target, direction: direction)
                     pagingTarget = target
                 }
             } else if pagingTarget != nil { sidebar.endPaging(); pagingTarget = nil }
             sidebar.setPagingOffset(offset)
-            root.previewSpace = pagingTarget; root.previewProgress = abs(offset) / max(1, sidebar.bounds.width)
+            root.previewSpace = pagingTarget.flatMap { session.spaceDefinition($0)?.colorIndex }; root.previewProgress = abs(offset) / max(1, sidebar.bounds.width)
         }
         if phase == .ended || phase == .cancelled { trackingSwipe = false }
         if result.finished {
             capturedSpaceMomentum = result.shouldConsume
-            finishPaging(commit: result.committedSpace, initialVelocity: result.releaseVelocity)
+            finishPaging(commit: result.committedSpace.flatMap { session.spaces.indices.contains($0) ? session.spaces[$0].id : nil }, initialVelocity: result.releaseVelocity)
         }
         return result.shouldConsume
     }
@@ -660,7 +670,7 @@ import QuartzCore
             guard let self else { return }
             self.pagingOffset = offset; self.sidebar.setPagingOffset(offset)
             if commit == nil {
-                self.root.previewSpace = self.pagingTarget
+                self.root.previewSpace = self.pagingTarget.flatMap { self.session.spaceDefinition($0)?.colorIndex }
                 self.root.previewProgress = abs(offset) / max(1, self.sidebar.bounds.width)
             }
         }, completion: { [weak self] in
@@ -671,8 +681,15 @@ import QuartzCore
             self.root.previewSpace = nil; self.root.previewProgress = 0
         })
     }
-    @objc func nextSpace(_ sender: Any?) { changeSpace(min(2, session.space + 1)) }
-    @objc func previousSpace(_ sender: Any?) { changeSpace(max(0, session.space - 1)) }
+    func spaceDirection(to id: Int) -> CGFloat {
+        (session.spaceIndex(id) ?? 0) > (session.spaceIndex(session.space) ?? 0) ? 1 : -1
+    }
+    func selectSpace(at index: Int) {
+        guard session.spaces.indices.contains(index) else { return }
+        changeSpace(session.spaces[index].id)
+    }
+    @objc func nextSpace(_ sender: Any?) { selectSpace(at: min(session.spaces.count - 1, (session.spaceIndex(session.space) ?? 0) + 1)) }
+    @objc func previousSpace(_ sender: Any?) { selectSpace(at: max(0, (session.spaceIndex(session.space) ?? 0) - 1)) }
     func returnToVideoTab(_ id: UUID) {
         guard !isShuttingDown, session.tabs.contains(where: { $0.id == id }), let window = view.window else { return }
         let primaryID = session.split(for: id)?.primaryID ?? id
@@ -820,7 +837,7 @@ import QuartzCore
     }
     func refreshPaletteResults() {
         guard let field = addressField else { return }
-        tabSearchResults?.update(tabs: session.tabs, query: field.stringValue, activeID: focusedTabID, canCreate: true)
+        tabSearchResults?.update(tabs: session.tabs, query: field.stringValue, activeID: focusedTabID, canCreate: true, spaces: session.spaces)
         layoutBrowser()
     }
     func selectSearchResult(_ id: UUID) {

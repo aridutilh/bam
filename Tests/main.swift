@@ -188,4 +188,124 @@ _ = splitState.makeSplit(primary: leftID, secondary: rightID)
 _ = splitState.close(leftID)
 expect(!splitState.tabs.contains(where: { $0.id == leftID || $0.id == rightID }) && splitState.splits?.isEmpty == true, "Closing split group removes both members")
 
+// Editable Spaces migrate legacy state without renumbering tabs or changing metadata.
+expect(BrowserSpace.defaults == BrowserSpace.legacyDefaults && BrowserSpace.defaults.map(\.id) == [0, 1, 2], "Legacy Space IDs stay stable")
+expect(BrowserSpace.defaults.map(\.name) == ["Studio", "Life", "Explore"] && BrowserSpace.colorNames.count == 6, "Default labels and the six supported color choices are available")
+var editableLegacy = BrowserSession.fresh()
+let legacyPrimary = editableLegacy.activeID
+let legacySecondary = editableLegacy.add(address: "https://example.com/legacy-right", title: "Legacy right")
+_ = editableLegacy.makeSplit(primary: legacyPrimary, secondary: legacySecondary)
+editableLegacy.sidebarWidth = 311; editableLegacy.sidebarVisible = false
+var oldFormat = try JSONSerialization.jsonObject(with: JSONEncoder().encode(editableLegacy)) as! [String: Any]
+for key in ["version", "spaces", "lastIssuedSpaceID"] { oldFormat.removeValue(forKey: key) }
+try JSONSerialization.data(withJSONObject: oldFormat).write(to: spacesFile)
+let migratedSpaces = SessionFile.load(spacesFile)
+expect(migratedSpaces.spaces == BrowserSpace.defaults && migratedSpaces.spaceIDs == [0, 1, 2], "Old session files gain exactly the three legacy Space definitions")
+expect(migratedSpaces.tabs == editableLegacy.tabs && migratedSpaces.splits == editableLegacy.splits && migratedSpaces.activeID == editableLegacy.activeID, "Space migration preserves tab identity, content, split grouping, and active selection")
+expect(migratedSpaces.lastSelectedTabIDsBySpace == editableLegacy.lastSelectedTabIDsBySpace && migratedSpaces.sidebarWidth == 311 && !migratedSpaces.sidebarVisible, "Space migration preserves remembered tabs and sidebar preferences")
+let migratedJSON = try JSONSerialization.jsonObject(with: JSONEncoder().encode(migratedSpaces)) as! [String: Any]
+expect(migratedJSON["version"] as? Int == 2 && migratedJSON["spaces"] != nil, "Subsequent saves explicitly version the editable-Space format")
+var futureJSON = migratedJSON; futureJSON["version"] = 999
+let futureData = try JSONSerialization.data(withJSONObject: futureJSON)
+expect((try? JSONDecoder().decode(BrowserSession.self, from: futureData)) == nil, "A future session format is not silently decoded as current state")
+
+var editable = BrowserSession.fresh()
+let creationSelection = editable.activeID, creationTabs = editable.tabs
+expect(editable.createSpace(name: "   ", symbol: "globe", colorIndex: 0) == nil, "An empty Space name is rejected")
+expect(editable.createSpace(name: String(repeating: "x", count: 61), symbol: "globe", colorIndex: 0) == nil && editable.createSpace(name: "Two\nLines", symbol: "globe", colorIndex: 0) == nil, "Overlong and multiline Space names are rejected")
+expect(editable.createSpace(name: "Invalid color", symbol: "globe", colorIndex: 6) == nil, "Unknown Space color is rejected")
+let createdID = editable.createSpace(name: "  Research  ", symbol: " book ", colorIndex: 4)!
+expect(createdID == 3 && editable.spaceDefinition(createdID) == BrowserSpace(id: createdID, name: "Research", symbol: "book", colorIndex: 4), "Valid Space metadata is trimmed and receives the next stable ID")
+expect(editable.activeID == creationSelection && editable.tabs == creationTabs && editable.space == 0, "Creating an unselected Space neither switches nor creates a background page")
+expect(editable.spaceIndex(createdID) == 3 && editable.spaceIndex(999) == nil && editable.spaceDefinition(999) == nil, "Space lookup distinguishes stable IDs from missing values")
+expect(editable.updateSpace(id: createdID, name: "  Reading  ", symbol: "not.a.symbol", colorIndex: 5), "A Space can be renamed and recolored")
+expect(editable.spaceDefinition(createdID)?.name == "Reading" && editable.spaceDefinition(createdID)?.symbol == "sparkles" && editable.spaceDefinition(createdID)?.colorIndex == 5, "Unknown symbols normalize safely while valid metadata updates")
+let beforeInvalidUpdate = editable.spaces
+expect(!editable.updateSpace(id: createdID, name: "", symbol: "book", colorIndex: 0) && !editable.updateSpace(id: 999, name: "Absent", symbol: "book", colorIndex: 0) && editable.spaces == beforeInvalidUpdate, "Invalid updates do not partially mutate Space metadata")
+editable.changeSpace(createdID)
+let newSpaceHome = editable.activeID
+expect(editable.active?.space == createdID && editable.active?.isHome == true && editable.tabs.count == creationTabs.count + 1, "Entering a new Space creates one selected local home")
+editable.changeSpace(0); editable.changeSpace(createdID)
+expect(editable.activeID == newSpaceHome, "Reentering a custom Space restores its page instead of allocating another")
+editable.changeSpace(999)
+expect(editable.space == createdID && editable.activeID == newSpaceHome, "An unknown Space ID cannot select an unrelated position")
+
+// Reordering never changes tab membership or the selected/remembered IDs.
+let savedTabs = editable.tabs, savedChoices = editable.lastSelectedTabIDsBySpace
+expect(editable.reorderSpace(id: createdID, to: 0) && editable.spaceIDs == [createdID, 0, 1, 2], "Space order is independent from stable IDs")
+expect(editable.tabs == savedTabs && editable.lastSelectedTabIDsBySpace == savedChoices && editable.activeID == newSpaceHome && editable.space == createdID, "Reordering preserves all tab and selection metadata")
+expect(!editable.reorderSpace(id: createdID, to: 4) && !editable.reorderSpace(id: 999, to: 0) && editable.spaceIDs == [createdID, 0, 1, 2], "Invalid reorder requests are atomic no-ops")
+try SessionFile.save(editable, to: spacesFile)
+var editableReload = SessionFile.load(spacesFile)
+expect(editableReload.spaces == editable.spaces && editableReload.tabs == editable.tabs && editableReload.activeID == editable.activeID && editableReload.lastSelectedTabIDsBySpace == editable.lastSelectedTabIDsBySpace, "Edited/reordered Space definitions and selection survive a file roundtrip")
+expect(editableReload.deleteSpace(id: createdID, movingTabsTo: 0), "Deleting the selected custom Space succeeds with an explicit destination")
+expect(editableReload.activeID == newSpaceHome && editableReload.space == 0 && editableReload.tabs.count == savedTabs.count && editableReload.tabs.first(where: { $0.id == newSpaceHome })?.space == 0, "Deleting the selected Space moves its page without closing or replacing it")
+expect(editableReload.lastSelectedTabIDsBySpace?[createdID] == nil && editableReload.lastSelectedTabIDsBySpace?[0] == newSpaceHome, "Deleted Space choices are removed and the surviving selection is remembered at its destination")
+try SessionFile.save(editableReload, to: spacesFile)
+var afterSpaceDelete = SessionFile.load(spacesFile)
+let afterDeletedID = afterSpaceDelete.createSpace(name: "Next", symbol: "leaf", colorIndex: 1)!
+expect(afterDeletedID > createdID, "Deleting the highest Space and relaunching never reuses its ID")
+
+// Deliberately nonsequential IDs catch accidental use of IDs as array indices.
+let definitions = [BrowserSpace(id: 42, name: "Work", symbol: "briefcase", colorIndex: 3),
+                   BrowserSpace(id: 7, name: "Home", symbol: "house", colorIndex: 1),
+                   BrowserSpace(id: 90, name: "Listening", symbol: "music.note", colorIndex: 5)]
+let groupLeft = BrowserTab(title: "Left", address: "https://example.com/left", space: 42, pinned: true)
+let groupRight = BrowserTab(title: "Right", address: "https://example.com/right", space: 42)
+let staying = BrowserTab(title: "Stay", address: "https://example.com/stay", space: 42)
+let movingBackground = BrowserTab(title: "Background", address: "https://example.com/background", space: 7)
+let destinationTab = BrowserTab(title: "Destination", address: "https://example.com/destination", space: 90)
+var dynamic = BrowserSession(tabs: [groupLeft, groupRight, staying, movingBackground, destinationTab], activeID: groupLeft.id, space: 42,
+                             lastSelectedTabIDsBySpace: [42: groupLeft.id, 7: movingBackground.id, 90: destinationTab.id],
+                             splits: [BrowserSplit(primaryID: groupLeft.id, secondaryID: groupRight.id)], spaces: definitions)
+dynamic.sanitize()
+expect(dynamic.tabs.count == 5 && dynamic.space == 42 && dynamic.spaceIndex(42) == 0 && dynamic.spaceIndex(90) == 2, "Sanitation retains tabs whose custom IDs are not positions")
+expect(dynamic.moveTab(id: groupRight.id, toSpace: 90), "Moving either split member moves its whole group")
+expect(dynamic.activeID == groupLeft.id && dynamic.space == 90 && dynamic.split(for: groupRight.id)?.primaryID == groupLeft.id, "Moving the active split follows the same selected primary and retains the pair")
+expect(dynamic.tabs.filter { [groupLeft.id, groupRight.id].contains($0.id) }.allSatisfy { $0.space == 90 } && dynamic.tabs.count == 5 && dynamic.tabs.map(\.id) == [groupLeft.id, groupRight.id, staying.id, movingBackground.id, destinationTab.id], "Split movement preserves both tab IDs and tab order without creating or deleting pages")
+var movedLeft = groupLeft; movedLeft.space = 90
+var movedRight = groupRight; movedRight.space = 90
+expect(dynamic.tabs.first { $0.id == groupLeft.id } == movedLeft && dynamic.tabs.first { $0.id == groupRight.id } == movedRight, "Moving preserves titles, URLs and pin state exactly")
+expect(dynamic.lastSelectedTabIDsBySpace?[42] == staying.id && dynamic.lastSelectedTabIDsBySpace?[90] == groupLeft.id && !dynamic.visibleTabs.contains(where: { $0.id == groupRight.id }), "Moving a split repairs source memory and keeps one destination row")
+expect(dynamic.moveTab(id: movingBackground.id, toSpace: 42), "A background tab can move between custom Spaces")
+expect(dynamic.activeID == groupLeft.id && dynamic.space == 90 && dynamic.lastSelectedTabIDsBySpace?[42] == staying.id && dynamic.lastSelectedTabIDsBySpace?[7] == nil, "Background moves preserve the current page and existing destination choice, clearing an emptied source")
+let beforeInvalidMove = dynamic.tabs
+expect(!dynamic.moveTab(id: UUID(), toSpace: 90) && !dynamic.moveTab(id: groupLeft.id, toSpace: 999) && dynamic.tabs == beforeInvalidMove, "Invalid tab moves neither lose pages nor alter membership")
+expect(dynamic.reorderSpace(id: 90, to: 0) && dynamic.spaceIDs == [90, 42, 7] && dynamic.activeID == groupLeft.id && dynamic.space == 90, "Reordering nonsequential IDs retains active membership")
+expect(dynamic.deleteSpace(id: 90, movingTabsTo: 42), "Deleting a Space containing a selected split moves its contents")
+expect(dynamic.activeID == groupLeft.id && dynamic.space == 42 && dynamic.tabs.count == 5 && dynamic.tabs.allSatisfy { $0.space == 42 } && dynamic.splits == [BrowserSplit(primaryID: groupLeft.id, secondaryID: groupRight.id)], "Deleting a Space preserves every tab and split without replacing the selected page")
+expect(dynamic.lastSelectedTabIDsBySpace?[90] == nil && dynamic.lastSelectedTabIDsBySpace?[42] == groupLeft.id, "Deleting a split's Space repairs remembered selection by stable ID")
+expect(dynamic.deleteSpace(id: 7, movingTabsTo: 42) && dynamic.spaceIDs == [42], "An empty background Space can be removed without affecting the selected one")
+expect(!dynamic.deleteSpace(id: 42, movingTabsTo: 42) && !dynamic.deleteSpace(id: 42, movingTabsTo: 999) && dynamic.spaceIDs == [42] && dynamic.tabs.count == 5, "The final Space can never be deleted")
+let customHighID = dynamic.createSpace(name: "After relayout", symbol: "terminal", colorIndex: 0)!
+expect(customHighID == 91, "Deleted and reordered custom IDs still determine the monotonic allocation high-water mark")
+try SessionFile.save(dynamic, to: spacesFile)
+let dynamicReload = SessionFile.load(spacesFile)
+expect(dynamicReload.spaces == dynamic.spaces && dynamicReload.tabs == dynamic.tabs && dynamicReload.splits == dynamic.splits && dynamicReload.activeID == dynamic.activeID, "Nonsequential Space IDs, moved split identities and metadata persist together")
+
+// Background deletion must not steal the current tab or the destination's last choice.
+var backgroundDelete = BrowserSession(tabs: [groupLeft, movingBackground, destinationTab], activeID: destinationTab.id, space: 90,
+                                      lastSelectedTabIDsBySpace: [42: groupLeft.id, 7: movingBackground.id, 90: destinationTab.id], spaces: definitions)
+expect(backgroundDelete.deleteSpace(id: 7, movingTabsTo: 42), "A background Space can be deleted into another background Space")
+expect(backgroundDelete.activeID == destinationTab.id && backgroundDelete.space == 90 && backgroundDelete.lastSelectedTabIDsBySpace?[42] == groupLeft.id && backgroundDelete.tabs.first(where: { $0.id == movingBackground.id })?.space == 42, "Background deletion preserves the active tab and the destination's remembered page")
+
+var fullSpaces = BrowserSession.fresh()
+for index in 3..<BrowserSession.maximumSpaces { _ = fullSpaces.createSpace(name: "Space \(index)", symbol: "globe", colorIndex: index % 6) }
+let maxID = fullSpaces.spaceIDs.max()!
+expect(fullSpaces.spaces.count == 32 && fullSpaces.createSpace(name: "Overflow", symbol: "globe", colorIndex: 0) == nil, "A bounded Space limit rejects overflow")
+_ = fullSpaces.deleteSpace(id: maxID, movingTabsTo: 0)
+expect(fullSpaces.createSpace(name: "Replacement", symbol: "globe", colorIndex: 0) == maxID + 1 && fullSpaces.spaces.count == 32, "Freeing a slot permits creation but never ID reuse")
+
+var damagedSpaces = BrowserSession(tabs: [groupLeft], activeID: groupLeft.id, space: 42, sidebarWidth: 303, sidebarVisible: false,
+                                  spaces: [BrowserSpace(id: 42, name: "  Repaired  ", symbol: "invalid", colorIndex: 99),
+                                           BrowserSpace(id: 42, name: "Duplicate", symbol: "book", colorIndex: 0),
+                                           BrowserSpace(id: -1, name: "Invalid", symbol: "book", colorIndex: 0)])
+damagedSpaces.sanitize()
+expect(damagedSpaces.spaceIDs == [42] && damagedSpaces.spaces[0].name == "Repaired" && damagedSpaces.spaces[0].symbol == "sparkles" && damagedSpaces.spaces[0].colorIndex == 5 && damagedSpaces.tabs == [groupLeft], "Malformed Space metadata is repaired without dropping a valid custom-Space tab")
+damagedSpaces.tabs = []
+damagedSpaces.sanitize()
+expect(damagedSpaces.spaceIDs == [42] && damagedSpaces.active?.space == 42 && damagedSpaces.active?.isHome == true && damagedSpaces.sidebarWidth == 303 && !damagedSpaces.sidebarVisible, "An empty repaired session retains its edited Spaces and preferences while adding a safe home")
+var exhaustedIDs = BrowserSession(tabs: [valid], activeID: valid.id, spaces: BrowserSpace.defaults + [BrowserSpace(id: Int.max, name: "Last possible ID", symbol: "globe", colorIndex: 0)])
+expect(exhaustedIDs.createSpace(name: "Cannot overflow", symbol: "globe", colorIndex: 0) == nil, "Space ID allocation cannot overflow or wrap to a reused ID")
+
 print("PASS: \(count) model, URL, space, and persistence checks")

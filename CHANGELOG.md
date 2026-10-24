@@ -4,6 +4,16 @@
 
 Remaining work is tracked with acceptance criteria in [FEATURE-INVENTORY.md](FEATURE-INVENTORY.md). An inventory item is complete only after its full behavior is verified.
 
+## 0.6.0 prerelease — build 19
+
+All seven component and five final-package runtime suites passed: model 120, motion, symbols 63, swipe 22 scenarios, search 20, Find, library 32; WebKit, PiP with 70 positioning checks, 162 controller interactions, 85 automatic PiP and 268 feature checks including 61 editable Spaces. The first runtime attempt stopped at a fixture selector that expected a primary-only Split title; the selector was corrected to match the intentional combined title, preserving the menu/action checks. No product change was needed, and the rebuilt final package passed the full rerun. All 56 inputs matched. Installation, strict signature, tested-executable identity and unchanged approved icon passed. Session-format-2 migration preserved all 13 existing tabs and their saved state. Native preview checks verified readable sheet layout, edit/cancel, creation, arrow reorder, ordered shortcut selection, moving a page and removing the empty test Space. Manual table drag, physical swipes and broader accessibility/theme checks remain unperformed.
+
+- Add Manage Spaces through the Tabs menu, sidebar heading and stack button, with staged Save/Cancel, names, twelve symbols, six colors and a 32-Space limit.
+- Reorder Spaces by table drag or arrows. Footer buttons/overflow, sidebar swipes and ⌥⌘1…9 follow the saved order.
+- Remove a Space by moving its tabs to a chosen destination. Move a tab or whole Split pair from its row menu; moving the selected page follows it without replacing its tab identity.
+- Persist stable integer Space IDs, explicit order and a never-reused allocation counter in session format 2. Migrate legacy Studio/Life/Explore sessions while retaining tabs, Split groups, remembered selection and sidebar preferences.
+- Keep all Spaces in the existing shared website-data store. This adds no isolated profiles, true Favorites, folders, tab reordering or browser import.
+
 ## 0.5.5 prerelease — build 18
 
 All seven component and five exact-package runtime suites passed on the first attempt, including 207 feature, 162 interaction, 85 automatic PiP and 70 positioning checks. All 54 inputs matched the tested manifest. Installation, strict signature and tested-executable/approved-icon identity passed; all 13 tabs and existing selection/sidebar/Split state were retained. Actual copy and hard-refresh shortcuts showed complete, readable bottom-right cards on one main-window page, and later dismissal was confirmed. Other surfaces have automated coverage; broader themes, preferences and frame-by-frame animation timing were not rechecked.

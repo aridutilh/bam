@@ -66,7 +66,8 @@ enum TabSearchMatcher {
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
 
-    func update(tabs: [BrowserTab], query: String, activeID: UUID, canCreate: Bool) {
+    func update(tabs: [BrowserTab], query: String, activeID: UUID, canCreate: Bool,
+                spaces: [BrowserSpace] = BrowserSpace.legacyDefaults) {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         let previousIdentity = entries.indices.contains(selectedIndex) ? entries[selectedIndex].identity : nil
         entries = []
@@ -83,7 +84,8 @@ enum TabSearchMatcher {
             case .query(let text):
                 row.configure(title: "Open or search “\(text)”", subtitle: "Return to open this address or search", badge: "↵", symbol: "magnifyingglass")
             case .tab(let tab):
-                let space = ["Studio", "Life", "Explore"].indices.contains(tab.space) ? ["Studio", "Life", "Explore"][tab.space] : "Space \(tab.space + 1)"
+                // IDs remain stable when Spaces are renamed, reordered or deleted.
+                let space = spaces.first(where: { $0.id == tab.space })?.name ?? "Unknown Space"
                 let badge = tab.id == activeID ? "\(space) · Current" : space
                 let subtitle = tab.isHome ? "New tab" : tab.isVideoDemo ? "Picture in Picture demo" : tab.address
                 row.configure(title: tab.title.isEmpty ? subtitle : tab.title, subtitle: subtitle, badge: badge, symbol: tab.symbol)
