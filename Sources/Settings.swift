@@ -370,7 +370,7 @@ struct SettingsActions {
         let manage = BamPillButton(title: "Manage Extensions…", symbol: "puzzlepiece.extension")
         manage.target = self; manage.action = #selector(manageExtensions)
         let footer = BamCard(frame: .zero)
-        footer.add(BamRow(title: "Import, enable or remove", detail: "Chrome Web Store installs aren’t supported yet.", control: manage))
+        footer.add(BamRow(title: "Add, enable or remove", detail: "Store links, Firefox Add-ons search, package links and local folders.", control: manage))
         return [caption(snapshot.profileName + " profile"), card, footer]
     }
     @objc private func manageExtensions() { actions.manageExtensions() }

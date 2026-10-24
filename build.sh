@@ -27,7 +27,7 @@ printf '// Empty legacy module map; current SwiftBridging is supplied by the too
 python3 -c 'import json,sys; from pathlib import Path; p=Path(sys.argv[1]); (p/"overlay.json").write_text(json.dumps({"version":0,"case-sensitive":"true","roots":[{"type":"file","name":"/Library/Developer/CommandLineTools/usr/include/swift/module.modulemap","external-contents":str(p/"empty.modulemap")}]},indent=2))' "$BUILD_DIR"
 ARCH=${BAM_ARCH:-${ARK_ARCH:-${ORBIT_ARCH:-$(uname -m)}}}
 COMMON=(-swift-version 5 -sdk "$SDK" -target "$ARCH-apple-macosx14.0" -module-cache-path "$BUILD_DIR/module-cache" -vfsoverlay "$BUILD_DIR/overlay.json" -Xcc -ivfsoverlay -Xcc "$BUILD_DIR/overlay.json")
-"$SWIFTC" "${COMMON[@]}" -O -parse-as-library -framework AppKit -framework WebKit -framework QuartzCore "$PROJECT_DIR"/Sources/*.swift -o "$APP/Contents/MacOS/BamBrowser"
+"$SWIFTC" "${COMMON[@]}" -O -parse-as-library -framework AppKit -framework WebKit -framework QuartzCore -framework UserNotifications -framework Security "$PROJECT_DIR"/Sources/*.swift -o "$APP/Contents/MacOS/BamBrowser"
 cp -X "$PROJECT_DIR/Info.plist" "$APP/Contents/Info.plist"
 /usr/bin/ditto --norsrc --noextattr "$PROJECT_DIR/Resources/" "$APP/Contents/Resources/"
 # Exclude the previous generated icon from upgraded working copies.
@@ -62,9 +62,13 @@ if [ "$VERIFIED" != true ]; then exit 1; fi
 "$BUILD_DIR/model-tests" "$BUILD_DIR"
 "$SWIFTC" "${COMMON[@]}" -parse-as-library "$PROJECT_DIR/Sources/ExtensionPackagePreparation.swift" "$PROJECT_DIR/Tests/ExtensionPackagePreparationTests.swift" -o "$BUILD_DIR/extension-package-tests"
 "$BUILD_DIR/extension-package-tests" "$BUILD_DIR/extension-package-fixtures"
-"$SWIFTC" "${COMMON[@]}" -O -parse-as-library -framework AppKit -framework WebKit "$PROJECT_DIR/Sources/BrowserState.swift" "$PROJECT_DIR/Sources/BrowserExtensions.swift" "$PROJECT_DIR/Sources/ExtensionManagement.swift" "$PROJECT_DIR/Sources/ExtensionPackagePreparation.swift" "$PROJECT_DIR/Tests/BrowserExtensionEnumerationTests.swift" -o "$BUILD_DIR/extension-enumeration-tests"
+"$SWIFTC" "${COMMON[@]}" -parse-as-library -framework Security "$PROJECT_DIR/Sources/ExtensionPackageArchive.swift" "$PROJECT_DIR/Tests/ExtensionPackageArchiveTests.swift" -o "$BUILD_DIR/extension-archive-tests"
+"$BUILD_DIR/extension-archive-tests" "$BUILD_DIR/extension-archive-fixtures"
+"$SWIFTC" "${COMMON[@]}" -parse-as-library -framework Security "$PROJECT_DIR/Sources/ExtensionPackageArchive.swift" "$PROJECT_DIR/Sources/ExtensionCatalog.swift" "$PROJECT_DIR/Tests/ExtensionCatalogTests.swift" -o "$BUILD_DIR/extension-catalog-tests"
+"$BUILD_DIR/extension-catalog-tests" "$BUILD_DIR/extension-catalog-fixtures"
+"$SWIFTC" "${COMMON[@]}" -O -parse-as-library -framework AppKit -framework WebKit -framework UserNotifications -framework Security "$PROJECT_DIR/Sources/BrowserState.swift" "$PROJECT_DIR/Sources/BrowserExtensions.swift" "$PROJECT_DIR/Sources/ExtensionCompatibility.swift" "$PROJECT_DIR/Sources/ExtensionInstallation.swift" "$PROJECT_DIR/Sources/ExtensionCatalog.swift" "$PROJECT_DIR/Sources/ExtensionPackageArchive.swift" "$PROJECT_DIR/Sources/ExtensionManagement.swift" "$PROJECT_DIR/Sources/ExtensionLibraryPanel.swift" "$PROJECT_DIR/Sources/SafariUserAgent.swift" "$PROJECT_DIR/Sources/ExtensionPackagePreparation.swift" "$PROJECT_DIR/Tests/BrowserExtensionEnumerationTests.swift" -o "$BUILD_DIR/extension-enumeration-tests"
 "$BUILD_DIR/extension-enumeration-tests"
-"$SWIFTC" "${COMMON[@]}" -O -parse-as-library -framework AppKit -framework WebKit "$PROJECT_DIR/Sources/BrowserState.swift" "$PROJECT_DIR/Sources/BrowserExtensions.swift" "$PROJECT_DIR/Sources/ExtensionManagement.swift" "$PROJECT_DIR/Sources/ExtensionPackagePreparation.swift" "$PROJECT_DIR/Tests/BrowserExtensionStartupTests.swift" -o "$BUILD_DIR/extension-startup-tests"
+"$SWIFTC" "${COMMON[@]}" -O -parse-as-library -framework AppKit -framework WebKit -framework UserNotifications -framework Security "$PROJECT_DIR/Sources/BrowserState.swift" "$PROJECT_DIR/Sources/BrowserExtensions.swift" "$PROJECT_DIR/Sources/ExtensionCompatibility.swift" "$PROJECT_DIR/Sources/ExtensionInstallation.swift" "$PROJECT_DIR/Sources/ExtensionCatalog.swift" "$PROJECT_DIR/Sources/ExtensionPackageArchive.swift" "$PROJECT_DIR/Sources/ExtensionManagement.swift" "$PROJECT_DIR/Sources/ExtensionLibraryPanel.swift" "$PROJECT_DIR/Sources/SafariUserAgent.swift" "$PROJECT_DIR/Sources/ExtensionPackagePreparation.swift" "$PROJECT_DIR/Tests/BrowserExtensionStartupTests.swift" -o "$BUILD_DIR/extension-startup-tests"
 "$BUILD_DIR/extension-startup-tests"
 "$SWIFTC" "${COMMON[@]}" -O -parse-as-library -framework AppKit "$PROJECT_DIR/Sources/WebsiteFaviconStore.swift" "$PROJECT_DIR/Tests/WebsiteFaviconStoreTests.swift" -o "$BUILD_DIR/favicon-store-tests"
 "$BUILD_DIR/favicon-store-tests"

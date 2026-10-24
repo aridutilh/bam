@@ -48,6 +48,23 @@ import WebKit
             return true
         }
         value.createTab = { [weak self] url, profile, active in self?.openProfileTab(url, profileID: profile, active: active) }
+        value.createWindow = { [weak self] url, profile, focused in
+            guard let self else { return nil }
+            let before = Set(self.littleWindows.keys)
+            self.openLittleOrbit(url: url, profileID: profile)
+            guard let id = self.littleWindows.keys.first(where: { !before.contains($0) }), let little = self.littleWindows[id], let window = little.window else { return nil }
+            if !focused { self.view.window?.makeKeyAndOrderFront(nil) }
+            return window
+        }
+        value.closeWindow = { [weak self] window in
+            guard let self, let little = self.littleWindows.values.first(where: { $0.window === window }) else { return false }
+            little.close(); return true
+        }
+        value.startDownload = { [weak self] web, url, _ in
+            guard let self else { return false }
+            web.startDownload(using: URLRequest(url: url)) { [weak self] download in self?.downloads.start(download: download) }
+            return true
+        }
         value.onChange = { [weak self] in self?.scheduleExtensionRefresh() }
         value.onReloadNeeded = { [weak self] profile in self?.offerExtensionReload(profileID: profile) }
         return value

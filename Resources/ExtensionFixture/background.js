@@ -24,7 +24,8 @@ browser.runtime.onMessage.addListener((message) => {
     }
     const tabs = await browser.tabs.query({});
     return {token: value.token, visits: value.visits, lastMenu: value.lastMenu, urls: tabs.map(tab => tab.url || ""),
-      encoding: globalThis["bamCaf\u00e9"] || "absent", nativeMessagingExposed: typeof browser.runtime.sendNativeMessage !== "undefined"};
+      encoding: globalThis["bamCaf\u00e9"] || "absent", nativeMessagingExposed: typeof browser.runtime.sendNativeMessage !== "undefined",
+      compat: await (globalThis.bamCompatProbe || "absent")};
   })();
 });
 

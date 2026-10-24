@@ -26,6 +26,10 @@ struct BrowserExtensionRecord: Codable, Identifiable {
     var deniedPermissions: [String: Date] = [:]
     var deniedPatterns: [String: Date] = [:]
     var compatibilityNote: String? = nil
+    /// Requested permissions Bam's compatibility layer stands in for; nil before 0.17.
+    var compatibility: [String]? = nil
+    /// Where the package came from and how it was verified; nil for folder imports.
+    var catalog: ExtensionCatalogRecord? = nil
 }
 
 struct BrowserExtensionPermissionReview {
@@ -36,6 +40,8 @@ struct BrowserExtensionPermissionReview {
     let unsupported: [String]
     let isOptional: Bool
     var compatibilityNote: String? = nil
+    /// Permissions provided by Bam's limited compatibility layer rather than WebKit.
+    var bridged: [String] = []
 }
 
 @available(macOS 15.4, *)
@@ -53,6 +59,12 @@ struct BrowserExtensionPermissionReview {
     var navigateTab: ((UUID, URL) -> Bool)?
     var reloadTab: ((UUID, Bool) -> Bool)?
     var createTab: ((URL, UUID, Bool) -> UUID?)?
+    /// Opens a separate window (Little Bam) in the profile; returns its native window.
+    var createWindow: ((URL?, UUID, Bool) -> NSWindow?)?
+    /// Closes a window an extension created; the main browser window refuses.
+    var closeWindow: ((NSWindow) -> Bool)?
+    /// Starts a download requested by an extension document through Bam's downloads.
+    var startDownload: ((WKWebView, URL, String) -> Bool)?
     var onChange: (() -> Void)?
     /// Informs the browser that already loaded pages need a user-requested reload.
     var onReloadNeeded: ((UUID) -> Void)?
@@ -72,7 +84,11 @@ struct BrowserExtensionPermissionReview {
     private var stopped = false
 
     static let supportedPermissions: Set<String> = ["activeTab", "alarms", "clipboardWrite", "contextMenus", "menus", "cookies", "declarativeNetRequest", "declarativeNetRequestFeedback", "declarativeNetRequestWithHostAccess", "scripting", "storage", "tabs", "unlimitedStorage", "webNavigation", "webRequest"]
-    static let unsupportedAPIs: Set<String> = ["browser.runtime.sendNativeMessage", "browser.runtime.connectNative", "browser.windows.create", "browser.windows.remove", "browser.windows.update", "browser.tabs.move", "browser.tabs.duplicate", "browser.tabs.highlight", "browser.tabs.discard", "browser.tabs.detectLanguage", "browser.bookmarks", "browser.history", "browser.downloads", "browser.identity", "browser.management", "browser.sessions", "browser.notifications"]
+    // windows.create/update/remove are implemented through Little Bam windows since 0.17.
+    // notifications/downloads/management are absent from WebKit; Bam's compatibility
+    // layer defines them in extension pages when the manifest requests them.
+    static let unsupportedAPIs: Set<String> = ["browser.runtime.sendNativeMessage", "browser.runtime.connectNative", "browser.tabs.move", "browser.tabs.duplicate", "browser.tabs.highlight", "browser.tabs.discard", "browser.tabs.detectLanguage", "browser.bookmarks", "browser.history", "browser.identity", "browser.sessions"]
+    nonisolated static var browserVersion: String { Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0" }
 
     init(storageURL: URL?, isPrivate: Bool = false) {
         self.isPrivate = isPrivate
@@ -154,6 +170,14 @@ struct BrowserExtensionPermissionReview {
         if manager == nil { manager = ExtensionManagement(host: self) }
         manager?.show(profileID: profileID, relativeTo: window)
     }
+    /// Verified store/link installs and updates; created on first use so the
+    /// network stack stays idle for folder-only users.
+    private(set) lazy var installer = ExtensionInstaller(host: self)
+    private var library: ExtensionLibraryPanel?
+    func showLibrary(profileID: UUID, relativeTo window: NSWindow?) {
+        if library == nil { library = ExtensionLibraryPanel(host: self, installer: installer) }
+        library?.show(profileID: profileID, relativeTo: window)
+    }
     func actionsMenu(profileID: UUID, tabID: UUID?, anchor: NSView) -> NSMenu {
         let menu = NSMenu(title: "Extensions")
         for record in items(profileID: profileID) where record.enabled && context(for: record.id) != nil {
@@ -195,11 +219,11 @@ struct BrowserExtensionPermissionReview {
     }
 
     /// Copies only the explicitly selected package, then reviews capabilities before loading.
-    @discardableResult func importPackage(at source: URL, profileID: UUID) async throws -> UUID {
+    @discardableResult func importPackage(at source: URL, profileID: UUID, catalog: ExtensionCatalogRecord? = nil) async throws -> UUID {
         guard runtimes[profileID] != nil else { throw Self.failure("Open this profile before installing an extension.") }
         let values = try source.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
         guard values.isSymbolicLink != true, values.isDirectory == true else {
-            throw Self.failure("Choose an unpacked extension folder containing manifest.json. Archives, CRX and browser stores are not supported.")
+            throw Self.failure("Choose an unpacked extension folder containing manifest.json. Use Add from Store or Link for archives, CRX files and store listings.")
         }
         try Self.validatePackageSize(source)
         let id = UUID(), name = "package"
@@ -214,7 +238,7 @@ struct BrowserExtensionPermissionReview {
             let ext = try await WKWebExtension(resourceBaseURL: package)
             guard ext.errors.isEmpty else { throw Self.failure(ext.errors.map(\.localizedDescription).joined(separator: "\n")) }
             guard !stopped else { throw Self.failure("The browser is closing.") }
-            records.append(BrowserExtensionRecord(id: id, profileID: profileID, name: ext.displayName ?? "Unnamed extension", version: ext.version ?? "", packageName: name, compatibilityNote: compatibilityNote))
+            records.append(BrowserExtensionRecord(id: id, profileID: profileID, name: ext.displayName ?? "Unnamed extension", version: ext.version ?? "", packageName: name, compatibilityNote: compatibilityNote, catalog: catalog))
             try persist()
             do { try await load(id, review: true, parsed: ext) } catch { setError(error, for: id) }
             changed()
@@ -222,6 +246,53 @@ struct BrowserExtensionPermissionReview {
         } catch {
             records.removeAll { $0.id == id }
             try? FileManager.default.removeItem(at: folder)
+            throw error
+        }
+    }
+
+    func noteUpdateCheck(id: UUID, available: String?) {
+        guard let i = records.firstIndex(where: { $0.id == id }), records[i].catalog != nil else { return }
+        records[i].catalog?.lastUpdateCheck = Date(); records[i].catalog?.availableVersion = available
+        try? persist(); changed()
+    }
+
+    /// Swaps the private package in place so the extension keeps its identifier,
+    /// WebKit storage, grants and profile. The previous package is restored on failure.
+    func replacePackage(id: UUID, with source: URL, catalog: ExtensionCatalogRecord) async throws {
+        guard let i = records.firstIndex(where: { $0.id == id }), let runtime = runtimes[records[i].profileID] else { throw Self.failure("This extension is not open in a profile.") }
+        try Self.validatePackageSize(source)
+        let folder = storageURL.appendingPathComponent(id.uuidString, isDirectory: true)
+        let package = folder.appendingPathComponent(records[i].packageName)
+        let previous = folder.appendingPathComponent("package-previous"), previousManifest = folder.appendingPathComponent("original-manifest-previous.json")
+        let originalManifest = folder.appendingPathComponent("original-manifest.json")
+        let fm = FileManager.default
+        try? fm.removeItem(at: previous); try? fm.removeItem(at: previousManifest)
+        let wasEnabled = records[i].enabled
+        if let context = runtime.contexts[id] {
+            runtime.closePopup(for: context); try runtime.controller.unload(context); runtime.compatibility.remove(context); runtime.contexts.removeValue(forKey: id)
+        }
+        try fm.moveItem(at: package, to: previous)
+        if fm.fileExists(atPath: originalManifest.path) { try fm.moveItem(at: originalManifest, to: previousManifest) }
+        func restore() {
+            try? fm.removeItem(at: package); try? fm.moveItem(at: previous, to: package)
+            try? fm.removeItem(at: originalManifest); if fm.fileExists(atPath: previousManifest.path) { try? fm.moveItem(at: previousManifest, to: originalManifest) }
+        }
+        do {
+            try fm.copyItem(at: source, to: package)
+            try Self.validatePackageSize(package)
+            let note = try ExtensionPackagePreparation.prepare(package: package, originalManifestURL: originalManifest)
+            let ext = try await WKWebExtension(resourceBaseURL: package)
+            guard ext.errors.isEmpty else { throw Self.failure(ext.errors.map(\.localizedDescription).joined(separator: "\n")) }
+            guard !stopped, let index = records.firstIndex(where: { $0.id == id }) else { throw Self.failure("The browser is closing.") }
+            records[index].name = ext.displayName ?? records[index].name; records[index].version = ext.version ?? ""
+            records[index].compatibilityNote = note; records[index].catalog = catalog; records[index].enabled = false
+            try persist()
+            try? fm.removeItem(at: previous); try? fm.removeItem(at: previousManifest)
+            if wasEnabled { try await load(id, review: true, parsed: ext) }
+            changed()
+        } catch {
+            restore()
+            if wasEnabled { try? await load(id, review: false) }
             throw error
         }
     }
@@ -234,6 +305,7 @@ struct BrowserExtensionPermissionReview {
             if let runtime = runtimes[records[i].profileID], let context = runtime.contexts[id] {
                 runtime.closePopup(for: context)
                 try runtime.controller.unload(context)
+                runtime.compatibility.remove(context)
                 runtime.contexts.removeValue(forKey: id)
             }
             records[i].enabled = false
@@ -270,12 +342,14 @@ struct BrowserExtensionPermissionReview {
         guard ext.errors.isEmpty else { throw Self.failure(ext.errors.map(\.localizedDescription).joined(separator: "\n")) }
         guard !stopped, loadGeneration[id] == token, let initialIndex = records.firstIndex(where: { $0.id == id }), review || records[initialIndex].enabled else { return }
         var index = initialIndex
+        let plan = ExtensionCompatibility.plan(manifest: ext.manifest)
+        let bridged = plan.provided.filter { ExtensionCompatibility.bridgedPermissions.contains($0) }
         if review {
             let requested = Set(ext.requestedPermissions.map(\.rawValue))
             let supported = requested.intersection(Self.supportedPermissions)
             let patterns = ext.allRequestedMatchPatterns.map(\.string).sorted()
             let details = BrowserExtensionPermissionReview(name: record.name, profileName: profileName?(record.profileID) ?? "Current profile", permissions: supported.sorted(), websites: patterns,
-                unsupported: requested.subtracting(supported).sorted(), isOptional: false, compatibilityNote: record.compatibilityNote)
+                unsupported: requested.subtracting(supported).subtracting(bridged).sorted(), isOptional: false, compatibilityNote: record.compatibilityNote, bridged: bridged)
             guard approve(details) else { changed(); return }
             // Native review runs a nested loop; deletion, disabling or shutdown wins.
             guard !stopped, loadGeneration[id] == token,
@@ -295,11 +369,13 @@ struct BrowserExtensionPermissionReview {
         context.grantedPermissionMatchPatterns = Self.matchPatterns(current.patterns)
         context.deniedPermissions = Dictionary(uniqueKeysWithValues: current.deniedPermissions.map { (WKWebExtension.Permission(rawValue: $0.key), $0.value) })
         context.deniedPermissionMatchPatterns = Self.matchPatterns(current.deniedPatterns)
-        try runtime.controller.load(context)
+        // The layer only defines what WebKit lacks, scoped to this extension's origin.
+        runtime.compatibility.install(plan, for: context)
+        do { try runtime.controller.load(context) } catch { runtime.compatibility.remove(context); throw error }
         runtime.contexts[id] = context
-        records[index].enabled = true; errors.removeValue(forKey: id)
+        records[index].enabled = true; records[index].compatibility = bridged; errors.removeValue(forKey: id)
         do { try persist() } catch {
-            runtime.contexts.removeValue(forKey: id); try? runtime.controller.unload(context); records[index].enabled = false; throw error
+            runtime.contexts.removeValue(forKey: id); runtime.compatibility.remove(context); try? runtime.controller.unload(context); records[index].enabled = false; throw error
         }
         runtime.reconcile()
         if review { onReloadNeeded?(record.profileID) }
@@ -335,9 +411,9 @@ struct BrowserExtensionPermissionReview {
     func shutdown() {
         stopped = true; manager?.close(); manager = nil
         for task in preparation.values { task.cancel() }; preparation.removeAll()
-        for runtime in runtimes.values { for context in runtime.contexts.values { runtime.closePopup(for: context); try? runtime.controller.unload(context) }; runtime.contexts.removeAll() }
+        for runtime in runtimes.values { for context in runtime.contexts.values { runtime.closePopup(for: context); try? runtime.controller.unload(context) }; runtime.contexts.removeAll(); runtime.shutdown() }
         runtimes.removeAll()
-        surfaces = nil; selectTab = nil; closeTab = nil; navigateTab = nil; reloadTab = nil; createTab = nil
+        surfaces = nil; selectTab = nil; closeTab = nil; navigateTab = nil; reloadTab = nil; createTab = nil; createWindow = nil; closeWindow = nil; startDownload = nil
         if ownsTemporaryStorage { try? FileManager.default.removeItem(at: storageURL) }
     }
     static func failure(_ message: String) -> NSError { NSError(domain: "BamExtensions", code: 1, userInfo: [NSLocalizedDescriptionKey: message]) }
@@ -375,6 +451,7 @@ struct BrowserExtensionPermissionReview {
     let dataStore: WKWebsiteDataStore
     let controller: WKWebExtensionController
     let extensionContentController = WKUserContentController()
+    let compatibility: ExtensionCompatibilityBridge
     var contexts: [UUID: WKWebExtensionContext] = [:]
     var tabs: [UUID: BrowserExtensionTab] = [:] { didSet { invalidateTopologyCache() } }
     var windows: [ObjectIdentifier: BrowserExtensionWindow] = [:] { didSet { invalidateTopologyCache() } }
@@ -405,12 +482,20 @@ struct BrowserExtensionPermissionReview {
         configuration.defaultWebsiteDataStore = dataStore
         let webConfiguration = WKWebViewConfiguration()
         webConfiguration.websiteDataStore = dataStore
+        // Extension pages fetch sites themselves (vidIQ reads YouTube HTML from its
+        // background); a bare WebKit user agent gets served different documents.
+        webConfiguration.adoptSafariUserAgent()
         // Materialize the shared controller before WebKit copies the configuration.
         // A default lazy UCC read through controller.configuration belongs to a copy.
         webConfiguration.userContentController = extensionContentController
         configuration.webViewConfiguration = webConfiguration
         controller = WKWebExtensionController(configuration: configuration)
+        compatibility = ExtensionCompatibilityBridge(controller: controller, dataStore: dataStore, contentController: extensionContentController, browserVersion: BrowserExtensions.browserVersion)
         super.init(); controller.delegate = self
+        ExtensionNotificationCenter.shared.register(compatibility)
+        compatibility.isNotificationDeliveryAvailable = { ExtensionNotificationCenter.shared.isAvailable }
+        compatibility.postNotification = { identifier, title, body, buttons in await ExtensionNotificationCenter.shared.post(identifier: identifier, title: title, body: body, buttons: buttons) }
+        compatibility.startDownload = { [weak self] web, download in self?.owner?.startDownload?(web, download.url, download.filename) == true }
         let names: [Notification.Name] = [WKWebExtensionContext.errorsDidUpdateNotification,
             WKWebExtensionContext.permissionsWereGrantedNotification, WKWebExtensionContext.permissionsWereDeniedNotification,
             WKWebExtensionContext.grantedPermissionsWereRemovedNotification, WKWebExtensionContext.deniedPermissionsWereRemovedNotification,
@@ -431,6 +516,7 @@ struct BrowserExtensionPermissionReview {
         }
     }
     deinit { for observer in observers { NotificationCenter.default.removeObserver(observer) } }
+    func shutdown() { compatibility.shutdown(); ExtensionNotificationCenter.shared.unregister(compatibility) }
     func closePopup(for context: WKWebExtensionContext) {
         if activePopup?.webExtensionContext === context { activePopup?.closePopup(); activePopup = nil }
         context.action(for: nil)?.closePopup()
@@ -567,6 +653,18 @@ struct BrowserExtensionPermissionReview {
         reconcile(); guard let tab = tabs[id] else { completionHandler(nil, BrowserExtensions.failure("The new tab is not in this extension’s profile.")); return }
         completionHandler(tab, nil)
     }
+    func webExtensionController(_ controller: WKWebExtensionController, openNewWindowUsing configuration: WKWebExtension.WindowConfiguration, for context: WKWebExtensionContext, completionHandler: @escaping ((any WKWebExtensionWindow)?, Error?) -> Void) {
+        let url = configuration.tabURLs.first
+        guard owns(context), !configuration.shouldBePrivate, configuration.tabURLs.count <= 1, configuration.tabs.isEmpty,
+              url == nil || ["http", "https"].contains(url!.scheme?.lowercased() ?? "") || BrowserExtensions.isExtensionURL(url!, ownedBy: context),
+              let native = owner?.createWindow?(url, profileID, configuration.shouldBeFocused) else {
+            completionHandler(nil, BrowserExtensions.failure("Bam opens extension windows as Little Bam windows with one ordinary or extension page in this profile.")); return
+        }
+        reconcile()
+        guard let window = windows[ObjectIdentifier(native)] else { completionHandler(nil, BrowserExtensions.failure("The new window is not in this extension’s profile.")); return }
+        if configuration.windowState == .minimized { native.miniaturize(nil) }
+        completionHandler(window, nil)
+    }
     func webExtensionController(_ controller: WKWebExtensionController, promptForPermissions permissions: Set<WKWebExtension.Permission>, in tab: (any WKWebExtensionTab)?, for context: WKWebExtensionContext, completionHandler: @escaping (Set<WKWebExtension.Permission>, Date?) -> Void) {
         guard authorizes(tab, for: context), let owner else { completionHandler([], nil); return }
         let requested = Set(permissions.map(\.rawValue)), supported = requested.intersection(BrowserExtensions.supportedPermissions)
@@ -654,6 +752,33 @@ struct BrowserExtensionPermissionReview {
         return surface.isSelected || runtime.windows[runtime.windowKey(surface)]?.activeID == id
     }
     func isLoadingComplete(for context: WKWebExtensionContext) -> Bool { webView(for: context)?.isLoading != true }
+    func size(for context: WKWebExtensionContext) -> CGSize { webView(for: context)?.bounds.size ?? .zero }
+    func zoomFactor(for context: WKWebExtensionContext) -> Double { Double(webView(for: context)?.pageZoom ?? 1) }
+    func setZoomFactor(_ zoomFactor: Double, for context: WKWebExtensionContext, completionHandler: @escaping (Error?) -> Void) {
+        guard let web = webView(for: context), zoomFactor >= 0.25, zoomFactor <= 5 else { completionHandler(BrowserExtensions.failure("This page cannot be zoomed.")); return }
+        web.pageZoom = zoomFactor; completionHandler(nil)
+    }
+    func goBack(for context: WKWebExtensionContext, completionHandler: @escaping (Error?) -> Void) {
+        guard let web = webView(for: context), web.canGoBack else { completionHandler(BrowserExtensions.failure("This page cannot go back.")); return }
+        web.goBack(); completionHandler(nil)
+    }
+    func goForward(for context: WKWebExtensionContext, completionHandler: @escaping (Error?) -> Void) {
+        guard let web = webView(for: context), web.canGoForward else { completionHandler(BrowserExtensions.failure("This page cannot go forward.")); return }
+        web.goForward(); completionHandler(nil)
+    }
+    /// tabs.detectLanguage: the document's declared language, else the page's navigator language.
+    func detectWebpageLocale(for context: WKWebExtensionContext, completionHandler: @escaping (Locale?, Error?) -> Void) {
+        guard let web = webView(for: context) else { completionHandler(nil, BrowserExtensions.failure("This page is not available.")); return }
+        web.evaluateJavaScript("(document.documentElement.lang || navigator.language || '')") { value, error in
+            guard error == nil, let tag = value as? String, !tag.isEmpty else { completionHandler(nil, error ?? BrowserExtensions.failure("The page language could not be detected.")); return }
+            completionHandler(Locale(identifier: tag), nil)
+        }
+    }
+    /// tabs.captureVisibleTab: a snapshot of the live page, which the extension already has host access to.
+    func takeSnapshot(using configuration: WKSnapshotConfiguration, for context: WKWebExtensionContext, completionHandler: @escaping (NSImage?, Error?) -> Void) {
+        guard let web = webView(for: context), let url = url(for: context), context.hasAccess(to: url) else { completionHandler(nil, BrowserExtensions.failure("This page cannot be captured.")); return }
+        web.takeSnapshot(with: configuration) { image, error in completionHandler(image, error) }
+    }
     func shouldGrantPermissionsOnUserGesture(for context: WKWebExtensionContext) -> Bool { url(for: context) != nil }
     func shouldBypassPermissions(for context: WKWebExtensionContext) -> Bool { false }
     func activate(for context: WKWebExtensionContext, completionHandler: @escaping (Error?) -> Void) { completionHandler(valid(context) && runtime?.owner?.selectTab?(id) == true ? nil : BrowserExtensions.failure("This tab cannot be activated.")) }
@@ -695,5 +820,18 @@ struct BrowserExtensionPermissionReview {
     func focus(for context: WKWebExtensionContext, completionHandler: @escaping (Error?) -> Void) {
         guard runtime?.owns(context) == true, !tabIDs.isEmpty, let native else { completionHandler(BrowserExtensions.failure("This profile has no open window.")); return }
         native.makeKeyAndOrderFront(nil); completionHandler(nil)
+    }
+    func setWindowState(_ state: WKWebExtension.WindowState, for context: WKWebExtensionContext, completionHandler: @escaping (Error?) -> Void) {
+        guard runtime?.owns(context) == true, let native else { completionHandler(BrowserExtensions.failure("This profile has no open window.")); return }
+        switch state {
+        case .minimized: native.miniaturize(nil)
+        case .normal, .maximized: if native.isMiniaturized { native.deminiaturize(nil) }
+        default: completionHandler(BrowserExtensions.failure("Full-screen extension windows are not supported.")); return
+        }
+        completionHandler(nil)
+    }
+    func close(for context: WKWebExtensionContext, completionHandler: @escaping (Error?) -> Void) {
+        guard runtime?.owns(context) == true, let native, runtime?.owner?.closeWindow?(native) == true else { completionHandler(BrowserExtensions.failure("Only windows an extension opened can be closed by it.")); return }
+        completionHandler(nil)
     }
 }
