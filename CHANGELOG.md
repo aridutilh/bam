@@ -1,6 +1,6 @@
 # Changelog
 
-## Local draft — onboarding in Bam’s look, remappable shortcuts, Spaces list (unreleased, branch `onboarding-theme`)
+## 0.17.0 prerelease — build 35
 
 - Make the Keyboard section of Settings ▸ General editable: each keycap is a recorder. Click it, press a chord, and the menu item takes that key equivalent at once (New Tab, Open Location, Toggle Sidebar, Next and Previous Space, Keep/Unkeep Tab, Settings). Escape keeps the old chord, Delete restores the default, a chord another command already owns is refused with a red flash, and a “Reset all” pill returns every command to its default. Custom chords persist in UserDefaults; fresh previews never save them.
 - Rebuild Settings ▸ Spaces as a list and one editor: a card lists every Space with its tile, name and a Current badge, and the editor below it shows the picked Space’s name field, labelled Color and Icon rows (with the colour’s name) and a “Switch to it” pill for a Space that is not on screen, instead of a full swatch-and-icon card per Space.
