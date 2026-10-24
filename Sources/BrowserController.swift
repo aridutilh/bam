@@ -69,6 +69,9 @@ import QuartzCore
     var retiringViews: [ObjectIdentifier: NSView] = [:]
     var splitCoordinators: [UUID: SplitViewCoordinator] = [:]
     var isShuttingDown = false
+    /// While first-run onboarding covers the window, browser chrome must not
+    /// react to swipes or menu commands behind it.
+    var suspendsChromeInteraction = false
     var automaticallyShowsVideo = true
     var peeks: [UUID: PeekCoordinator] = [:]
     var littleWindows: [UUID: LittleArcController] = [:]
@@ -556,6 +559,7 @@ import QuartzCore
         finishPaging(commit: space, initialVelocity: velocity)
     }
     func handleSpaceScroll(_ event: NSEvent, source: SpaceScrollSource = .monitor) -> NSEvent? {
+        guard !suspendsChromeInteraction else { return event }
         if let previous = recentSpaceScrollEvents.last(where: { $0.event === event }) {
             SpaceSwipeDiagnostics.shared.record(["kind": "duplicate", "source": source.rawValue,
                                                  "consumed": previous.consumed])

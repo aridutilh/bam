@@ -1,4 +1,4 @@
-# Bam — 0.9.0 local draft
+# Bam — 0.10.0 local draft
 
 <img src="Resources/BamIcon.png" width="128" alt="Bam’s red burst sticker on a light pink tile">
 
@@ -8,7 +8,9 @@ The original application code is available under the [MIT license](LICENSE). The
 
 [Bam v0.6.0 prerelease](https://github.com/aridutilh/bam/releases/tag/v0.6.0) · [Previous Bam v0.5.5](https://github.com/aridutilh/bam/releases/tag/v0.5.5) · [Bam source repository](https://github.com/aridutilh/bam) · [Feature checklist](FEATURE-INVENTORY.md) · [Validation status](VALIDATION.md)
 
-**Local draft: Bam 0.9.0 (build 23), unreleased.** Adds a native “Are you sure you want to quit Bam?” confirmation to Cmd+Q, the app menu and Dock quit. Cancel/Escape leaves the live session running; accepting Quit waits for the latest session save and retains Retry/Cancel handling if saving fails. Fresh previews confirm too. Cancelling an automatic quit after the last window closes restores the main window. The preceding sidebar-proportion, Favorites and performance changes remain included. See [VALIDATION.md](VALIDATION.md) for checks and limits. Published and installed Bam remains 0.6.0; this draft is not installed or published.
+**Local draft: Bam 0.10.0 (build 24), unreleased.** Adds a first-run onboarding: a full-screen stage window that welcomes with the popping burst icon, lets the new user pick their first Space's color (retinting the stage live with the same gradients the browser wears), name it and pick its symbol, optionally import favorites from Chrome's bookmarks bar, actually try ⌘T and ⌘S, offer the macOS default-browser confirmation, and finish with confetti. It is keyboard-first and skippable, honors Reduce Motion, can be minimized or closed (closing skips), appears only on a true first launch (existing profiles are grandfathered silently; fixtures and plain previews never see it), can be forced with `--onboarding` or `bash scripts/preview-onboarding.sh`, and can be replayed from Bam ▸ "Welcome to Bam…". The earlier quit-confirmation, sidebar-proportion, Favorites and performance changes remain included. See [VALIDATION.md](VALIDATION.md) for checks and limits.
+
+**Previous local draft: Bam 0.9.0 (build 23), unreleased.** Adds a native “Are you sure you want to quit Bam?” confirmation to Cmd+Q, the app menu and Dock quit. Cancel/Escape leaves the live session running; accepting Quit waits for the latest session save and retains Retry/Cancel handling if saving fails. Fresh previews confirm too. Cancelling an automatic quit after the last window closes restores the main window. The preceding sidebar-proportion, Favorites and performance changes remain included. See [VALIDATION.md](VALIDATION.md) for checks and limits. Published and installed Bam remains 0.6.0; this draft is not installed or published.
 
 Sleeping starts with ordinary static HTTP(S) documents idle for at least ten minutes and keeps the three most recent loaded pages warm. Saved tabs, Split members, PiP, media/capture, forms, scripts, interaction, history, previews, navigation, errors and unknown activity remain protected. Downloads pause sleeping. View → Keep This Site Awake exempts the exact current hostname; View → Sleep Idle Pages Under Memory Pressure toggles the policy. These preferences apply to the main browser, not Peek/Little Bam.
 

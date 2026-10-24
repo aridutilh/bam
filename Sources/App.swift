@@ -12,6 +12,7 @@ import WebKit
     var autoPiPSmoke: AutomaticPiPSmokeTest?
     var pendingExternalURLs: [URL] = []
     var spacesMenu: NSMenu?
+    var onboarding: OnboardingController?
     private let quitCoordinator = QuitCoordinator()
     private var mainWindowWasClosed = false
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -25,6 +26,7 @@ import WebKit
         }
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("OrbitPrototype", isDirectory: true)
         let preview = CommandLine.arguments.contains("--fresh-preview")
+        let sessionFileExists = FileManager.default.fileExists(atPath: support.appendingPathComponent("session.json").path)
         controller = BrowserController(sessionURL: support.appendingPathComponent("session.json"), ephemeral: preview)
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1260, height: 800), styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
         window.title = "Bam"; window.titleVisibility = .hidden; window.titlebarAppearsTransparent = true
@@ -40,6 +42,35 @@ import WebKit
         controller.onSpacesChanged = { [weak self] in self?.rebuildSpacesMenu() }
         buildMenus(); window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
         for url in pendingExternalURLs { controller.openLittleOrbit(url: url) }; pendingExternalURLs.removeAll()
+        let completed = UserDefaults.standard.bool(forKey: OnboardingGate.completedKey)
+        if OnboardingGate.shouldGrandfather(arguments: CommandLine.arguments, sessionFileExists: sessionFileExists, completed: completed) {
+            // Profiles that predate onboarding are never welcomed as new.
+            UserDefaults.standard.set(true, forKey: OnboardingGate.completedKey)
+        } else if OnboardingGate.shouldPresent(arguments: CommandLine.arguments, sessionFileExists: sessionFileExists, completed: completed) {
+            presentOnboarding()
+        }
+    }
+    @objc func showWelcome(_ sender: Any?) { presentOnboarding() }
+    func presentOnboarding() {
+        guard onboarding == nil, let controller, let window, window.attachedSheet == nil else { return }
+        controller.setOnboardingActive(true)
+        var model = OnboardingModel(bookmarks: ChromeBookmarks.load(from: ChromeBookmarks.defaultStoreURL()))
+        if let first = controller.session.spaces.first {
+            model.colorIndex = first.colorIndex; model.spaceName = first.name; model.spaceSymbol = first.symbol
+        }
+        let welcome = OnboardingController(model: model)
+        welcome.onApply = { [weak self] result in self?.controller?.applyOnboarding(result) }
+        welcome.onDismiss = { [weak self] _ in
+            guard let self else { return }
+            self.onboarding = nil
+            self.controller?.setOnboardingActive(false)
+            // Seen once is seen: skipping must not re-welcome on the next launch.
+            if self.controller?.privateMode != true { UserDefaults.standard.set(true, forKey: OnboardingGate.completedKey) }
+            self.window?.makeKeyAndOrderFront(nil)
+            self.window?.makeFirstResponder(self.controller?.commandWebView)
+        }
+        onboarding = welcome
+        welcome.present(over: window)
     }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         // Fixtures deliberately minimize, replace, and close their windows.
@@ -136,6 +167,9 @@ import WebKit
         if menuItem.action == #selector(recordSpaceSwipes(_:)) {
             return !SpaceSwipeDiagnostics.shared.isRecording && !SpaceSwipeDiagnostics.shared.isStarting
         }
+        if menuItem.action == #selector(showWelcome(_:)) {
+            return onboarding == nil && controller != nil && window?.attachedSheet == nil && window?.isVisible == true
+        }
         return true
     }
     @objc func showAbout(_ sender: Any?) {
@@ -149,6 +183,7 @@ import WebKit
         }
         let app = menu("Bam")
         item(app, "About Bam", #selector(showAbout), "", .command, self)
+        item(app, "Welcome to Bam…", #selector(showWelcome), "", .command, self)
         app.addItem(.separator()); item(app, "Hide Bam", #selector(NSApplication.hide(_:)), "h")
         item(app, "Hide Others", #selector(NSApplication.hideOtherApplications(_:)), "h", [.command, .option])
         item(app, "Show All", #selector(NSApplication.unhideAllApplications(_:)))

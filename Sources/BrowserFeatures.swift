@@ -131,7 +131,9 @@ import WebKit
 
 extension BrowserController: NSMenuItemValidation {
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
-        // Editing a Space sheet must not close or navigate a background tab.
+        // Editing a Space sheet must not close or navigate a background tab,
+        // and the onboarding overlay owns the window while it is up.
+        if suspendsChromeInteraction { return false }
         if isViewLoaded, view.window?.attachedSheet != nil { return false }
         switch menuItem.action {
         case #selector(toggleAutomaticTabSleeping(_:)):

@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased — 0.10.0 local draft, build 24
+
+- Add a first-run onboarding: a full-screen stage window with a popping icon welcome, Space color choice that retints the stage live, first-Space naming with symbol choice, optional Chrome bookmark-bar favorite import, interactive ⌘T/⌘S training, a user-initiated default-browser offer and a confetti finale. Keyboard-first (Return advances, Escape goes back, arrows pick colors), with native minimize/close controls (close skips), Reduce Motion fades and a progress-dot/back cluster kept clear of the menu-bar corner.
+- Gate it to true first launches (no session file); existing profiles are grandfathered silently and fixtures never see it. `--onboarding` forces it (demo: `bash scripts/preview-onboarding.sh`), and Bam ▸ “Welcome to Bam…” replays it. Finishing updates the first Space and adds chosen favorites as unloaded Favorites within the cap; skipping changes nothing. Browser swipes and chrome menu items stand down while the stage is up.
+- Local only; installation and publication remain on hold. Verification is recorded in [VALIDATION.md](VALIDATION.md).
+
 ## Unreleased — 0.9.0 local draft, build 23
 
 - Ask “Are you sure you want to quit Bam?” for application quit requests, including fresh previews. Cancel/Escape keeps the live session; Quit Bam proceeds through the existing asynchronous save barrier. Repeated requests share one pending decision.

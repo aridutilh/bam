@@ -68,6 +68,8 @@ if [ "$VERIFIED" != true ]; then exit 1; fi
 "$BUILD_DIR/swipe-tests"
 "$SWIFTC" "${COMMON[@]}" -parse-as-library -framework AppKit "$PROJECT_DIR/Sources/BrowserState.swift" "$PROJECT_DIR/Sources/TabSearchResults.swift" "$PROJECT_DIR/Tests/TabSearchTests.swift" -o "$BUILD_DIR/tab-search-tests"
 "$BUILD_DIR/tab-search-tests"
+"$SWIFTC" "${COMMON[@]}" -parse-as-library "$PROJECT_DIR/Sources/BrowserState.swift" "$PROJECT_DIR/Sources/OnboardingModel.swift" "$PROJECT_DIR/Tests/OnboardingTests.swift" -o "$BUILD_DIR/onboarding-tests"
+"$BUILD_DIR/onboarding-tests"
 "$SWIFTC" "${COMMON[@]}" -parse-as-library -framework AppKit -framework WebKit "$PROJECT_DIR/Sources/FindBarCoordinator.swift" "$PROJECT_DIR/Tests/FindTests.swift" -o "$BUILD_DIR/find-tests"
 "$BUILD_DIR/find-tests"
 "$SWIFTC" "${COMMON[@]}" -parse-as-library -framework AppKit "$PROJECT_DIR/Sources/BrowserState.swift" "$PROJECT_DIR/Sources/BrowserLibrary.swift" "$PROJECT_DIR/Tests/LibraryTests.swift" -o "$BUILD_DIR/library-tests"
