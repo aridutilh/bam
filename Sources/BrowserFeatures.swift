@@ -85,47 +85,71 @@ import WebKit
         guard URLInput.directURL(url.absoluteString) != nil else { return }
         dismissAddress(); cancelPaging(); findBar.hide()
         let owner = session.activeID
+        let profile = activeWebView.flatMap { profileID(of: $0) } ?? session.currentProfileID
         peeks[owner]?.dismiss()
         let peek = PeekCoordinator()
         peek.onDownload = { [weak self] download in self?.downloads.start(download: download) }
-        peek.onVisit = { [weak self] title, address in self?.library.recordVisit(title: title, address: address) }
-        peeks[owner] = peek
+        peek.onVisit = { [weak self] title, address in self?.library(for: profile).recordVisit(title: title, address: address) }
+        peeks[owner] = peek; peekExtensionIDs[owner] = UUID()
         peek.shouldHandleEscape = { [weak self] in !(self?.findBar.isVisible ?? false) }
         peek.onDismiss = { [weak self, weak peek] in
             guard let self, self.peeks[owner] === peek else { return }
-            self.peeks.removeValue(forKey: owner)
+            self.peeks.removeValue(forKey: owner); self.peekExtensionIDs.removeValue(forKey: owner)
+            self.scheduleExtensionRefresh()
             self.refreshFindTarget()
         }
-        peek.onPromote = { [weak self] web in self?.adoptWebView(web) }
+        peek.onPromote = { [weak self] web in _ = self?.adoptWebView(web) }
         peek.onOpenLittleOrbit = { [weak self] web in self?.openLittleOrbit(adopting: web) }
         peek.onSplit = { [weak self] web in self?.openSplit(adopting: web, beside: owner) }
-        let store = activeWebView?.configuration.websiteDataStore ?? (privateMode ? .nonPersistent() : .default())
-        if !peek.present(url: url, in: card, websiteDataStore: store) { peeks.removeValue(forKey: owner) }
+        let store = activeWebView?.configuration.websiteDataStore ?? profileStores.store(for: profile)
+        if !peek.present(url: url, in: card, websiteDataStore: store, configure: { [weak self] in self?.configureExtensions($0, profileID: profile) }, beforeLoad: { [weak self] action in self?.whenExtensionsReady(profileID: profile, perform: action) }) { peeks.removeValue(forKey: owner); peekExtensionIDs.removeValue(forKey: owner) }
+        scheduleExtensionRefresh()
     }
-    @discardableResult func adoptWebView(_ web: WKWebView) -> UUID {
+    @discardableResult func adoptWebView(_ web: WKWebView) -> UUID? {
         cancelPaging(); dismissAddress()
-        let address = ((web as? PreviewWKWebView)?.promotionURL ?? web.url).flatMap { URLInput.directURL($0.absoluteString) }?.absoluteString ?? "orbit://newtab"
+        let pendingURL = (web as? PreviewWKWebView)?.pendingReadyURL
+        let address = (pendingURL ?? (web as? PreviewWKWebView)?.promotionURL ?? web.url).flatMap { URLInput.directURL($0.absoluteString) }?.absoluteString ?? "orbit://newtab"
+        let sourceProfile = profileID(of: web)
+        if let sourceProfile, !selectSpace(forProfile: sourceProfile) {
+            openLittleOrbit(adopting: web); return nil
+        }
+        (web as? PreviewWKWebView)?.pendingReadyURL = nil
         let id = session.add(address: address, title: web.title?.isEmpty == false ? web.title : nil)
+        // Unknown externally-created pages are never transplanted into a real
+        // login profile. Disposable fixtures may supply their own private view.
+        if sourceProfile == nil && !privateMode {
+            web.stopLoading(); web.removeFromSuperview(); showActive(); save(); return id
+        }
         web.removeFromSuperview(); register(web, id: id)
         if web.isLoading { pendingLoads.insert(id) }
-        if address == "orbit://newtab" { load(address, in: web, id: id) }
+        if pendingURL != nil || address == "orbit://newtab" || (web.url == nil && !web.isLoading) { load(address, in: web, id: id) }
         showActive(); save(); view.window?.makeKeyAndOrderFront(nil)
         return id
     }
     @objc func newLittleOrbit(_ sender: Any?) { openLittleOrbit(url: nil) }
-    func openLittleOrbit(url: URL? = nil, adopting web: WKWebView? = nil) {
+    func openLittleOrbit(url: URL? = nil, adopting web: WKWebView? = nil, profileID sourceProfile: UUID? = nil) {
         if let url, URLInput.directURL(url.absoluteString) == nil { return }
         let id = UUID()
-        let store = web?.configuration.websiteDataStore ?? activeWebView?.configuration.websiteDataStore ?? (privateMode ? .nonPersistent() : .default())
-        let little = LittleArcController(websiteDataStore: store)
+        let profile = sourceProfile ?? web.flatMap { profileID(of: $0) } ?? commandWebView.flatMap { profileID(of: $0) } ?? session.currentProfileID
+        let store = web?.configuration.websiteDataStore ?? profileStores.store(for: profile)
+        let little = LittleArcController(websiteDataStore: store, configure: { [weak self] in self?.configureExtensions($0, profileID: profile) }, beforeLoad: { [weak self] action in self?.whenExtensionsReady(profileID: profile, perform: action) })
         little.onDownload = { [weak self] download in self?.downloads.start(download: download) }
-        little.onVisit = { [weak self] title, address in self?.library.recordVisit(title: title, address: address) }
+        little.onVisit = { [weak self] title, address in self?.library(for: profile).recordVisit(title: title, address: address) }
         littleWindows[id] = little
-        little.onClose = { [weak self] in self?.littleWindows.removeValue(forKey: id) }
-        little.onPromote = { [weak self] web in self?.adoptWebView(web) }
+        little.onClose = { [weak self] in self?.littleWindows.removeValue(forKey: id); self?.scheduleExtensionRefresh() }
+        little.canPromote = { [weak self] in
+            guard let self else { return false }
+            guard self.selectSpace(forProfile: profile) else {
+                let alert = NSAlert(); alert.messageText = "Make room for this profile"
+                alert.informativeText = "Assign a Space to this window’s login profile, or remove an unused Space, before opening it in the main browser."
+                alert.addButton(withTitle: "OK"); alert.runModal(); return false
+            }
+            return true
+        }
+        little.onPromote = { [weak self] web in _ = self?.adoptWebView(web) }
         if let web { little.adopt(webView: web) }
         else if let url { _ = little.open(url: url) }
-        little.show(relativeTo: view.window)
+        little.show(relativeTo: view.window); scheduleExtensionRefresh()
     }
 }
 

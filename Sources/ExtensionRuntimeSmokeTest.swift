@@ -1,0 +1,56 @@
+import AppKit
+import WebKit
+
+/// Separate process entry point: original local fixtures and disposable stores only.
+@MainActor final class ExtensionRuntimeSmokeTest {
+    private var watchdog: Timer?
+    private var finished = false
+    private var task: Task<Void, Never>?
+
+    func start() {
+        guard #available(macOS 15.4, *) else {
+            print("SKIP: Extensions — macOS 15.4 or later is required")
+            fflush(stdout); exit(0)
+        }
+        watchdog = Timer.scheduledTimer(withTimeInterval: 120, repeats: false) { [weak self] _ in
+            Task { @MainActor [weak self] in self?.finish(false, "Overall fixture timeout") }
+        }
+        task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let environment = ProcessInfo.processInfo.environment
+                guard let raw = environment["BAM_TEST_URL"] ?? environment["ARK_TEST_URL"] ?? environment["ORBIT_TEST_URL"],
+                      let base = URL(string: raw), ["http", "https"].contains(base.scheme?.lowercased() ?? ""),
+                      ["127.0.0.1", "localhost", "::1", "[::1]"].contains(base.host?.lowercased() ?? ""),
+                      base.user == nil, base.password == nil else {
+                    throw ExtensionSmokeTest.Failure(description: "Set BAM_TEST_URL to the isolated loopback fixture server")
+                }
+                guard let resources = Bundle.main.resourceURL else {
+                    throw ExtensionSmokeTest.Failure(description: "The packaged extension fixture resource directory is missing")
+                }
+                let fixture = resources.appendingPathComponent("ExtensionFixture", isDirectory: true)
+                guard FileManager.default.fileExists(atPath: fixture.appendingPathComponent("manifest.json").path) else {
+                    throw ExtensionSmokeTest.Failure(description: "The packaged original ExtensionFixture/manifest.json is missing")
+                }
+                var components = URLComponents(url: base, resolvingAgainstBaseURL: false)!
+                components.path = base.deletingLastPathComponent().appendingPathComponent("extension-test.html").path
+                components.query = nil; components.fragment = nil
+                guard let page = components.url else {
+                    throw ExtensionSmokeTest.Failure(description: "Could not construct the local extension test page URL")
+                }
+                let isolatedChecks = try await ExtensionSmokeTest.run(fixtureURL: fixture, pageURL: page)
+                let integratedChecks = try await BrowserExtensionSmokeTest.run(fixtureURL: fixture, pageURL: page)
+                let bridgeChecks = try await ExtensionBridgeCapabilityProbe.run()
+                let checks = isolatedChecks + integratedChecks + bridgeChecks
+                self.finish(true, "\(checks)")
+            } catch { self.finish(false, String(describing: error)) }
+        }
+    }
+
+    private func finish(_ success: Bool, _ message: String) {
+        guard !finished else { return }
+        finished = true; watchdog?.invalidate(); watchdog = nil
+        print("\(success ? "PASS" : "FAIL"): Extensions — \(message)")
+        fflush(stdout); exit(success ? 0 : 1)
+    }
+}

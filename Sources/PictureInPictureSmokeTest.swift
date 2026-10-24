@@ -479,7 +479,7 @@ import WebKit
             self.web.evaluateJavaScript("({same: document.querySelector('video') === window.__orbitSmokeVideo, time: window.__orbitSmokeVideo.currentTime, paused: window.__orbitSmokeVideo.paused})") { [weak self] value, error in
                 guard let self else { return }
                 guard error == nil, let info = value as? [String: Any], info["same"] as? Bool == true, info["paused"] as? Bool == false, let time = info["time"] as? Double, time > self.baselineTime + 0.1,
-                      NSApp.keyWindow === self.expectedKeyWindow, self.window.firstResponder === self.expectedFirstResponder else { self.finish(false, "Automatic playback continuity or focus retention failed: \(value ?? "nil")"); return }
+                      NSApp.keyWindow === self.expectedKeyWindow, self.window.firstResponder === self.expectedFirstResponder else { self.finish(false, "Automatic playback continuity or focus retention failed: \(value ?? "nil"); baseline=\(self.baselineTime); \(self.focusEvidence)"); return }
                 self.panelTime = time
                 self.stage = .automaticReturning
                 self.coordinator.restore()
@@ -494,7 +494,7 @@ import WebKit
             self.web.evaluateJavaScript("({same: document.querySelector('video') === window.__orbitSmokeVideo, time: window.__orbitSmokeVideo.currentTime, controls: window.__orbitSmokeVideo.controls, styles: JSON.stringify([window.__orbitSmokeVideo.getAttribute('style'),document.body.getAttribute('style'),document.documentElement.getAttribute('style')].map(value => value || '')) === JSON.stringify(window.__orbitSmokeStyles.map(value => value || ''))})") { [weak self] value, error in
                 guard let self else { return }
                 guard error == nil, let info = value as? [String: Any], info["same"] as? Bool == true, info["controls"] as? Bool == false, info["styles"] as? Bool == true, let time = info["time"] as? Double, time > self.panelTime + 0.1,
-                      NSApp.keyWindow === self.expectedKeyWindow, self.window.firstResponder === self.expectedFirstResponder else { self.finish(false, "Automatic return did not restore content/playback without stealing focus: \(value ?? "nil")"); return }
+                      NSApp.keyWindow === self.expectedKeyWindow, self.window.firstResponder === self.expectedFirstResponder else { self.finish(false, "Automatic return did not restore content/playback without stealing focus: \(value ?? "nil"); panelTime=\(self.panelTime); \(self.focusEvidence)"); return }
                 self.focusField.removeFromSuperview()
                 self.stage = .loadingEmpty; self.loadFixture("SmokeA")
             }
@@ -503,6 +503,10 @@ import WebKit
 
     private func recordCompletion(_ label: String, _ result: Bool) {
         automaticCompletions[label, default: []].append(result)
+    }
+
+    private var focusEvidence: String {
+        "appActive=\(NSApp.isActive); expectedWindowKey=\(window.isKeyWindow); keyMatches=\(NSApp.keyWindow === expectedKeyWindow); responderMatches=\(window.firstResponder === expectedFirstResponder); key=\(String(describing: NSApp.keyWindow)); responder=\(String(describing: window.firstResponder))"
     }
 
     private func readTime(_ callback: @escaping (Double) -> Void) {

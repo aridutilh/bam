@@ -1,0 +1,38 @@
+{
+  "manifest_version": 3,
+  "name": "Bam Local Extension Fixture",
+  "version": "1.0.0",
+  "description": "Original local fixture for real WebKit extension execution and profile isolation.",
+  "permissions": [
+    "storage",
+    "tabs",
+    "activeTab",
+    "scripting",
+    "nativeMessaging",
+    "contextMenus"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1/*"
+  ],
+  "optional_host_permissions": [
+    "http://localhost/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "http://127.0.0.1/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_end"
+    }
+  ],
+  "action": {
+    "default_title": "Bam Fixture",
+    "default_popup": "popup.html"
+  }
+}

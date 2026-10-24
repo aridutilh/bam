@@ -1,6 +1,18 @@
 # Changelog
 
-## Unreleased — 0.9.0 local draft, build 23
+## Unreleased — 0.10.0 local draft, build 24
+
+- Add named login profiles to Manage Spaces. Shared-profile Spaces intentionally share website data; separate profiles isolate cookies/local storage, Favorites, history/archive and extensions. Legacy sessions keep the existing Default store.
+- Confirm before replacing loaded pages on a cross-profile move or Space reassignment; preserve cancellation, current metadata, Split pairs and source profiles when promoting Peek/Little Bam.
+- Add the macOS 15.4+ WebKit extension runtime, per-profile host adapters, local-folder import, permission review/revocation, actions and own-origin setup tabs. Delay first navigation until restored extensions are ready. No Chrome Web Store/CRX/archive installer, updates or native messaging.
+- Prepare Manifest V2 background scripts as an explicit UTF-8 page in the private package copy, preserving JavaScript bytes and the original manifest backup.
+- Add loopback native tests for real website-data isolation and extension background/content/popup execution, plus a separate bounded vendor probe. Real vendor compatibility remains individually assessed.
+- Keep notification compatibility out of the build after its experimental bridge failed inbound-message checks. Dashlane reaches onboarding; 1Password remains blocked, and neither vendor is certified for login/autofill.
+- Bind internal Home navigation to the originating main-frame tab so a background profile cannot replace another profile’s active page.
+- Final build: all twelve component suites pass; all eight exact-package native suites have passing results across reruns. Intermittent PiP focus and Space-state failures remain documented in VALIDATION.md.
+- Keep the draft local; no installation, push, tag or release.
+
+## Earlier local draft — 0.9.0, build 23
 
 - Ask “Are you sure you want to quit Bam?” for application quit requests, including fresh previews. Cancel/Escape keeps the live session; Quit Bam proceeds through the existing asynchronous save barrier. Repeated requests share one pending decision.
 - Retain the main window so cancelling last-window termination restores it. Ordinary Little Bam close and PiP Return keep their existing behavior.

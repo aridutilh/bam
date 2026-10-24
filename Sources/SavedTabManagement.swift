@@ -75,7 +75,7 @@ import AppKit
         func label(_ text: String, _ rect: NSRect) {
             let field = NSTextField(labelWithString: text); field.frame = rect; content.addSubview(field)
         }
-        label(tab.isFavorite ? "Favorite · available in every Space" : "Kept tab · stays in this Space", NSRect(x: 24, y: 18, width: 410, height: 20))
+        label(tab.isFavorite ? "Favorite · shared within this login profile" : "Kept tab · stays in this Space", NSRect(x: 24, y: 18, width: 410, height: 20))
         label("Name", NSRect(x: 24, y: 52, width: 410, height: 20))
         nameField.frame = NSRect(x: 24, y: 77, width: 412, height: 26)
         nameField.stringValue = tab.saved?.customTitle ?? ""

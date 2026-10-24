@@ -23,6 +23,7 @@ struct ClosedRecord: Codable, Identifiable, Equatable {
     var onOpenURL: ((String) -> Void)?
     var onRestoreClosed: ((ClosedRecord) -> Void)?
     var onStorageError: ((String) -> Void)?
+    var profileName: String?
     let storageURL: URL?
     private var loadFailure: String?
     private var historyWindow: BrowserLibraryWindowController?
@@ -84,10 +85,12 @@ struct ClosedRecord: Codable, Identifiable, Equatable {
 
     func showHistory(relativeTo parent: NSWindow?) {
         if historyWindow == nil { historyWindow = BrowserLibraryWindowController(library: self, mode: .history) }
+        historyWindow?.window?.title = "History — \(profileName ?? "Bam")"
         historyWindow?.present(relativeTo: parent)
     }
     func showArchive(relativeTo parent: NSWindow?) {
         if archiveWindow == nil { archiveWindow = BrowserLibraryWindowController(library: self, mode: .archive) }
+        archiveWindow?.window?.title = "Recently Closed — \(profileName ?? "Bam")"
         archiveWindow?.present(relativeTo: parent)
     }
 

@@ -71,7 +71,7 @@ enum TabSearchMatcher {
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
 
     func update(tabs: [BrowserTab], query: String, activeID: UUID, canCreate: Bool,
-                spaces: [BrowserSpace] = BrowserSpace.legacyDefaults) {
+                spaces: [BrowserSpace] = BrowserSpace.legacyDefaults, profiles: [BrowserProfile] = BrowserProfile.defaults) {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         let previousIdentity = entries.indices.contains(selectedIndex) ? entries[selectedIndex].identity : nil
         entries = []
@@ -90,7 +90,9 @@ enum TabSearchMatcher {
             case .tab(let tab):
                 // IDs remain stable when Spaces are renamed, reordered or deleted.
                 let space = spaces.first(where: { $0.id == tab.space })?.name ?? "Unknown Space"
-                let badge = tab.isFavorite ? "Favorite · All Spaces" : (tab.id == activeID ? "\(space) · Current" : space)
+                let profileID = tab.saved?.profileID ?? spaces.first(where: { $0.id == tab.space })?.profileID ?? BrowserProfile.defaultID
+                let profile = profiles.first(where: { $0.id == profileID })?.name ?? "Profile"
+                let badge = tab.isFavorite ? "Favorite · \(profile)" : (tab.id == activeID ? "\(space) · Current" : space)
                 let address = tab.isHome ? "New tab" : tab.isVideoDemo ? "Picture in Picture demo" : tab.address
                 let subtitle = tab.isUnloaded ? "Sleeping · \(address)" : address
                 row.configure(title: tab.displayTitle.isEmpty ? address : tab.displayTitle, subtitle: subtitle, badge: badge, symbol: tab.symbol)
