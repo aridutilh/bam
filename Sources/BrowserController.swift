@@ -9,15 +9,17 @@ import QuartzCore
     var previewProgress: CGFloat = 0 { didSet { needsDisplay = true } }
     override var isFlipped: Bool { true }
     override func layout() { super.layout(); onLayout?() }
+    /// Space theme gradients, ordered to match BrowserSpace.colorNames.
+    static let palettes: [[NSColor]] = [
+        [NSColor(srgbRed: 0.20, green: 0.17, blue: 0.25, alpha: 1), NSColor(srgbRed: 0.29, green: 0.23, blue: 0.29, alpha: 1)],
+        [NSColor(srgbRed: 0.17, green: 0.24, blue: 0.22, alpha: 1), NSColor(srgbRed: 0.27, green: 0.29, blue: 0.22, alpha: 1)],
+        [NSColor(srgbRed: 0.16, green: 0.22, blue: 0.29, alpha: 1), NSColor(srgbRed: 0.26, green: 0.23, blue: 0.34, alpha: 1)],
+        [NSColor(srgbRed: 0.29, green: 0.17, blue: 0.23, alpha: 1), NSColor(srgbRed: 0.34, green: 0.23, blue: 0.27, alpha: 1)],
+        [NSColor(srgbRed: 0.28, green: 0.22, blue: 0.15, alpha: 1), NSColor(srgbRed: 0.34, green: 0.28, blue: 0.21, alpha: 1)],
+        [NSColor(srgbRed: 0.18, green: 0.19, blue: 0.21, alpha: 1), NSColor(srgbRed: 0.28, green: 0.29, blue: 0.31, alpha: 1)]
+    ]
     override func draw(_ dirtyRect: NSRect) {
-        let palettes: [[NSColor]] = [
-            [NSColor(srgbRed: 0.20, green: 0.17, blue: 0.25, alpha: 1), NSColor(srgbRed: 0.29, green: 0.23, blue: 0.29, alpha: 1)],
-            [NSColor(srgbRed: 0.17, green: 0.24, blue: 0.22, alpha: 1), NSColor(srgbRed: 0.27, green: 0.29, blue: 0.22, alpha: 1)],
-            [NSColor(srgbRed: 0.16, green: 0.22, blue: 0.29, alpha: 1), NSColor(srgbRed: 0.26, green: 0.23, blue: 0.34, alpha: 1)],
-            [NSColor(srgbRed: 0.29, green: 0.17, blue: 0.23, alpha: 1), NSColor(srgbRed: 0.34, green: 0.23, blue: 0.27, alpha: 1)],
-            [NSColor(srgbRed: 0.28, green: 0.22, blue: 0.15, alpha: 1), NSColor(srgbRed: 0.34, green: 0.28, blue: 0.21, alpha: 1)],
-            [NSColor(srgbRed: 0.18, green: 0.19, blue: 0.21, alpha: 1), NSColor(srgbRed: 0.28, green: 0.29, blue: 0.31, alpha: 1)]
-        ]
+        let palettes = Self.palettes
         let base = palettes[min(palettes.count - 1, max(0, space))]
         let colors: [NSColor]
         if let previewSpace { colors = zip(base, palettes[min(palettes.count - 1, max(0, previewSpace))]).map { $0.blended(withFraction: min(1,max(0,previewProgress)), of: $1) ?? $0 } }
@@ -110,6 +112,8 @@ import QuartzCore
     var paletteSeparator: NSBox?
     var paletteGlow: NSView?
     var paletteTint: NSView?
+    var spaceCreateIndicator: SpaceCreateIndicatorView?
+    var spaceCreationPanel: SpaceCreationPanel?
     var paletteEnginePill: PaletteEnginePill?
     var paletteEngine: SiteSearchEngine?
     var paletteHintEngine: SiteSearchEngine?
@@ -237,7 +241,7 @@ import QuartzCore
         sidebar.frame = NSRect(x: width - targetWidth, y: 0, width: targetWidth, height: h)
         sidebar.layer?.transform = CATransform3DIdentity
         sidebar.alphaValue = 1
-        sidebar.isHidden = width < 0.5
+        sidebar.isHidden = width < 0.5 || spaceCreationPanel != nil
         card.frame = NSRect(x: width + 8, y: 8, width: max(100, w - width - 16), height: h - 16)
         // The strip grows continuously as the sidebar collapses. A threshold
         // switch here used to resize the webpage by 36 points in a single frame.
@@ -257,6 +261,7 @@ import QuartzCore
         handle.frame = NSRect(x: max(0, width - 5), y: 44, width: 10, height: max(0, h - 60))
         handle.currentWidth = targetWidth; handle.isHidden = !session.sidebarVisible || width < 100
         if addressOverlay != nil { layoutPalette(width: w, height: h) }
+        layoutSpaceCreation()
     }
 
     func webView(for tab: BrowserTab) -> WKWebView {
@@ -579,6 +584,7 @@ import QuartzCore
     func changeSpace(_ space: Int) {
         guard session.spaceDefinition(space) != nil else { return }
         dismissAddress()
+        dismissSpaceCreation()
         quarantineActiveSpaceGesture()
         swipe.reset(); trackingSwipe = false
         unphasedScrollEnd?.cancel(); unphasedScrollEnd = nil
@@ -733,6 +739,8 @@ import QuartzCore
     }
     private func applySpaceScroll(deltaX: CGFloat, deltaY: CGFloat, phase: SpaceSwipeStateMachine.Phase,
                                   isMomentum: Bool, timestamp: TimeInterval) -> Bool {
+        // The creation panel owns the sidebar area; Space paging waits for it.
+        guard spaceCreationPanel == nil else { return false }
         let before = SpaceSwipeDiagnostics.shared.isRecording ? swipe.diagnostics : nil
         let result = swipe.handle(deltaX: deltaX, deltaY: deltaY, phase: phase, isMomentum: isMomentum,
                                   timestamp: timestamp, space: session.spaceIndex(session.space) ?? 0, width: sidebar.bounds.width,
@@ -767,10 +775,13 @@ import QuartzCore
             sidebar.setPagingOffset(offset)
             root.previewSpace = pagingTarget.flatMap { session.spaceDefinition($0)?.colorIndex }; root.previewProgress = abs(offset) / max(1, sidebar.bounds.width)
         }
+        if !result.finished { updateSpaceCreateIndicator(progress: result.createProgress) }
         if phase == .ended || phase == .cancelled { trackingSwipe = false }
         if result.finished {
+            updateSpaceCreateIndicator(progress: nil)
             capturedSpaceMomentum = result.shouldConsume
             finishPaging(commit: result.committedSpace.flatMap { session.spaces.indices.contains($0) ? session.spaces[$0].id : nil }, initialVelocity: result.releaseVelocity)
+            if result.committedCreate { openSpaceCreation() }
         }
         return result.shouldConsume
     }

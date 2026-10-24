@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased — 0.12.0 local draft, build 26
+
+- Create Spaces the Arc way: overscrolling past the last Space fills a circled plus; completing the pull and releasing opens a sidebar creation panel with a native stacked-cards illustration, name field, profile picker and theme swatches that live-preview the Space gradient. Create switches to the new Space; Escape, Cancel or any Space change dismisses without creating.
+- A partial pull springs back without creating, cancellation abandons even a completed pull, overscroll on the leading edge or a middle Space never offers creation, and reduced motion skips the pop animations.
+- Local only; publication and installation remain on hold. See [VALIDATION.md](VALIDATION.md).
+
 ## Unreleased — 0.11.0 local draft, build 25
 
 - Redesign the command palette as a single translucent card in the system appearance: icon-led input row, separator, and Arc-style single-line results with a full-width accent selection, inline dimmed addresses and trailing Space labels. The forced-light card, heading and shortcut footer are removed.
