@@ -35,6 +35,7 @@ import AppKit
         actions.setKeepsSiteAwake = { [weak self] host, on in self?.setKeepAwake(host: host, on) }
         actions.setSearchEngine = { [weak self] engine in self?.setDefaultSearchEngine(engine) }
         actions.editSpace = { [weak self] space in self?.editSpace(space) ?? false }
+        actions.switchSpace = { [weak self] id in self?.changeSpace(id) }
         actions.manageSpaces = { [weak self] in self?.manageSpaces(nil) }
         actions.manageExtensions = { [weak self] in self?.manageExtensions(nil) }
         actions.showWelcome = showWelcome

@@ -1,6 +1,11 @@
 # Changelog
 
-## Local draft — onboarding in Bam’s look (unreleased, branch `onboarding-theme`)
+## Local draft — onboarding in Bam’s look, remappable shortcuts, Spaces list (unreleased, branch `onboarding-theme`)
+
+- Make the Keyboard section of Settings ▸ General editable: each keycap is a recorder. Click it, press a chord, and the menu item takes that key equivalent at once (New Tab, Open Location, Toggle Sidebar, Next and Previous Space, Keep/Unkeep Tab, Settings). Escape keeps the old chord, Delete restores the default, a chord another command already owns is refused with a red flash, and a “Reset all” pill returns every command to its default. Custom chords persist in UserDefaults; fresh previews never save them.
+- Rebuild Settings ▸ Spaces as a list and one editor: a card lists every Space with its tile, name and a Current badge, and the editor below it shows the picked Space’s name field, labelled Color and Icon rows (with the colour’s name) and a “Switch to it” pill for a Space that is not on screen, instead of a full swatch-and-icon card per Space.
+- Spell the About button “Welcome to Bam” in full, and drop the ellipsis from “Manage Spaces” in the Spaces footer.
+- Fold in the code review of the onboarding restyle: the colour step keeps its glow when a swatch is clicked, the name field’s editor is no longer inset twice, its red hairline follows focus rather than the first typed character, the hello icon’s shadow follows the appearance, one headline helper serves the hello and finale titles, and dead accent parameters and state are gone.
 
 - Restyle the first-run welcome in bambrowser.com’s look: the stage is Bam’s paper (pink, plum in dark mode, following the system) with a soft glow in the chosen Space colour and two faint bursts in the corners; headlines in Bricolage Grotesque (“The browser that goes Bam.” with a red “Bam.”), body in Instrument Sans; red lip-and-face pills, paper keycaps on a hard lip, ink-ringed colour swatches, red-washed picked icons, a “NEW!” sticker over the icon, and burst-shaped confetti on the finale. The step flow, keyboard handling, Chrome import, default-browser handoff and the `--onboarding` gate are unchanged.
 

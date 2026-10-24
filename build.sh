@@ -94,4 +94,6 @@ if [ "$VERIFIED" != true ]; then exit 1; fi
 "$BUILD_DIR/tab-resource-tests"
 "$SWIFTC" "${COMMON[@]}" -parse-as-library -framework AppKit -framework QuartzCore "$PROJECT_DIR/Sources/BrowserState.swift" "$PROJECT_DIR/Sources/RecoveredMotion.swift" "$PROJECT_DIR/Sources/SidebarSymbol.swift" "$PROJECT_DIR/Sources/SidebarView.swift" "$PROJECT_DIR/Tests/SidebarPerformanceTests.swift" -o "$BUILD_DIR/sidebar-performance-tests"
 "$BUILD_DIR/sidebar-performance-tests"
+"$SWIFTC" "${COMMON[@]}" -parse-as-library -framework AppKit "$PROJECT_DIR/Sources/Shortcuts.swift" "$PROJECT_DIR/Tests/ShortcutTests.swift" -o "$BUILD_DIR/shortcut-tests"
+"$BUILD_DIR/shortcut-tests"
 printf 'Built %s\n' "$DELIVERABLE_APP"

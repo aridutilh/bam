@@ -51,6 +51,7 @@ struct SettingsActions {
     var setKeepsSiteAwake: (String, Bool) -> Void = { _, _ in }
     var setSearchEngine: (DefaultSearchEngine) -> Void = { _ in }
     var editSpace: (BrowserSpace) -> Bool = { _ in false }
+    var switchSpace: (Int) -> Void = { _ in }
     var manageSpaces: () -> Void = {}
     var manageExtensions: () -> Void = {}
     var showWelcome: () -> Void = {}
@@ -105,6 +106,7 @@ struct SettingsActions {
         window.delegate = self
         window.setFrameAutosaveName("BamSettings")
         build()
+        NotificationCenter.default.addObserver(self, selector: #selector(shortcutsChanged), name: ShortcutStore.didChange, object: nil)
     }
 
     private func build() {
@@ -293,12 +295,19 @@ struct SettingsActions {
                               control: toggle(false, enabled: false, { _ in }), enabled: false))
         }
         let keys = BamCard(frame: .zero)
-        for (keycap, title) in [("⌘ T", "New tab or search"), ("⌘ L", "Open location"), ("⌘ S", "Toggle sidebar"),
-                                ("⌥ ⌘ →", "Next Space"), ("⌘ D", "Keep or unkeep tab"), ("⌘ ,", "Settings")] {
-            keys.add(BamRow(title: title, control: BamKeycap(keycap)))
+        for command in ShortcutCommand.allCases {
+            keys.add(BamRow(title: command.title, control: BamShortcutRecorder(command: command)))
         }
+        let reset = BamPillButton(title: "Reset all", symbol: "arrow.counterclockwise")
+        reset.target = self; reset.action = #selector(resetShortcuts)
+        reset.isEnabled = ShortcutStore.shared.anyCustom
+        keys.add(BamRow(title: "Click a key to change it",
+                        detail: "Then press the new shortcut. Escape keeps the old one, Delete restores the default.",
+                        control: reset))
         return [caption("Playback"), playback, caption("Memory"), memory, caption("Keyboard"), keys]
     }
+    @objc private func resetShortcuts() { ShortcutStore.shared.resetAll() }
+    @objc private func shortcutsChanged() { if section == .general, window.isVisible { refresh() } }
 
     private func searchCards() -> [NSView] {
         let card = BamCard(frame: .zero)
@@ -331,10 +340,36 @@ struct SettingsActions {
         for case let chip as BamChip in engineChips?.arrangedSubviews ?? [] { chip.isPicked = chip === sender }
     }
 
+    /// The Space the editor shows; the list on top picks it. Survives refreshes.
+    private var editingSpaceID: Int?
+
     private func spacesCards() -> [NSView] {
-        var cards: [NSView] = []
-        for space in snapshot.spaces {
-            let editor = SpaceEditorCard(space: space, isCurrent: space.id == snapshot.currentSpaceID, accent: accent)
+        let spaces = snapshot.spaces
+        let editing = spaces.first { $0.id == editingSpaceID } ?? spaces.first { $0.id == snapshot.currentSpaceID } ?? spaces.first
+        editingSpaceID = editing?.id
+        let list = BamCard(frame: .zero)
+        list.showsSeparators = false
+        let rows = NSStackView(); rows.orientation = .vertical; rows.spacing = 2; rows.alignment = .leading
+        rows.translatesAutoresizingMaskIntoConstraints = false
+        for space in spaces {
+            let row = SpaceListRow(space: space, isCurrent: space.id == snapshot.currentSpaceID)
+            row.isPicked = space.id == editing?.id
+            row.target = self; row.action = #selector(pickSpace(_:))
+            rows.addArrangedSubview(row)
+            row.widthAnchor.constraint(equalTo: rows.widthAnchor).isActive = true
+        }
+        let host = NSView(); host.translatesAutoresizingMaskIntoConstraints = false
+        host.addSubview(rows)
+        NSLayoutConstraint.activate([
+            rows.leadingAnchor.constraint(equalTo: host.leadingAnchor, constant: 8),
+            rows.trailingAnchor.constraint(equalTo: host.trailingAnchor, constant: -8),
+            rows.topAnchor.constraint(equalTo: host.topAnchor, constant: 8),
+            rows.bottomAnchor.constraint(equalTo: host.bottomAnchor, constant: -8)
+        ])
+        list.add(host)
+        var cards: [NSView] = [caption("Your Spaces"), list]
+        if let editing {
+            let editor = SpaceEditorCard(space: editing, isCurrent: editing.id == snapshot.currentSpaceID)
             // A successful edit reaches the app's onSpacesChanged, which refreshes
             // this window; a rejected one leaves the card as it was.
             editor.onEdit = { [weak self] updated in
@@ -343,13 +378,25 @@ struct SettingsActions {
                 if !applied { NSSound.beep() }
                 return applied
             }
-            cards.append(editor)
+            editor.onSwitch = { [weak self] id in
+                guard let self else { return }
+                self.act { self.actions.switchSpace(id) }
+                self.refresh()
+            }
+            cards += [caption("Edit \(editing.name)"), editor]
         }
-        let manage = BamPillButton(title: "Manage Spaces…", symbol: "square.stack.3d.up")
+        let manage = BamPillButton(title: "Manage Spaces", symbol: "square.stack.3d.up")
         manage.target = self; manage.action = #selector(manageSpaces)
         let footer = BamCard(frame: .zero)
         footer.add(BamRow(title: "Reorder, add or remove Spaces", detail: "Login profiles live there too.", control: manage))
         return cards + [footer]
+    }
+    @objc private func pickSpace(_ sender: SpaceListRow) {
+        guard editingSpaceID != sender.spaceID else { return }
+        editingSpaceID = sender.spaceID
+        let offset = scroll.contentView.bounds.origin
+        render()
+        scroll.contentView.scroll(to: offset)
     }
     @objc private func manageSpaces() { actions.manageSpaces() }
 
@@ -412,7 +459,7 @@ struct SettingsActions {
         ])
         let heroCard = BamCard(frame: .zero); heroCard.add(heroRow)
         let links = BamCard(frame: .zero)
-        let welcome = BamPillButton(title: "Welcome to Bam…", symbol: "sparkles")
+        let welcome = BamPillButton(title: "Welcome to Bam", symbol: "sparkles")
         welcome.target = self; welcome.action = #selector(showWelcome)
         links.add(BamRow(title: "Replay the welcome", detail: "Pick a color, name a Space, learn the keys.", control: welcome))
         let github = BamPillButton(title: "GitHub", symbol: "chevron.left.forwardslash.chevron.right")
@@ -470,29 +517,114 @@ struct SettingsActions {
 
 /// A card editing one Space in place: name, color and icon. Each change
 /// applies immediately; the browser retints behind the window.
+/// One line per Space: its tile, its name and whether it is the one on screen.
+/// Clicking it hands the Space to the editor below.
+@MainActor final class SpaceListRow: NSButton {
+    let spaceID: Int
+    private let tile = SpaceTile(size: 32, pointSize: 15)
+    private let name = NSTextField(labelWithString: "")
+    private let badge = BamBadge("Current")
+    private let chevron = NSImageView()
+    var isPicked = false { didSet { paint(); setAccessibilityValue(isPicked ? "Selected" : "") } }
+
+    init(space: BrowserSpace, isCurrent: Bool) {
+        spaceID = space.id
+        super.init(frame: .zero)
+        title = ""; isBordered = false; wantsLayer = true
+        setButtonType(.momentaryChange)
+        layer?.cornerRadius = 12
+        tile.show(space)
+        name.stringValue = space.name
+        name.font = BamType.sans(15, weight: .semibold)
+        name.textColor = BamTheme.ink
+        name.lineBreakMode = .byTruncatingTail
+        chevron.image = NSImage(systemSymbolName: "chevron.right", accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: 11, weight: .bold))
+        chevron.contentTintColor = BamTheme.muted
+        badge.isHidden = !isCurrent
+        for view in [tile, name, badge, chevron] { view.translatesAutoresizingMaskIntoConstraints = false; addSubview(view) }
+        NSLayoutConstraint.activate([
+            heightAnchor.constraint(equalToConstant: 52),
+            tile.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+            tile.centerYAnchor.constraint(equalTo: centerYAnchor),
+            name.leadingAnchor.constraint(equalTo: tile.trailingAnchor, constant: 12),
+            name.centerYAnchor.constraint(equalTo: centerYAnchor),
+            badge.leadingAnchor.constraint(equalTo: name.trailingAnchor, constant: 10),
+            badge.centerYAnchor.constraint(equalTo: centerYAnchor),
+            badge.trailingAnchor.constraint(lessThanOrEqualTo: chevron.leadingAnchor, constant: -12),
+            chevron.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
+            chevron.centerYAnchor.constraint(equalTo: centerYAnchor)
+        ])
+        setAccessibilityRole(.radioButton)
+        setAccessibilityLabel("\(space.name) Space\(isCurrent ? ", current" : "")")
+        paint()
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+    private func paint() {
+        layer?.backgroundColor = bamCG(isPicked ? BamTheme.redWash : .clear)
+        chevron.contentTintColor = isPicked ? BamTheme.red : BamTheme.muted
+    }
+    override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); paint() }
+    override var isHighlighted: Bool { didSet { layer?.opacity = isHighlighted ? 0.75 : 1 } }
+    override var focusRingMaskBounds: NSRect { bounds }
+    override func drawFocusRingMask() { NSBezierPath(roundedRect: bounds, xRadius: 12, yRadius: 12).fill() }
+    override func resetCursorRects() { addCursorRect(bounds, cursor: .pointingHand) }
+}
+
+/// A Space's colour square with its glyph, the way the sidebar draws it.
+@MainActor final class SpaceTile: NSView {
+    private let glyph = NSImageView()
+    private let pointSize: CGFloat
+    private var space: BrowserSpace?
+    init(size: CGFloat, pointSize: CGFloat) {
+        self.pointSize = pointSize
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.cornerRadius = size * 0.28
+        glyph.imageScaling = .scaleProportionallyDown
+        glyph.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(glyph)
+        translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            widthAnchor.constraint(equalToConstant: size), heightAnchor.constraint(equalToConstant: size),
+            glyph.centerXAnchor.constraint(equalTo: centerXAnchor), glyph.centerYAnchor.constraint(equalTo: centerYAnchor)
+        ])
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+    func show(_ space: BrowserSpace) { self.space = space; paint() }
+    private func paint() {
+        guard let space else { return }
+        let clear = space.colorIndex == BrowserSpace.clearColorIndex
+        let fill = clear ? BamTheme.card : ArkPalette.spaceColor(space.colorIndex)
+        let ink = clear ? BamTheme.ink : NSColor(white: 0.08, alpha: 1)
+        var resolvedInk = ink
+        effectiveAppearance.performAsCurrentDrawingAppearance { resolvedInk = NSColor(cgColor: ink.cgColor) ?? ink }
+        layer?.backgroundColor = bamCG(fill)
+        layer?.borderWidth = clear ? 1.5 : 0
+        layer?.borderColor = bamCG(BamTheme.line)
+        glyph.image = SidebarSymbol.image(named: space.symbol, color: resolvedInk, pointSize: pointSize)
+            ?? NSImage(systemSymbolName: space.symbol, accessibilityDescription: nil)
+    }
+    override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); paint() }
+}
+
+/// Edits one Space: name, then colour, then icon, each on its own labelled row.
 @MainActor final class SpaceEditorCard: BamCard {
     var onEdit: ((BrowserSpace) -> Bool)?
+    var onSwitch: ((Int) -> Void)?
     private var space: BrowserSpace
-    private let accent: NSColor
     private var swatches: [SettingsSwatch] = []
     private var glyphs: [SettingsGlyph] = []
     private let field: BamTextField
-    private let preview = NSImageView()
+    private let tile = SpaceTile(size: 44, pointSize: 20)
+    private let colorName = NSTextField(labelWithString: "")
 
-    init(space: BrowserSpace, isCurrent: Bool, accent: NSColor) {
+    init(space: BrowserSpace, isCurrent: Bool) {
         self.space = space
-        self.accent = accent
         field = BamTextField(string: space.name, placeholder: "Space name")
         super.init(frame: .zero)
-        showsSeparators = false
         let header = NSStackView()
-        header.orientation = .horizontal; header.alignment = .centerY; header.spacing = 12
-        preview.imageScaling = .scaleProportionallyDown
-        preview.wantsLayer = true
-        preview.layer?.cornerRadius = 10
-        preview.translatesAutoresizingMaskIntoConstraints = false
-        preview.widthAnchor.constraint(equalToConstant: 36).isActive = true
-        preview.heightAnchor.constraint(equalToConstant: 36).isActive = true
+        header.orientation = .horizontal; header.alignment = .centerY; header.spacing = 14
         field.setAccessibilityLabel("\(space.name) Space name")
         field.onCommit = { [weak self] name in
             guard let self, let valid = BrowserSpace.validName(name) else { NSSound.beep(); return false }
@@ -501,18 +633,30 @@ struct SettingsActions {
             self.space = proposed
             return true
         }
-        field.widthAnchor.constraint(greaterThanOrEqualToConstant: 220).isActive = true
-        header.addArrangedSubview(preview)
+        field.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        header.addArrangedSubview(tile)
         header.addArrangedSubview(field)
-        if isCurrent { header.addArrangedSubview(BamBadge("Current")) }
-        add(pad(header, top: 18, bottom: 8))
-        let colors = NSStackView(); colors.orientation = .horizontal; colors.spacing = 8
+        if isCurrent {
+            header.addArrangedSubview(BamBadge("Current"))
+        } else {
+            let go = BamPillButton(title: "Switch to it", symbol: "arrow.right")
+            go.target = self; go.action = #selector(switchSpace)
+            header.addArrangedSubview(go)
+        }
+        add(pad(header, top: 16, bottom: 16, stretch: true))
+
+        let colors = NSStackView(); colors.orientation = .horizontal; colors.spacing = 10; colors.alignment = .centerY
         for index in 0..<BrowserSpace.colorNames.count {
             let swatch = SettingsSwatch(colorIndex: index)
             swatch.isPicked = index == space.colorIndex
             swatch.target = self; swatch.action = #selector(pickColor(_:))
             swatches.append(swatch); colors.addArrangedSubview(swatch)
         }
+        colorName.font = BamType.sans(13); colorName.textColor = BamTheme.muted
+        colors.setCustomSpacing(16, after: colors.arrangedSubviews.last!)
+        colors.addArrangedSubview(colorName)
+        add(labelled("Color", colors))
+
         let glyphRow = NSStackView(); glyphRow.orientation = .horizontal; glyphRow.spacing = 6
         for symbol in BrowserSpace.symbols {
             let glyph = SettingsGlyph(symbol: symbol)
@@ -520,28 +664,38 @@ struct SettingsActions {
             glyph.target = self; glyph.action = #selector(pickGlyph(_:))
             glyphs.append(glyph); glyphRow.addArrangedSubview(glyph)
         }
-        add(pad(colors, top: 6, bottom: 6))
-        add(pad(glyphRow, top: 6, bottom: 18))
+        add(labelled("Icon", glyphRow))
         updatePreview()
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
-    private func pad(_ view: NSView, top: CGFloat, bottom: CGFloat) -> NSView {
+
+    private func pad(_ view: NSView, top: CGFloat, bottom: CGFloat, stretch: Bool = false) -> NSView {
         let host = NSView(); host.translatesAutoresizingMaskIntoConstraints = false
         view.translatesAutoresizingMaskIntoConstraints = false
         host.addSubview(view)
         NSLayoutConstraint.activate([
             view.leadingAnchor.constraint(equalTo: host.leadingAnchor, constant: 20),
-            view.trailingAnchor.constraint(lessThanOrEqualTo: host.trailingAnchor, constant: -20),
+            stretch ? view.trailingAnchor.constraint(equalTo: host.trailingAnchor, constant: -20)
+                    : view.trailingAnchor.constraint(lessThanOrEqualTo: host.trailingAnchor, constant: -20),
             view.topAnchor.constraint(equalTo: host.topAnchor, constant: top),
             view.bottomAnchor.constraint(equalTo: host.bottomAnchor, constant: -bottom)
         ])
         return host
     }
-    private func updatePreview() {
-        preview.image = SidebarSymbol.image(named: space.symbol, color: NSColor(white: 0.08, alpha: 1), pointSize: 17)
-            ?? NSImage(systemSymbolName: space.symbol, accessibilityDescription: nil)
-        preview.layer?.backgroundColor = ArkPalette.spaceColor(space.colorIndex).cgColor
+    /// A small caption over a row of choices, like the site's form labels.
+    private func labelled(_ text: String, _ view: NSView) -> NSView {
+        let label = NSTextField(labelWithString: "")
+        label.attributedStringValue = NSAttributedString(string: text.uppercased(), attributes: [
+            .font: BamType.sans(11, weight: .bold), .foregroundColor: BamTheme.muted, .kern: 0.8])
+        let stack = NSStackView(); stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 10
+        stack.addArrangedSubview(label); stack.addArrangedSubview(view)
+        return pad(stack, top: 14, bottom: 16)
     }
+    private func updatePreview() {
+        tile.show(space)
+        colorName.stringValue = BrowserSpace.colorNames[min(BrowserSpace.colorNames.count - 1, space.colorIndex)]
+    }
+    @objc private func switchSpace() { onSwitch?(space.id) }
     @objc private func pickColor(_ sender: SettingsSwatch) {
         guard sender.colorIndex != space.colorIndex else { return }
         var proposed = space; proposed.colorIndex = sender.colorIndex
@@ -620,8 +774,8 @@ struct SettingsActions {
         setAccessibilityRole(.radioButton)
         setAccessibilityLabel("\(symbol) icon")
         translatesAutoresizingMaskIntoConstraints = false
-        widthAnchor.constraint(equalToConstant: 30).isActive = true
-        heightAnchor.constraint(equalToConstant: 30).isActive = true
+        widthAnchor.constraint(equalToConstant: 34).isActive = true
+        heightAnchor.constraint(equalToConstant: 34).isActive = true
         paint()
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
