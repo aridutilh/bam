@@ -1,5 +1,24 @@
 # Local tab performance work
 
+## 0.10.2: extension enumeration and automatic-PiP overhead
+
+An optimized method-level harness reproduced repeated full-list reconstruction in the extension host with many listed tabs. Five measured repetitions after a warmup used the actual BrowserSession model, extracted production adapter methods, one profile, unloaded tabs and the active tab at the end. No WebViews or third-party extension processes were created for these timings.
+
+| Operation | Listed tabs | Before median ms | After median ms | Full surface-list reads |
+|---|---:|---:|---:|---:|
+| Window tab IDs | 100 | 4.974 | 0.084 | 100 → 1 |
+| Window tab IDs | 500 | 119.308 | 0.382 | 500 → 1 |
+| Window tab IDs | 1,000 | 497.838 | 0.802 | 1,000 → 1 |
+| Active tab, last member | 1,000 | 998.818 | 0.760 | 2,000 → 1 |
+
+Each bulk operation now borrows a fresh validated surface list, preserves reconciled order and discards the list afterward. Single-tab actions resolve live state and still validate extension controller and website-data-store identity. No cached event snapshot grants authority. The ordinary no-extension refresh path already skipped scheduling; these numbers describe adapter calls when invoked. They are not whole JavaScript `tabs.query` timings: direct ID lookup still scans the model, and per-tab index queries can request another window enumeration.
+
+Automatic PiP previously took a compositor snapshot before discovering whether an eligible departing page had a playing video. A read-only check now skips that snapshot for video-free or paused pages. The same accessible-frame candidate rules are shared with final isolation; positive checks still take the normal snapshot and recheck playback/cancellation. Manual PiP retains its original path. This removes known unnecessary work; callback timing alone cannot establish click-to-displayed-frame latency.
+
+The local comparison used the same HTTP renderer fixture in Bam, Arc and Yab. Baseline median DOM mutation/layout was 3 / 4.75 / 3 ms, while animation callback intervals were 17 / 8.4 / 17 ms respectively. Those 30-trial samples describe a bounded synthetic workload, not browser rankings. Existing competitor sessions, profile modes, background work, 1 ms WebKit timer precision and system pressure limit comparison. No universal memory, performance or feature parity is claimed. See VALIDATION.md for candidate checks and the retained limitations.
+
+## Earlier 0.8.0 work
+
 Bam 0.8.0 is an unshipped local draft. These measurements compare the same isolated synthetic fixture before and after the sidebar/session/resource changes. They are not Arc/Yab head-to-head measurements, real-site memory budgets, or input-to-visible-frame timings.
 
 The baseline is local commit d20a719. The fixture lists 100, 500 or 1,000 tabs, loads a controlled subset, alternates two live pages, and checks that their JavaScript state survives. Each loaded page contains 400 article nodes and a touched 4 MiB allocation. The timed selection call is synchronous controller work; a separate JavaScript acknowledgement measures a roundtrip after selection. Cold readiness uses polling and is not first paint. No external network or ordinary browser profile is used.

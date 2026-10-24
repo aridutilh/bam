@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.12.1 — build 27
+
+- Replace repeated extension surface-list reconstruction with one fresh list per window enumeration. Preserve ordering, active selection and live profile/controller/data-store ownership checks; direct tab actions resolve current state.
+- Check for playing HTML5 video before taking an automatic-PiP snapshot. Video-free and paused pages skip compositor capture; manual PiP and final playback/cancellation checks retain their existing behavior.
+- Add enumeration scaling/ownership regressions and real WebKit snapshot-count checks. Performance measurements are scoped in [the performance notes](docs/tab-performance.md).
+- Integrate the fixes on top of 0.12.0, preserving onboarding, command-palette/site-search and Prism/Clear changes. The unrelated local Preview icon draft is excluded.
+
 ## Unreleased — 0.12.0 local draft, build 26
 
 Two parallel draft lines each used the 0.10–0.11 numbers; this merge renumbers them as one release. Both lines' entries follow.
