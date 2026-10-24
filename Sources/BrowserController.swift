@@ -713,10 +713,17 @@ import QuartzCore
     @objc func nextSpace(_ sender: Any?) { changeSpace(min(2, (queuedSpace ?? pagingCommit ?? session.space) + 1)) }
     @objc func previousSpace(_ sender: Any?) { changeSpace(max(0, (queuedSpace ?? pagingCommit ?? session.space) - 1)) }
     func returnToVideoTab(_ id: UUID) {
-        guard session.tabs.contains(where: { $0.id == id }) else { return }
+        guard !isShuttingDown, session.tabs.contains(where: { $0.id == id }), let window = view.window else { return }
+        let primaryID = session.split(for: id)?.primaryID ?? id
+        peeks[primaryID]?.dismiss()
         select(id)
-        view.window?.makeKeyAndOrderFront(nil)
-        if let web = browsers[id], web.window === view.window { view.window?.makeFirstResponder(web) }
+        // A nonactivating PiP can be clicked while another application is active.
+        // Explicit Return restores the source window as well as the page.
+        if NSApp.isHidden { NSApp.unhideWithoutActivation() }
+        if window.isMiniaturized { window.deminiaturize(nil) }
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate()
+        if let web = browsers[id], web.window === window { window.makeFirstResponder(web) }
         if let group = session.split(for: id) {
             splitCoordinators[group.primaryID]?.setFocusedSide(id == group.secondaryID ? .right : .left)
         }

@@ -37,7 +37,7 @@ import WebKit
         let config = WKWebViewConfiguration(); config.websiteDataStore = .nonPersistent(); config.mediaTypesRequiringUserActionForPlayback = []
         let player = WKWebView(frame: .zero, configuration: config)
         controller.register(player, id: video.id)
-        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 700), styleMask: [.titled, .closable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
+        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 700), styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
         window.contentViewController = controller; window.setContentSize(NSSize(width: 1000, height: 700)); window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
         controller.load("orbit://video", in: player, id: video.id)
         try await wait("local demo") { !player.isLoading && player.url?.lastPathComponent == "PiPDemo.html" }
@@ -77,6 +77,7 @@ import WebKit
         controller.changeSpace(0)
         try await wait("space return") { self.controller.session.activeID == video.id && self.controller.pictureInPicture.referencedTabID == nil }
         try await runQueuedSingleDeparture(player: player, videoID: video.id, homeID: home.id, destinationID: otherSpace.id)
+        try await runExplicitReturn(player: player, videoID: video.id, destinationID: otherSpace.id)
         controller.automaticallyShowsVideo = false
         controller.select(home.id); await pause(0.3)
         try require(controller.pictureInPicture.referencedTabID == nil, "Disabled auto preference is respected")
@@ -86,6 +87,46 @@ import WebKit
         try require(controller.session.activeID == home.id, "Background video closure preserves destination selection")
         try await runSplitLifecycle(destinationID: home.id)
         try await runRetirementAndCommandRouting(destinationID: home.id)
+    }
+
+    func pipReturnButton(in view: NSView) -> NSButton? {
+        if let button = view as? NSButton, button.identifier?.rawValue == "pip.return" { return button }
+        return view.subviews.lazy.compactMap { self.pipReturnButton(in: $0) }.first
+    }
+
+    func runExplicitReturn(player: WKWebView, videoID: UUID, destinationID: UUID) async throws {
+        controller.select(videoID)
+        _ = try await js(player, "__orbitTestVideo.play(); true")
+        guard let fixtureURL = ProcessInfo.processInfo.environment["ORBIT_TEST_URL"].flatMap(URL.init(string:)) else {
+            throw Failure.assertion("Missing local Peek URL")
+        }
+        controller.openPeek(fixtureURL)
+        try require(controller.peeks[videoID]?.isPresented == true, "Source has a retained Peek before departure")
+        controller.select(destinationID)
+        try await wait("explicit return fixture floats") { self.controller.pictureInPicture.activeTabID == videoID }
+        guard let floating = player.window, floating !== window, let host = floating.contentView,
+              let button = pipReturnButton(in: host) else { throw Failure.assertion("Missing native PiP Return button") }
+        let utility = NSWindow(contentRect: NSRect(x: 40, y: 40, width: 380, height: 220),
+                               styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        utility.isReleasedWhenClosed = false
+        defer { utility.close() }
+        window.makeKeyAndOrderFront(nil)
+        try await wait("source browser key before minimizing") { NSApp.keyWindow === self.window }
+        window.miniaturize(nil)
+        try await wait("source browser minimized") { self.window.isMiniaturized }
+        utility.makeKeyAndOrderFront(nil)
+        try await wait("utility key over minimized source") { self.window.isMiniaturized && NSApp.keyWindow === utility }
+        button.performClick(nil)
+        try await wait("Return reveals source browser") { NSApp.isActive && NSApp.keyWindow === self.window && !self.window.isMiniaturized }
+        try require(controller.session.activeID == videoID && controller.session.space == 0,
+                    "Return selects the playing page and its Space")
+        try require(controller.peeks[videoID] == nil && controller.commandWebView === player && responderIsInside(player),
+                    "Return dismisses a retained Peek and focuses the playing page")
+        try await wait("explicit return render handoff") { !self.controller.pictureInPicture.isRestoring(player) }
+        try require(player.superview === controller.webHost && player.alphaValue > 0.99 && !floating.isVisible,
+                    "Return leaves a visible browser page and no floating player")
+        try require((try await js(player, "__orbitTestVideo === document.querySelector('video') && !__orbitTestVideo.paused")) as? Bool == true,
+                    "Explicit Return retains the playing media element")
     }
 
     func runQueuedSingleDeparture(player: WKWebView, videoID: UUID, homeID: UUID, destinationID: UUID) async throws {
@@ -164,6 +205,17 @@ import WebKit
         try await wait("outgoing Home probe clears after split return") { self.controller.pictureInPicture.referencedTabID == nil }
         await pause(0.2)
         try require((try await js(player, "__orbitSplitVideo === document.querySelector('video') && !__orbitSplitVideo.paused && getComputedStyle(document.querySelector('h1')).visibility === 'visible'")) as? Bool == true, "Returned split video retains playback and restored page styling")
+
+        controller.select(destinationID)
+        try await wait("split video floats before explicit return") { self.controller.pictureInPicture.activeTabID == right.id }
+        guard let panelContent = player.window?.contentView, let returnButton = pipReturnButton(in: panelContent) else {
+            throw Failure.assertion("Missing split PiP Return button")
+        }
+        returnButton.performClick(nil)
+        try await wait("explicit split return render handoff") { !self.controller.pictureInPicture.isRestoring(player) }
+        try require(controller.session.activeID == left.id && controller.focusedTabID == right.id
+                    && controller.commandWebView === player && responderIsInside(player),
+                    "Explicit Return selects the source Split group and focuses its playing secondary pane")
 
         controller.select(destinationID)
         try await wait("split video floats before group close") { self.controller.pictureInPicture.activeTabID == right.id }
