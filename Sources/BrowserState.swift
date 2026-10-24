@@ -119,7 +119,12 @@ struct BrowserSpace: Codable, Equatable, Identifiable {
     var colorIndex: Int
 
     static let symbols = ["sparkles", "sun.max", "globe", "briefcase", "house", "heart", "book", "paintbrush", "terminal", "bolt", "leaf", "music.note"]
-    static let colorNames = ["Violet", "Sage", "Ocean", "Rose", "Amber", "Graphite"]
+    /// Prism (a slowly shifting spectrum) and Clear (a translucent window that
+    /// shows the desktop) are appearances, not flat colors; their indices are
+    /// stable because sessions persist colorIndex.
+    static let colorNames = ["Violet", "Sage", "Ocean", "Rose", "Amber", "Graphite", "Prism", "Clear"]
+    static let prismColorIndex = 6
+    static let clearColorIndex = 7
     static let defaults = [
         BrowserSpace(id: 0, name: "Studio", symbol: "sparkles", colorIndex: 0),
         BrowserSpace(id: 1, name: "Life", symbol: "sun.max", colorIndex: 1),
@@ -440,7 +445,11 @@ struct BrowserSession: Codable {
             return BrowserSpace(id: definition.id,
                                 name: BrowserSpace.validName(definition.name) ?? "Space \(definition.id)",
                                 symbol: BrowserSpace.normalizedSymbol(definition.symbol),
-                                colorIndex: min(BrowserSpace.colorNames.count - 1, max(0, definition.colorIndex)))
+                                // Out-of-range indices repair to a flat color;
+                                // Prism and Clear apply only by explicit choice.
+                                colorIndex: BrowserSpace.colorNames.indices.contains(definition.colorIndex)
+                                    ? definition.colorIndex
+                                    : min(BrowserSpace.prismColorIndex - 1, max(0, definition.colorIndex)))
         }
         if spaces.isEmpty { spaces = BrowserSpace.defaults }
         lastIssuedSpaceID = max(2, max(lastIssuedSpaceID, spaces.map(\.id).max() ?? 2))

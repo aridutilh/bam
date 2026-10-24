@@ -500,7 +500,10 @@ import QuartzCore
     private func buildFinale() -> NSView {
         let title = OnboardingText.title("That’s it. Bam.", size: 56)
         let names = BrowserSpace.colorNames
-        let summary = OnboardingText.subtitle("“\(model.result.spaceName)” is dressed in \(names[min(names.count - 1, model.colorIndex)].lowercased()) and ready to go.")
+        let dress = model.colorIndex == BrowserSpace.prismColorIndex ? "every color at once"
+            : model.colorIndex == BrowserSpace.clearColorIndex ? "glass"
+            : names[min(names.count - 1, model.colorIndex)].lowercased()
+        let summary = OnboardingText.subtitle("“\(model.result.spaceName)” is dressed in \(dress) and ready to go.")
         let start = OnboardingPillButton(title: "Start browsing", prominent: true)
         start.target = self; start.action = #selector(advance)
         return column(spacing: 20, [title, summary, OnboardingSpacer(height: 10), start])
@@ -578,6 +581,7 @@ extension OnboardingController: NSWindowDelegate {
     var onKey: ((NSEvent) -> Bool)?
     private let wash = CAGradientLayer()
     private let glow = CAGradientLayer()
+    private var prism: CAGradientLayer?
     private var confetti: CAEmitterLayer?
 
     /// The stage wears CanvasView's own per-space gradients, so the chosen
@@ -602,6 +606,7 @@ extension OnboardingController: NSWindowDelegate {
         CATransaction.begin(); CATransaction.setDisableActions(true)
         wash.frame = bounds
         glow.frame = bounds
+        prism?.frame = bounds
         confetti?.frame = bounds
         confetti?.emitterPosition = CGPoint(x: bounds.midX, y: bounds.height + 8)
         confetti?.emitterSize = CGSize(width: bounds.width * 0.7, height: 1)
@@ -626,7 +631,25 @@ extension OnboardingController: NSWindowDelegate {
         CATransaction.begin(); CATransaction.setDisableActions(true)
         wash.colors = washColors
         glow.colors = glowColors
+        // Prism previews its live spectrum; Clear lets the stage window go
+        // see-through so the desktop reads behind a faint wash.
+        let prismActive = colorIndex == BrowserSpace.prismColorIndex
+        if prismActive, prism == nil {
+            let spectrum = PrismBackground.makeLayer()
+            spectrum.frame = bounds
+            layer?.insertSublayer(spectrum, above: wash)
+            prism = spectrum
+        }
+        prism?.isHidden = !prismActive
+        // The stage has no glass layer, so Clear keeps a stronger wash than the
+        // browser does: text must stay readable over a light wallpaper.
+        let clear = colorIndex == BrowserSpace.clearColorIndex
+        wash.opacity = clear ? 0.55 : 1
         CATransaction.commit()
+        if let window {
+            window.isOpaque = !clear
+            window.backgroundColor = clear ? .clear : NSColor(white: 0.10, alpha: 1)
+        }
     }
 
     func burstConfetti(accentIndex: Int) {
@@ -814,7 +837,23 @@ extension OnboardingController: NSWindowDelegate {
         isBordered = false
         wantsLayer = true
         setButtonType(.momentaryChange)
-        layer?.backgroundColor = ArkPalette.spaceColor(colorIndex).cgColor
+        if colorIndex == BrowserSpace.prismColorIndex {
+            // The Prism swatch wears a brighter slice of its own spectrum.
+            let rainbow = CAGradientLayer()
+            rainbow.colors = (0..<6).map {
+                NSColor(calibratedHue: CGFloat($0) / 6, saturation: 0.55, brightness: 0.88, alpha: 1).cgColor
+            }
+            rainbow.startPoint = CGPoint(x: 0, y: 1); rainbow.endPoint = CGPoint(x: 1, y: 0)
+            rainbow.frame = NSRect(x: 0, y: 0, width: 54, height: 54)
+            rainbow.cornerRadius = 27
+            layer?.insertSublayer(rainbow, at: 0)
+        } else if colorIndex == BrowserSpace.clearColorIndex {
+            layer?.backgroundColor = NSColor.white.withAlphaComponent(0.13).cgColor
+            layer?.borderWidth = 1
+            layer?.borderColor = NSColor.white.withAlphaComponent(0.4).cgColor
+        } else {
+            layer?.backgroundColor = ArkPalette.spaceColor(colorIndex).cgColor
+        }
         layer?.cornerRadius = 27
         ring.borderColor = NSColor.white.cgColor
         ring.cornerRadius = 32

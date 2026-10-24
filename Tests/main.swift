@@ -190,7 +190,7 @@ expect(!splitState.tabs.contains(where: { $0.id == leftID || $0.id == rightID })
 
 // Editable Spaces migrate legacy state without renumbering tabs or changing metadata.
 expect(BrowserSpace.defaults == BrowserSpace.legacyDefaults && BrowserSpace.defaults.map(\.id) == [0, 1, 2], "Legacy Space IDs stay stable")
-expect(BrowserSpace.defaults.map(\.name) == ["Studio", "Life", "Explore"] && BrowserSpace.colorNames.count == 6, "Default labels and the six supported color choices are available")
+expect(BrowserSpace.defaults.map(\.name) == ["Studio", "Life", "Explore"] && BrowserSpace.colorNames.count == 8, "Default labels and the eight supported appearances are available")
 var editableLegacy = BrowserSession.fresh()
 let legacyPrimary = editableLegacy.activeID
 let legacySecondary = editableLegacy.add(address: "https://example.com/legacy-right", title: "Legacy right")
@@ -213,7 +213,7 @@ var editable = BrowserSession.fresh()
 let creationSelection = editable.activeID, creationTabs = editable.tabs
 expect(editable.createSpace(name: "   ", symbol: "globe", colorIndex: 0) == nil, "An empty Space name is rejected")
 expect(editable.createSpace(name: String(repeating: "x", count: 61), symbol: "globe", colorIndex: 0) == nil && editable.createSpace(name: "Two\nLines", symbol: "globe", colorIndex: 0) == nil, "Overlong and multiline Space names are rejected")
-expect(editable.createSpace(name: "Invalid color", symbol: "globe", colorIndex: 6) == nil, "Unknown Space color is rejected")
+expect(editable.createSpace(name: "Invalid color", symbol: "globe", colorIndex: 8) == nil, "Unknown Space color is rejected")
 let createdID = editable.createSpace(name: "  Research  ", symbol: " book ", colorIndex: 4)!
 expect(createdID == 3 && editable.spaceDefinition(createdID) == BrowserSpace(id: createdID, name: "Research", symbol: "book", colorIndex: 4), "Valid Space metadata is trimmed and receives the next stable ID")
 expect(editable.activeID == creationSelection && editable.tabs == creationTabs && editable.space == 0, "Creating an unselected Space neither switches nor creates a background page")
@@ -563,3 +563,19 @@ let sleepVersion = try JSONSerialization.jsonObject(with: Data(contentsOf: space
 expect(sleepVersion["version"] as? Int == 4, "Current-page sleeping metadata uses session format 4")
 
 print("PASS: \(count) model, URL, space, and persistence checks")
+
+// Prism and Clear are persisted Space appearances, not transient UI state.
+expect(BrowserSpace.colorNames.count == 8 && BrowserSpace.prismColorIndex == 6 && BrowserSpace.clearColorIndex == 7,
+       "Prism and Clear join the color table at stable indices")
+var appearances = BrowserSession.fresh()
+let prismSpace = appearances.createSpace(name: "Glow", symbol: "bolt", colorIndex: BrowserSpace.prismColorIndex)
+let clearSpace = appearances.createSpace(name: "Glass", symbol: "sparkles", colorIndex: BrowserSpace.clearColorIndex)
+expect(prismSpace != nil && clearSpace != nil, "Spaces can wear the new appearances")
+expect(appearances.createSpace(name: "Overflow", symbol: "bolt", colorIndex: 8) == nil, "Indices past the table are refused")
+appearances.sanitize()
+expect(appearances.spaces.first { $0.name == "Glass" }?.colorIndex == BrowserSpace.clearColorIndex,
+       "Sanitize keeps the Clear appearance")
+let appearanceFile = URL(fileURLWithPath: CommandLine.arguments[1]).appendingPathComponent("appearance-session.json")
+try SessionFile.save(appearances, to: appearanceFile)
+expect(SessionFile.load(appearanceFile).spaces.first { $0.name == "Glow" }?.colorIndex == BrowserSpace.prismColorIndex,
+       "Prism survives a persistence roundtrip")

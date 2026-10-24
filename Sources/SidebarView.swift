@@ -559,7 +559,10 @@ enum ArkPalette {
         NSColor(calibratedRed: 0.62, green: 0.81, blue: 0.86, alpha: 1),
         NSColor(calibratedRed: 0.94, green: 0.65, blue: 0.73, alpha: 1),
         NSColor(calibratedRed: 0.96, green: 0.79, blue: 0.47, alpha: 1),
-        NSColor(calibratedRed: 0.70, green: 0.74, blue: 0.80, alpha: 1)
+        NSColor(calibratedRed: 0.70, green: 0.74, blue: 0.80, alpha: 1),
+        // Prism and Clear are appearances; these are their accent tints.
+        NSColor(calibratedRed: 0.84, green: 0.62, blue: 0.94, alpha: 1),
+        NSColor(calibratedRed: 0.85, green: 0.87, blue: 0.90, alpha: 1)
     ]
     static func spaceColor(_ index: Int) -> NSColor { spaceColors[min(spaceColors.count - 1, max(0, index))] }
 }

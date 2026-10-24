@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased — 0.11.0 local draft, build 25
+
+- Add two Space appearances beyond the six flat colors: **Prism**, a slowly shifting spectrum (a 24-second curated hue cycle that skips the muddy yellow-green band; static under Reduce Motion), and **Clear**, which turns the window translucent over a behind-window blur so the desktop shows through. Both are picked anywhere colors are — Manage Spaces, the onboarding color step (with a rainbow and a glass swatch) — persist as ordinary colorIndex values, and carry fallback gradients so Space swipes still blend toward them.
+- Sanitize repairs out-of-range color indices to a flat color; Prism and Clear apply only by explicit choice. The onboarding stage previews both live (Clear keeps a stronger wash there so text stays readable over light wallpapers), and the finale says "dressed in every color at once" or "dressed in glass".
+- Local only; installation and publication remain on hold. Verification is recorded in [VALIDATION.md](VALIDATION.md).
+
 ## Unreleased — 0.10.0 local draft, build 24
 
 - Add a first-run onboarding: a full-screen stage window with a popping icon welcome, Space color choice that retints the stage live, first-Space naming with symbol choice, optional Chrome bookmark-bar favorite import, interactive ⌘T/⌘S training, a user-initiated default-browser offer and a confetti finale. Keyboard-first (Return advances, Escape goes back, arrows pick colors), with native minimize/close controls (close skips), Reduce Motion fades and a progress-dot/back cluster kept clear of the menu-bar corner.
