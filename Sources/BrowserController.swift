@@ -186,6 +186,10 @@ import QuartzCore
     var pageCommandPasteboard: NSPasteboard = .general
     let downloads: DownloadCoordinator
     let profileStores: WebsiteProfileStore
+    let favicons: WebsiteFaviconStore
+    var faviconRefreshWork: DispatchWorkItem?
+    var faviconDiscoveryWork: [UUID: DispatchWorkItem] = [:]
+    var faviconDocumentGenerations: [UUID: UUID] = [:]
     var profileLibraries: [UUID: BrowserLibrary] = [:]
     var library: BrowserLibrary { library(for: commandProfileID) }
     var confirmProfileChange: ((String) -> Bool)?
@@ -276,6 +280,7 @@ import QuartzCore
         self.downloads = downloadCoordinator ?? DownloadCoordinator()
         self.sessionURL = sessionURL; self.privateMode = ephemeral
         self.profileStores = WebsiteProfileStore(ephemeral: ephemeral)
+        self.favicons = WebsiteFaviconStore(directory: ephemeral ? nil : sessionURL.deletingLastPathComponent().appendingPathComponent("Favicons", isDirectory: true))
         session = ephemeral ? .fresh() : SessionFile.load(sessionURL)
         if !ephemeral, UserDefaults.standard.object(forKey: "AutomaticallyShowPlayingVideo") != nil { automaticallyShowsVideo = UserDefaults.standard.bool(forKey: "AutomaticallyShowPlayingVideo") }
         displayedWidth = session.sidebarVisible ? CGFloat(session.sidebarWidth) : 0
@@ -312,6 +317,7 @@ import QuartzCore
         pin.target = self; pin.action = #selector(togglePin); pin.toolTip = "Keep or unkeep this tab"
         progress.wantsLayer = true; progress.layer?.backgroundColor = NSColor(srgbRed: 0.47, green: 0.39, blue: 0.66, alpha: 1).cgColor
         card.addSubview(progress)
+        configureFavicons()
         sidebar.onSelectTab = { [weak self] id in self?.select(id) }
         sidebar.onCloseTab = { [weak self] id in self?.close(id) }
         sidebar.onPinTab = { [weak self] id in self?.pinTab(id) }
@@ -438,6 +444,7 @@ import QuartzCore
     }
     func load(_ address: String, in browser: WKWebView, id: UUID) {
         guard let tab = session.tabs.first(where: { $0.id == id }), browsers[id] === browser else { return }
+        invalidateFaviconDocument(id)
         let profile = session.profileID(for: tab), token = UUID()
         navigationTokens[id] = token
         tabActivityProbe.invalidate(browser); sleepRestores.removeValue(forKey: id)
@@ -603,6 +610,9 @@ import QuartzCore
         guard !isShuttingDown else { return }
         saveWork?.cancel(); saveWork = nil
         chromeRefreshWork?.cancel(); chromeRefreshWork = nil
+        faviconRefreshWork?.cancel(); faviconRefreshWork = nil
+        faviconDiscoveryWork.values.forEach { $0.cancel() }; faviconDiscoveryWork.removeAll()
+        faviconDocumentGenerations.removeAll(); favicons.shutdown()
         stopTabResourceMonitoring()
         stopExtensions()
         spaceManager?.cancel(nil)
@@ -627,6 +637,7 @@ import QuartzCore
             session.tabs[i].address = "orbit://newtab"; session.tabs[i].title = "A little space"
         }
         guard session.tabs[i] != previous else { return }
+        scheduleFaviconDiscovery(in: web)
         let tab = session.tabs[i]
         if tab.isFavorite || tab.space == session.space || tab.space == pagingTarget { scheduleChromeRefresh() }
         scheduleSave()
@@ -683,6 +694,7 @@ import QuartzCore
             retiringViews.removeValue(forKey: ObjectIdentifier(split.view))
         }
         for closingID in closingIDs {
+            invalidateFaviconDocument(closingID)
             peeks[closingID]?.dismiss()
             observations.removeValue(forKey: closingID)
             let web = browsers.removeValue(forKey: closingID)
@@ -1092,7 +1104,10 @@ import QuartzCore
 
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
         tabActivityProbe.invalidate(webView)
-        if let id = browsers.first(where: { $0.value === webView })?.key { tabErrors.removeValue(forKey: id); pendingLoads.insert(id) }
+        if let id = browsers.first(where: { $0.value === webView })?.key {
+            invalidateFaviconDocument(id)
+            tabErrors.removeValue(forKey: id); pendingLoads.insert(id)
+        }
         if visibleMemberIDs.contains(where: { browsers[$0] === webView }) { scheduleChromeRefresh() }
     }
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
@@ -1108,6 +1123,7 @@ import QuartzCore
         if let id = browsers.first(where: { $0.value === webView })?.key { tabErrors.removeValue(forKey: id); pendingLoads.remove(id) }
         updateMetadata(webView)
         restoreSleepingPage(webView)
+        scheduleFaviconDiscovery(in: webView)
         if let url = webView.url, let profile = profileID(of: webView) { library(for: profile).recordVisit(title: webView.title ?? url.host ?? "Page", address: url.absoluteString) }
     }
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) { showError(error, web: webView) }
@@ -1174,6 +1190,7 @@ import QuartzCore
             }
         }
         if navigationAction.targetFrame?.isMainFrame == true, let id = browsers.first(where: { $0.value === webView })?.key {
+            invalidateFaviconDocument(id)
             let newOrigin = scheme == "webkit-extension" ? url.host?.lowercased() : nil
             if browserExtensionOrigins[id] != newOrigin {
                 // Do not replay a form submission across renderer configurations.

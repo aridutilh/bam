@@ -66,6 +66,8 @@ if [ "$VERIFIED" != true ]; then exit 1; fi
 "$BUILD_DIR/extension-enumeration-tests"
 "$SWIFTC" "${COMMON[@]}" -O -parse-as-library -framework AppKit -framework WebKit "$PROJECT_DIR/Sources/BrowserState.swift" "$PROJECT_DIR/Sources/BrowserExtensions.swift" "$PROJECT_DIR/Sources/ExtensionManagement.swift" "$PROJECT_DIR/Sources/ExtensionPackagePreparation.swift" "$PROJECT_DIR/Tests/BrowserExtensionStartupTests.swift" -o "$BUILD_DIR/extension-startup-tests"
 "$BUILD_DIR/extension-startup-tests"
+"$SWIFTC" "${COMMON[@]}" -O -parse-as-library -framework AppKit "$PROJECT_DIR/Sources/WebsiteFaviconStore.swift" "$PROJECT_DIR/Tests/WebsiteFaviconStoreTests.swift" -o "$BUILD_DIR/favicon-store-tests"
+"$BUILD_DIR/favicon-store-tests"
 "$SWIFTC" "${COMMON[@]}" -parse-as-library -framework AppKit -framework QuartzCore "$PROJECT_DIR/Sources/RecoveredMotion.swift" "$PROJECT_DIR/Tests/MotionTests.swift" -o "$BUILD_DIR/motion-tests"
 "$BUILD_DIR/motion-tests"
 "$SWIFTC" "${COMMON[@]}" -parse-as-library -framework AppKit "$PROJECT_DIR/Sources/SidebarSymbol.swift" "$PROJECT_DIR/Tests/SymbolRenderingTests.swift" -o "$BUILD_DIR/symbol-tests"

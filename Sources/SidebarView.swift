@@ -31,6 +31,8 @@ struct SidebarTabItem: Equatable {
 
 /// Shared Favorites and chrome stay fixed while each Space's heading and rows page.
 @MainActor final class SidebarView: NSView {
+    /// Fast cache lookup; the owner may schedule a fetch for this current tab.
+    var faviconProvider: ((UUID) -> NSImage?)? { didSet { refreshFavicons() } }
     var onSelectTab: ((UUID) -> Void)?
     var onCloseTab: ((UUID) -> Void)?
     var onPinTab: ((UUID) -> Void)?
@@ -175,6 +177,7 @@ struct SidebarTabItem: Equatable {
         super.scrollWheel(with: event)
     }
     private func connect(_ page: SidebarPage) {
+        page.faviconProvider = { [weak self] in self?.faviconProvider?($0) }
         page.scroll.onSpaceScroll = { [weak self] in self?.onSpaceScroll?($0, .tabList) ?? false }
         page.select = { [weak self] in self?.onSelectTab?($0) }
         page.close = { [weak self] in self?.onCloseTab?($0) }
@@ -198,6 +201,7 @@ struct SidebarTabItem: Equatable {
         favorites = updated.enumerated().map { index, item in
             let button = existing[item.id] ?? ArkFavoriteButton(item: item)
             button.configure(item, canMoveEarlier: index > 0, canMoveLater: index + 1 < updated.count)
+            button.setFavicon(faviconProvider?(item.id))
             button.handler = { [weak self] in self?.onSelectTab?(item.id) }
             button.close = { [weak self] in self?.onCloseTab?(item.id) }
             button.keep = { [weak self] in self?.onPinTab?(item.id) }
@@ -217,6 +221,12 @@ struct SidebarTabItem: Equatable {
         }
         nextItems.removeAll { ids.contains($0.id) }
         needsLayout = true
+    }
+    /// Refresh only materialized rows on attached pages, including both sides
+    /// of a Space gesture. Cached offscreen pages resolve icons when attached.
+    func refreshFavicons() {
+        for button in favorites { button.setFavicon(faviconProvider?(button.item.id)) }
+        for case let attached as SidebarPage in clip.subviews { attached.refreshFavicons() }
     }
     func update(tabs: [SidebarTabItem], space: Int, canGoBack: Bool, canGoForward: Bool, isLoading: Bool) {
         guard let definition = definition(for: space) else { return }
@@ -368,6 +378,7 @@ struct SidebarTabItem: Equatable {
 /// Keep a lightweight model for every tab; AppKit creates/reuses only the rows
 /// near the viewport, and supplies native accessibility for offscreen table rows.
 @MainActor private final class SidebarPage: ArkFlippedView, NSTableViewDataSource, NSTableViewDelegate {
+    var faviconProvider: ((UUID) -> NSImage?)?
     var select: ((UUID)->Void)?; var close: ((UUID)->Void)?; var pin: ((UUID)->Void)?; var newTab: (()->Void)?
     var manageSpaces: (() -> Void)?
     var move: ((UUID, Int) -> Void)?
@@ -410,6 +421,18 @@ struct SidebarTabItem: Equatable {
         heading.handler = { [weak self] in self?.manageSpaces?() }
     }
     required init?(coder: NSCoder) { fatalError() }
+
+    override func viewDidMoveToSuperview() {
+        super.viewDidMoveToSuperview()
+        if superview != nil { refreshFavicons() }
+    }
+    func refreshFavicons() {
+        guard superview != nil else { return }
+        table.enumerateAvailableRowViews { [weak self] _, index in
+            guard let self, let cell = self.table.view(atColumn: 0, row: index, makeIfNecessary: false) as? SidebarTabCell else { return }
+            cell.row.setFavicon(cell.row.item.isSplit ? nil : self.faviconProvider?(cell.row.item.id))
+        }
+    }
 
     func configure(_ items: [SidebarTabItem], space: BrowserSpace, destinations: [BrowserSpace]) {
         let items = items.filter { !$0.isFavorite }
@@ -467,6 +490,7 @@ struct SidebarTabItem: Equatable {
         if row.item.id != item.id, let focused = window?.firstResponder as? NSView,
            focused === row || focused.isDescendant(of: row) { window?.makeFirstResponder(table) }
         row.update(item)
+        row.setFavicon(superview == nil || item.isSplit ? nil : faviconProvider?(item.id))
         if let spaceAppearance { row.configureSpace(id: spaceAppearance.id, tint: ArkPalette.spaceColor(spaceAppearance.colorIndex), destinations: destinations) }
         row.canMoveEarlier = keptFirst != item.id; row.canMoveLater = keptLast != item.id
         // Read the cell's current identity: AppKit can recycle it for a different tab.
@@ -675,6 +699,11 @@ private final class ArkFavoriteButton: ArkHoverButton {
         configure(item, canMoveEarlier: false, canMoveLater: false)
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    func setFavicon(_ favicon: NSImage?) {
+        guard image !== favicon else { return }
+        image = favicon
+        needsDisplay = true
+    }
     func configure(_ item: SidebarTabItem, canMoveEarlier: Bool, canMoveLater: Bool) {
         self.item = item; self.canMoveEarlier = canMoveEarlier; self.canMoveLater = canMoveLater
         identifier = NSUserInterfaceItemIdentifier("favorite-\(item.id.uuidString)")
@@ -691,8 +720,16 @@ private final class ArkFavoriteButton: ArkHoverButton {
     }
     override func draw(_ dirtyRect: NSRect) {
         fill(NSColor.white.withAlphaComponent(item.isActive ? 0.18 : hovered ? 0.14 : 0.08), radius: 9)
-        symbol(item.symbol, rect: NSRect(x: (bounds.width - 19) / 2, y: (bounds.height - 19) / 2, width: 19, height: 19),
-               color: item.isUnloaded || item.isSleeping ? ArkPalette.secondary.withAlphaComponent(0.66) : ArkPalette.ink, size: 18)
+        if let image, image.size.width > 0, image.size.height > 0 {
+            let scale = min(19 / image.size.width, 19 / image.size.height)
+            let size = NSSize(width: image.size.width * scale, height: image.size.height * scale)
+            image.draw(in: NSRect(x: (bounds.width - size.width) / 2, y: (bounds.height - size.height) / 2,
+                                 width: size.width, height: size.height), from: .zero, operation: .sourceOver,
+                       fraction: item.isUnloaded || item.isSleeping ? 0.66 : 1, respectFlipped: true, hints: nil)
+        } else {
+            symbol(item.symbol, rect: NSRect(x: (bounds.width - 19) / 2, y: (bounds.height - 19) / 2, width: 19, height: 19),
+                   color: item.isUnloaded || item.isSleeping ? ArkPalette.secondary.withAlphaComponent(0.66) : ArkPalette.ink, size: 18)
+        }
         if item.isUnloaded || item.isSleeping {
             symbol("moon", rect: NSRect(x: bounds.width - 13, y: bounds.height - 13, width: 8, height: 8), color: ArkPalette.secondary, size: 8)
         }
@@ -806,6 +843,7 @@ private final class ArkTabRow: ArkFlippedView {
     private let titleLabel: NSTextField
     private let subtitleLabel: NSTextField
     private let iconView = NSImageView()
+    private var favicon: NSImage?
     private let closeButton = ArkIconButton(symbol: "xmark", label: "Close tab", glyphSize: 12)
     private var hovered = false
     private var area: NSTrackingArea?
@@ -819,6 +857,7 @@ private final class ArkTabRow: ArkFlippedView {
         subtitleLabel.textColor = ArkPalette.secondary.withAlphaComponent(0.84)
         iconView.image = NSImage(systemSymbolName: item.symbol, accessibilityDescription: nil) ?? NSImage(systemSymbolName: "globe", accessibilityDescription: nil)
         iconView.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 16, weight: .regular)
+        iconView.imageScaling = .scaleProportionallyUpOrDown
         iconView.contentTintColor = item.isActive ? spaceTint : ArkPalette.secondary
         for view in [titleLabel, subtitleLabel, iconView, closeButton] as [NSView] { addSubview(view) }
         closeButton.isHidden = !item.isActive
@@ -844,8 +883,8 @@ private final class ArkTabRow: ArkFlippedView {
             iconView.alphaValue = item.isUnloaded || item.isSleeping ? 0.55 : 1
         }
         if first || old.subtitle != item.subtitle { subtitleLabel.stringValue = item.subtitle }
-        if first || old.symbol != item.symbol { iconView.image = NSImage(systemSymbolName: item.symbol, accessibilityDescription: nil) }
-        if first || old.isActive != item.isActive { iconView.contentTintColor = item.isActive ? spaceTint : ArkPalette.secondary }
+        if favicon == nil, first || old.symbol != item.symbol { iconView.image = NSImage(systemSymbolName: item.symbol, accessibilityDescription: nil) }
+        if first || old.isActive != item.isActive { applyIconTint() }
         if first || old.isSplit != item.isSplit || old.isPinned != item.isPinned {
             closeButton.setSymbol("xmark", label: item.isSplit ? "Close Split" : item.isPinned ? "Unload tab" : "Close tab")
             closeButton.setAccessibilityHelp(item.isSplit ? "Saved panes unload and remain in the sidebar; ordinary panes close." : nil)
@@ -860,10 +899,22 @@ private final class ArkTabRow: ArkFlippedView {
         }
         needsDisplay = true
     }
+    func setFavicon(_ image: NSImage?) {
+        if favicon !== image {
+            favicon = image
+            iconView.image = image ?? NSImage(systemSymbolName: item.symbol, accessibilityDescription: nil)
+            iconView.symbolConfiguration = image == nil ? NSImage.SymbolConfiguration(pointSize: 16, weight: .regular) : nil
+            iconView.identifier = image == nil ? nil : NSUserInterfaceItemIdentifier("website-favicon")
+        }
+        applyIconTint()
+    }
+    private func applyIconTint() {
+        iconView.contentTintColor = favicon == nil ? (item.isActive ? spaceTint : ArkPalette.secondary) : nil
+    }
     func configureSpace(id: Int, tint: NSColor, destinations: [BrowserSpace]) {
         guard currentSpace != id || !spaceTint.isEqual(tint) || self.destinations != destinations else { return }
         currentSpace = id; spaceTint = tint; self.destinations = destinations
-        iconView.contentTintColor = item.isActive ? tint : ArkPalette.secondary
+        applyIconTint()
     }
     override var acceptsFirstResponder: Bool { true }
     override func becomeFirstResponder() -> Bool { needsDisplay = true; return true }

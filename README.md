@@ -6,13 +6,9 @@ A small, fast, slightly obsessive macOS browser prototype. Native Swift + AppKit
 
 Bam explores the things that make sidebar browsers feel good: a compact sidebar with **Spaces**, a **Peek** overlay for glancing at links, **Split View**, a pocket-sized **Little Bam** window, and a **floating video panel** you can flick into a corner. It's an independent open-source experiment — not affiliated with Arc, The Browser Company, or Yab, and not claiming feature parity with any of them. Think of it as a love letter written in its own handwriting.
 
-**Local startup correction:** 0.13.2 build 29 addresses a confirmed ordinary-startup crash in 0.13.1 and 0.13.0 for the Default profile; it is currently unpublished. See [validation](VALIDATION.md).
+**Latest download:** [v0.14.0 prerelease](https://github.com/aridutilh/bam/releases/tag/v0.14.0) · [all releases](https://github.com/aridutilh/bam/releases) · [changelog](CHANGELOG.md)
 
-**Latest download:** [v0.13.1 prerelease](https://github.com/aridutilh/bam/releases/tag/v0.13.1) · [all releases](https://github.com/aridutilh/bam/releases) · [changelog](CHANGELOG.md)
-
-**Released: Bam 0.13.1 (build 28).** This version includes overscroll Space creation, Favorites, kept tabs, performance improvements, login profiles, a local extension host, the redesigned command palette with Tab-to-search, a full-screen first-run onboarding (replay it from Bam ▸ "Welcome to Bam…", or demo with `bash scripts/preview-onboarding.sh`), and two new Space appearances: **Prism**, a slowly shifting spectrum, and **Clear**, a translucent window that lets your desktop show through. See [CHANGELOG.md](CHANGELOG.md) and [VALIDATION.md](VALIDATION.md).
-
-This patch reduces extension tab/window enumeration work and skips automatic-PiP page snapshots when no video is playing. See the [performance notes](docs/tab-performance.md) for measurements and limits.
+**Bam 0.14.0 (build 30)** adds full-color website favicons to sidebar rows, Favorites and command-palette results. Icons load asynchronously, stay cached per login profile, and preserve your custom saved icons. This version also includes the Default-profile startup correction for 0.13.1. See [CHANGELOG.md](CHANGELOG.md) and [VALIDATION.md](VALIDATION.md).
 
 ## Try it
 
@@ -32,6 +28,7 @@ That builds for your machine, locally signs the app, and runs the component test
 - **Login profiles** — assign the same profile to Spaces that should share logins, or separate profiles to keep website data, Favorites, history, and extensions apart. Existing Spaces keep the Default profile. Moving loaded pages between profiles asks before reloading them.
 - **Local extensions** — Extensions → Manage Extensions imports unpacked extension folders with permission review. Runtime support needs macOS 15.4+. This is an experimental WebKit host: [extension notes](docs/extensions.md) describe what works and what does not.
 - **A lighter browser** — sidebar rows are reused and chrome updates are coalesced; session files save on a background writer. Under critical memory pressure, ordinary static pages idle for ten minutes can sleep while the three most recently used loaded pages stay warm. Saved tabs, Splits, video, forms, scripts, and uncertain activity stay protected. See the [tab performance notes](docs/tab-performance.md) for the policy and its limits.
+- **Website icons** — full-color favicons in the sidebar, Favorites and tab search, plus site-search results. Public icon declarations and `/favicon.ico` load directly with a bounded, profile-scoped cache; no third-party favicon service. Custom saved icons take priority, and missing icons retain native symbols.
 - **Tab search** — ⌘T opens a palette *before* making a tab. Type a URL or search, or jump to a tab you already have open in any Space. Fewer duplicate tabs, more smugness.
 - **Peek** 👀 — shift-click a link to open it in an overlay without leaving your page. Like it? Promote it to a tab, a Split pane, or Little Bam. Done? Escape and it's gone.
 - **Split View** — two live pages side by side with a draggable divider and per-pane controls. The pair sticks together in the sidebar and survives restarts.
