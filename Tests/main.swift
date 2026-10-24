@@ -20,6 +20,9 @@ let file = URL(fileURLWithPath: CommandLine.arguments[1]).appendingPathComponent
 try SessionFile.save(s, to: file)
 let restored = SessionFile.load(file)
 expect(restored.tabs == s.tabs && restored.activeID == s.activeID, "Atomic persistence roundtrip")
+let firstRun = SessionFile.load(URL(fileURLWithPath: CommandLine.arguments[1]).appendingPathComponent("never-written.json"))
+expect(firstRun.tabs.count == 1 && firstRun.active?.address == "https://bambrowser.com" && firstRun.spaces == BrowserSpace.defaults, "A missing session file is a first launch on bambrowser.com")
+expect(BrowserSession.fresh().tabs.contains { $0.isHome }, "Fixtures keep the offline demo session")
 
 // Address regressions: preserve URLs rather than treating them as search terms.
 expect(URLInput.resolve(" \n\t ") == nil, "Empty address does not navigate")
@@ -95,7 +98,7 @@ try Data("{}".utf8).write(to: detailedFile)
 let incomplete = SessionFile.load(detailedFile)
 expect(incomplete.active != nil && incomplete.sidebarWidth.isFinite, "Incomplete session also recovers safely")
 let missing = SessionFile.load(file.deletingLastPathComponent().appendingPathComponent("missing-\(UUID().uuidString).json"))
-expect(missing.active != nil && missing.active?.isHome == true, "First launch with no file has a selected home")
+expect(missing.active != nil && missing.active?.address == "https://bambrowser.com", "First launch with no file opens bambrowser.com")
 
 // Every space remembers its own selection, including pinned tabs and new tabs.
 var spaces = BrowserSession.fresh()

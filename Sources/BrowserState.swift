@@ -252,6 +252,13 @@ struct BrowserSession: Codable {
         try values.encode(lastIssuedSpaceID, forKey: .lastIssuedSpaceID)
     }
 
+    /// The very first launch of an installed Bam: one tab on bambrowser.com,
+    /// so a new user lands on Bam's own page instead of an empty start page.
+    /// Fixtures and fresh previews keep `fresh()`, which needs no network.
+    static func firstRun() -> BrowserSession {
+        let welcome = BrowserTab(title: "Bam", address: "https://bambrowser.com", space: 0)
+        return BrowserSession(tabs: [welcome], activeID: welcome.id, lastSelectedTabIDsBySpace: [0: welcome.id])
+    }
     static func fresh() -> BrowserSession {
         let home = BrowserTab(title: "A little space", address: "orbit://newtab", space: 0)
         return BrowserSession(tabs: [
@@ -693,6 +700,8 @@ enum URLInput {
 
 enum SessionFile {
     static func load(_ url: URL) -> BrowserSession {
+        // No file at all is a first launch; an unreadable one keeps the demo session.
+        guard FileManager.default.fileExists(atPath: url.path) else { return .firstRun() }
         guard let data = try? Data(contentsOf: url), var session = try? JSONDecoder().decode(BrowserSession.self, from: data) else { return .fresh() }
         session.sanitize(); return session
     }
