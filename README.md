@@ -1,4 +1,4 @@
-# Ark 0.5.0 prerelease
+# Ark 0.5.1 prerelease
 
 <img src="Resources/ArkIcon.png" width="128" alt="Ark’s crayon-drawn icon">
 
@@ -6,9 +6,11 @@ An open-source macOS browser prototype built with Swift, AppKit, Core Animation,
 
 The original application code is available under the [MIT license](LICENSE). The public source includes no extracted Arc artwork, animation frames, fonts, textures, binaries, or decompiler output. The app icon is a crayon-drawn reinterpretation of Arc’s mark; [branding notes](docs/branding.md) record its source and generation prompt. Sidebar controls use macOS SF Symbols, and the Spaces button uses an original native animation.
 
-[v0.5.0 prerelease](https://github.com/aridutilh/ark/releases/tag/v0.5.0) · [Previous v0.4.0 download](https://github.com/aridutilh/ark/releases/tag/v0.4.0) · [Source repository](https://github.com/aridutilh/ark) · [Feature checklist](FEATURE-INVENTORY.md) · [Validation status](VALIDATION.md)
+[v0.5.1 prerelease](https://github.com/aridutilh/ark/releases/tag/v0.5.1) · [Previous v0.5.0 download](https://github.com/aridutilh/ark/releases/tag/v0.5.0) · [Source repository](https://github.com/aridutilh/ark) · [Feature checklist](FEATURE-INVENTORY.md) · [Validation status](VALIDATION.md)
 
-**Current prerelease: 0.5.0 (build 13).** This adds page-command confirmations: ⇧⌘C copies the current URL and shows “Page copied”; ⇧⌘R requests a hard refresh and shows “Hard refreshing…”. Both commands follow the key browser window and its active page. All six component and five packaged runtime suites passed. The installed app matches the tested executable, preserves all 12 existing tabs, and passed a native main-window check of both shortcuts, complete confirmation text and pill dismissal. Multi-surface routing is covered by automated fixtures; broader manual and accessibility coverage remains open. The previous public release is **0.4.0 (build 12)**, which passed its component/runtime suites and received limited user acceptance of PiP corner movement.
+**Current prerelease: 0.5.1 (build 14).** Sidebar symbols now retain their natural proportions and native SF Symbol tinting instead of being stretched into squares and rasterized before drawing. All seven component and five packaged runtime suites passed, including 63 symbol-rendering checks at 1×/2×. The installed app matched the tested executable and retained all 12 existing tabs. A native check in two main-window Spaces confirmed three round ellipsis dots and readable, correctly proportioned and tinted controls; broader display and animation checks remain open.
+
+**Verified previous release: 0.5.0 (build 13).** That release added page-command confirmations: ⇧⌘C copies the current URL and shows “Page copied”; ⇧⌘R requests a hard refresh and shows “Hard refreshing…”. Both commands follow the key browser window and its active page. All six component and five packaged runtime suites passed. Its installed app matched the tested executable, preserved all 12 existing tabs, and passed a native main-window check of both shortcuts, complete confirmation text and pill dismissal. Multi-surface routing is covered by automated fixtures; broader manual and accessibility coverage remains open. The previous public release is **0.4.0 (build 12)**, which passed its component/runtime suites and received limited user acceptance of PiP corner movement.
 
 ## Build and run
 
@@ -19,7 +21,7 @@ bash build.sh
 open Ark.app
 ```
 
-The build targets the current host architecture by default, locally signs `Ark.app`, creates `Ark-macOS.zip`, and runs the model, motion, swipe, tab-search, find, and library suites. `ARK_ARCH` can override the architecture, and `ARK_BUILD_DIR` can override the build directory. The release target is Apple Silicon; Intel compatibility has not been established. The app is a development build, not a notarized distribution.
+The build targets the current host architecture by default, locally signs `Ark.app`, creates `Ark-macOS.zip`, and runs the model, motion, swipe, tab-search, find, library, and sidebar-symbol rendering suites. `ARK_ARCH` can override the architecture, and `ARK_BUILD_DIR` can override the build directory. The release target is Apple Silicon; Intel compatibility has not been established. The app is a development build, not a notarized distribution.
 
 No package dependencies are fetched by a normal build. A project-local VFS overlay handles a duplicate Swift module map in some Command Line Tools installations without changing the installed toolchain. No Arc installation, reverse-engineering tools, or private research files are needed.
 
@@ -29,7 +31,7 @@ Run the integrated local fixtures after building:
 bash scripts/test-runtime.sh
 ```
 
-This starts a loopback fixture server and runs the packaged app's WebKit, manual PiP, native interaction, automatic PiP, and feature tests. Tests open native windows. Each run must exit successfully and emit exactly one matching terminal PASS; a subtest PASS or an early zero exit is insufficient. Fixture windows cannot trigger the normal last-window autoquit behavior. **Build 13 passed all six component and five runtime suites**, including 70 positioning, 84 controller interaction, 85 automatic PiP and 137 browsing-feature checks. All 53 source/resource/test/build inputs match the isolated final copy, and the installed app passed strict signature and executable-identity checks. See [VALIDATION.md](VALIDATION.md) for the current run and its limits; these fixtures do not reproduce every device's physical input.
+This starts a loopback fixture server and runs the packaged app's WebKit, manual PiP, native interaction, automatic PiP, and feature tests. Tests open native windows. Each run must exit successfully and emit exactly one matching terminal PASS; a subtest PASS or an early zero exit is insufficient. Fixture windows cannot trigger the normal last-window autoquit behavior. **Build 14 passed all seven component and five runtime suites**, including 63 symbol-rendering, 70 positioning, 84 controller interaction, 85 automatic PiP and 137 browsing-feature checks. All 55 source/resource/test/build inputs match the isolated final copy, and the installed app passed strict signature and executable-identity checks. See [VALIDATION.md](VALIDATION.md) for the current run and its limits; these fixtures do not reproduce every device's physical input.
 
 The bundled video is a generated test pattern. To regenerate it, install FFmpeg and run `bash scripts/generate-demo.sh`; FFmpeg is not needed for an ordinary build.
 

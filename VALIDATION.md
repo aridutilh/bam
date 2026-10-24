@@ -1,14 +1,16 @@
-# Validation — Ark 0.5.0 prerelease
+# Validation — Ark 0.5.1 prerelease
 
-Status: **0.5.0 build 13 automated and installation verification passed; native main-window shortcuts checked**, as of October 23, 2026. `bash build.sh` and `bash scripts/test-runtime.sh` both exited successfully. All six component and five packaged runtime suites emitted their terminal PASS, including 137 browsing-feature checks. All 53 source/resource/test/build inputs byte-match the isolated final copy. Native UI evidence is limited to one main-window page; multi-surface behavior is covered by fixtures.
+**0.5.1 build 14 patch verification passed.** `bash build.sh` and `bash scripts/test-runtime.sh` both exited successfully; all seven component and five packaged runtime suites emitted their terminal PASS. The new `Tests/SymbolRenderingTests.swift` passed **63 checks**, covering aspect fitting, native tint, three round ellipsis dots rendered at 1×/2× and a control that detects the old stretched rendering. The existing component results were model 69, motion, swipe 20, tab search 15, find and library 28; runtime results were WebKit, PiP with 70 positioning checks, 84 controller interactions, 85 automatic PiP and 137 browsing-feature checks. All **55** source/resource/test/build inputs byte-match the isolated final copy. Installation, strict signature and executable identity passed; the limited native sidebar check is recorded below.
 
-The previous published release, **0.4.0 build 12**, passed all six component and five packaged runtime suites, strict signature checks and installation verification. Its 50 source/resource/build inputs matched the isolated build copy, and its installed executable matched the tested bundle. One user accepted its quick PiP corner flicks and stronger slow-release attraction. That evidence belongs to build 12 and does not establish the new page commands or broader device/website compatibility.
+Historical baseline: **0.5.0 build 13 automated and installation verification passed; native main-window shortcuts checked**, as of October 23, 2026. `bash build.sh` and `bash scripts/test-runtime.sh` both exited successfully. All six component and five packaged runtime suites emitted their terminal PASS, including 137 browsing-feature checks. All 53 source/resource/test/build inputs byte-matched its isolated final copy. Native UI evidence is limited to one main-window page; multi-surface behavior is covered by fixtures.
+
+The earlier published release, **0.4.0 build 12**, passed all six component and five packaged runtime suites, strict signature checks and installation verification. Its 50 source/resource/build inputs matched the isolated build copy, and its installed executable matched the tested bundle. One user accepted its quick PiP corner flicks and stronger slow-release attraction. That evidence belongs to build 12 and does not establish the new page commands or broader device/website compatibility.
 
 Independent review covers implementation boundaries, not runtime or physical acceptance. Ark's PiP uses an existing live web view, bounded rendering waits and inert transition snapshots; the source does not claim identical Arc behavior. The new confirmation pill is native and noninteractive. Hard refresh requests origin revalidation and is not an unconditional cache purge.
 
-## Build and component checks
+## Historical build and component checks: builds 12–13
 
-Run `bash build.sh`. The script compiles for the current host architecture with a macOS 14 minimum, locally signs the application, verifies the signature, packages it, and runs these suites.
+Run `bash build.sh`. The script compiles for the current host architecture with a macOS 14 minimum, locally signs the application, verifies the signature, packages it, and runs the component suites. The table preserves builds 12–13 results; build 14 reran these suites and added symbol rendering, as recorded above.
 
 | Check | Scope | 0.4.0 build 12 baseline | 0.5.0 build 13 |
 |---|---|---|---|
@@ -22,9 +24,11 @@ Run `bash build.sh`. The script compiles for the current host architecture with 
 
 The public sidebar uses SF Symbols and an original native stack-symbol animation. Spring profiles and controller transitions passed the build 13 rerun. Native symbol appearance was inspected in the installed app. Full manual hover/detachment and accessibility preference coverage remains below. The repository contains no extracted Arc artwork or animation frames.
 
-## Packaged runtime checks
+## Packaged runtime checks and historical builds 12–13
 
 Run `bash scripts/test-runtime.sh` after building. It serves `Tests/Fixtures` on loopback and invokes all five app fixture modes. The fixtures use local pages/media and nonpersistent website stores; no personal browser profile is involved. The runtime harness now requires a successful process exit plus exactly one matching suite-terminal PASS and no FAIL. A preceding positioning subtest PASS is insufficient. Fixture mode disables last-window autoquit, and the automatic PiP fixture has an overall watchdog and explicit activation/presentation preconditions. Its setup helper requests foreground activation and then requires actual app-active and target-key state. It is never called between Return and its assertions, and the retiring-pane focus check can no longer be skipped.
+
+The table preserves builds 12–13 results. All five suites also passed for build 14, with the unchanged runtime counts recorded above.
 
 | Fixture | Scope | 0.4.0 build 12 baseline | 0.5.0 build 13 |
 |---|---|---|---|
@@ -48,9 +52,13 @@ Additional standalone fixtures in `Tests/DownloadTests.swift` and `Tests/Preview
 
 ## Installed-app checks
 
-**Verified installation: version 0.5.0 (build 13) in `/Applications/Ark.app`.** Strict signature verification passed, and its executable SHA-256 matches the tested bundle: `191f6341668fec7238ea1059d5dd08a0b72208c6a78ea1de60998824a29be6d8`. The release ZIP SHA-256 is `e6cd269c603e3bb6ce5ff3623e7ffca9bca84f4638b3957f17b8ddd21810098b`. All 53 source/resource/test/build inputs matched the final isolated copy. All 12 preexisting tab identifiers were retained, with 12 tabs present after installation.
+**Current verified installation: version 0.5.1 (build 14) in `/Applications/Ark.app`.** Strict signature verification passed, and the installed executable matched the tested bundle. Executable SHA-256: `5e7fbda9b77be76fe2e4bc692a8115421ddee931725b0418d957ea9907487198`. Release ZIP SHA-256: `91067ba67c63e42c24cdc20fb98bf820147bdf5ca5281e65e117e81a0342ea6e`. All 55 source/resource/test/build inputs matched the isolated copy. All 12 tab identifiers present immediately before the update were retained, with 12 tabs after installation.
 
-On the installed app's existing GitHub repository page, actual ⇧⌘C displayed the complete “Page copied” pill. Clearing the address palette and pasting confirmed `https://github.com/aridutilh/ark`. Actual ⇧⌘R displayed the complete “Hard refreshing…” pill and reloaded the page; a later screenshot showed the pill dismissed. An initial native check had exposed clipped text; the final build fixes its measured text width and includes text-fit/click-through regressions for both strings on the main page, both Split panes, Peek and Little Ark. The final native visual check covers one page in the main window; those other surfaces are automated evidence. It does not establish unconditional cache eviction or all accessibility preferences.
+Native screenshots in two main-window Spaces showed the ellipsis as three round dots, correctly tinted/proportioned Apple, code, sparkle and globe favorites, toolbar chevrons/reload/sidebar controls, and footer stack/PiP/plus controls. The check returned to the original Space and page. These screenshots establish that limited static appearance; 1×/2× automated rendering does not establish broader physical display, animation or accessibility behavior.
+
+**Historical installation: version 0.5.0 (build 13).** Strict signature verification passed, and its executable SHA-256 matches the tested bundle: `191f6341668fec7238ea1059d5dd08a0b72208c6a78ea1de60998824a29be6d8`. The release ZIP SHA-256 is `e6cd269c603e3bb6ce5ff3623e7ffca9bca84f4638b3957f17b8ddd21810098b`. All 53 source/resource/test/build inputs matched the final isolated copy. All 12 preexisting tab identifiers were retained, with 12 tabs present after installation.
+
+On build 13's installed GitHub repository page, actual ⇧⌘C displayed the complete “Page copied” pill. Clearing the address palette and pasting confirmed `https://github.com/aridutilh/ark`. Actual ⇧⌘R displayed the complete “Hard refreshing…” pill and reloaded the page; a later screenshot showed the pill dismissed. An initial native check had exposed clipped text; the final build fixes its measured text width and includes text-fit/click-through regressions for both strings on the main page, both Split panes, Peek and Little Ark. The final native visual check covers one page in the main window; those other surfaces are automated evidence. It does not establish unconditional cache eviction or all accessibility preferences.
 
 An assisted static check of installed build 12 showed one actual YouTube video rendering cleanly at the correct aspect ratio in the rounded PiP panel. Native hover controls were visible for Return, play/pause, ±10-second seek, volume and resize; accessibility reported Pause while the video was playing. This verifies that limited rendered state, not physical movement, transition feel or cross-app Return. Separately, the user physically tested build 12 and accepted the quick corner flicks and stronger slow-release pull. That limited feedback accepts the final corner tuning, not build 12’s Return transition, cross-app activation or broader device behavior.
 

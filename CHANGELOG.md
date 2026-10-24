@@ -4,6 +4,14 @@
 
 Remaining work is tracked with acceptance criteria in [FEATURE-INVENTORY.md](FEATURE-INVENTORY.md). An inventory item is complete only after its full behavior is verified.
 
+## 0.5.1 prerelease — build 14
+
+Build 14 passed all seven component and five packaged runtime suites, including 63 symbol-rendering checks at 1×/2×. All 55 source/resource/test/build inputs matched the isolated final copy; installation, strict signature and executable identity passed, and all 12 existing tab identifiers were retained. Native inspection in two main-window Spaces confirmed round ellipsis dots and the tint/proportions of favorite, toolbar and footer symbols. This is a limited static appearance check, not broader display or physical-animation coverage. The 0.5.0 results below remain historical evidence.
+
+- Keep sidebar SF Symbols at their natural aspect ratio, so wide glyphs such as the ellipsis do not stretch into vertical bars.
+- Apply color through native SF Symbol configuration instead of tinting an intermediate bitmap. Preserve disabled opacity and existing hover, focus and click behavior.
+- Add a real 1×/2× symbol pixel regression suite to the build.
+
 ## 0.5.0 prerelease — build 13
 
 Build 13 passed all six component and five packaged runtime suites, including 137 browsing-feature checks. The installed app passed strict signature and executable-identity checks; all 53 source/resource/test/build inputs matched the final isolated copy, and all 12 existing tabs were retained. Actual shortcuts on one installed main-window page confirmed full pill text, the copied URL, refresh and later pill dismissal. Multi-surface behavior is automated coverage; broader manual/accessibility checks remain open.
