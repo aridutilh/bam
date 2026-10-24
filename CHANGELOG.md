@@ -4,6 +4,14 @@
 
 Remaining work is tracked with acceptance criteria in [FEATURE-INVENTORY.md](FEATURE-INVENTORY.md). An inventory item is complete only after its full behavior is verified.
 
+## 0.5.2 prerelease — build 15
+
+Build 15 passed all seven component and five packaged runtime suites, including 162 controller interaction checks (previously 84). All 54 tracked source/resource/test/build inputs matched the isolated copy. New checks cover early warm-page attachment, cold navigation requests, retained document state, rapid requests/reversals, committed release and preview cancellation, and Split destinations. The installed app passed strict signature and tested-executable identity checks; all 12 tabs were retained and the original Space/selection was restored. Actual Space buttons reached the correct pages in two main-window Spaces, first on cold selection and then warmed. Post-fix presentation timing and physical trackpad behavior were not measured. Earlier release evidence below remains historical.
+
+- Select the destination page on an explicit Space request or committed gesture release, while the sidebar spring finishes independently. Rejected gestures keep the current page.
+- Remove the queued Space request and old-page snapshot fade. Retain cached WebKit views and their page state while handling rapid requests and reversals.
+- Target the visible delay between sidebar movement and page selection; this does not promise instantaneous network loads or Arc speed parity.
+
 ## 0.5.1 prerelease — build 14
 
 Build 14 passed all seven component and five packaged runtime suites, including 63 symbol-rendering checks at 1×/2×. All 55 source/resource/test/build inputs matched the isolated final copy; installation, strict signature and executable identity passed, and all 12 existing tab identifiers were retained. Native inspection in two main-window Spaces confirmed round ellipsis dots and the tint/proportions of favorite, toolbar and footer symbols. This is a limited static appearance check, not broader display or physical-animation coverage. The 0.5.0 results below remain historical evidence.
