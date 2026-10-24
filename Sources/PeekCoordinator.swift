@@ -39,6 +39,7 @@ typealias PreviewNavigationReadiness = @MainActor (@escaping @MainActor () -> Vo
         guard PreviewURLPolicy.allows(url) else { return false }
         _ = detach(notify: false, stop: true)
         let configuration = WKWebViewConfiguration()
+        configuration.adoptSafariUserAgent()
         configuration.websiteDataStore = websiteDataStore
         configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
         configure?(configuration)

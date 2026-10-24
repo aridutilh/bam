@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.15.2 prerelease — build 33
+
+- Send Safari's user-agent suffix ("Version/<installed Safari> Safari/605.1.15") from tabs, Peek and Little Bam. A bare WKWebView already exposes FairPlay, but streaming sites such as Netflix, Spotify and Disney+ read the Safari token to choose their FairPlay playback path and can refuse playback without it. The suffix mirrors the installed Safari's version so it tracks macOS updates; Widevine and PlayReady remain unavailable, as in Safari.
+
 ## 0.15.1 prerelease — build 32
 
 - Retain the published 0.15.0 Settings, default search engine and command-palette features.

@@ -38,6 +38,7 @@ import WebKit
         root.reload.target = self; root.reload.action = #selector(reloadAction)
         root.promote.target = self; root.promote.action = #selector(promoteAction)
         let configuration = WKWebViewConfiguration(); configuration.websiteDataStore = websiteDataStore
+        configuration.adoptSafariUserAgent()
         configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
         configure?(configuration)
         adopt(webView: PreviewWKWebView(frame: .zero, configuration: configuration))

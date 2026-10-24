@@ -416,6 +416,7 @@ import QuartzCore
     func webView(for tab: BrowserTab) -> WKWebView {
         if let cached = browsers[tab.id] { return cached }
         let configuration = WKWebViewConfiguration()
+        configuration.adoptSafariUserAgent()
         configuration.websiteDataStore = profileStores.store(for: session.profileID(for: tab))
         configureExtensions(configuration, profileID: session.profileID(for: tab))
         let browser = WKWebView(frame: .zero, configuration: configuration)
@@ -476,6 +477,7 @@ import QuartzCore
             if let extensionURL, let configured = extensionPageConfiguration(extensionURL, profileID: profileID) { configuration = configured }
             else {
                 configuration = WKWebViewConfiguration()
+                configuration.adoptSafariUserAgent()
                 configuration.websiteDataStore = profileStores.store(for: profileID)
                 configureExtensions(configuration, profileID: profileID)
             }
