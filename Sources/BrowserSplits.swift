@@ -22,7 +22,7 @@ import WebKit
         guard let left = session.tabs.first(where: { $0.id == group.primaryID }), let right = session.tabs.first(where: { $0.id == group.secondaryID }) else { return }
         let split = splitCoordinators[group.primaryID] ?? makeSplitCoordinator(group)
         let leftWeb = webView(for: left), rightWeb = webView(for: right)
-        webHost.addSubview(split.view); split.view.frame = webHost.bounds
+        installActiveHost(split.view)
         split.configure(left: pictureInPicture.owns(leftWeb) ? nil : leftWeb, right: pictureInPicture.owns(rightWeb) ? nil : rightWeb, leftAddress: left.address, rightAddress: right.address)
     }
     func makeSplitCoordinator(_ group: BrowserSplit) -> SplitViewCoordinator {

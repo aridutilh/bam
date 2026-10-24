@@ -523,15 +523,14 @@ import QuartzCore
             if !outgoing.isEmpty { automaticallyFloatDeparture(outgoing) }
         }
         for (id, peek) in peeks { peek.setVisible(id == tab.id) }
-        webHost.subviews.filter { retiringViews[ObjectIdentifier($0)] == nil }.forEach { $0.removeFromSuperview() }
         if let group = session.split(for: tab.id) { showSplit(group) }
         else {
             let browser = webView(for: tab)
             if pictureInPicture.owns(browser) {
                 let placeholder = PiPPlaceholder(frame: webHost.bounds)
                 placeholder.returnVideo = { [weak self] in self?.pictureInPicture.restore() }
-                webHost.addSubview(placeholder)
-            } else { webHost.addSubview(browser); browser.frame = webHost.bounds }
+                installActiveHost(placeholder)
+            } else { installActiveHost(browser) }
         }
         refresh()
         // A covered retiring view is still a valid AppKit responder. Move only
@@ -541,6 +540,18 @@ import QuartzCore
            let destination = commandWebView, destination.window === window {
             window.makeFirstResponder(destination)
         }
+    }
+    /// Refreshing the selected page must not detach its live WebKit surface.
+    /// Resolve the actual host first: the same tab ID can acquire a different
+    /// renderer, a Split, or a PiP placeholder during synchronous callbacks.
+    func installActiveHost(_ host: NSView) {
+        for child in webHost.subviews where child !== host && retiringViews[ObjectIdentifier(child)] == nil {
+            child.removeFromSuperview()
+        }
+        if host.superview !== webHost || webHost.subviews.last !== host {
+            webHost.addSubview(host, positioned: .above, relativeTo: nil)
+        }
+        if host.frame != webHost.bounds { host.frame = webHost.bounds }
     }
     private func hostedAncestor(_ view: NSView) -> NSView? {
         var current: NSView? = view
