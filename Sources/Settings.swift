@@ -485,34 +485,46 @@ struct SettingsActions {
 }
 
 /// One rail entry: symbol + title; the picked one sits on a paper card.
+/// A rail entry: symbol and title laid out by hand, inset from the pill so
+/// nothing touches its edge when it is picked.
 @MainActor final class SettingsRailButton: NSButton {
     let section: SettingsSection
+    private let icon = NSImageView()
+    private let label = NSTextField(labelWithString: "")
     var accent: NSColor = BamTheme.red { didSet { paint() } }
     var isPicked = false { didSet { paint(); setAccessibilityValue(isPicked ? "Selected" : "") } }
     init(section: SettingsSection) {
         self.section = section
         super.init(frame: .zero)
-        isBordered = false
+        title = ""; isBordered = false
         wantsLayer = true
         setButtonType(.momentaryChange)
-        alignment = .left
-        imagePosition = .imageLeading
         layer?.cornerRadius = 11
+        icon.image = NSImage(systemSymbolName: section.symbol, accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: 13, weight: .semibold))
+        icon.imageScaling = .scaleNone
+        label.stringValue = section.title
+        label.lineBreakMode = .byTruncatingTail
+        for view in [icon, label] { view.translatesAutoresizingMaskIntoConstraints = false; addSubview(view) }
         setAccessibilityRole(.radioButton)
         setAccessibilityLabel("\(section.title) settings")
         translatesAutoresizingMaskIntoConstraints = false
-        heightAnchor.constraint(equalToConstant: 38).isActive = true
+        NSLayoutConstraint.activate([
+            heightAnchor.constraint(equalToConstant: 38),
+            icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 13),
+            icon.widthAnchor.constraint(equalToConstant: 20),
+            icon.centerYAnchor.constraint(equalTo: centerYAnchor),
+            label.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 8),
+            label.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -12),
+            label.centerYAnchor.constraint(equalTo: centerYAnchor)
+        ])
         paint()
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
     private func paint() {
-        attributedTitle = NSAttributedString(string: "  " + section.title, attributes: [
-            .font: BamType.sans(14.5, weight: isPicked ? .bold : .medium),
-            .foregroundColor: isPicked ? BamTheme.ink : BamTheme.muted
-        ])
-        image = NSImage(systemSymbolName: section.symbol, accessibilityDescription: nil)?
-            .withSymbolConfiguration(.init(pointSize: 13, weight: .semibold))
-        contentTintColor = isPicked ? accent : BamTheme.muted
+        label.font = BamType.sans(14.5, weight: isPicked ? .bold : .medium)
+        label.textColor = isPicked ? BamTheme.ink : BamTheme.muted
+        icon.contentTintColor = isPicked ? accent : BamTheme.muted
         layer?.backgroundColor = bamCG(isPicked ? BamTheme.card : NSColor.clear)
         layer?.borderWidth = isPicked ? 1.5 : 0
         layer?.borderColor = bamCG(BamTheme.line)
@@ -524,8 +536,6 @@ struct SettingsActions {
     override var isHighlighted: Bool { didSet { layer?.opacity = isHighlighted ? 0.8 : 1 } }
 }
 
-/// A card editing one Space in place: name, color and icon. Each change
-/// applies immediately; the browser retints behind the window.
 /// One line per Space: its tile, its name and whether it is the one on screen.
 /// Clicking it hands the Space to the editor below.
 @MainActor final class SpaceListRow: NSButton {
