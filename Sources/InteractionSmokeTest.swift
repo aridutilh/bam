@@ -43,16 +43,214 @@ import WebKit
         }
         waitUntil("initial local page", condition: { self.localPageIsReady }) {
             self.initialWeb = self.controller.activeWebView
-            self.controller.changeSpace(1)
-            self.waitUntil("space change completion", condition: {
-                self.controller.session.space == 1 && !self.controller.pagingAnimator.isRunning && self.controller.pagingTarget == nil && self.localPageIsReady
-            }) {
-                guard self.check(self.controller.session.activeID == self.selectedSpaceOneTab && self.controller.activeWebView !== self.initialWeb && self.controller.activeWebView?.superview === self.controller.webHost && self.pagingIsClear, "Space change did not display the target tab") else { return }
-                self.controller.activeWebView?.evaluateJavaScript("document.title") { [weak self] value, error in
-                    guard let self else { return }
-                    guard self.check(error == nil && value as? String == "A little space", "Visible target page did not render bundled Home") else { return }
-                    self.testAddressInterrupt()
+            self.testImmediateSpaceContent { self.testInitialSpaceSwitch() }
+        }
+    }
+
+    private func testInitialSpaceSwitch() {
+        controller.changeSpace(1)
+        waitUntil("space change completion", condition: {
+            self.controller.session.space == 1 && !self.controller.pagingAnimator.isRunning && self.controller.pagingTarget == nil && self.localPageIsReady
+        }) {
+            guard self.check(self.controller.session.activeID == self.selectedSpaceOneTab && self.controller.activeWebView !== self.initialWeb && self.controller.activeWebView?.superview === self.controller.webHost && self.pagingIsClear, "Space change did not display the target tab") else { return }
+            self.controller.activeWebView?.evaluateJavaScript("document.title") { [weak self] value, error in
+                guard let self else { return }
+                guard self.check(error == nil && value as? String == "A little space", "Visible target page did not render bundled Home") else { return }
+                self.testAddressInterrupt()
+            }
+        }
+    }
+
+    private struct ContentFailure: Error, CustomStringConvertible { let description: String }
+
+    /// Warm documents make a delayed content swap observable independently of
+    /// network timing. Immediate assertions run in the same call stack as each
+    /// command, before awaiting JavaScript or the sidebar animation.
+    private func testImmediateSpaceContent(_ completion: @escaping @MainActor () -> Void) {
+        Task { @MainActor in
+            let automaticVideo = self.controller.automaticallyShowsVideo
+            self.controller.automaticallyShowsVideo = false
+            defer { self.controller.automaticallyShowsVideo = automaticVideo }
+            do {
+                @MainActor func require(_ condition: Bool, _ message: String) throws {
+                    guard condition else { throw ContentFailure(description: message) }
+                    self.checks += 1
                 }
+                @MainActor func js(_ web: WKWebView, _ source: String) async throws -> Any? {
+                    try await withCheckedThrowingContinuation { continuation in
+                        web.evaluateJavaScript(source) { value, error in
+                            if let error { continuation.resume(throwing: error) }
+                            else { continuation.resume(returning: value) }
+                        }
+                    }
+                }
+                @MainActor func wait(_ label: String, _ condition: @MainActor () -> Bool) async throws {
+                    for _ in 0..<100 {
+                        if condition() { return }
+                        try await Task.sleep(nanoseconds: 50_000_000)
+                    }
+                    throw ContentFailure(description: "Timed out: \(label)")
+                }
+                var pages: [Int: WKWebView] = [:]
+                var ids: [Int: UUID] = [:]
+                var tokens: [Int: String] = [:]
+                for space in 0...2 {
+                    self.selectSpaceImmediately(space)
+                    guard let web = self.controller.activeWebView else { throw ContentFailure(description: "No warm page in Space \(space)") }
+                    try await wait("warm Space \(space)") { !web.isLoading && web.title == "A little space" }
+                    let token = UUID().uuidString
+                    _ = try await js(web, "window.__arkSpaceToken='\(token)'; window.__arkSpaceOrigin=performance.timeOrigin; var f=document.createElement('input'); f.id='ark-space-state'; f.value='kept-\(space)'; document.body.appendChild(f); true")
+                    pages[space] = web; ids[space] = self.controller.session.activeID; tokens[space] = token
+                }
+                let warmIDs = Set(self.controller.browsers.keys)
+                @MainActor func displayed(_ space: Int, _ label: String) throws {
+                    guard let web = pages[space], let id = ids[space] else { throw ContentFailure(description: "Missing warm target") }
+                    try require(self.controller.session.space == space && self.controller.session.activeID == id
+                                    && self.controller.displayedTabID == id && self.controller.activeWebView === web,
+                                "\(label) delayed the model or live page until sidebar settling")
+                    try require(web.superview === self.controller.webHost && web.window === self.window
+                                    && !web.isHiddenOrHasHiddenAncestor && web.alphaValue > 0.99,
+                                "\(label) did not immediately attach the visible destination WKWebView")
+                    try require(self.controller.webHost.subviews.last === web
+                                    && abs(web.frame.width - self.controller.webHost.bounds.width) < 0.5
+                                    && abs(web.frame.height - self.controller.webHost.bounds.height) < 0.5,
+                                "\(label) left a stale content overlay or incorrectly sized destination")
+                }
+                @MainActor func retained(_ space: Int) async throws {
+                    guard let web = pages[space], let token = tokens[space], let id = ids[space] else { throw ContentFailure(description: "Missing warm state") }
+                    let state = try await js(web, "window.__arkSpaceToken==='\(token)' && document.getElementById('ark-space-state')?.value==='kept-\(space)' && performance.timeOrigin===window.__arkSpaceOrigin")
+                    try require(self.controller.browsers[id] === web && state as? Bool == true,
+                                "Space \(space) replaced/reloaded its WKWebView or lost live document state")
+                }
+                @MainActor func stillSettling(_ label: String) throws {
+                    if !self.reduceMotion {
+                        try require(self.controller.pagingAnimator.isRunning, "\(label) did not exercise content readiness before sidebar settling")
+                    }
+                }
+                var handoffMilliseconds: [Double] = []
+                @MainActor func warmChange(_ space: Int) {
+                    let start = ProcessInfo.processInfo.systemUptime
+                    self.controller.changeSpace(space)
+                    handoffMilliseconds.append((ProcessInfo.processInfo.systemUptime - start) * 1000)
+                }
+                self.selectSpaceImmediately(0)
+                warmChange(1)
+                try displayed(1, "Direct Space command")
+                try stillSettling("Direct Space command")
+                // Every latest request must take effect now, including returning
+                // to an earlier destination while the previous spring is active.
+                for target in [2, 0, 2, 1] {
+                    warmChange(target)
+                    try displayed(target, "Rapid Space \(target) request")
+                }
+                self.controller.nextSpace(nil)
+                try displayed(2, "Next Space shortcut")
+                self.controller.previousSpace(nil)
+                try displayed(1, "Previous Space shortcut")
+                guard let studio = self.spaceButton(named: "Studio") else { throw ContentFailure(description: "Missing native Studio Space button") }
+                studio.performClick(nil)
+                try displayed(0, "Native Space button")
+                warmChange(1)
+                warmChange(0)
+                try displayed(0, "Reversed Space command")
+                try await wait("rapid content transition settles") { self.pagingIsClear }
+                try displayed(0, "Settled reverse request")
+                for space in 0...2 { try await retained(space) }
+                try require(Set(self.controller.browsers.keys) == warmIDs, "Warm Space switches allocated extra WKWebViews")
+                let times = handoffMilliseconds.sorted()
+                print(String(format: "Space content handoff: %d warmed synchronous calls, median %.2f ms, maximum %.2f ms (host attachment, not screen presentation)", times.count, times[times.count / 2], times.last ?? 0))
+                fflush(stdout)
+
+                // A new horizontal gesture starts from the already committed
+                // Space, not the positive offset of its incoming sidebar page.
+                warmChange(1)
+                _ = self.scroll(phase: .began)
+                _ = self.scroll(-70, phase: .changed)
+                try displayed(1, "New horizontal gesture during committed sidebar settling")
+                try require(self.controller.trackingSwipe && abs(self.controller.pagingOffset + 70) < 0.001,
+                            "New horizontal gesture inherited the incoming page offset and reversed its destination")
+                _ = self.scroll(phase: .ended)
+                try displayed(2, "New horizontal gesture release")
+                try await wait("horizontal takeover settles") { self.pagingIsClear }
+                try await retained(2)
+                self.selectSpaceImmediately(0)
+
+                // A preview has no committed destination. Cancellation must not
+                // replace or reload the source, even after its spring completes.
+                _ = self.scroll(phase: .began)
+                _ = self.scroll(-35, phase: .changed)
+                try displayed(0, "Uncommitted swipe preview")
+                _ = self.scroll(phase: .cancelled)
+                try displayed(0, "Cancelled swipe preview")
+                try await wait("cancelled content preview settles") { self.pagingIsClear }
+                try displayed(0, "Settled cancelled preview")
+                try await retained(0)
+
+                _ = self.scroll(phase: .began)
+                _ = self.scroll(-70, phase: .changed)
+                try displayed(0, "Swipe before physical release")
+                _ = self.scroll(phase: .ended, momentum: true)
+                try displayed(1, "Committed swipe release")
+                try stillSettling("Committed swipe release")
+                _ = self.scroll(-120, phase: .none, momentum: true)
+                try displayed(1, "Committed swipe momentum tail")
+                try await wait("committed content swipe settles") { self.pagingIsClear }
+                try await retained(1)
+
+                // The alternate tab has never been created. Its load must start
+                // in the command call itself, not in the spring's completion.
+                self.selectSpaceImmediately(0)
+                try require(self.controller.browsers[self.alternateSpaceOneTab] == nil, "Cold Space fixture was already loaded")
+                self.controller.session.lastSelectedTabIDsBySpace?[1] = self.alternateSpaceOneTab
+                self.controller.changeSpace(1)
+                guard let cold = self.controller.browsers[self.alternateSpaceOneTab] else { throw ContentFailure(description: "Cold Space load waited for the sidebar animation") }
+                try require(self.controller.session.activeID == self.alternateSpaceOneTab
+                                && self.controller.displayedTabID == self.alternateSpaceOneTab
+                                && self.controller.activeWebView === cold && cold.superview === self.controller.webHost
+                                && self.controller.webHost.subviews.last === cold,
+                            "Cold Space destination was not attached in the command call")
+                try require(self.controller.pendingLoads.contains(self.alternateSpaceOneTab)
+                                && self.controller.requestedAddresses[self.alternateSpaceOneTab] == "orbit://newtab",
+                            "Cold Space navigation was not requested before sidebar completion")
+                try stillSettling("Cold Space navigation")
+                try await wait("cold destination renders") { !cold.isLoading && cold.title == "A little space" }
+                self.controller.select(self.selectedSpaceOneTab)
+                try displayed(1, "Selecting warm tab after cold destination")
+                try await retained(1)
+
+                // A warm split is one destination host with two existing live
+                // pages. Neither pane may wait for the sidebar spring or sit
+                // behind the previous Space's full-page snapshot.
+                guard let splitID = ids[2], let splitLeft = pages[2] else { throw ContentFailure(description: "Missing split destination") }
+                let rightTab = BrowserTab(title: "Warm split right", address: "orbit://newtab", space: 2)
+                self.controller.session.tabs.append(rightTab)
+                try require(self.controller.session.makeSplit(primary: splitID, secondary: rightTab.id), "Could not create the split content fixture")
+                self.controller.showActive()
+                guard let split = self.controller.splitCoordinators[splitID], let right = self.controller.browsers[rightTab.id] else {
+                    throw ContentFailure(description: "Split fixture did not attach its two pages")
+                }
+                try await wait("warm split right") { !right.isLoading && right.title == "A little space" }
+                _ = try await js(right, "window.__arkSplitToken='kept'; true")
+                self.selectSpaceImmediately(0)
+                self.controller.changeSpace(2)
+                try require(self.controller.session.activeID == splitID && self.controller.displayedTabID == splitID
+                                && self.controller.webHost.subviews.last === split.view && split.view.superview === self.controller.webHost,
+                            "Split destination waited for settling or remained behind a stale page overlay")
+                try require(splitLeft.isDescendant(of: split.view) && right.isDescendant(of: split.view)
+                                && splitLeft.window === self.window && right.window === self.window
+                                && !splitLeft.isHiddenOrHasHiddenAncestor && !right.isHiddenOrHasHiddenAncestor,
+                            "Split Space command did not immediately attach both existing live panes")
+                try stillSettling("Split Space command")
+                try await retained(2)
+                try require((try await js(right, "window.__arkSplitToken==='kept'")) as? Bool == true,
+                            "Switching to a split reloaded its right pane")
+                try await wait("split content transition settles") { self.pagingIsClear }
+                self.controller.unsplit(splitID)
+                self.controller.close(rightTab.id)
+                self.selectSpaceImmediately(0)
+                completion()
+            } catch {
+                self.finish(false, String(describing: error))
             }
         }
     }
@@ -66,19 +264,16 @@ import WebKit
     }
 
     private func beginInterruptibleChange(_ action: @escaping () -> Void) {
+        selectSpaceImmediately(1)
+        controller.changeSpace(2)
         if reduceMotion {
-            // With Reduce Motion, real animation commits synchronously. Verify
-            // the same cancellation entry points against pending preview state,
-            // while reporting that timed-animation interruption was not tested.
+            // Selection is already committed; there is no timed animation to
+            // interrupt when the system requests Reduce Motion.
             skippedInterruptions += 1
-            controller.sidebar.beginPaging(tabs: controller.sidebarItems(for: 2), space: 2, direction: 1)
-            controller.pagingTarget = 2; controller.pagingOffset = -40
-            controller.sidebar.setPagingOffset(-40)
             action()
         } else {
-            controller.changeSpace(2)
             after(0.025) {
-                guard self.check(self.controller.session.space == 1 && self.controller.pagingAnimator.isRunning, "Expected an in-flight Space transition") else { return }
+                guard self.check(self.controller.session.space == 2 && self.controller.pagingAnimator.isRunning, "Expected committed content with an in-flight sidebar transition") else { return }
                 action()
             }
         }
@@ -87,9 +282,10 @@ import WebKit
     private func testAddressInterrupt() {
         beginInterruptibleChange {
             self.controller.openAddress(newTab: false, empty: true)
-            guard self.check(self.pagingIsClear && self.controller.addressOverlay != nil && self.controller.session.space == 1, "Opening address did not cancel paging") else { return }
+            guard self.check(self.pagingIsClear && self.controller.addressOverlay != nil && self.controller.session.space == 2, "Opening address did not cancel sidebar paging while retaining the committed Space") else { return }
+            let committedID = self.controller.session.activeID
             self.after(0.8) {
-                guard self.check(self.controller.session.space == 1 && self.controller.session.activeID == self.selectedSpaceOneTab && self.pagingIsClear, "Cancelled address transition committed later") else { return }
+                guard self.check(self.controller.session.space == 2 && self.controller.session.activeID == committedID && self.pagingIsClear, "Cancelling sidebar motion rolled back or later replaced committed content") else { return }
                 self.controller.dismissAddress()
                 self.testSelectionInterrupt()
             }
@@ -112,9 +308,9 @@ import WebKit
         beginInterruptibleChange {
             self.controller.newTab(nil)
             let newID = self.controller.session.activeID
-            guard self.check(self.pagingIsClear && self.controller.session.space == 1 && self.controller.session.tabs.count == oldCount && self.controller.addressOverlay != nil, "New tab palette must cancel paging without creating a tab") else { return }
+            guard self.check(self.pagingIsClear && self.controller.session.space == 2 && self.controller.session.tabs.count == oldCount && self.controller.addressOverlay != nil, "New tab palette must cancel paging, retain the committed Space, and defer tab creation") else { return }
             self.after(0.8) {
-                guard self.check(self.controller.session.space == 1 && self.controller.session.activeID == newID && self.pagingIsClear && self.controller.activeWebView?.superview === self.controller.webHost, "Cancelled new-tab transition committed later") else { return }
+                guard self.check(self.controller.session.space == 2 && self.controller.session.activeID == newID && self.pagingIsClear && self.controller.activeWebView?.superview === self.controller.webHost, "New-tab palette cancellation replaced committed content later") else { return }
                 self.controller.dismissAddress()
                 guard self.check(self.controller.session.tabs.count == oldCount, "Cancelling New Tab created a blank tab") else { return }
                 self.testRapidSidebarToggles()
@@ -252,8 +448,8 @@ import WebKit
             return
         }
         after(0.04) {
-            guard self.check(self.controller.pagingAnimator.isRunning && self.controller.pagingOffset < 0,
-                             "Expected a settling Space before the vertical-touch regression") else { return }
+            guard self.check(self.controller.pagingAnimator.isRunning && self.controller.pagingOffset > 0,
+                             "Expected the incoming sidebar to settle after the content committed") else { return }
             let offset = self.controller.pagingOffset
             let target = self.controller.pagingTarget
             let touch = self.scroll(phase: .mayBegin)
@@ -601,7 +797,7 @@ import WebKit
                        ("bottom dock", NSPoint(x: 50, y: controller.sidebar.bounds.height - 20))]
         guard index < regions.count else {
             let note = skippedInterruptions == 0 ? "" : "; \(skippedInterruptions) timed interruption cases used preview cancellation or synchronous selection because Reduce Motion is enabled"
-            finish(true, "\(checks) checks: rendered Space change, address/selection/new-tab cancellation, rapid sidebar toggles, resize/collapse/reset, continuous toolbar geometry, capture/end/momentum, unphased fallback, interruption/queued commands, native Space buttons, NSEvent adapter phase/window/flipped-coordinate/noisy-intent coverage, vertical-only list widths/scrolling, retained scroll position across Spaces, native receiver takeover/deduplication, and vertical/mouse-wheel forwarding\(note)")
+            finish(true, "\(checks) checks: immediate warm/cold Space content, retained live document state, rapid/reversed content commands, committed gesture release and preview cancellation, rendered Space change, address/selection/new-tab cancellation, rapid sidebar toggles, resize/collapse/reset, continuous toolbar geometry, capture/end/momentum, unphased fallback, interruption/queued commands, native Space buttons, NSEvent adapter phase/window/flipped-coordinate/noisy-intent coverage, vertical-only list widths/scrolling, retained scroll position across Spaces, native receiver takeover/deduplication, and vertical/mouse-wheel forwarding\(note)")
             return
         }
         selectSpaceImmediately(0)

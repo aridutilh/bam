@@ -27,10 +27,6 @@ import QuartzCore
     override var isFlipped: Bool { true }
 }
 
-@MainActor private final class SpaceTransitionImage: NSImageView {
-    override func hitTest(_ point: NSPoint) -> NSView? { nil }
-}
-
 @MainActor final class PaletteField: NSTextField {
     var escape: (() -> Void)?
     override func cancelOperation(_ sender: Any?) { escape?() }
@@ -79,7 +75,6 @@ import QuartzCore
     var pagingOffset: CGFloat = 0
     var pagingTarget: Int?
     private var pagingCommit: Int?
-    private var queuedSpace: Int?
     private var capturedSpaceMomentum = false
     private var ignoreSpaceGestureUntilEnd = false
     private var rejectedSpaceGesture = false
@@ -89,11 +84,6 @@ import QuartzCore
     // A packet may visit the monitor, the tab list, and the sidebar responder.
     // Retain a small identity cache so nested dispatch cannot apply it twice.
     private var recentSpaceScrollEvents: [(event: NSEvent, consumed: Bool)] = []
-    private var spaceSnapshotRequest: UUID?
-    private var spaceSnapshot: NSImage?
-    private var spaceSnapshotSource: UUID?
-    private var contentTransitionOverlay: NSImageView?
-    private let contentTransitionAnimator = CubicAnimator()
     let sessionURL: URL
     var session: BrowserSession
     var displayedWidth: CGFloat
@@ -124,7 +114,6 @@ import QuartzCore
     override func loadView() {
         view = root; root.wantsLayer = true; root.layer?.masksToBounds = true
         animator.animationView = root; pagingAnimator.animationView = root
-        contentTransitionAnimator.animationView = root
         root.onLayout = { [weak self] in self?.layoutBrowser() }
         [sidebar, card, handle].forEach(root.addSubview)
         card.wantsLayer = true; card.layer?.backgroundColor = NSColor(white: 0.10, alpha: 1).cgColor
@@ -279,9 +268,6 @@ import QuartzCore
         let focusWasWindow = view.window?.firstResponder === view.window
         displayedTabID = tab.id; displayedMemberIDs = arriving
         if switched, let source = pictureInPicture.referencedTabID, arriving.contains(source) { pictureInPicture.restore() }
-        if arriving.contains(where: { id in browsers[id].map { pictureInPicture.isRestoring($0) } ?? false }) {
-            clearSpaceContentTransition()
-        }
         // Every queued page keeps its original window attachment until discovery
         // completes, including single tabs queued behind another pending probe.
         if automaticallyShowsVideo {
@@ -400,7 +386,7 @@ import QuartzCore
         root.space = session.space
         let tabs = session.visibleTabs.map { sidebarItem($0, activeID: session.activeID) }
         sidebar.update(tabs: tabs, space: session.space, canGoBack: activeWebView?.canGoBack ?? false, canGoForward: activeWebView?.canGoForward ?? false, isLoading: activeWebView?.isLoading ?? false)
-        if let target = pagingTarget {
+        if let target = pagingTarget, target != session.space {
             sidebar.beginPaging(tabs: sidebarItems(for: target), space: target, direction: target > session.space ? 1 : -1)
         }
         if let tab = session.active {
@@ -455,10 +441,9 @@ import QuartzCore
         unphasedScrollEnd?.cancel(); unphasedScrollEnd = nil
         quarantineActiveSpaceGesture()
         pagingAnimator.stop(); swipe.reset(); trackingSwipe = false
-        capturedSpaceMomentum = false; queuedSpace = nil; pagingCommit = nil
+        capturedSpaceMomentum = false; pagingCommit = nil
         pagingOffset = 0; pagingTarget = nil; sidebar.endPaging()
         root.previewSpace = nil; root.previewProgress = 0
-        clearSpaceContentTransition()
     }
     func changeSpace(_ space: Int) {
         guard (0...2).contains(space) else { return }
@@ -466,16 +451,22 @@ import QuartzCore
         quarantineActiveSpaceGesture()
         swipe.reset(); trackingSwipe = false
         unphasedScrollEnd?.cancel(); unphasedScrollEnd = nil
-        if pagingAnimator.isRunning {
-            if space == pagingCommit { queuedSpace = nil; return }
-            if space == session.space || space == pagingTarget {
-                queuedSpace = nil
-                finishPaging(commit: space == session.space ? nil : space)
-            } else { queuedSpace = space }
-            return
+        var velocity = pagingAnimator.isRunning ? pagingAnimator.velocity : 0
+        if pagingAnimator.isRunning, pagingCommit != nil {
+            if space == session.space { return }
+            // Reverse the existing pair continuously. A third Space has no
+            // displayed page in this pair, so finish its visuals before retargeting.
+            if !sidebar.canReversePaging(to: space) {
+                sidebar.endPaging(); pagingOffset = 0; velocity = 0
+            }
+        } else if let target = pagingTarget, target != space, space != session.space {
+            // Replacing an undecided preview must not remove the only page
+            // filling the exposed edge while its source is still displaced.
+            sidebar.endPaging(); pagingOffset = 0; velocity = 0
         }
+        pagingAnimator.stop(); pagingCommit = nil
         if space == session.space {
-            if pagingOffset != 0 { finishPaging(commit: nil) }
+            if pagingOffset != 0 || sidebar.isPaging { finishPaging(commit: nil, initialVelocity: velocity) }
             return
         }
         swipe.reset(); trackingSwipe = false
@@ -483,8 +474,7 @@ import QuartzCore
         let direction: CGFloat = space > session.space ? 1 : -1
         sidebar.beginPaging(tabs: sidebarItems(for: space), space: space, direction: direction)
         pagingTarget = space
-        prepareSpaceContentTransition()
-        finishPaging(commit: space)
+        finishPaging(commit: space, initialVelocity: velocity)
     }
     func handleSpaceScroll(_ event: NSEvent, source: SpaceScrollSource = .monitor) -> NSEvent? {
         if let previous = recentSpaceScrollEvents.last(where: { $0.event === event }) {
@@ -615,7 +605,9 @@ import QuartzCore
         let before = SpaceSwipeDiagnostics.shared.isRecording ? swipe.diagnostics : nil
         let result = swipe.handle(deltaX: deltaX, deltaY: deltaY, phase: phase, isMomentum: isMomentum,
                                   timestamp: timestamp, space: session.space, width: sidebar.bounds.width,
-                                  initialOffset: pagingOffset)
+                                  // A committed page's remaining entrance offset is
+                                  // visual only, not travel toward the previous Space.
+                                  initialOffset: pagingCommit == nil ? pagingOffset : 0)
         SpaceSwipeDiagnostics.shared.record(["kind": "result", "phase": String(describing: phase),
             "momentum": isMomentum, "didLock": result.didLock, "consumed": result.shouldConsume,
             "finished": result.finished, "target": result.committedSpace ?? -1,
@@ -625,8 +617,10 @@ import QuartzCore
             "totalY": (result.finished ? before : swipe.diagnostics)?.totalY ?? 0,
             "velocityX": (result.finished ? before : swipe.diagnostics)?.velocityX ?? 0])
         if result.didLock {
-            pagingAnimator.stop(); pagingCommit = nil; queuedSpace = nil
-            prepareSpaceContentTransition()
+            if pagingCommit != nil {
+                sidebar.endPaging(); pagingOffset = 0; pagingTarget = nil
+            }
+            pagingAnimator.stop(); pagingCommit = nil
         }
         if let offset = result.previewOffset {
             pagingOffset = offset
@@ -652,69 +646,33 @@ import QuartzCore
         SpaceSwipeDiagnostics.shared.record(["kind": "settle", "space": session.space,
             "target": commit ?? -1, "offset": pagingOffset, "releaseVelocity": initialVelocity ?? 0])
         pagingCommit = commit
-        let end: CGFloat = commit.map { $0 > session.space ? -sidebar.bounds.width : sidebar.bounds.width } ?? 0
-        pagingAnimator.animate(from: pagingOffset, to: end, response: 0.30, dampingRatio: 0.99,
+        if let commit {
+            // Navigation is not an animation completion. Publish the selection
+            // and attach the live destination before the next display frame.
+            pagingOffset = sidebar.commitPaging(to: commit, preservingOffset: true)
+            session.changeSpace(commit)
+            showActive(); scheduleSave()
+            SpaceSwipeDiagnostics.shared.record(["kind": "commit", "space": session.space,
+                "target": commit, "offset": pagingOffset])
+        }
+        pagingAnimator.animate(from: pagingOffset, to: 0, response: 0.30, dampingRatio: 0.99,
             initialVelocity: initialVelocity, update: { [weak self] offset in
             guard let self else { return }
             self.pagingOffset = offset; self.sidebar.setPagingOffset(offset)
-            self.root.previewSpace = self.pagingTarget
-            self.root.previewProgress = abs(offset) / max(1, self.sidebar.bounds.width)
+            if commit == nil {
+                self.root.previewSpace = self.pagingTarget
+                self.root.previewProgress = abs(offset) / max(1, self.sidebar.bounds.width)
+            }
         }, completion: { [weak self] in
             guard let self else { return }
-            SpaceSwipeDiagnostics.shared.record(["kind": "commit", "space": self.session.space,
-                "target": commit ?? -1, "offset": self.pagingOffset])
-            let nextRequest = self.queuedSpace
-            self.queuedSpace = nil; self.pagingCommit = nil
-            if let commit {
-                let image = self.spaceSnapshotSource == self.session.activeID ? self.spaceSnapshot : nil
-                self.sidebar.commitPaging(to: commit)
-                // Clear target before refresh so it cannot recreate the promoted page.
-                self.pagingTarget = nil; self.pagingOffset = 0
-                self.session.changeSpace(commit); self.showActive(); self.save()
-                self.revealSpaceContent(over: image)
-            } else { self.sidebar.endPaging(); self.clearSpaceContentTransition() }
+            self.pagingCommit = nil
+            self.sidebar.endPaging()
             self.pagingOffset = 0; self.pagingTarget = nil
             self.root.previewSpace = nil; self.root.previewProgress = 0
-            if let nextRequest, nextRequest != self.session.space { self.changeSpace(nextRequest) }
         })
     }
-    private func prepareSpaceContentTransition() {
-        guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion,
-              spaceSnapshotSource != session.activeID, session.split(for: session.activeID) == nil,
-              let web = activeWebView, web.superview === webHost, web.bounds.width > 0 else { return }
-        clearSpaceContentTransition()
-        let request = UUID(), source = session.activeID
-        spaceSnapshotRequest = request; spaceSnapshotSource = source
-        let configuration = WKSnapshotConfiguration(); configuration.rect = web.bounds
-        web.takeSnapshot(with: configuration) { [weak self] image, _ in
-            guard let self, self.spaceSnapshotRequest == request, self.session.activeID == source else { return }
-            self.spaceSnapshot = image
-        }
-    }
-    private func revealSpaceContent(over image: NSImage?) {
-        clearSpaceContentTransition()
-        // PiP owns the visible handoff until the restored page has rendered.
-        // A second fade of the previous Space would obscure that destination.
-        guard !visibleMemberIDs.contains(where: { id in browsers[id].map { pictureInPicture.isRestoring($0) } ?? false }) else { return }
-        guard let image, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { return }
-        let overlay = SpaceTransitionImage(frame: webHost.bounds)
-        overlay.image = image; overlay.imageScaling = .scaleAxesIndependently
-        overlay.autoresizingMask = [.width, .height]; overlay.wantsLayer = true
-        overlay.setAccessibilityElement(false)
-        webHost.addSubview(overlay); contentTransitionOverlay = overlay
-        contentTransitionAnimator.animate(from: 1, to: 0, duration: 0.16,
-            controlPoints: (0.25, 0.1, 0.25, 1), update: { [weak overlay] alpha in overlay?.alphaValue = alpha },
-            completion: { [weak self, weak overlay] in
-                overlay?.removeFromSuperview()
-                if self?.contentTransitionOverlay === overlay { self?.contentTransitionOverlay = nil }
-            })
-    }
-    private func clearSpaceContentTransition() {
-        spaceSnapshotRequest = nil; spaceSnapshot = nil; spaceSnapshotSource = nil
-        contentTransitionAnimator.stop(); contentTransitionOverlay?.removeFromSuperview(); contentTransitionOverlay = nil
-    }
-    @objc func nextSpace(_ sender: Any?) { changeSpace(min(2, (queuedSpace ?? pagingCommit ?? session.space) + 1)) }
-    @objc func previousSpace(_ sender: Any?) { changeSpace(max(0, (queuedSpace ?? pagingCommit ?? session.space) - 1)) }
+    @objc func nextSpace(_ sender: Any?) { changeSpace(min(2, session.space + 1)) }
+    @objc func previousSpace(_ sender: Any?) { changeSpace(max(0, session.space - 1)) }
     func returnToVideoTab(_ id: UUID) {
         guard !isShuttingDown, session.tabs.contains(where: { $0.id == id }), let window = view.window else { return }
         let primaryID = session.split(for: id)?.primaryID ?? id

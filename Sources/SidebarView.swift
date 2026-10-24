@@ -50,6 +50,8 @@ struct SidebarTabItem: Equatable {
     private let spaces = ["Studio", "Life", "Explore"].enumerated().map { ArkSpaceButton(index: $0.offset, name: $0.element) }
     private let clip = ArkFlippedView()
     private var page = SidebarPage()
+    private var departing: SidebarPage?
+    private var departingSpace: Int?
     private var next: SidebarPage?
     private var nextSpace: Int?
     private var nextItems: [SidebarTabItem] = []
@@ -58,7 +60,8 @@ struct SidebarTabItem: Equatable {
     private var offset: CGFloat = 0
     private var selectedSpace = 0
     private var items: [SidebarTabItem] = []
-    var isPaging: Bool { next != nil }
+    var isPaging: Bool { next != nil || departing != nil }
+    func canReversePaging(to space: Int) -> Bool { departingSpace == space }
 
     override init(frame: NSRect) {
         super.init(frame: frame); wantsLayer = true
@@ -129,6 +132,7 @@ struct SidebarTabItem: Equatable {
             if nextItems != tabs { nextItems = tabs; next.configure(tabs, space: space) }
             return
         }
+        departing?.removeFromSuperview(); departing = nil; departingSpace = nil
         next?.removeFromSuperview()
         let incoming = pageForSpace(space)
         incoming.configure(tabs, space: space)
@@ -143,6 +147,7 @@ struct SidebarTabItem: Equatable {
         // second implicit animation, and origin-only moves need no row relayout.
         CATransaction.begin(); CATransaction.setDisableActions(true)
         position(page, at: value)
+        if let departing { position(departing, at: value - clip.bounds.width * pageDirection) }
         if let next { position(next, at: value + clip.bounds.width * pageDirection) }
         CATransaction.commit()
     }
@@ -152,18 +157,25 @@ struct SidebarTabItem: Equatable {
         let origin = NSPoint(x: x, y: 0)
         if page.frame.origin != origin { page.setFrameOrigin(origin) }
     }
-    /// Commit the existing incoming page, preserving its scroll position and rows.
-    func commitPaging(to space: Int) {
-        guard let incoming = next, nextSpace == space else { return }
-        page.removeFromSuperview()
+    /// Select immediately, retaining the outgoing page only for visual settling.
+    /// Rebase to the selected page's coordinates so a reversal can reuse both
+    /// live sidebar pages at their exact current positions.
+    @discardableResult func commitPaging(to space: Int, preservingOffset: Bool = false) -> CGFloat {
+        guard let incoming = next, nextSpace == space else { return offset }
+        let previous = page, previousSpace = selectedSpace
+        let incomingOffset = offset + clip.bounds.width * pageDirection
         page = incoming; items = nextItems; selectedSpace = space
         next = nil; nextSpace = nil; nextItems = []
-        setPagingOffset(0)
+        if preservingOffset { departing = previous; departingSpace = previousSpace }
+        else { previous.removeFromSuperview() }
+        setPagingOffset(preservingOffset ? incomingOffset : 0)
         for button in spaces { button.selected = button.index == space }
         library.playSelection()
+        return offset
     }
     func endPaging() {
         next?.removeFromSuperview(); next = nil; nextSpace = nil; nextItems = []
+        departing?.removeFromSuperview(); departing = nil; departingSpace = nil
         setPagingOffset(0)
     }
     override func layout() {
