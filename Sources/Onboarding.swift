@@ -52,8 +52,9 @@ import QuartzCore
         window.titlebarAppearsTransparent = true
         window.standardWindowButton(.zoomButton)?.isHidden = true
         window.isMovable = false
-        window.appearance = NSAppearance(named: .darkAqua)
-        window.backgroundColor = NSColor(white: 0.10, alpha: 1)
+        // Follows the system like the website; the browser behind stays dark.
+        window.appearance = nil
+        window.backgroundColor = BamTheme.bg
         window.isReleasedWhenClosed = false
         window.animationBehavior = .none
         window.collectionBehavior = [.fullScreenAuxiliary, .transient]
@@ -171,10 +172,9 @@ import QuartzCore
 
         backButton.isHidden = model.isFirstStep || model.isLastStep
         skipButton.isHidden = model.isLastStep
-        dots.configure(count: model.steps.count, current: model.stepIndex,
-                       accent: ArkPalette.spaceColor(model.colorIndex))
+        dots.configure(count: model.steps.count, current: model.stepIndex, accent: BamTheme.red)
         overlay.tint(colorIndex: model.colorIndex,
-                     glow: model.step == .hello || model.step == .finale ? 1 : 0.35,
+                     glow: model.step == .color || model.step == .finale ? 1 : 0.45,
                      animated: previous != nil)
 
         let forward = previous.map { $0.rawValue < model.step.rawValue } ?? true
@@ -320,22 +320,37 @@ import QuartzCore
 
     private func buildHello() -> NSView {
         let icon = NSImageView()
-        icon.image = NSImage(named: "BamIcon")
+        icon.image = SettingsController.appIcon
         icon.imageScaling = .scaleProportionallyUpOrDown
         icon.translatesAutoresizingMaskIntoConstraints = false
-        icon.widthAnchor.constraint(equalToConstant: 128).isActive = true
-        icon.heightAnchor.constraint(equalToConstant: 128).isActive = true
         icon.wantsLayer = true
-        icon.layer?.shadowColor = NSColor.black.cgColor
-        icon.layer?.shadowOpacity = 0.3; icon.layer?.shadowRadius = 18
-        icon.layer?.shadowOffset = CGSize(width: 0, height: -6)
+        icon.layer?.shadowColor = BamTheme.shadow.cgColor
+        icon.layer?.shadowOpacity = 0.35; icon.layer?.shadowRadius = 22
+        icon.layer?.shadowOffset = CGSize(width: 0, height: -10)
         icon.setAccessibilityElement(true); icon.setAccessibilityRole(.image)
         icon.setAccessibilityLabel("Bam burst sticker")
-        let title = OnboardingText.title("Bam.", size: 72)
-        let subtitle = OnboardingText.subtitle("A little browser with a lot of pop.\nLet’s set yours up — it takes about a minute.")
+        // The site's hero tile: the icon with a "NEW!" sticker over its corner.
+        let tile = NSView(); tile.translatesAutoresizingMaskIntoConstraints = false
+        let sticker = BamSticker("NEW!", diameter: 64)
+        tile.addSubview(icon); tile.addSubview(sticker)
+        NSLayoutConstraint.activate([
+            tile.widthAnchor.constraint(equalToConstant: 168), tile.heightAnchor.constraint(equalToConstant: 150),
+            icon.widthAnchor.constraint(equalToConstant: 136), icon.heightAnchor.constraint(equalToConstant: 136),
+            icon.leadingAnchor.constraint(equalTo: tile.leadingAnchor), icon.bottomAnchor.constraint(equalTo: tile.bottomAnchor),
+            sticker.trailingAnchor.constraint(equalTo: tile.trailingAnchor), sticker.topAnchor.constraint(equalTo: tile.topAnchor)
+        ])
+        // Two lines like the site's hero; a wrapping label so nothing truncates.
+        let title = NSTextField(wrappingLabelWithString: "")
+        let headline = NSMutableParagraphStyle(); headline.alignment = .center; headline.lineHeightMultiple = 0.92
+        let words = NSMutableAttributedString(string: "The browser\nthat goes ", attributes: [.font: OnboardingText.display(60), .foregroundColor: BamTheme.ink, .paragraphStyle: headline])
+        words.append(NSAttributedString(string: "Bam.", attributes: [.font: OnboardingText.display(60), .foregroundColor: BamTheme.red, .paragraphStyle: headline]))
+        title.attributedStringValue = words
+        title.alignment = .center; title.isSelectable = false
+        title.setAccessibilityLabel("The browser that goes Bam.")
+        let subtitle = OnboardingText.subtitle("Native, fast, built on your Mac’s own WebKit.\nLet’s set yours up — it takes about a minute.")
         let begin = OnboardingPillButton(title: "Begin", prominent: true)
         begin.target = self; begin.action = #selector(advance)
-        return column(spacing: 20, [icon, title, subtitle, OnboardingSpacer(height: 4), begin])
+        return column(spacing: 22, [tile, title, subtitle, OnboardingSpacer(height: 4), begin])
     }
 
     private func stageHelloReveal(_ content: NSView) {
@@ -370,9 +385,10 @@ import QuartzCore
             swatches.append(swatch)
             row.addArrangedSubview(swatch)
         }
-        let name = OnboardingText.subtitle(BrowserSpace.colorNames[min(BrowserSpace.colorNames.count - 1, model.colorIndex)])
-        name.font = .systemFont(ofSize: 14, weight: .semibold)
-        name.textColor = ArkPalette.spaceColor(model.colorIndex)
+        let name = NSTextField(labelWithString: BrowserSpace.colorNames[min(BrowserSpace.colorNames.count - 1, model.colorIndex)])
+        name.font = BamType.sans(15, weight: .bold)
+        name.alignment = .center
+        name.textColor = BamTheme.ink
         colorNameLabel = name
         let next = OnboardingPillButton(title: "Keep going", prominent: true)
         next.target = self; next.action = #selector(advance)
@@ -386,7 +402,6 @@ import QuartzCore
         model.colorIndex = index
         for swatch in swatches { swatch.isPicked = swatch.colorIndex == index }
         colorNameLabel?.stringValue = BrowserSpace.colorNames[min(BrowserSpace.colorNames.count - 1, index)]
-        colorNameLabel?.textColor = ArkPalette.spaceColor(index)
         dots.configure(count: model.steps.count, current: model.stepIndex, accent: ArkPalette.spaceColor(index))
         overlay.tint(colorIndex: index, glow: 0.35, animated: !Self.reduceMotion)
     }
@@ -396,8 +411,8 @@ import QuartzCore
         let subtitle = OnboardingText.subtitle("Work, play, plotting — what happens here?")
         let field = OnboardingNameField(string: model.spaceName)
         field.placeholderAttributedString = NSAttributedString(
-            string: "Studio", attributes: [.foregroundColor: ArkPalette.secondary.withAlphaComponent(0.5),
-                                           .font: OnboardingText.serif(34, weight: .semibold),
+            string: "Studio", attributes: [.foregroundColor: BamTheme.muted.withAlphaComponent(0.5),
+                                           .font: OnboardingText.display(32, weight: .bold),
                                            .paragraphStyle: OnboardingText.centered])
         field.delegate = self
         field.escape = { [weak self] in self?.goBack() }
@@ -500,7 +515,10 @@ import QuartzCore
     }
 
     private func buildFinale() -> NSView {
-        let title = OnboardingText.title("That’s it. Bam.", size: 56)
+        let title = OnboardingText.title("That’s it. Bam.", size: 60)
+        let words = NSMutableAttributedString(string: "That’s it. ", attributes: [.font: OnboardingText.display(60), .foregroundColor: BamTheme.ink])
+        words.append(NSAttributedString(string: "Bam.", attributes: [.font: OnboardingText.display(60), .foregroundColor: BamTheme.red]))
+        title.attributedStringValue = words
         let names = BrowserSpace.colorNames
         let dress = model.colorIndex == BrowserSpace.prismColorIndex ? "every color at once"
             : model.colorIndex == BrowserSpace.clearColorIndex ? "glass"
@@ -577,28 +595,24 @@ extension OnboardingController: NSWindowDelegate {
 
 // MARK: - Backdrop
 
-/// Owns the gradient wash, the soft glow and confetti, and swallows every
-/// event so the live browser underneath stays untouched.
+/// The stage: Bam's page paper (pink, plum in dark mode) with a soft glow in
+/// the chosen Space colour, two faint bursts in the corners, confetti on the
+/// finale. It swallows every event so the live browser underneath stays
+/// untouched.
 @MainActor final class OnboardingBackdropView: NSView {
     var onKey: ((NSEvent) -> Bool)?
-    private let wash = CAGradientLayer()
     private let glow = CAGradientLayer()
     private var prism: CAGradientLayer?
     private var confetti: CAEmitterLayer?
-
-    /// The stage wears CanvasView's own per-space gradients, so the chosen
-    /// color previews exactly what the browser behind will wear.
-    static var backgrounds: [[NSColor]] { CanvasView.palettes }
+    private var accentIndex = 0
+    private var paperAlpha: CGFloat = 1
 
     override init(frame: NSRect) {
         super.init(frame: frame)
         wantsLayer = true
-        wash.startPoint = CGPoint(x: 0.1, y: 1)
-        wash.endPoint = CGPoint(x: 0.9, y: 0)
         glow.type = .radial
-        glow.startPoint = CGPoint(x: 0.5, y: 0.42)
-        glow.endPoint = CGPoint(x: 1.1, y: 1.1)
-        layer?.addSublayer(wash)
+        glow.startPoint = CGPoint(x: 0.5, y: 0.46)
+        glow.endPoint = CGPoint(x: 1.05, y: 1.05)
         layer?.addSublayer(glow)
     }
     required init?(coder: NSCoder) { fatalError("Onboarding is created programmatically") }
@@ -606,7 +620,6 @@ extension OnboardingController: NSWindowDelegate {
     override func layout() {
         super.layout()
         CATransaction.begin(); CATransaction.setDisableActions(true)
-        wash.frame = bounds
         glow.frame = bounds
         prism?.frame = bounds
         confetti?.frame = bounds
@@ -615,45 +628,54 @@ extension OnboardingController: NSWindowDelegate {
         CATransaction.commit()
     }
 
+    override func draw(_ dirtyRect: NSRect) {
+        BamTheme.bg.withAlphaComponent(paperAlpha).setFill(); bounds.fill()
+        // Two big, quiet bursts peeking in from the corners, like the site's
+        // sticker pile; the red wash keeps them in the paper rather than on it.
+        let dark = effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        BamTheme.red.withAlphaComponent(dark ? 0.16 : 0.09).setFill()
+        let big = min(bounds.width, bounds.height) * 0.62
+        BamSticker.burst(in: NSRect(x: -big * 0.42, y: -big * 0.38, width: big, height: big)).fill()
+        BamSticker.burst(in: NSRect(x: bounds.width - big * 0.5, y: bounds.height - big * 0.55, width: big * 0.8, height: big * 0.8)).fill()
+    }
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance(); needsDisplay = true
+    }
+
     func tint(colorIndex: Int, glow glowStrength: CGFloat, animated: Bool) {
-        let pair = Self.backgrounds[min(Self.backgrounds.count - 1, max(0, colorIndex))]
+        accentIndex = colorIndex
         let accent = ArkPalette.spaceColor(colorIndex)
-        let washColors = pair.map(\.cgColor)
-        let glowColors = [accent.withAlphaComponent(0.26 * glowStrength).cgColor,
+        let glowColors = [accent.withAlphaComponent(0.30 * glowStrength).cgColor,
                           accent.withAlphaComponent(0).cgColor]
         if animated {
-            for (layer, key, from, to) in [(wash, "colors", wash.colors, washColors as [Any]),
-                                           (glow, "colors", glow.colors, glowColors as [Any])] {
-                let fade = CABasicAnimation(keyPath: key)
-                fade.fromValue = from; fade.toValue = to; fade.duration = 0.5
-                fade.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-                layer.add(fade, forKey: "tint")
-            }
+            let fade = CABasicAnimation(keyPath: "colors")
+            fade.fromValue = glow.colors; fade.toValue = glowColors; fade.duration = 0.5
+            fade.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            glow.add(fade, forKey: "tint")
         }
         CATransaction.begin(); CATransaction.setDisableActions(true)
-        wash.colors = washColors
         glow.colors = glowColors
-        // Prism previews its live spectrum; Clear lets the stage window go
-        // see-through so the desktop reads behind a faint wash.
+        // Prism previews its live spectrum, softly, over the paper; Clear lets
+        // the stage window go see-through so the desktop reads behind it.
         let prismActive = colorIndex == BrowserSpace.prismColorIndex
         if prismActive, prism == nil {
             let spectrum = PrismBackground.makeLayer()
             spectrum.frame = bounds
-            layer?.insertSublayer(spectrum, above: wash)
+            spectrum.opacity = 0.35
+            layer?.insertSublayer(spectrum, below: glow)
             prism = spectrum
         } else if !prismActive, let prism {
             // The spectrum's infinite animation stops when deselected.
             prism.removeFromSuperlayer()
             self.prism = nil
         }
-        // The stage has no glass layer, so Clear keeps a stronger wash than the
-        // browser does: text must stay readable over a light wallpaper.
-        let clear = colorIndex == BrowserSpace.clearColorIndex
-        wash.opacity = clear ? 0.55 : 1
         CATransaction.commit()
+        let clear = colorIndex == BrowserSpace.clearColorIndex
+        paperAlpha = clear ? 0.72 : 1
+        needsDisplay = true
         if let window {
             window.isOpaque = !clear
-            window.backgroundColor = clear ? .clear : NSColor(white: 0.10, alpha: 1)
+            window.backgroundColor = clear ? .clear : BamTheme.bg
         }
     }
 
@@ -665,18 +687,26 @@ extension OnboardingController: NSWindowDelegate {
         emitter.emitterPosition = CGPoint(x: bounds.midX, y: bounds.height + 8)
         emitter.emitterSize = CGSize(width: bounds.width * 0.7, height: 1)
         emitter.birthRate = 1
+        // Sticker colours first, then the chosen Space colour: little bursts
+        // and paper scraps.
+        var palette: [(NSColor, Bool, Float)] = [
+            (BamTheme.red, true, 22), (BamTheme.redDeep, false, 10),
+            (NSColor(srgbRed: 0.98, green: 0.88, blue: 0.91, alpha: 1), false, 12),
+            (.white, true, 8)
+        ]
+        palette.append((ArkPalette.spaceColor(accentIndex), true, 16))
         var cells: [CAEmitterCell] = []
-        for (index, color) in ArkPalette.spaceColors.enumerated() {
+        for (color, burst, rate) in palette {
             let cell = CAEmitterCell()
-            cell.contents = Self.confettiImage(color: color)
-            cell.birthRate = index == accentIndex ? 26 : 10
+            cell.contents = Self.confettiImage(color: color, burst: burst)
+            cell.birthRate = rate
             cell.lifetime = 4.2
             cell.velocity = 540; cell.velocityRange = 190
             cell.emissionLongitude = -.pi / 2
             cell.emissionRange = .pi / 5
             cell.yAcceleration = 420
             cell.spin = 3.4; cell.spinRange = 5
-            cell.scale = 0.6; cell.scaleRange = 0.35
+            cell.scale = burst ? 0.55 : 0.6; cell.scaleRange = 0.35
             cell.alphaSpeed = -0.28
             cells.append(cell)
         }
@@ -692,11 +722,12 @@ extension OnboardingController: NSWindowDelegate {
         }
     }
 
-    private static func confettiImage(color: NSColor) -> CGImage? {
-        let size = NSSize(width: 12, height: 8)
+    private static func confettiImage(color: NSColor, burst: Bool) -> CGImage? {
+        let size = burst ? NSSize(width: 18, height: 18) : NSSize(width: 12, height: 8)
         let image = NSImage(size: size, flipped: false) { rect in
             color.setFill()
-            NSBezierPath(roundedRect: rect, xRadius: 2, yRadius: 2).fill()
+            if burst { BamSticker.burst(in: rect).fill() }
+            else { NSBezierPath(roundedRect: rect, xRadius: 2, yRadius: 2).fill() }
             return true
         }
         return image.cgImage(forProposedRect: nil, context: nil, hints: nil)
@@ -716,30 +747,27 @@ extension OnboardingController: NSWindowDelegate {
 
 // MARK: - Typography
 
+/// The site's voice: Bricolage Grotesque headlines, Instrument Sans body.
 @MainActor enum OnboardingText {
     static let centered: NSParagraphStyle = {
         let style = NSMutableParagraphStyle()
         style.alignment = .center
-        style.lineSpacing = 3
+        style.lineSpacing = 4
         return style
     }()
-    static func serif(_ size: CGFloat, weight: NSFont.Weight) -> NSFont {
-        let base = NSFont.systemFont(ofSize: size, weight: weight)
-        guard let descriptor = base.fontDescriptor.withDesign(.serif),
-              let font = NSFont(descriptor: descriptor, size: size) else { return base }
-        return font
-    }
-    static func title(_ text: String, size: CGFloat = 42) -> NSTextField {
+    static func display(_ size: CGFloat, weight: NSFont.Weight = .heavy) -> NSFont { BamType.display(size, weight: weight) }
+    static func title(_ text: String, size: CGFloat = 46) -> NSTextField {
         let label = NSTextField(labelWithString: text)
-        label.font = serif(size, weight: .bold)
-        label.textColor = ArkPalette.ink
+        label.font = display(size)
+        label.textColor = BamTheme.ink
         label.alignment = .center
         return label
     }
     static func subtitle(_ text: String) -> NSTextField {
-        let label = NSTextField(wrappingLabelWithString: text)
-        label.font = .systemFont(ofSize: 15)
-        label.textColor = ArkPalette.secondary
+        let label = NSTextField(wrappingLabelWithString: "")
+        label.attributedStringValue = NSAttributedString(string: text, attributes: [
+            .font: BamType.sans(17), .foregroundColor: BamTheme.muted, .paragraphStyle: centered
+        ])
         label.alignment = .center
         label.isSelectable = false
         return label
@@ -757,8 +785,11 @@ extension OnboardingController: NSWindowDelegate {
 
 // MARK: - Controls
 
+/// The site's button at stage size: a face resting on a lip, red for the main
+/// move and paper for the quiet one. Pressing sinks the face onto the lip.
 @MainActor final class OnboardingPillButton: NSButton {
     private let prominent: Bool
+    private static let drop: CGFloat = 3
     init(title: String, prominent: Bool) {
         self.prominent = prominent
         super.init(frame: .zero)
@@ -767,29 +798,39 @@ extension OnboardingController: NSWindowDelegate {
         setButtonType(.momentaryChange)
         keyEquivalent = prominent ? "\r" : ""
         attributedTitle = NSAttributedString(string: title, attributes: [
-            .font: NSFont.systemFont(ofSize: 15, weight: .semibold),
-            .foregroundColor: prominent ? NSColor(white: 0.08, alpha: 1) : ArkPalette.ink
+            .font: BamType.sans(16, weight: .bold),
+            .foregroundColor: prominent ? BamTheme.white : BamTheme.ink
         ])
-        layer?.backgroundColor = (prominent ? ArkPalette.ink : NSColor.white.withAlphaComponent(0.09)).cgColor
-        layer?.cornerRadius = 22
-        if !prominent {
-            layer?.borderWidth = 1
-            layer?.borderColor = NSColor.white.withAlphaComponent(0.18).cgColor
-        }
         translatesAutoresizingMaskIntoConstraints = false
-        heightAnchor.constraint(equalToConstant: 44).isActive = true
-        widthAnchor.constraint(greaterThanOrEqualToConstant: 170).isActive = true
+        heightAnchor.constraint(equalToConstant: 50).isActive = true
+        widthAnchor.constraint(greaterThanOrEqualToConstant: 176).isActive = true
     }
     required init?(coder: NSCoder) { fatalError("Onboarding is created programmatically") }
     override var intrinsicContentSize: NSSize {
-        var size = super.intrinsicContentSize; size.width += 52; return size
+        var size = super.intrinsicContentSize; size.width += 56; return size
+    }
+    override func draw(_ dirtyRect: NSRect) {
+        // NSButton is flipped: the lip sits along the bottom edge.
+        let drop = Self.drop, pressed = isHighlighted, radius: CGFloat = 16
+        let lip = NSRect(x: 0, y: drop, width: bounds.width, height: bounds.height - drop)
+        let face = NSRect(x: 0, y: pressed ? drop : 0, width: bounds.width, height: bounds.height - drop)
+        (prominent ? BamTheme.redDeep : BamTheme.line).setFill()
+        NSBezierPath(roundedRect: lip, xRadius: radius, yRadius: radius).fill()
+        (prominent ? BamTheme.red : BamTheme.card).setFill()
+        NSBezierPath(roundedRect: face, xRadius: radius, yRadius: radius).fill()
+        if !prominent {
+            BamTheme.line.setStroke()
+            let ring = NSBezierPath(roundedRect: face.insetBy(dx: 0.75, dy: 0.75), xRadius: radius - 0.75, yRadius: radius - 0.75)
+            ring.lineWidth = 1.5; ring.stroke()
+        }
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current?.cgContext.translateBy(x: 0, y: pressed ? drop / 2 : -drop / 2)
+        super.draw(dirtyRect)
+        NSGraphicsContext.restoreGraphicsState()
     }
     override func resetCursorRects() { addCursorRect(bounds, cursor: .pointingHand) }
-    override var isHighlighted: Bool {
-        didSet {
-            layer?.opacity = isHighlighted ? 0.82 : 1
-        }
-    }
+    override var isHighlighted: Bool { didSet { needsDisplay = true } }
+    override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); needsDisplay = true }
 }
 
 @MainActor final class OnboardingQuietButton: NSButton {
@@ -798,30 +839,38 @@ extension OnboardingController: NSWindowDelegate {
         isBordered = false
         setButtonType(.momentaryChange)
         attributedTitle = NSAttributedString(string: title, attributes: [
-            .font: NSFont.systemFont(ofSize: 13, weight: .medium),
-            .foregroundColor: ArkPalette.secondary
+            .font: BamType.sans(14, weight: .semibold),
+            .foregroundColor: BamTheme.muted
         ])
     }
     required init?(coder: NSCoder) { fatalError("Onboarding is created programmatically") }
     override func resetCursorRects() { addCursorRect(bounds, cursor: .pointingHand) }
 }
 
+/// A round paper button with one symbol (Back).
 @MainActor final class OnboardingGlyphButton: NSButton {
     init(symbol: String, label: String) {
         super.init(frame: .zero)
         title = ""
         isBordered = false
         wantsLayer = true
-        image = NSImage(systemSymbolName: symbol, accessibilityDescription: label)
-        contentTintColor = ArkPalette.secondary
-        layer?.backgroundColor = NSColor.white.withAlphaComponent(0.08).cgColor
-        layer?.cornerRadius = 15
+        image = NSImage(systemSymbolName: symbol, accessibilityDescription: label)?
+            .withSymbolConfiguration(.init(pointSize: 13, weight: .bold))
+        contentTintColor = BamTheme.ink
+        layer?.cornerRadius = 17
+        layer?.borderWidth = 1.5
         setAccessibilityLabel(label)
         translatesAutoresizingMaskIntoConstraints = false
-        widthAnchor.constraint(equalToConstant: 30).isActive = true
-        heightAnchor.constraint(equalToConstant: 30).isActive = true
+        widthAnchor.constraint(equalToConstant: 34).isActive = true
+        heightAnchor.constraint(equalToConstant: 34).isActive = true
+        paint()
     }
     required init?(coder: NSCoder) { fatalError("Onboarding is created programmatically") }
+    private func paint() {
+        layer?.backgroundColor = bamCG(BamTheme.card)
+        layer?.borderColor = bamCG(BamTheme.line)
+    }
+    override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); paint() }
     override func resetCursorRects() { addCursorRect(bounds, cursor: .pointingHand) }
 }
 
@@ -852,15 +901,10 @@ extension OnboardingController: NSWindowDelegate {
             rainbow.frame = NSRect(x: 0, y: 0, width: 54, height: 54)
             rainbow.cornerRadius = 27
             layer?.insertSublayer(rainbow, at: 0)
-        } else if colorIndex == BrowserSpace.clearColorIndex {
-            layer?.backgroundColor = NSColor.white.withAlphaComponent(0.13).cgColor
-            layer?.borderWidth = 1
-            layer?.borderColor = NSColor.white.withAlphaComponent(0.4).cgColor
-        } else {
+        } else if colorIndex != BrowserSpace.clearColorIndex {
             layer?.backgroundColor = ArkPalette.spaceColor(colorIndex).cgColor
         }
         layer?.cornerRadius = 27
-        ring.borderColor = NSColor.white.cgColor
         ring.cornerRadius = 32
         ring.frame = NSRect(x: -5, y: -5, width: 64, height: 64)
         layer?.addSublayer(ring)
@@ -868,23 +912,32 @@ extension OnboardingController: NSWindowDelegate {
         translatesAutoresizingMaskIntoConstraints = false
         widthAnchor.constraint(equalToConstant: 54).isActive = true
         heightAnchor.constraint(equalToConstant: 54).isActive = true
+        paint()
         updateSelection()
     }
     required init?(coder: NSCoder) { fatalError("Onboarding is created programmatically") }
+    private func paint() {
+        // Clear is a paper disc with a hairline; the ring is ink on every swatch.
+        if colorIndex == BrowserSpace.clearColorIndex {
+            layer?.backgroundColor = bamCG(BamTheme.card)
+            layer?.borderWidth = 1.5
+            layer?.borderColor = bamCG(BamTheme.line)
+        }
+        ring.borderColor = bamCG(BamTheme.ink)
+    }
     private func updateSelection() {
         CATransaction.begin(); CATransaction.setDisableActions(true)
-        ring.borderWidth = isPicked ? 2.5 : 0
+        ring.borderWidth = isPicked ? 3 : 0
         CATransaction.commit()
         setAccessibilityValue(isPicked ? "Selected" : "")
     }
+    override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); paint() }
     override func resetCursorRects() { addCursorRect(bounds, cursor: .pointingHand) }
 }
 
 @MainActor final class OnboardingSymbolButton: NSButton {
     let symbol: String
-    var isPicked = false {
-        didSet { layer?.backgroundColor = NSColor.white.withAlphaComponent(isPicked ? 0.22 : 0.07).cgColor }
-    }
+    var isPicked = false { didSet { paint() } }
     init(symbol: String) {
         self.symbol = symbol
         super.init(frame: .zero)
@@ -892,20 +945,45 @@ extension OnboardingController: NSWindowDelegate {
         isBordered = false
         wantsLayer = true
         setButtonType(.momentaryChange)
-        image = SidebarSymbol.image(named: symbol, color: ArkPalette.ink, pointSize: 14)
-        layer?.cornerRadius = 9
-        layer?.backgroundColor = NSColor.white.withAlphaComponent(0.07).cgColor
+        layer?.cornerRadius = 10
+        layer?.borderWidth = 1.5
         setAccessibilityLabel("Space icon \(symbol)")
         translatesAutoresizingMaskIntoConstraints = false
-        widthAnchor.constraint(equalToConstant: 36).isActive = true
-        heightAnchor.constraint(equalToConstant: 36).isActive = true
+        widthAnchor.constraint(equalToConstant: 38).isActive = true
+        heightAnchor.constraint(equalToConstant: 38).isActive = true
+        paint()
     }
     required init?(coder: NSCoder) { fatalError("Onboarding is created programmatically") }
+    private func paint() {
+        image = SidebarSymbol.image(named: symbol, color: isPicked ? BamTheme.red : BamTheme.ink, pointSize: 14)
+        layer?.backgroundColor = bamCG(isPicked ? BamTheme.redWash : BamTheme.card)
+        layer?.borderColor = bamCG(isPicked ? BamTheme.red : BamTheme.line)
+    }
+    override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); paint() }
     override func resetCursorRects() { addCursorRect(bounds, cursor: .pointingHand) }
+}
+
+/// Centres a tall display face inside the field; NSTextFieldCell otherwise
+/// pins the line to the top and the variable font's ascenders clip.
+@MainActor final class OnboardingNameCell: NSTextFieldCell {
+    override func drawingRect(forBounds rect: NSRect) -> NSRect {
+        var inner = super.drawingRect(forBounds: rect)
+        let needed = cellSize(forBounds: rect).height
+        let delta = inner.height - needed
+        if delta > 0 { inner.origin.y += delta / 2; inner.size.height = needed }
+        return inner
+    }
+    override func select(withFrame rect: NSRect, in controlView: NSView, editor textObj: NSText, delegate: Any?, start selStart: Int, length selLength: Int) {
+        super.select(withFrame: drawingRect(forBounds: rect), in: controlView, editor: textObj, delegate: delegate, start: selStart, length: selLength)
+    }
+    override func edit(withFrame rect: NSRect, in controlView: NSView, editor textObj: NSText, delegate: Any?, event: NSEvent?) {
+        super.edit(withFrame: drawingRect(forBounds: rect), in: controlView, editor: textObj, delegate: delegate, event: event)
+    }
 }
 
 @MainActor final class OnboardingNameField: NSTextField {
     var escape: (() -> Void)?
+    override class var cellClass: AnyClass? { get { OnboardingNameCell.self } set {} }
     init(string: String) {
         super.init(frame: .zero)
         stringValue = string
@@ -913,10 +991,17 @@ extension OnboardingController: NSWindowDelegate {
         isBordered = false
         drawsBackground = false
         focusRingType = .none
-        font = OnboardingText.serif(34, weight: .semibold)
-        textColor = ArkPalette.ink
+        font = OnboardingText.display(32, weight: .bold)
+        textColor = BamTheme.ink
         alignment = .center
-        usesSingleLineMode = true
+        // Single-line mode lays the variable display face out against its
+        // hhea metrics and clips the ascenders; the ordinary path measures glyphs.
+        usesSingleLineMode = false
+        maximumNumberOfLines = 1
+        cell?.wraps = false; cell?.isScrollable = true
+        cell?.lineBreakMode = .byTruncatingTail
+        translatesAutoresizingMaskIntoConstraints = false
+        heightAnchor.constraint(equalToConstant: 56).isActive = true
         lineBreakMode = .byTruncatingTail
         setAccessibilityLabel("Space name")
     }
@@ -924,49 +1009,64 @@ extension OnboardingController: NSWindowDelegate {
     override func cancelOperation(_ sender: Any?) { escape?() }
 }
 
+/// A paper card around the name field; the hairline turns red while typing.
 @MainActor final class OnboardingFieldBox: NSView {
+    private weak var field: OnboardingNameField?
     init(field: OnboardingNameField) {
+        self.field = field
         super.init(frame: .zero)
         wantsLayer = true
-        layer?.backgroundColor = NSColor.white.withAlphaComponent(0.07).cgColor
-        layer?.cornerRadius = 16
-        layer?.borderWidth = 1
-        layer?.borderColor = NSColor.white.withAlphaComponent(0.14).cgColor
+        layer?.cornerRadius = 18
+        layer?.borderWidth = 1.5
         translatesAutoresizingMaskIntoConstraints = false
         field.translatesAutoresizingMaskIntoConstraints = false
         addSubview(field)
         NSLayoutConstraint.activate([
             widthAnchor.constraint(equalToConstant: 420),
-            heightAnchor.constraint(equalToConstant: 72),
+            heightAnchor.constraint(equalToConstant: 76),
             field.centerYAnchor.constraint(equalTo: centerYAnchor),
             field.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 22),
             field.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -22)
         ])
+        paint()
+        NotificationCenter.default.addObserver(self, selector: #selector(editingChanged), name: NSControl.textDidBeginEditingNotification, object: field)
+        NotificationCenter.default.addObserver(self, selector: #selector(editingChanged), name: NSControl.textDidEndEditingNotification, object: field)
     }
     required init?(coder: NSCoder) { fatalError("Onboarding is created programmatically") }
+    @objc private func editingChanged() { paint() }
+    private func paint() {
+        let editing = field?.currentEditor() != nil
+        layer?.backgroundColor = bamCG(BamTheme.card)
+        layer?.borderColor = bamCG(editing ? BamTheme.red : BamTheme.line)
+        layer?.shadowColor = bamCG(BamTheme.line)
+        layer?.shadowOpacity = 1; layer?.shadowRadius = 0
+        layer?.shadowOffset = CGSize(width: 0, height: -2)
+    }
+    override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); paint() }
 }
 
+/// A site keycap at training size: paper cap on a hard lip, the chord in
+/// mono, a caption below. Done turns the cap red-rimmed with a check sticker.
 @MainActor final class OnboardingKeycapView: NSView {
     private let check = NSImageView()
     private let cap = NSView()
     private let keyLabel: NSTextField
+    private var done: NSColor?
     init(key: String, caption: String) {
         keyLabel = NSTextField(labelWithString: "⌘ \(key)")
         super.init(frame: .zero)
         wantsLayer = true
         cap.wantsLayer = true
-        cap.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.09).cgColor
-        cap.layer?.cornerRadius = 14
-        cap.layer?.borderWidth = 1
-        cap.layer?.borderColor = NSColor.white.withAlphaComponent(0.22).cgColor
-        keyLabel.font = .monospacedSystemFont(ofSize: 24, weight: .semibold)
-        keyLabel.textColor = ArkPalette.ink
+        cap.layer?.cornerRadius = 16
+        cap.layer?.borderWidth = 1.5
+        cap.layer?.masksToBounds = false
+        keyLabel.font = BamType.mono(26, weight: .bold)
         let captionLabel = NSTextField(labelWithString: caption)
-        captionLabel.font = .systemFont(ofSize: 13)
-        captionLabel.textColor = ArkPalette.secondary
+        captionLabel.font = BamType.sans(14, weight: .medium)
+        captionLabel.textColor = BamTheme.muted
         captionLabel.alignment = .center
         check.image = NSImage(systemSymbolName: "checkmark.circle.fill", accessibilityDescription: "Done")
-        check.symbolConfiguration = .init(pointSize: 22, weight: .bold)
+        check.symbolConfiguration = .init(pointSize: 24, weight: .bold)
         check.alphaValue = 0
         check.wantsLayer = true
         for view in [cap, keyLabel, captionLabel, check] {
@@ -980,25 +1080,37 @@ extension OnboardingController: NSWindowDelegate {
         NSLayoutConstraint.activate([
             cap.topAnchor.constraint(equalTo: topAnchor),
             cap.centerXAnchor.constraint(equalTo: centerXAnchor),
-            cap.widthAnchor.constraint(equalToConstant: 118),
-            cap.heightAnchor.constraint(equalToConstant: 68),
+            cap.widthAnchor.constraint(equalToConstant: 124),
+            cap.heightAnchor.constraint(equalToConstant: 72),
             keyLabel.centerXAnchor.constraint(equalTo: cap.centerXAnchor),
-            keyLabel.centerYAnchor.constraint(equalTo: cap.centerYAnchor),
-            captionLabel.topAnchor.constraint(equalTo: cap.bottomAnchor, constant: 10),
+            keyLabel.centerYAnchor.constraint(equalTo: cap.centerYAnchor, constant: -1),
+            captionLabel.topAnchor.constraint(equalTo: cap.bottomAnchor, constant: 12),
             captionLabel.centerXAnchor.constraint(equalTo: centerXAnchor),
             captionLabel.bottomAnchor.constraint(equalTo: bottomAnchor),
             widthAnchor.constraint(greaterThanOrEqualTo: cap.widthAnchor),
-            check.trailingAnchor.constraint(equalTo: cap.trailingAnchor, constant: 10),
-            check.topAnchor.constraint(equalTo: cap.topAnchor, constant: -10)
+            check.trailingAnchor.constraint(equalTo: cap.trailingAnchor, constant: 11),
+            check.topAnchor.constraint(equalTo: cap.topAnchor, constant: -11)
         ])
+        paint()
     }
     required init?(coder: NSCoder) { fatalError("Onboarding is created programmatically") }
+    private func paint() {
+        cap.layer?.backgroundColor = cap.bamCG(BamTheme.card)
+        cap.layer?.borderColor = cap.bamCG(done ?? BamTheme.line)
+        // The lip: a hard, unblurred shadow three points down.
+        cap.layer?.shadowColor = cap.bamCG(done?.withAlphaComponent(0.9) ?? BamTheme.ink.withAlphaComponent(0.22))
+        cap.layer?.shadowOpacity = 1
+        cap.layer?.shadowRadius = 0
+        cap.layer?.shadowOffset = CGSize(width: 0, height: -3)
+        keyLabel.textColor = done ?? BamTheme.ink
+        check.contentTintColor = done ?? BamTheme.red
+    }
+    override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); paint() }
 
     func markDone(accent: NSColor, animated: Bool = true) {
-        check.contentTintColor = accent
+        done = BamTheme.red
         check.alphaValue = 1
-        cap.layer?.borderColor = accent.withAlphaComponent(0.9).cgColor
-        keyLabel.textColor = accent
+        paint()
         setAccessibilityValue("Done")
         guard animated, !OnboardingController.reduceMotion else { return }
         OnboardingMotion.pop(check.layer, from: 0.2)
@@ -1019,7 +1131,7 @@ extension OnboardingController: NSWindowDelegate {
         let host = URL(string: bookmark.address)?.host.map { " — \($0)" } ?? ""
         attributedTitle = NSAttributedString(
             string: bookmark.title,
-            attributes: [.font: NSFont.systemFont(ofSize: 13), .foregroundColor: ArkPalette.ink])
+            attributes: [.font: BamType.sans(14, weight: .medium), .foregroundColor: BamTheme.ink])
         state = checked ? .on : .off
         lineBreakMode = .byTruncatingTail
         toolTip = bookmark.title + host
@@ -1028,6 +1140,7 @@ extension OnboardingController: NSWindowDelegate {
     required init?(coder: NSCoder) { fatalError("Onboarding is created programmatically") }
 }
 
+/// Progress dots: the current step is a red pill, the others hairline dots.
 @MainActor final class OnboardingDotsView: NSView {
     private var dotLayers: [CALayer] = []
     private var current = -1
@@ -1036,28 +1149,27 @@ extension OnboardingController: NSWindowDelegate {
         if dotLayers.count != count {
             for dot in dotLayers { dot.removeFromSuperlayer() }
             dotLayers = (0..<count).map { _ in
-                let dot = CALayer(); dot.cornerRadius = 3; layer?.addSublayer(dot); return dot
+                let dot = CALayer(); dot.cornerRadius = 3.5; layer?.addSublayer(dot); return dot
             }
             invalidateIntrinsicContentSize()
         }
         current = index
-        relayout(accent: accent)
+        relayout()
     }
     override var intrinsicContentSize: NSSize {
-        NSSize(width: CGFloat(max(0, dotLayers.count - 1)) * 14 + 18, height: 6)
+        NSSize(width: CGFloat(max(0, dotLayers.count - 1)) * 15 + 22, height: 7)
     }
-    override func layout() { super.layout(); relayout(accent: nil) }
-    private var lastAccent: NSColor = ArkPalette.spaceColor(0)
-    private func relayout(accent: NSColor?) {
-        if let accent { lastAccent = accent }
+    override func layout() { super.layout(); relayout() }
+    override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); relayout() }
+    private func relayout() {
         CATransaction.begin()
         CATransaction.setAnimationDuration(OnboardingController.reduceMotion ? 0 : 0.3)
         var x: CGFloat = 0
         for (index, dot) in dotLayers.enumerated() {
             let wide = index == current
-            dot.frame = NSRect(x: x, y: 0, width: wide ? 18 : 6, height: 6)
-            dot.backgroundColor = wide ? lastAccent.cgColor : NSColor.white.withAlphaComponent(0.25).cgColor
-            x += (wide ? 18 : 6) + 8
+            dot.frame = NSRect(x: x, y: 0, width: wide ? 22 : 7, height: 7)
+            dot.backgroundColor = bamCG(wide ? BamTheme.red : BamTheme.ink.withAlphaComponent(0.18))
+            x += (wide ? 22 : 7) + 8
         }
         CATransaction.commit()
     }
