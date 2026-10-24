@@ -1,6 +1,14 @@
 import AppKit
 import WebKit
 
+@MainActor private final class AttachmentCountingWebView: WKWebView {
+    var windowMoves = 0
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        windowMoves += 1
+    }
+}
+
 /// Controller-level native tests using bundled Home pages, real Space buttons,
 /// and local NSEvent fixtures passed through the scroll-event adapter and native
 /// sidebar receivers. Receiver fixtures exercise in-process delivery, not OS input.
@@ -91,6 +99,69 @@ import WebKit
                     }
                     throw ContentFailure(description: "Timed out: \(label)")
                 }
+                // Refreshing a live page (including a PiP state notification)
+                // must preserve its native window attachment and DOM state.
+                // Count real AppKit callbacks rather than timing test dispatch.
+                let originalID = self.controller.session.activeID
+                let attachmentTabs = (0..<2).map {
+                    BrowserTab(title: "Attachment \($0)", address: "orbit://newtab", space: 0)
+                }
+                var attachedPages: [AttachmentCountingWebView] = []
+                for tab in attachmentTabs {
+                    self.controller.session.tabs.append(tab)
+                    let configuration = WKWebViewConfiguration()
+                    configuration.websiteDataStore = .nonPersistent()
+                    let web = AttachmentCountingWebView(frame: .zero, configuration: configuration)
+                    self.controller.register(web, id: tab.id)
+                    self.controller.load(tab.address, in: web, id: tab.id)
+                    attachedPages.append(web)
+                }
+                let tracked = attachedPages[0]
+                self.controller.select(attachmentTabs[0].id)
+                try await wait("attachment fixture") { !tracked.isLoading && tracked.title == "A little space" }
+                _ = try await js(tracked, "window.__attachmentOrigin=performance.timeOrigin; var f=document.createElement('input'); f.id='attachment-state'; f.value='kept'; document.body.appendChild(f); f.focus(); true")
+                self.window.makeFirstResponder(tracked)
+                let responder = self.window.firstResponder
+                tracked.windowMoves = 0
+                for _ in 0..<10 {
+                    self.controller.showActive()
+                    self.controller.select(attachmentTabs[0].id)
+                    self.controller.pictureInPicture.onChange?()
+                }
+                try require(tracked.windowMoves == 0 && tracked.window === self.window
+                                && self.controller.webHost.subviews.last === tracked,
+                            "Refreshing the selected live page detached/re-attached WebKit")
+                try require(self.window.firstResponder === responder,
+                            "Refreshing the selected live page displaced its native responder")
+                try require((try await js(tracked, "performance.timeOrigin===window.__attachmentOrigin && document.getElementById('attachment-state')?.value==='kept'")) as? Bool == true,
+                            "Refreshing the selected live page lost document state")
+
+                // Identity, rather than tab ID, decides which renderer is kept.
+                let replacementConfiguration = WKWebViewConfiguration()
+                replacementConfiguration.websiteDataStore = .nonPersistent()
+                let replacement = AttachmentCountingWebView(frame: .zero, configuration: replacementConfiguration)
+                self.controller.register(replacement, id: attachmentTabs[0].id)
+                self.controller.showActive()
+                try require(tracked.window == nil && replacement.window === self.window
+                                && self.controller.webHost.subviews.last === replacement,
+                            "A renderer replacement under the same tab ID kept the stale surface")
+                self.controller.load("orbit://newtab", in: replacement, id: attachmentTabs[0].id)
+                try await wait("replacement fixture") { !replacement.isLoading && replacement.title == "A little space" }
+                try require(self.controller.session.makeSplit(primary: attachmentTabs[0].id, secondary: attachmentTabs[1].id),
+                            "Could not create attachment Split")
+                self.controller.showActive()
+                let second = attachedPages[1]
+                try await wait("attachment right pane") { !second.isLoading && second.title == "A little space" }
+                replacement.windowMoves = 0; second.windowMoves = 0
+                for _ in 0..<10 { self.controller.showActive() }
+                try require(replacement.windowMoves == 0 && second.windowMoves == 0
+                                && replacement.window === self.window && second.window === self.window,
+                            "Refreshing a Split detached/re-attached its live pages")
+                self.controller.unsplit(attachmentTabs[0].id)
+                self.controller.select(originalID)
+                for tab in attachmentTabs { self.controller.close(tab.id) }
+                print("Host attachment: 30 repeated single-page presentations and 10 Split presentations retained their native windows; renderer replacement installed correctly")
+                fflush(stdout)
                 var pages: [Int: WKWebView] = [:]
                 var ids: [Int: UUID] = [:]
                 var tokens: [Int: String] = [:]

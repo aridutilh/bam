@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Round 2 browser fixture</title><link rel="stylesheet" href="/style.css"><script src="/fixture.js" defer></script></head>
+<body><header><h1 id="title">Round 2 browser fixture</h1><p id="identity">Loopback only. No external resources.</p></header>
+<section id="launcher" hidden><h2>Fixture links</h2><p>One link per test tab. Open only the approved live-page count; default and maximum are ten.</p>
+<form id="configuration"><input id="phase" name="phase" type="hidden"><input id="condition" name="condition" type="hidden"><label>Run <input id="run" name="run" value="round2-pilot"></label>
+<label>Block <input id="block" name="block" value="pilot"></label>
+<label>Browser <select id="browser" name="browser"><option>Bam</option><option>Arc</option><option>Yab</option></select></label>
+<label>Workload <select id="workload" name="workload"><option value="article">400-row article + 4 MiB</option><option value="renderer">Cadence then CPU/DOM</option><option value="cadence">Idle cadence only</option><option value="switch">Warm switch/state</option><option value="light">Light static page</option></select></label>
+<label>Pages <input id="tabs" name="tabs" type="number" value="10" min="1" max="10"></label>
+<label><input id="auto" name="auto" type="checkbox" value="1"> Auto-run after two foreground frames</label>
+<label><input id="arm" name="arm" type="checkbox" value="1"> Arm state/switch diagnostics</label>
+<button type="submit">Apply settings</button></form><nav id="links" aria-label="Fixture tab links"></nav></section>
+<section id="fixture" hidden><div id="capture-marker" aria-label="Stable page marker"></div><div class="controls">
+<button id="cadence-start" type="button">Measure 120 idle frame intervals</button>
+<button id="renderer-start" type="button">Measure 30 CPU and DOM trials</button>
+<button id="switch-arm" type="button">Arm tab-switch measurement</button>
+<button id="checkpoint" type="button">Record state checkpoint</button>
+<button id="increment" type="button">Increment state counter</button>
+<label>State sentinel <input id="sentinel" autocomplete="off" spellcheck="false"></label><span id="counter">Counter: 0</span></div>
+<p id="status" role="status" aria-live="polite">Initializing fixture</p>
+<p class="note">Measurements describe renderer work and callback scheduling. They do not establish native input latency, paint or displayed frame rate.</p>
+<main id="article"></main><pre id="last-result" aria-label="Latest result"></pre></section>
+<footer><a href="/report" target="_blank" rel="noopener">JSON report</a> · <a href="/manifest.json" target="_blank" rel="noopener">Manifest</a></footer></body></html>

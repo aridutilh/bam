@@ -10,6 +10,7 @@ import WebKit
         value.profileName = { [weak self] in self?.session.profileName($0) ?? "Profile" }
         value.surfaces = { [weak self] in self?.extensionSurfaces(profileID: $0) ?? [] }
         value.surface = { [weak self] profile, id in self?.extensionSurface(profileID: profile, id: id) }
+        value.surfaceRevision = { [weak self] _ in self?.extensionTopologyRevision() }
         value.selectTab = { [weak self] id in
             guard let self else { return false }
             if self.session.tabs.contains(where: { $0.id == id }) {
@@ -66,7 +67,25 @@ import WebKit
         guard #available(macOS 15.4, *) else { return nil }
         return browserExtensions.configuration(forExtensionURL: url, profileID: profileID)
     }
+    func invalidateExtensionSurfaceTopology() {
+        extensionSurfaceRevision &+= 1
+        extensionTabIndices = nil
+    }
+    /// Preview objects can change their own presentation/window state. Keep that
+    /// less common path fully live; no callback-timing assumptions enter the cache.
+    func extensionTopologyRevision() -> UInt64? {
+        guard peeks.isEmpty, littleWindows.isEmpty else { return nil }
+        let window = (viewIfLoaded?.window).map(ObjectIdentifier.init)
+        if window != extensionSurfaceWindow {
+            extensionSurfaceWindow = window
+            invalidateExtensionSurfaceTopology()
+        }
+        return extensionSurfaceRevision
+    }
     func scheduleExtensionRefresh() {
+        // Invalidate synchronously even when event publication is coalesced,
+        // disabled, or shutting down.
+        invalidateExtensionSurfaceTopology()
         guard !isShuttingDown, extensionRefreshWork == nil else { return }
         guard #available(macOS 15.4, *), let extensions = extensionStorage as? BrowserExtensions,
               extensions.records.contains(where: { $0.enabled }) else { return }
@@ -112,7 +131,12 @@ import WebKit
     @available(macOS 15.4, *)
     func extensionSurface(profileID: UUID, id: UUID) -> BrowserExtensionSurface? {
         guard !isShuttingDown, !isApplyingProfileChange else { return nil }
-        if let tab = session.tabs.first(where: { $0.id == id && session.profileID(for: $0) == profileID }) {
+        if extensionTabIndices == nil {
+            extensionTabIndices = Dictionary(session.tabs.enumerated().map { ($0.element.id, $0.offset) }, uniquingKeysWith: { first, _ in first })
+        }
+        if let index = extensionTabIndices?[id], session.tabs.indices.contains(index),
+           session.tabs[index].id == id, session.profileID(for: session.tabs[index]) == profileID {
+            let tab = session.tabs[index]
             return BrowserExtensionSurface(id: tab.id, title: tab.displayTitle, url: URL(string: tab.address), webView: browsers[tab.id], window: viewIfLoaded?.window,
                 isActive: session.currentProfileID == profileID && focusedTabID == tab.id && peeks[session.activeID]?.isPresented != true,
                 isSelected: session.currentProfileID == profileID && visibleMemberIDs.contains(tab.id), isPinned: tab.isSaved)

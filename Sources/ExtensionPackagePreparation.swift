@@ -49,7 +49,10 @@ enum ExtensionPackagePreparation {
         let backup = originalManifestURL.standardizedFileURL
         let backupParent = backup.deletingLastPathComponent()
         let parentValues = try backupParent.resourceValues(forKeys: [.isDirectoryKey])
-        let canonicalBackup = backup.resolvingSymlinksInPath().standardizedFileURL.path
+        // Resolve the existing parent, not the missing leaf: Foundation can
+        // otherwise preserve /private/tmp for one path and use /tmp for the other.
+        let canonicalBackup = backupParent.resolvingSymlinksInPath().standardizedFileURL
+            .appendingPathComponent(backup.lastPathComponent).path
         guard parentValues.isDirectory == true,
               canonicalBackup != canonicalPackage,
               !canonicalBackup.hasPrefix(canonicalPackage + "/"),

@@ -1,0 +1,1 @@
+{"manifest_version":3,"name":"Bam original tabs-query performance fixture","version":"1.0","description":"Private original fixture; no network, content scripts, background worker or vendor code.","permissions":["tabs"]}

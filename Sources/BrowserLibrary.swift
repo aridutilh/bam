@@ -26,27 +26,77 @@ struct ClosedRecord: Codable, Identifiable, Equatable {
     var profileName: String?
     let storageURL: URL?
     private var loadFailure: String?
+    private let writer: LibraryWriter?
+    private var reportedFailureRevision: UInt64?
     private var historyWindow: BrowserLibraryWindowController?
     private var archiveWindow: BrowserLibraryWindowController?
     private static let historyLimit = 5_000
     private static let closedLimit = 200
 
-    init(storageURL: URL?) { self.storageURL = storageURL; load() }
+    init(storageURL: URL?, write: @escaping LibraryWriter.Write = { try LibraryWriter.writeFile($0, to: $1) }) {
+        self.storageURL = storageURL
+        writer = storageURL.map { LibraryWriter(url: $0, write: write) }
+        load()
+        writer?.setCompletionHandler { [weak self] result in
+            Task { @MainActor [weak self] in self?.acceptCompletion(result) }
+        }
+    }
+
+    var isLatestSnapshotSaved: Bool { writer?.isLatestSnapshotSaved ?? true }
+    @discardableResult func flush(timeout: TimeInterval = 2) -> Bool {
+        guard let writer else { return true }
+        let target = writer.prepareFlush()
+        let result = writer.wait(for: target, timeout: timeout)
+        if let completion = writer.currentCompletion { acceptCompletion(completion) }
+        return result
+    }
+    func flushAsync(timeout: TimeInterval = 2) async -> Bool {
+        guard let writer else { return true }
+        let target = writer.prepareFlush()
+        let result = await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .utility).async {
+                continuation.resume(returning: writer.wait(for: target, timeout: timeout))
+            }
+        }
+        if let completion = writer.currentCompletion { acceptCompletion(completion) }
+        return result
+    }
+    private var snapshot: LibrarySnapshot { LibrarySnapshot(history: history, closedRecords: closedRecords) }
+    private func acceptCompletion(_ result: LibraryWriter.Completion) {
+        // Queued callbacks cannot clear a newer error or report a superseded
+        // failure. They never mutate history or roll back later user changes.
+        guard writer?.currentRevision == result.revision else { return }
+        if let error = result.error {
+            lastStorageError = error.localizedDescription
+            if reportedFailureRevision != result.revision {
+                reportedFailureRevision = result.revision
+                onStorageError?(error.localizedDescription)
+            }
+        } else { lastStorageError = nil; reportedFailureRevision = nil }
+    }
+    private func canMutate() -> Bool {
+        guard let loadFailure else { return true }
+        lastStorageError = loadFailure; onStorageError?(loadFailure); return false
+    }
+    private func reloadWindows() { historyWindow?.reload(); archiveWindow?.reload() }
 
     func recordVisit(title: String, address: String) {
         guard let url = Self.webURL(address) else { return }
         let address = url.absoluteString
         let title = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        _ = commit {
-            if history.first?.address == address {
-                // Only consecutive visits coalesce; earlier visits stay visible.
-                history[0].title = title.isEmpty ? (url.host ?? address) : title
-                history[0].visitedAt = Date()
-            } else {
-                history.insert(BrowserHistoryEntry(title: title.isEmpty ? (url.host ?? address) : title, address: address), at: 0)
-                if history.count > Self.historyLimit { history.removeLast(history.count - Self.historyLimit) }
-            }
+        guard canMutate() else { return }
+        if history.first?.address == address {
+            // Only consecutive visits coalesce; earlier visits stay visible.
+            history[0].title = title.isEmpty ? (url.host ?? address) : title
+            history[0].visitedAt = Date()
+        } else {
+            history.insert(BrowserHistoryEntry(title: title.isEmpty ? (url.host ?? address) : title, address: address), at: 0)
+            if history.count > Self.historyLimit { history.removeLast(history.count - Self.historyLimit) }
         }
+        // Encoding and disk replacement happen on the ordered worker. Keep an
+        // accepted visit in memory if storage fails, and retry on a visit/flush.
+        writer?.enqueue(snapshot)
+        reloadWindows()
     }
 
     func recordClosed(tabs: [BrowserTab], split: Bool) {
@@ -104,25 +154,20 @@ struct ClosedRecord: Codable, Identifiable, Equatable {
     /// in-memory mutation so reopening/clearing cannot claim unpersisted success.
     private func commit(_ change: () -> Void) -> Bool {
         // A future/corrupt file must not be replaced by an empty older snapshot.
-        if let loadFailure { lastStorageError = loadFailure; onStorageError?(loadFailure); return false }
+        guard canMutate() else { return false }
         let oldHistory = history, oldClosed = closedRecords
         change()
-        if let storageURL {
-            do {
-                try FileManager.default.createDirectory(at: storageURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-                let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .millisecondsSince1970
-                encoder.outputFormatting = [.sortedKeys]
-                let data = try encoder.encode(FileContents(history: history, closedRecords: closedRecords))
-                try data.write(to: storageURL, options: .atomic)
-            } catch {
+        if let writer {
+            let result = writer.writeSynchronously(snapshot)
+            if result.error != nil {
                 history = oldHistory; closedRecords = oldClosed
-                lastStorageError = error.localizedDescription
-                onStorageError?(error.localizedDescription)
+                let restoredRevision = writer.stage(snapshot)
+                acceptCompletion(LibraryWriter.Completion(revision: restoredRevision, error: result.error))
                 return false
             }
         }
-        lastStorageError = nil
-        historyWindow?.reload(); archiveWindow?.reload()
+        lastStorageError = nil; reportedFailureRevision = nil
+        reloadWindows()
         return true
     }
 
@@ -131,30 +176,48 @@ struct ClosedRecord: Codable, Identifiable, Equatable {
         guard FileManager.default.fileExists(atPath: storageURL.path) else { return }
         do {
             let data = try Data(contentsOf: storageURL)
+            let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .millisecondsSince1970
+            // Our normal file can be decoded in one pass. Keep the per-record
+            // salvage path for partially damaged compatible files below.
+            if let contents = try? decoder.decode(FileContents.self, from: data), contents.version == 1 {
+                acceptLoaded(history: contents.history, closedRecords: contents.closedRecords)
+                return
+            }
             guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
                   (root["version"] as? Int ?? 1) == 1 else {
                 let message = "The library file has an unsupported format and was left unchanged."
                 lastStorageError = message; loadFailure = message
                 return
             }
-            let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .millisecondsSince1970
             func records<T: Decodable>(_ key: String, as type: T.Type) -> [T] {
                 (root[key] as? [Any] ?? []).compactMap { item in
                     guard let object = item as? [String: Any], let data = try? JSONSerialization.data(withJSONObject: object) else { return nil }
                     return try? decoder.decode(type, from: data)
                 }
             }
-            var historyIDs = Set<UUID>()
-            history = Array(records("history", as: BrowserHistoryEntry.self).filter { entry in
-                entry.visitedAt.timeIntervalSince1970.isFinite && Self.webURL(entry.address) != nil && historyIDs.insert(entry.id).inserted
-            }.prefix(Self.historyLimit))
-            var closedIDs = Set<UUID>()
-            closedRecords = Array(records("closedRecords", as: ClosedRecord.self).filter { record in
-                Self.validClosed(record) && closedIDs.insert(record.id).inserted
-            }.prefix(Self.closedLimit))
+            acceptLoaded(history: records("history", as: BrowserHistoryEntry.self),
+                         closedRecords: records("closedRecords", as: ClosedRecord.self))
         } catch {
             let message = "The library file could not be read and was left unchanged: " + error.localizedDescription
             lastStorageError = message; loadFailure = message
+        }
+    }
+
+    private func acceptLoaded(history entries: [BrowserHistoryEntry], closedRecords records: [ClosedRecord]) {
+        var historyIDs = Set<UUID>()
+        history = []
+        for entry in entries {
+            guard entry.visitedAt.timeIntervalSince1970.isFinite, Self.webURL(entry.address) != nil,
+                  historyIDs.insert(entry.id).inserted else { continue }
+            history.append(entry)
+            if history.count == Self.historyLimit { break }
+        }
+        var closedIDs = Set<UUID>()
+        closedRecords = []
+        for record in records {
+            guard Self.validClosed(record), closedIDs.insert(record.id).inserted else { continue }
+            closedRecords.append(record)
+            if closedRecords.count == Self.closedLimit { break }
         }
     }
 

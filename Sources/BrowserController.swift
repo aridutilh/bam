@@ -193,10 +193,13 @@ import QuartzCore
     var profileLibraries: [UUID: BrowserLibrary] = [:]
     var library: BrowserLibrary { library(for: commandProfileID) }
     var confirmProfileChange: ((String) -> Bool)?
-    var isApplyingProfileChange = false
+    var isApplyingProfileChange = false { didSet { invalidateExtensionSurfaceTopology() } }
     var extensionStorage: AnyObject?
     var extensionRefreshWork: DispatchWorkItem?
-    var peekExtensionIDs: [UUID: UUID] = [:]
+    var extensionSurfaceRevision: UInt64 = 0
+    var extensionSurfaceWindow: ObjectIdentifier?
+    var extensionTabIndices: [UUID: Int]?
+    var peekExtensionIDs: [UUID: UUID] = [:] { didSet { invalidateExtensionSurfaceTopology() } }
     var navigationTokens: [UUID: UUID] = [:]
     var browserExtensionOrigins: [UUID: String] = [:]
     var displayedTabID: UUID?
@@ -206,14 +209,14 @@ import QuartzCore
     private var automaticProbeToken: UUID?
     private var automaticProbeTabID: UUID?
     var retiringViews: [ObjectIdentifier: NSView] = [:]
-    var splitCoordinators: [UUID: SplitViewCoordinator] = [:]
-    var isShuttingDown = false
+    var splitCoordinators: [UUID: SplitViewCoordinator] = [:] { didSet { invalidateExtensionSurfaceTopology() } }
+    var isShuttingDown = false { didSet { invalidateExtensionSurfaceTopology() } }
     /// While first-run onboarding covers the window, browser chrome must not
     /// react to swipes or menu commands behind it.
     var suspendsChromeInteraction = false
     var automaticallyShowsVideo = true
-    var peeks: [UUID: PeekCoordinator] = [:]
-    var littleWindows: [UUID: LittleArcController] = [:]
+    var peeks: [UUID: PeekCoordinator] = [:] { didSet { invalidateExtensionSurfaceTopology() } }
+    var littleWindows: [UUID: LittleArcController] = [:] { didSet { invalidateExtensionSurfaceTopology() } }
     var swipe = SpaceSwipeStateMachine()
     var scrollMonitor: Any?
     var trackingSwipe = false
@@ -230,9 +233,9 @@ import QuartzCore
     // Retain a small identity cache so nested dispatch cannot apply it twice.
     private var recentSpaceScrollEvents: [(event: NSEvent, consumed: Bool)] = []
     let sessionURL: URL
-    var session: BrowserSession
+    var session: BrowserSession { didSet { invalidateExtensionSurfaceTopology() } }
     var displayedWidth: CGFloat
-    var browsers: [UUID: WKWebView] = [:]
+    var browsers: [UUID: WKWebView] = [:] { didSet { invalidateExtensionSurfaceTopology() } }
     var observations: [UUID: [NSKeyValueObservation]] = [:]
     var addressOverlay: DismissView?
     var addressField: PaletteField?
@@ -520,15 +523,14 @@ import QuartzCore
             if !outgoing.isEmpty { automaticallyFloatDeparture(outgoing) }
         }
         for (id, peek) in peeks { peek.setVisible(id == tab.id) }
-        webHost.subviews.filter { retiringViews[ObjectIdentifier($0)] == nil }.forEach { $0.removeFromSuperview() }
         if let group = session.split(for: tab.id) { showSplit(group) }
         else {
             let browser = webView(for: tab)
             if pictureInPicture.owns(browser) {
                 let placeholder = PiPPlaceholder(frame: webHost.bounds)
                 placeholder.returnVideo = { [weak self] in self?.pictureInPicture.restore() }
-                webHost.addSubview(placeholder)
-            } else { webHost.addSubview(browser); browser.frame = webHost.bounds }
+                installActiveHost(placeholder)
+            } else { installActiveHost(browser) }
         }
         refresh()
         // A covered retiring view is still a valid AppKit responder. Move only
@@ -538,6 +540,18 @@ import QuartzCore
            let destination = commandWebView, destination.window === window {
             window.makeFirstResponder(destination)
         }
+    }
+    /// Refreshing the selected page must not detach its live WebKit surface.
+    /// Resolve the actual host first: the same tab ID can acquire a different
+    /// renderer, a Split, or a PiP placeholder during synchronous callbacks.
+    func installActiveHost(_ host: NSView) {
+        for child in webHost.subviews where child !== host && retiringViews[ObjectIdentifier(child)] == nil {
+            child.removeFromSuperview()
+        }
+        if host.superview !== webHost || webHost.subviews.last !== host {
+            webHost.addSubview(host, positioned: .above, relativeTo: nil)
+        }
+        if host.frame != webHost.bounds { host.frame = webHost.bounds }
     }
     private func hostedAncestor(_ view: NSView) -> NSView? {
         var current: NSView? = view
@@ -622,7 +636,13 @@ import QuartzCore
         for little in Array(littleWindows.values) { little.close() }
         if let monitor = scrollMonitor { NSEvent.removeMonitor(monitor); scrollMonitor = nil }
         cancelPaging(); animator.stop()
-        if persistSession { save(); _ = sessionWriter?.flush(timeout: 2) }
+        if persistSession {
+            let deadline = ProcessInfo.processInfo.systemUptime + 2
+            save(); _ = sessionWriter?.flush(timeout: 2)
+            for library in profileLibraries.values {
+                _ = library.flush(timeout: max(0, deadline - ProcessInfo.processInfo.systemUptime))
+            }
+        }
     }
     func updateMetadata(_ web: WKWebView) {
         guard let pair = browsers.first(where: { $0.value === web }), let i = session.tabs.firstIndex(where: { $0.id == pair.key }) else { return }
@@ -1087,14 +1107,21 @@ import QuartzCore
     /// Called before teardown. New edits made during an async write must also
     /// reach disk before the main actor allows the application to terminate.
     func flushSessionForTermination(timeout: TimeInterval = 5) async -> Bool {
-        guard !privateMode, let writer = sessionWriter else { return true }
+        guard !privateMode else { return true }
         save()
         let deadline = ProcessInfo.processInfo.systemUptime + max(0, timeout)
         repeat {
-            let remaining = max(0, deadline - ProcessInfo.processInfo.systemUptime)
-            guard await writer.flushAsync(timeout: remaining) else { return false }
+            if let writer = sessionWriter {
+                guard await writer.flushAsync(timeout: max(0, deadline - ProcessInfo.processInfo.systemUptime)) else { return false }
+            }
+            // Awaiting disk keeps the app responsive: another profile may gain
+            // a visit during either flush. Recheck every live library below.
+            for library in Array(profileLibraries.values) {
+                guard await library.flushAsync(timeout: max(0, deadline - ProcessInfo.processInfo.systemUptime)) else { return false }
+            }
             if saveWork != nil { save(); continue }
-            if writer.isLatestSnapshotSaved { return true }
+            if sessionWriter?.isLatestSnapshotSaved != false,
+               profileLibraries.values.allSatisfy(\.isLatestSnapshotSaved) { return true }
         } while ProcessInfo.processInfo.systemUptime < deadline
         return false
     }
