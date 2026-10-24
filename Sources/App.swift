@@ -11,6 +11,7 @@ import WebKit
     var autoPiPSmoke: AutomaticPiPSmokeTest?
     var pendingExternalURLs: [URL] = []
     var spacesMenu: NSMenu?
+    private var quitPending = false
     func applicationDidFinishLaunching(_ notification: Notification) {
         if CommandLine.arguments.contains("--feature-test") { featureSmoke = FeatureSmokeTest(); featureSmoke?.start(); return }
         if CommandLine.arguments.contains("--auto-pip-test") { autoPiPSmoke = AutomaticPiPSmokeTest(); autoPiPSmoke?.start(); return }
@@ -42,7 +43,34 @@ import WebKit
         let testArguments: Set<String> = ["--web-test", "--pip-test", "--interaction-test", "--auto-pip-test", "--feature-test"]
         return !CommandLine.arguments.contains { testArguments.contains($0) }
     }
-    func applicationWillTerminate(_ notification: Notification) { controller?.prepareToClose() }
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let controller, !controller.privateMode else { return .terminateNow }
+        guard !quitPending else { return .terminateLater }
+        quitPending = true
+        Task { @MainActor [weak self] in
+            guard let self else { sender.reply(toApplicationShouldTerminate: false); return }
+            while true {
+                if await controller.flushSessionForTermination() {
+                    sender.reply(toApplicationShouldTerminate: true); return
+                }
+                let alert = NSAlert()
+                alert.messageText = "Your latest tabs haven’t been saved"
+                alert.informativeText = "Bam couldn’t finish saving this session. You can stay in the browser, retry, or quit without the latest changes."
+                alert.addButton(withTitle: "Cancel Quit")
+                alert.addButton(withTitle: "Retry")
+                alert.addButton(withTitle: "Quit Without Saving")
+                switch alert.runModal() {
+                case .alertSecondButtonReturn: continue
+                case .alertThirdButtonReturn: sender.reply(toApplicationShouldTerminate: true); return
+                default:
+                    self.quitPending = false
+                    sender.reply(toApplicationShouldTerminate: false); return
+                }
+            }
+        }
+        return .terminateLater
+    }
+    func applicationWillTerminate(_ notification: Notification) { controller?.prepareToClose(persistSession: false) }
     func application(_ application: NSApplication, open urls: [URL]) {
         for url in urls where URLInput.directURL(url.absoluteString) != nil {
             if let controller { controller.openLittleOrbit(url: url) } else { pendingExternalURLs.append(url) }

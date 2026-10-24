@@ -103,6 +103,7 @@ import QuartzCore
     var savedTabEditor: SavedTabEditorController?
     var onSpacesChanged: (() -> Void)?
     var saveWork: DispatchWorkItem?
+    var sessionWriter: SessionWriter?
     private var chromeRefreshWork: DispatchWorkItem?
     var tabErrors: [UUID: String] = [:]
     var pendingHome: Set<UUID> = []
@@ -116,6 +117,15 @@ import QuartzCore
         if !ephemeral, UserDefaults.standard.object(forKey: "AutomaticallyShowPlayingVideo") != nil { automaticallyShowsVideo = UserDefaults.standard.bool(forKey: "AutomaticallyShowPlayingVideo") }
         displayedWidth = session.sidebarVisible ? CGFloat(session.sidebarWidth) : 0
         super.init(nibName: nil, bundle: nil)
+        if !ephemeral {
+            let writer = SessionWriter(url: sessionURL)
+            writer.onError = { [weak self] error in
+                NSLog("Session save: %@", error.localizedDescription)
+                guard let self, self.isViewLoaded, !self.isShuttingDown, self.sessionWriter?.isLatestSnapshotSaved == false else { return }
+                self.pageFeedback.show("Couldn’t save tabs", symbol: "exclamationmark.triangle", in: self.webHost)
+            }
+            sessionWriter = writer
+        }
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     override func loadView() {
@@ -378,7 +388,9 @@ import QuartzCore
         }
         retiringViews.removeAll()
     }
-    func prepareToClose() {
+    func prepareToClose(persistSession: Bool = true) {
+        guard !isShuttingDown else { return }
+        saveWork?.cancel(); saveWork = nil
         chromeRefreshWork?.cancel(); chromeRefreshWork = nil
         spaceManager?.cancel(nil)
         savedTabEditor?.cancel(nil)
@@ -386,7 +398,8 @@ import QuartzCore
         for peek in Array(peeks.values) { peek.dismiss() }
         for little in Array(littleWindows.values) { little.close() }
         if let monitor = scrollMonitor { NSEvent.removeMonitor(monitor); scrollMonitor = nil }
-        cancelPaging(); animator.stop(); save()
+        cancelPaging(); animator.stop()
+        if persistSession { save(); _ = sessionWriter?.flush(timeout: 2) }
     }
     func updateMetadata(_ web: WKWebView) {
         guard let pair = browsers.first(where: { $0.value === web }), let i = session.tabs.firstIndex(where: { $0.id == pair.key }) else { return }
@@ -824,7 +837,22 @@ import QuartzCore
     }
     func save() {
         guard !privateMode else { return }
-        do { try SessionFile.save(session, to: sessionURL) } catch { NSLog("Session save: %@", error.localizedDescription) }
+        saveWork?.cancel(); saveWork = nil
+        sessionWriter?.enqueue(session)
+    }
+    /// Called before teardown. New edits made during an async write must also
+    /// reach disk before the main actor allows the application to terminate.
+    func flushSessionForTermination(timeout: TimeInterval = 5) async -> Bool {
+        guard !privateMode, let writer = sessionWriter else { return true }
+        save()
+        let deadline = ProcessInfo.processInfo.systemUptime + max(0, timeout)
+        repeat {
+            let remaining = max(0, deadline - ProcessInfo.processInfo.systemUptime)
+            guard await writer.flushAsync(timeout: remaining) else { return false }
+            if saveWork != nil { save(); continue }
+            if writer.isLatestSnapshotSaved { return true }
+        } while ProcessInfo.processInfo.systemUptime < deadline
+        return false
     }
 
     func openAddress(newTab: Bool, empty: Bool) {
