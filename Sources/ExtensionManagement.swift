@@ -37,7 +37,11 @@ import UniformTypeIdentifiers
         revoke.frame = NSRect(x: 286, y: 21, width: 190, height: 32); revoke.target = self; revoke.action = #selector(revokePermissions)
         removeButton.frame = NSRect(x: 482, y: 21, width: 116, height: 32); removeButton.target = self; removeButton.action = #selector(removeExtension)
         [importButton, toggle, revoke, removeButton].forEach { root.addSubview($0) }
+        Self.dress?(window, root)
     }
+    /// The app installs Bam's wash and pill styling here; this file also builds
+    /// alone in its component suite, where the styling kit is absent.
+    @MainActor static var dress: ((NSWindow?, NSView) -> Void)?
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
     func show(profileID: UUID, relativeTo parent: NSWindow?) {
         self.profileID = profileID; refresh()
@@ -56,7 +60,10 @@ import UniformTypeIdentifiers
     private var selection: BrowserExtensionRecord? { items.indices.contains(table.selectedRow) ? items[table.selectedRow] : nil }
     private func updateControls() {
         let selected = selection
-        toggle.title = selected?.enabled == true ? "Disable" : "Enable"
+        let toggleTitle = selected?.enabled == true ? "Disable" : "Enable"
+        // Keep whatever styling the app dressed the button in.
+        let attributes = toggle.attributedTitle.length > 0 ? toggle.attributedTitle.attributes(at: 0, effectiveRange: nil) : [:]
+        toggle.attributedTitle = NSAttributedString(string: toggleTitle, attributes: attributes)
         toggle.isEnabled = !busy && selected != nil; removeButton.isEnabled = !busy && selected != nil; revoke.isEnabled = !busy && selected != nil; importButton.isEnabled = !busy
         let guidance = "Reload already open pages after enabling, disabling, or revoking access. Code injected into a page cannot be removed until that page reloads. Extension storage stays local to this profile."
         status.stringValue = selected.flatMap { host?.errors[$0.id] } ?? host?.lastError

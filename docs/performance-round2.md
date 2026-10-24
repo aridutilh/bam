@@ -1,6 +1,6 @@
 # Performance round 2 — local candidate
 
-This work starts from Bam 0.14.0 (`8dec99c`). It is an unpublished local candidate. The installed app, release version, browser profiles and saved sessions are unchanged.
+The measurements below start from Bam 0.14.0 (`8dec99c`). The performance changes remain unpublished. The local Preview now combines them with the published 0.15.0 Settings and palette commands; this integration does not change the historical benchmark results below. Regular Bam and its saved profile are unchanged.
 
 ## What the comparison establishes
 
@@ -91,4 +91,4 @@ The remaining measurements are a complete many-tab before/after comparison, idle
 
 ## Practical recommendation
 
-The verified search, history and extension-query gains justify a local trial of the candidate. All eighteen component suites and nine native suites passed against the final build. Keep the current conservative background-page policy, and evaluate normal browsing before adding more performance work. Arc still leads in the measured page-callback cadence; a full memory comparison and input-to-displayed-pixel measurement remain open. This round stops with the improvements committed locally and the installed app unchanged.
+The verified search, history and extension-query gains justify a local trial of the candidate. All eighteen component suites and nine native suites passed against the final build. Keep the current conservative background-page policy, and evaluate normal browsing before adding more performance work. Arc still leads in the measured page-callback cadence; a full memory comparison and input-to-displayed-pixel measurement remain open. This round stops with the improvements committed locally, available in the separate Bam Preview, and regular Bam unchanged.

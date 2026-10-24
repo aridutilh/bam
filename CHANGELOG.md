@@ -2,12 +2,22 @@
 
 ## Unreleased — performance round 2
 
+- Integrate the published 0.15.0 Settings, default search engine and command-palette features into the local performance candidate.
+
 - Reuse validated normalized tab-search fields and avoid sorting an empty query.
 - Decode normal history files once, move visit encoding/atomic writes to a coalescing background writer, and wait for session plus history saves during quit. Explicit clear/archive operations retain synchronous durable results.
 - Cache revision-bound extension tab topology and adapter arrays while checking live ownership on every access; Peek and Little Bam keep the uncached path.
 - Resolve an extension backup's existing parent before validating its location, so macOS temporary-directory aliases cannot bypass the requirement to keep the backup outside the package.
 - Preserve an already attached page or Split host during repeated presentation, including PiP callbacks, while still installing a replacement renderer under the same tab ID.
-- Add a reproducible local renderer/cadence fixture and report the measured gains and remaining Arc/Yab gaps in [performance round 2](docs/performance-round2.md). This candidate has not been published or installed.
+- Add a reproducible local renderer/cadence fixture and report the measured gains and remaining Arc/Yab gaps in [performance round 2](docs/performance-round2.md). Available only as a local Bam Preview; no performance changes have been published.
+
+## 0.15.0 prerelease — build 31
+
+- Add a Bam-styled Settings window (Bam ▸ Settings…, ⌘,): a Space-tinted stage with a section rail and translucent cards, built from the onboarding ink, pills and washes instead of Aqua controls. General holds playback and memory toggles plus a keyboard card; Search picks the default engine; Spaces edits each Space’s name, color and icon in place and links to Manage Spaces; Extensions lists the current profile’s extensions; About replaces the system About panel with version, welcome replay and links.
+- Add a default search engine (DuckDuckGo, Google or Perplexity). Plain typed text goes to the chosen engine with the same single encoding; palette suggestions follow it. Persisted outside fresh previews.
+- Let the command palette run browser commands by name: Settings, Manage Spaces, History, Downloads, Recently Closed, Extensions, New Little Bam Window, Toggle Sidebar, Find in Page, Picture in Picture, Print and Welcome. A typed command name (three or more characters) leads the results; looser matches trail the tabs so “se” or “hi” never hijacks a web search. Commands run through the responder chain once the palette closes.
+- Dress Manage Spaces and the Extensions manager in the same wash, serif headings, ink labels and pill buttons; controls, names and fixtures are unchanged. ⌘W and Escape close the Settings window instead of a tab.
+- Merged on top of the 0.14.0 favicon release and shipped as the v0.15.0 prerelease. See [VALIDATION.md](VALIDATION.md).
 
 ## 0.14.0 — Website favicons
 

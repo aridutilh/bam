@@ -60,8 +60,12 @@ import WebKit
 /// The command palette: open/search, Arc-style Tab-to-search site scoping,
 /// remote suggestions, layout and dismissal.
 extension BrowserController {
+    /// The chosen default engine supplies suggestions when it has an endpoint;
+    /// otherwise DuckDuckGo keeps autocomplete alive.
     private var defaultSuggestionEngine: SiteSearchEngine? {
-        SiteSearchCatalog.engines.first { $0.host == "duckduckgo.com" }
+        let chosen = SiteSearchCatalog.engines.first { $0.host == URLInput.searchEngine.rawValue }
+        if chosen?.suggestTemplate != nil { return chosen }
+        return SiteSearchCatalog.engines.first { $0.host == "duckduckgo.com" }
     }
 
     func openAddress(newTab: Bool, empty: Bool) {
@@ -107,6 +111,7 @@ extension BrowserController {
         results.onSelect = { [weak self] id in self?.selectSearchResult(id) }
         results.onSubmitQuery = { [weak self] query in self?.submitAddressQuery(query) }
         results.onSearch = { [weak self] text in self?.submitPaletteSearch(text) }
+        results.onCommand = { [weak self] command in self?.performPaletteCommand(command) }
         box.addSubview(results)
         overlay.addSubview(box); root.addSubview(overlay)
         addressOverlay = overlay; addressField = field; addressCard = box; tabSearchResults = results
@@ -199,10 +204,18 @@ extension BrowserController {
     }
     private func applyPaletteResults() {
         guard let field = addressField else { return }
+        let commands = paletteEngine == nil ? PaletteCommandCatalog.matches(field.stringValue) : []
         tabSearchResults?.update(tabs: session.tabs, query: field.stringValue, activeID: focusedTabID,
                                  canCreate: true, spaces: session.spaces, profiles: session.profiles,
-                                 engine: paletteEngine, suggestions: paletteSuggestions)
+                                 engine: paletteEngine, suggestions: paletteSuggestions, commands: commands)
         layoutBrowser()
+    }
+    /// Runs a catalog command through the responder chain once the palette is
+    /// gone, so the same entry reaches the controller, the app delegate, or a
+    /// Little Bam window depending on where it was typed.
+    func performPaletteCommand(_ command: PaletteCommand) {
+        dismissAddress()
+        if !NSApp.sendAction(Selector(command.action), to: nil, from: self) { NSSound.beep() }
     }
 
     @discardableResult func activatePaletteEngineHint() -> Bool {

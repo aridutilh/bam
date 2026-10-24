@@ -35,6 +35,16 @@ let punctuationQuery = "Swift & AppKit #1 + 50%?"
 let punctuationURL = URLComponents(string: URLInput.resolve(punctuationQuery)!)!
 expect(punctuationURL.host == "duckduckgo.com" && punctuationURL.queryItems?.first?.value == punctuationQuery, "Search punctuation is encoded exactly once")
 
+// The default search engine swaps the results host, never the encoding.
+URLInput.searchEngine = .google
+let googleURL = URLComponents(string: URLInput.resolve(punctuationQuery)!)!
+expect(googleURL.host == "www.google.com" && googleURL.queryItems?.first?.value == punctuationQuery, "Google default keeps the single-encoded query")
+URLInput.searchEngine = .perplexity
+expect(URLComponents(string: URLInput.resolve("native mac")!)!.host == "www.perplexity.ai", "Perplexity default")
+URLInput.searchEngine = .duckDuckGo
+expect(DefaultSearchEngine(rawValue: "duckduckgo.com") == .duckDuckGo && DefaultSearchEngine(rawValue: "bing.com") == nil, "Saved engine hosts round-trip and unknown hosts are ignored")
+expect(URLInput.resolve("example.com") == "https://example.com", "Addresses bypass the default engine")
+
 // Closing a different tab must not change the current selection.
 var closing = BrowserSession.fresh()
 let selectedBeforeClose = closing.activeID
