@@ -9,6 +9,7 @@ import WebKit
         extensionStorage = value
         value.profileName = { [weak self] in self?.session.profileName($0) ?? "Profile" }
         value.surfaces = { [weak self] in self?.extensionSurfaces(profileID: $0) ?? [] }
+        value.surface = { [weak self] profile, id in self?.extensionSurface(profileID: profile, id: id) }
         value.selectTab = { [weak self] id in
             guard let self else { return false }
             if self.session.tabs.contains(where: { $0.id == id }) {
@@ -106,6 +107,26 @@ import WebKit
                 isActive: true, isSelected: true))
         }
         return result
+    }
+    /// Resolve one live page without constructing metadata for every other tab.
+    @available(macOS 15.4, *)
+    func extensionSurface(profileID: UUID, id: UUID) -> BrowserExtensionSurface? {
+        guard !isShuttingDown, !isApplyingProfileChange else { return nil }
+        if let tab = session.tabs.first(where: { $0.id == id && session.profileID(for: $0) == profileID }) {
+            return BrowserExtensionSurface(id: tab.id, title: tab.displayTitle, url: URL(string: tab.address), webView: browsers[tab.id], window: viewIfLoaded?.window,
+                isActive: session.currentProfileID == profileID && focusedTabID == tab.id && peeks[session.activeID]?.isPresented != true,
+                isSelected: session.currentProfileID == profileID && visibleMemberIDs.contains(tab.id), isPinned: tab.isSaved)
+        }
+        for (owner, peek) in peeks where peekExtensionIDs[owner] == id {
+            guard let web = peek.webView, self.profileID(of: web) == profileID else { continue }
+            return BrowserExtensionSurface(id: id, title: web.title ?? "Peek", url: web.url, webView: web, window: viewIfLoaded?.window,
+                isActive: session.activeID == owner && peek.isPresented, isSelected: session.activeID == owner && peek.isPresented)
+        }
+        if let little = littleWindows[id], let web = little.webView, self.profileID(of: web) == profileID {
+            return BrowserExtensionSurface(id: id, title: web.title ?? "Little Bam", url: web.url, webView: web, window: little.window,
+                isActive: true, isSelected: true)
+        }
+        return nil
     }
     var extensionCommandTabID: UUID? {
         if let pair = littleWindows.first(where: { $0.value.window?.isKeyWindow == true }) { return pair.key }

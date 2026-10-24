@@ -239,6 +239,9 @@ import QuartzCore
     var paletteSeparator: NSBox?
     var paletteGlow: NSView?
     var paletteTint: NSView?
+    var spaceCreateIndicator: SpaceCreateIndicatorView?
+    var spaceCreationPanel: SpaceCreationPanel?
+    var spaceCreationKeyMonitor: Any?
     var paletteEnginePill: PaletteEnginePill?
     var paletteEngine: SiteSearchEngine?
     var paletteHintEngine: SiteSearchEngine?
@@ -378,7 +381,7 @@ import QuartzCore
         sidebar.frame = NSRect(x: width - targetWidth, y: 0, width: targetWidth, height: h)
         sidebar.layer?.transform = CATransform3DIdentity
         sidebar.alphaValue = 1
-        sidebar.isHidden = width < 0.5
+        sidebar.isHidden = width < 0.5 || spaceCreationPanel != nil
         card.frame = NSRect(x: width + 8, y: 8, width: max(100, w - width - 16), height: h - 16)
         // The strip grows continuously as the sidebar collapses. A threshold
         // switch here used to resize the webpage by 36 points in a single frame.
@@ -398,6 +401,7 @@ import QuartzCore
         handle.frame = NSRect(x: max(0, width - 5), y: 44, width: 10, height: max(0, h - 60))
         handle.currentWidth = targetWidth; handle.isHidden = !session.sidebarVisible || width < 100
         if addressOverlay != nil { layoutPalette(width: w, height: h) }
+        layoutSpaceCreation()
     }
 
     func webView(for tab: BrowserTab) -> WKWebView {
@@ -715,11 +719,13 @@ import QuartzCore
         pagingAnimator.stop(); swipe.reset(); trackingSwipe = false
         capturedSpaceMomentum = false; pagingCommit = nil
         pagingOffset = 0; pagingTarget = nil; sidebar.endPaging()
-        root.previewSpace = nil; root.previewProgress = 0
+        updateSpaceCreateIndicator(progress: nil)
+        if spaceCreationPanel == nil { root.previewSpace = nil; root.previewProgress = 0 }
     }
     func changeSpace(_ space: Int) {
         guard session.spaceDefinition(space) != nil else { return }
         dismissAddress()
+        dismissSpaceCreation()
         quarantineActiveSpaceGesture()
         swipe.reset(); trackingSwipe = false
         unphasedScrollEnd?.cancel(); unphasedScrollEnd = nil
@@ -875,6 +881,8 @@ import QuartzCore
     }
     private func applySpaceScroll(deltaX: CGFloat, deltaY: CGFloat, phase: SpaceSwipeStateMachine.Phase,
                                   isMomentum: Bool, timestamp: TimeInterval) -> Bool {
+        // The creation panel owns the sidebar area; Space paging waits for it.
+        guard spaceCreationPanel == nil else { return false }
         let before = SpaceSwipeDiagnostics.shared.isRecording ? swipe.diagnostics : nil
         let result = swipe.handle(deltaX: deltaX, deltaY: deltaY, phase: phase, isMomentum: isMomentum,
                                   timestamp: timestamp, space: session.spaceIndex(session.space) ?? 0, width: sidebar.bounds.width,
@@ -909,10 +917,15 @@ import QuartzCore
             sidebar.setPagingOffset(offset)
             root.previewSpace = pagingTarget.flatMap { session.spaceDefinition($0)?.colorIndex }; root.previewProgress = abs(offset) / max(1, sidebar.bounds.width)
         }
+        // Never advertise creation that the Space cap would refuse.
+        let canCreate = session.spaces.count < BrowserSession.maximumSpaces
+        if !result.finished { updateSpaceCreateIndicator(progress: canCreate ? result.createProgress : nil) }
         if phase == .ended || phase == .cancelled { trackingSwipe = false }
         if result.finished {
+            updateSpaceCreateIndicator(progress: nil)
             capturedSpaceMomentum = result.shouldConsume
             finishPaging(commit: result.committedSpace.flatMap { session.spaces.indices.contains($0) ? session.spaces[$0].id : nil }, initialVelocity: result.releaseVelocity)
+            if result.committedCreate && canCreate { openSpaceCreation() }
         }
         return result.shouldConsume
     }
@@ -933,7 +946,8 @@ import QuartzCore
             initialVelocity: initialVelocity, update: { [weak self] offset in
             guard let self else { return }
             self.pagingOffset = offset; self.sidebar.setPagingOffset(offset)
-            if commit == nil {
+            // The creation panel owns the gradient preview while it is open.
+            if commit == nil, self.spaceCreationPanel == nil {
                 self.root.previewSpace = self.pagingTarget.flatMap { self.session.spaceDefinition($0)?.colorIndex }
                 self.root.previewProgress = abs(offset) / max(1, self.sidebar.bounds.width)
             }
@@ -942,7 +956,7 @@ import QuartzCore
             self.pagingCommit = nil
             self.sidebar.endPaging()
             self.pagingOffset = 0; self.pagingTarget = nil
-            self.root.previewSpace = nil; self.root.previewProgress = 0
+            if self.spaceCreationPanel == nil { self.root.previewSpace = nil; self.root.previewProgress = 0 }
         })
     }
     func spaceDirection(to id: Int) -> CGFloat {

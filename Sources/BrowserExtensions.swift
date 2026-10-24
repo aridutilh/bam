@@ -41,6 +41,8 @@ struct BrowserExtensionPermissionReview {
 @available(macOS 15.4, *)
 @MainActor final class BrowserExtensions: NSObject {
     var surfaces: ((UUID) -> [BrowserExtensionSurface])?
+    /// Optional live lookup; a nil result is authoritative, never a cache miss.
+    var surface: ((UUID, UUID) -> BrowserExtensionSurface?)?
     var profileName: ((UUID) -> String)?
     var selectTab: ((UUID) -> Bool)?
     var closeTab: ((UUID) -> Bool)?
@@ -419,11 +421,25 @@ struct BrowserExtensionPermissionReview {
     func owns(_ context: WKWebExtensionContext) -> Bool { context.webExtensionController === controller }
     /// Cached event snapshots are never authority for a live browser action.
     func currentSurface(_ id: UUID) -> BrowserExtensionSurface? {
-        guard let surface = owner?.surfaces?(profileID).first(where: { $0.id == id }) else { return nil }
-        if let web = surface.webView {
-            guard web.configuration.webExtensionController === controller, web.configuration.websiteDataStore === dataStore else { return nil }
-        }
+        let surface: BrowserExtensionSurface?
+        if let lookup = owner?.surface { surface = lookup(profileID, id) }
+        else { surface = owner?.surfaces?(profileID).first(where: { $0.id == id }) }
+        guard let surface, surface.id == id, accepts(surface) else { return nil }
         return surface
+    }
+    private func accepts(_ surface: BrowserExtensionSurface) -> Bool {
+        guard let web = surface.webView else { return true }
+        return web.configuration.webExtensionController === controller && web.configuration.websiteDataStore === dataStore
+    }
+    /// One borrowed snapshot per enumeration, discarded before returning to WebKit.
+    /// Keep reconciled ordering, but read membership and ownership from the live host.
+    func currentSurfaces() -> [BrowserExtensionSurface] {
+        var live: [UUID: BrowserExtensionSurface] = [:]
+        var seen = Set<UUID>()
+        for surface in owner?.surfaces?(profileID) ?? [] where seen.insert(surface.id).inserted {
+            if accepts(surface) { live[surface.id] = surface }
+        }
+        return orderedIDs.compactMap { live[$0] }
     }
     func authorizes(_ tab: (any WKWebExtensionTab)?, for context: WKWebExtensionContext) -> Bool {
         guard owns(context) else { return false }
@@ -456,8 +472,9 @@ struct BrowserExtensionPermissionReview {
             }
         }
         reportedActiveTabs = reportedActiveTabs.filter { windows[$0.key] != nil }
+        let activeMembers = Dictionary(grouping: currentSurfaces(), by: windowKey)
         for (key, window) in windows {
-            let previous = reportedActiveTabs[key], active = window.activeID
+            let previous = reportedActiveTabs[key], active = window.activeID(in: activeMembers[key] ?? [])
             if active != previous, let active, let tab = tabs[active] {
                 controller.didActivateTab(tab, previousActiveTab: previous.flatMap { tabs[$0] })
             }
@@ -472,14 +489,17 @@ struct BrowserExtensionPermissionReview {
         // actual focus after topology changes, including an unfocused profile.
         if focusedID != lastFocusedWindow || previousWindowKeys != Set(windows.keys) { lastFocusedWindow = focusedID; controller.didFocusWindow(focused) }
     }
-    func focusedWindow() -> BrowserExtensionWindow? {
-        windows.values.first { $0.native?.isKeyWindow == true && $0.tabIDs.contains { currentSurface($0)?.isActive == true } }
+    func focusedWindow() -> BrowserExtensionWindow? { focusedWindow(in: currentSurfaces()) }
+    private func focusedWindow(in surfaces: [BrowserExtensionSurface]) -> BrowserExtensionWindow? {
+        let activeWindows = Set(surfaces.filter(\.isActive).map(windowKey))
+        return windows.values.first { $0.native?.isKeyWindow == true && activeWindows.contains($0.key) }
     }
     func webExtensionController(_ controller: WKWebExtensionController, openWindowsFor context: WKWebExtensionContext) -> [any WKWebExtensionWindow] {
         guard owns(context) else { return [] }
+        let surfaces = currentSurfaces()
         var seen = Set<ObjectIdentifier>()
-        let ordered = orderedIDs.compactMap(currentSurface).map(windowKey).filter { seen.insert($0).inserted }.compactMap { windows[$0] }
-        if let focused = focusedWindow() { return [focused] + ordered.filter { $0 !== focused } }
+        let ordered = surfaces.map(windowKey).filter { seen.insert($0).inserted }.compactMap { windows[$0] }
+        if let focused = focusedWindow(in: surfaces) { return [focused] + ordered.filter { $0 !== focused } }
         return ordered
     }
     func webExtensionController(_ controller: WKWebExtensionController, focusedWindowFor context: WKWebExtensionContext) -> (any WKWebExtensionWindow)? { owns(context) ? focusedWindow() : nil }
@@ -578,14 +598,18 @@ struct BrowserExtensionPermissionReview {
     weak var native: NSWindow?
     private var rememberedActiveID: UUID?
     init(runtime: BrowserExtensionRuntime, key: ObjectIdentifier, native: NSWindow?) { self.runtime = runtime; self.key = key; self.native = native }
-    var tabIDs: [UUID] { guard let runtime else { return [] }; return runtime.orderedIDs.filter { runtime.currentSurface($0).map(runtime.windowKey) == key } }
+    private var members: [BrowserExtensionSurface] {
+        guard let runtime else { return [] }
+        return runtime.currentSurfaces().filter { runtime.windowKey($0) == key }
+    }
+    var tabIDs: [UUID] { members.map(\.id) }
     /// Each profile exposes a virtual window, even while another profile is visible.
     /// WebKit requires every nonempty window to contain its active tab. Preserve
     /// that profile's selection independently from physical window focus.
-    var activeID: UUID? {
-        let members = tabIDs
-        if let visible = members.first(where: { runtime?.currentSurface($0)?.isActive == true }) { rememberedActiveID = visible }
-        else if rememberedActiveID.map({ members.contains($0) }) != true { rememberedActiveID = members.first }
+    var activeID: UUID? { activeID(in: members) }
+    func activeID(in members: [BrowserExtensionSurface]) -> UUID? {
+        if let visible = members.first(where: \.isActive) { rememberedActiveID = visible.id }
+        else if rememberedActiveID.map({ id in members.contains { $0.id == id } }) != true { rememberedActiveID = members.first?.id }
         return rememberedActiveID
     }
     func tabs(for context: WKWebExtensionContext) -> [any WKWebExtensionTab] { guard runtime?.owns(context) == true else { return [] }; return tabIDs.compactMap { runtime?.tabs[$0] } }

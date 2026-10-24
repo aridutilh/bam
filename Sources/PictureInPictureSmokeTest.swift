@@ -1,6 +1,15 @@
 import AppKit
 import WebKit
 
+/// Counts real public snapshot requests while preserving WebKit rendering.
+@MainActor private final class PiPSnapshotCountingWebView: WKWebView {
+    private(set) var snapshotRequests = 0
+    override func takeSnapshot(with snapshotConfiguration: WKSnapshotConfiguration?, completionHandler: @escaping @MainActor @Sendable (NSImage?, Error?) -> Void) {
+        snapshotRequests += 1
+        super.takeSnapshot(with: snapshotConfiguration, completionHandler: completionHandler)
+    }
+}
+
 /// Uses only bundled pages, a bundled video, and a nonpersistent WebKit store.
 @MainActor final class PictureInPictureSmokeTest: NSObject, WKNavigationDelegate {
     private enum Stage { case loadingVideo, cancelling, opening, playing, returning, restored, rapidRefloat, automaticPaused, automaticCancelled, automaticOpening, automaticPlaying, automaticReturning, automaticRestored, loadingEmpty, automaticEmpty, empty, finished }
@@ -8,7 +17,7 @@ import WebKit
     private let coordinator = PictureInPictureCoordinator()
     private let tabID = UUID()
     private let resourcesURL: URL?
-    private var web: WKWebView!
+    private var web: PiPSnapshotCountingWebView!
     private var window: NSWindow!
     private let host = NSView()
     private var timeout: Timer?
@@ -34,7 +43,7 @@ import WebKit
         let config = WKWebViewConfiguration()
         config.websiteDataStore = .nonPersistent()
         config.mediaTypesRequiringUserActionForPlayback = []
-        web = WKWebView(frame: NSRect(x: 0, y: 0, width: 720, height: 500), configuration: config)
+        web = PiPSnapshotCountingWebView(frame: NSRect(x: 0, y: 0, width: 720, height: 500), configuration: config)
         web.navigationDelegate = self
         web.autoresizingMask = [.width, .height]
         window = NSWindow(contentRect: web.frame, styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
@@ -86,16 +95,18 @@ import WebKit
                 }
         case .loadingEmpty:
             stage = .automaticEmpty
+            let snapshotsBefore = web.snapshotRequests
             coordinator.automaticallyPresentIfPlaying(web: web, tabID: tabID, shouldPresent: { true }, restore: { [weak self] _ in self?.finish(false, "Automatic no-video request rehosted a page") }, completion: { [weak self] result in self?.recordCompletion("empty", result) })
             after(0.35) {
                 guard self.coordinator.referencedTabID == nil, !self.coordinator.references(self.web), self.web.superview === self.host else { self.finish(false, "Automatic no-video request did not quietly clear"); return }
+                guard self.web.snapshotRequests == snapshotsBefore else { self.finish(false, "Automatic no-video departure requested a compositor snapshot"); return }
                 self.stage = .empty
                 self.coordinator.toggle(web: self.web, tabID: self.tabID, restore: { _ in }, report: { [weak self] message in
                     guard let self else { return }
-                    let passed = message.hasPrefix("No HTML5 video found.") && self.coordinator.activeTabID == nil && !self.coordinator.owns(self.web) && self.web.superview === self.host
+                    let passed = self.web.snapshotRequests > snapshotsBefore && message.hasPrefix("No HTML5 video found.") && self.coordinator.activeTabID == nil && !self.coordinator.owns(self.web) && self.web.superview === self.host
                     let expected = ["empty": [false], "paused": [false], "initialGuard": [false], "staleGuard": [false], "cancelled": [false], "presented": [true], "busy": [false]]
                     guard self.automaticCompletions == expected else { self.finish(false, "Automatic completion was not delivered exactly once per terminal result: \(self.automaticCompletions)"); return }
-                    self.finish(passed, "Fresh page-cover pixel checks and cancellation, final-size presentation, manual and automatic PiP: live video identity/time, rounded aspect-fit panel, native pause/play/seek bounds/volume/mute/resize/Return, restored DOM before reveal, close/Escape; playing-only automatic detection, focus retention, stale-guard/pending cancellation, no replacement, and no-video handling")
+                    self.finish(passed, "Fresh page-cover pixel checks and cancellation, final-size presentation, manual and automatic PiP: live video identity/time, rounded aspect-fit panel, native pause/play/seek bounds/volume/mute/resize/Return, restored DOM before reveal, close/Escape; playing-only automatic detection without no-video/paused snapshots, focus retention, stale-guard/pending cancellation, no replacement, and no-video handling")
                 })
             }
         default: break
@@ -104,8 +115,9 @@ import WebKit
 
     private func checkPendingCancellation() {
         stage = .cancelling
+        let snapshotsBefore = web.snapshotRequests
         coordinator.toggle(web: web, tabID: tabID, restore: { [weak self] _ in self?.finish(false, "Pending detection unexpectedly rehosted the view") }, report: { [weak self] _ in self?.finish(false, "Cancelled request delivered a stale report") })
-        guard coordinator.references(web), !coordinator.owns(web), coordinator.activeTabID == nil else {
+        guard web.snapshotRequests == snapshotsBefore + 1, coordinator.references(web), !coordinator.owns(web), coordinator.activeTabID == nil else {
             finish(false, "Pending request ownership is incorrect"); return
         }
         coordinator.restore()
@@ -402,10 +414,12 @@ import WebKit
         stage = .automaticPaused
         web.evaluateJavaScript("window.__orbitSmokeVideo.pause(); undefined") { [weak self] _, error in
             guard let self, error == nil else { self?.finish(false, "Could not pause the local fixture"); return }
+            let snapshotsBefore = self.web.snapshotRequests
             self.coordinator.automaticallyPresentIfPlaying(web: self.web, tabID: self.tabID, shouldPresent: { true }, restore: { [weak self] _ in self?.finish(false, "Paused automatic video was rehosted") }, completion: { [weak self] result in self?.recordCompletion("paused", result) })
             guard self.coordinator.referencedTabID == self.tabID, !self.coordinator.owns(self.web) else { self.finish(false, "Automatic pending tab identity is missing"); return }
             self.after(0.35) {
                 guard self.coordinator.referencedTabID == nil, !self.coordinator.references(self.web), self.web.superview === self.host else { self.finish(false, "Paused video automatically entered PiP"); return }
+                guard self.web.snapshotRequests == snapshotsBefore else { self.finish(false, "Automatic paused-video departure requested a compositor snapshot"); return }
                 self.web.evaluateJavaScript("window.__orbitSmokeVideo.paused && !window.__orbitSmokeVideo.controls") { [weak self] value, error in
                     guard let self else { return }
                     guard error == nil, value as? Bool == true else { self.finish(false, "Automatic paused rejection altered playback or controls"); return }
