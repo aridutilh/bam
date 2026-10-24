@@ -302,14 +302,8 @@ private class ArkHoverButton: NSButton {
         NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: radius, yRadius: radius).fill()
     }
     func symbol(_ name: String, rect: NSRect, color: NSColor, size: CGFloat = 14) {
-        guard let image = NSImage(systemSymbolName: name, accessibilityDescription: nil)?
-            .withSymbolConfiguration(.init(pointSize: size, weight: .medium)),
-              let tinted = image.copy() as? NSImage else { return }
-        tinted.lockFocus()
-        color.setFill()
-        NSRect(origin: .zero, size: tinted.size).fill(using: .sourceAtop)
-        tinted.unlockFocus()
-        tinted.draw(in: rect, from: .zero, operation: .sourceOver, fraction: isEnabled ? 1 : 0.32, respectFlipped: true, hints: nil)
+        SidebarSymbol.draw(named: name, in: rect, color: color, pointSize: size,
+                           opacity: isEnabled ? 1 : 0.32)
     }
     func text(_ value: String, rect: NSRect, size: CGFloat, weight: NSFont.Weight = .regular, color: NSColor? = nil, alignment: NSTextAlignment = .left) {
         let paragraph = NSMutableParagraphStyle()

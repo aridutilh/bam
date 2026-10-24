@@ -60,6 +60,8 @@ if [ "$VERIFIED" != true ]; then exit 1; fi
 "$BUILD_DIR/model-tests" "$BUILD_DIR"
 "$SWIFTC" "${COMMON[@]}" -parse-as-library -framework AppKit -framework QuartzCore "$PROJECT_DIR/Sources/RecoveredMotion.swift" "$PROJECT_DIR/Tests/MotionTests.swift" -o "$BUILD_DIR/motion-tests"
 "$BUILD_DIR/motion-tests"
+"$SWIFTC" "${COMMON[@]}" -parse-as-library -framework AppKit "$PROJECT_DIR/Sources/SidebarSymbol.swift" "$PROJECT_DIR/Tests/SymbolRenderingTests.swift" -o "$BUILD_DIR/symbol-tests"
+"$BUILD_DIR/symbol-tests"
 "$SWIFTC" "${COMMON[@]}" -parse-as-library "$PROJECT_DIR/Sources/SpaceSwipe.swift" "$PROJECT_DIR/Tests/SpaceSwipeTests.swift" -o "$BUILD_DIR/swipe-tests"
 "$BUILD_DIR/swipe-tests"
 "$SWIFTC" "${COMMON[@]}" -parse-as-library -framework AppKit "$PROJECT_DIR/Sources/BrowserState.swift" "$PROJECT_DIR/Sources/TabSearchResults.swift" "$PROJECT_DIR/Tests/TabSearchTests.swift" -o "$BUILD_DIR/tab-search-tests"
