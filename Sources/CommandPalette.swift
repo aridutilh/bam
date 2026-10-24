@@ -29,7 +29,9 @@ import WebKit
 /// Arc-style site pill shown once Tab scopes the palette to one engine.
 @MainActor final class PaletteEnginePill: NSView {
     private let label = NSTextField(labelWithString: "")
-    var fittingWidth: CGFloat { label.measuredTextWidth + 24 }
+    // Text width + the field cell's own slack + the capsule's side padding.
+    private var labelWidth: CGFloat { label.measuredTextWidth + 6 }
+    var fittingWidth: CGFloat { labelWidth + 22 }
     init(engine: SiteSearchEngine) {
         super.init(frame: .zero)
         wantsLayer = true
@@ -49,7 +51,7 @@ import WebKit
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
     override func layout() {
         super.layout()
-        let width = label.measuredTextWidth
+        let width = labelWidth
         let height = label.intrinsicContentSize.height
         label.frame = NSRect(x: (bounds.width - width) / 2, y: (bounds.height - height) / 2, width: width, height: height)
     }
