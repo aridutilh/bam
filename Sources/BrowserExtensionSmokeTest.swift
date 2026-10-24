@@ -35,7 +35,29 @@ import WebKit
         try await wait("Browser adapter did not inject extension on first navigation") {
             (try? await web.evaluateJavaScript("document.documentElement.dataset.bamExtensionResult || ''") as? String)?.contains("browser-adapter") == true
         }
+        func checkLiveLookup(_ profileID: UUID) throws {
+            for surface in controller.extensionSurfaces(profileID: profileID) {
+                guard let direct = controller.extensionSurface(profileID: profileID, id: surface.id) else {
+                    throw ExtensionSmokeTest.Failure(description: "Live single-tab resolver omitted a listed page")
+                }
+                try check(direct.id == surface.id && direct.title == surface.title && direct.url == surface.url &&
+                          direct.webView === surface.webView && direct.window === surface.window &&
+                          direct.isActive == surface.isActive && direct.isSelected == surface.isSelected && direct.isPinned == surface.isPinned,
+                          "Single-tab resolver diverged from the browser's live surface list")
+            }
+        }
+        try checkLiveLookup(profile)
+        guard let runtime = config.webExtensionController?.delegate as? BrowserExtensionRuntime,
+              let tabIndex = controller.session.tabs.firstIndex(where: { $0.id == id }) else {
+            throw ExtensionSmokeTest.Failure(description: "Missing single-tab lookup fixture")
+        }
+        let originalSpace = controller.session.tabs[tabIndex].space
+        controller.session.tabs[tabIndex].space = otherSpace
+        let movedSurface = runtime.currentSurface(id)
+        controller.session.tabs[tabIndex].space = originalSpace
+        try check(movedSurface == nil, "A moved tab remained available through the direct resolver before reconciliation")
         controller.session.changeSpace(otherSpace); controller.showActive()
+        try checkLiveLookup(profile); try checkLiveLookup(other)
         host.reconcile()
         guard let context = host.context(for: extensionID), let popup = context.action(for: nil)?.popupWebView else { throw ExtensionSmokeTest.Failure(description: "Missing browser-adapter action popup") }
         try await wait("Browser-adapter popup did not initialize") { (try? await popup.evaluateJavaScript("document.title")) as? String == "Bam fixture ready" }
