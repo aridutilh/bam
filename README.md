@@ -6,9 +6,9 @@ A small, fast, slightly obsessive macOS browser prototype. Native Swift + AppKit
 
 Bam explores the things that make sidebar browsers feel good: a compact sidebar with **Spaces**, a **Peek** overlay for glancing at links, **Split View**, a pocket-sized **Little Bam** window, and a **floating video panel** you can flick into a corner. It's an independent open-source experiment — not affiliated with Arc, The Browser Company, or Yab, and not claiming feature parity with any of them. Think of it as a love letter written in its own handwriting.
 
-**Latest download:** [v0.6.0 prerelease](https://github.com/aridutilh/bam/releases/tag/v0.6.0) · [all releases](https://github.com/aridutilh/bam/releases) · [changelog](CHANGELOG.md)
+**Latest download:** [v0.12.0 prerelease](https://github.com/aridutilh/bam/releases/tag/v0.12.0) · [all releases](https://github.com/aridutilh/bam/releases) · [changelog](CHANGELOG.md)
 
-**Source on `main`: Bam 0.12.0 (build 26).** This source includes Favorites, kept tabs, performance improvements, login profiles, a local extension host, the redesigned command palette with Tab-to-search, a full-screen first-run onboarding (replay it from Bam ▸ "Welcome to Bam…", or demo with `bash scripts/preview-onboarding.sh`), and two new Space appearances: **Prism**, a slowly shifting spectrum, and **Clear**, a translucent window that lets your desktop show through. See [CHANGELOG.md](CHANGELOG.md) and [VALIDATION.md](VALIDATION.md).
+**Released: Bam 0.12.0 (build 26).** This version includes Favorites, kept tabs, performance improvements, login profiles, a local extension host, the redesigned command palette with Tab-to-search, a full-screen first-run onboarding (replay it from Bam ▸ "Welcome to Bam…", or demo with `bash scripts/preview-onboarding.sh`), and two new Space appearances: **Prism**, a slowly shifting spectrum, and **Clear**, a translucent window that lets your desktop show through. See [CHANGELOG.md](CHANGELOG.md) and [VALIDATION.md](VALIDATION.md).
 
 ## Try it
 

@@ -1,13 +1,13 @@
 # Changelog
 
-## Unreleased — 0.13.0 local draft, build 27
+## 0.13.0 prerelease — build 27
 
 - Create Spaces the Arc way: overscrolling past the last Space fills a circled plus; completing the pull and releasing opens a sidebar creation panel with a native stacked-cards illustration, name field, profile picker and theme swatches that live-preview the Space gradient. Create switches to the new Space; Escape, Cancel or any Space change dismisses without creating.
 - A partial pull springs back without creating, cancellation abandons even a completed pull, overscroll on the leading edge or a middle Space never offers creation, and reduced motion skips the pop animations.
 - The new Prism and Clear appearances join the six flat colors in the creation panel's theme swatches; new Spaces still default to cycling the flat colors.
-- Local only; publication and installation remain on hold. See [VALIDATION.md](VALIDATION.md).
+- Shipped as the v0.13.0 prerelease. See [VALIDATION.md](VALIDATION.md).
 
-## Unreleased — 0.12.0 local draft, build 26
+## 0.12.0 prerelease — build 26
 
 Two parallel draft lines each used the 0.10–0.11 numbers; this merge renumbers them as one release. Both lines' entries follow.
 
