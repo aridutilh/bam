@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased — 0.9.0 local draft, build 23
+
+- Ask “Are you sure you want to quit Bam?” for application quit requests, including fresh previews. Cancel/Escape keeps the live session; Quit Bam proceeds through the existing asynchronous save barrier. Repeated requests share one pending decision.
+- Retain the main window so cancelling last-window termination restores it. Ordinary Little Bam close and PiP Return keep their existing behavior.
+- Preserve Retry, Cancel Quit and explicit Quit Without Saving on save failure. Local only; publication and installation remain on hold. See [VALIDATION.md](VALIDATION.md).
+
 ## Unreleased — 0.8.1 local draft, build 22
 
 - Match the reference screenshot’s native point scale with 14-point sidebar labels, larger toolbar symbols, 36-point tab rows and four-column Favorites at normal sidebar widths. Narrow sidebars retain an adaptive grid.

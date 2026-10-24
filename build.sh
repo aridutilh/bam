@@ -74,6 +74,8 @@ if [ "$VERIFIED" != true ]; then exit 1; fi
 "$BUILD_DIR/library-tests" "$BUILD_DIR/library-fixtures"
 "$SWIFTC" "${COMMON[@]}" -parse-as-library "$PROJECT_DIR/Sources/BrowserState.swift" "$PROJECT_DIR/Sources/SessionWriter.swift" "$PROJECT_DIR/Tests/SessionWriterTests.swift" -o "$BUILD_DIR/session-writer-tests"
 "$BUILD_DIR/session-writer-tests" "$BUILD_DIR/session-writer-fixtures"
+"$SWIFTC" "${COMMON[@]}" -parse-as-library "$PROJECT_DIR/Sources/BrowserState.swift" "$PROJECT_DIR/Sources/SessionWriter.swift" "$PROJECT_DIR/Sources/QuitCoordinator.swift" "$PROJECT_DIR/Tests/QuitCoordinatorTests.swift" -o "$BUILD_DIR/quit-coordinator-tests"
+"$BUILD_DIR/quit-coordinator-tests" "$BUILD_DIR/quit-coordinator-fixtures"
 "$SWIFTC" "${COMMON[@]}" -parse-as-library -framework WebKit -framework JavaScriptCore "$PROJECT_DIR/Sources/TabResourcePolicy.swift" "$PROJECT_DIR/Sources/TabActivityProbe.swift" "$PROJECT_DIR/Tests/TabResourcePolicyTests.swift" -o "$BUILD_DIR/tab-resource-tests"
 "$BUILD_DIR/tab-resource-tests"
 "$SWIFTC" "${COMMON[@]}" -parse-as-library -framework AppKit -framework QuartzCore "$PROJECT_DIR/Sources/BrowserState.swift" "$PROJECT_DIR/Sources/RecoveredMotion.swift" "$PROJECT_DIR/Sources/SidebarSymbol.swift" "$PROJECT_DIR/Sources/SidebarView.swift" "$PROJECT_DIR/Tests/SidebarPerformanceTests.swift" -o "$BUILD_DIR/sidebar-performance-tests"

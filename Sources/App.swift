@@ -1,7 +1,7 @@
 import AppKit
 import WebKit
 
-@MainActor final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
+@MainActor final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuItemValidation {
     var window: NSWindow!
     var controller: BrowserController!
     var resourceSmoke: TabResourceSmokeTest?
@@ -12,7 +12,8 @@ import WebKit
     var autoPiPSmoke: AutomaticPiPSmokeTest?
     var pendingExternalURLs: [URL] = []
     var spacesMenu: NSMenu?
-    private var quitPending = false
+    private let quitCoordinator = QuitCoordinator()
+    private var mainWindowWasClosed = false
     func applicationDidFinishLaunching(_ notification: Notification) {
         if CommandLine.arguments.contains("--resource-test") { resourceSmoke = TabResourceSmokeTest(); resourceSmoke?.start(); return }
         if CommandLine.arguments.contains("--feature-test") { featureSmoke = FeatureSmokeTest(); featureSmoke?.start(); return }
@@ -27,6 +28,7 @@ import WebKit
         controller = BrowserController(sessionURL: support.appendingPathComponent("session.json"), ephemeral: preview)
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1260, height: 800), styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
         window.title = "Bam"; window.titleVisibility = .hidden; window.titlebarAppearsTransparent = true
+        window.isReleasedWhenClosed = false; window.delegate = self
         window.isMovableByWindowBackground = false; window.minSize = NSSize(width: 760, height: 540)
         window.backgroundColor = NSColor(white: 0.10, alpha: 1)
         window.contentViewController = controller
@@ -46,31 +48,64 @@ import WebKit
         return !CommandLine.arguments.contains { testArguments.contains($0) }
     }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard let controller, !controller.privateMode else { return .terminateNow }
-        guard !quitPending else { return .terminateLater }
-        quitPending = true
-        Task { @MainActor [weak self] in
-            guard let self else { sender.reply(toApplicationShouldTerminate: false); return }
-            while true {
-                if await controller.flushSessionForTermination() {
-                    sender.reply(toApplicationShouldTerminate: true); return
-                }
-                let alert = NSAlert()
-                alert.messageText = "Your latest tabs haven’t been saved"
-                alert.informativeText = "Bam couldn’t finish saving this session. You can stay in the browser, retry, or quit without the latest changes."
-                alert.addButton(withTitle: "Cancel Quit")
-                alert.addButton(withTitle: "Retry")
-                alert.addButton(withTitle: "Quit Without Saving")
-                switch alert.runModal() {
-                case .alertSecondButtonReturn: continue
-                case .alertThirdButtonReturn: sender.reply(toApplicationShouldTerminate: true); return
-                default:
-                    self.quitPending = false
-                    sender.reply(toApplicationShouldTerminate: false); return
-                }
+        // Runtime fixtures own their controllers and exit explicitly. Both
+        // normal browsing and the fresh private preview use this confirmation.
+        guard let controller else { return .terminateNow }
+        quitCoordinator.request(confirmation: {
+            let alert = NSAlert()
+            alert.messageText = "Are you sure you want to quit Bam?"
+            alert.informativeText = "All Bam windows will close. Playing audio and video will stop."
+            alert.addButton(withTitle: "Cancel")
+            alert.addButton(withTitle: "Quit Bam").keyEquivalent = ""
+            sender.activate(ignoringOtherApps: true)
+            return self.runQuitAlert(alert) == .alertSecondButtonReturn
+        }, save: {
+            await controller.flushSessionForTermination()
+        }, saveFailure: {
+            let alert = NSAlert()
+            alert.messageText = "Your latest tabs haven’t been saved"
+            alert.informativeText = "Bam couldn’t finish saving this session. You can stay in the browser, retry, or quit without the latest changes."
+            alert.addButton(withTitle: "Cancel Quit")
+            alert.addButton(withTitle: "Retry")
+            alert.addButton(withTitle: "Quit Without Saving")
+            switch self.runQuitAlert(alert) {
+            case .alertSecondButtonReturn: return .retry
+            case .alertThirdButtonReturn: return .quitWithoutSaving
+            default: return .cancel
             }
-        }
+        }, reply: { [weak self] shouldQuit in
+            if !shouldQuit { self?.restoreClosedMainWindow() }
+            sender.reply(toApplicationShouldTerminate: shouldQuit)
+        })
         return .terminateLater
+    }
+    private func runQuitAlert(_ alert: NSAlert) -> NSApplication.ModalResponse {
+        let cancel = alert.buttons[0]
+        alert.window.defaultButtonCell = cancel.cell as? NSButtonCell
+        // AppKit replaces a default button's Escape equivalent with Return.
+        // Handle Escape only while this alert owns the modal event loop.
+        let monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            guard NSApp.modalWindow === alert.window, event.keyCode == 53,
+                  event.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty else { return event }
+            cancel.performClick(nil)
+            return nil
+        }
+        defer { if let monitor { NSEvent.removeMonitor(monitor) } }
+        return alert.runModal()
+    }
+    private func restoreClosedMainWindow() {
+        // Closing the last window triggers termination after AppKit hides it.
+        // Cancel must bring back that retained session, not leave a windowless app.
+        guard mainWindowWasClosed,
+              controller?.littleWindows.values.contains(where: { $0.window?.isVisible == true }) != true else { return }
+        mainWindowWasClosed = false
+        window?.makeKeyAndOrderFront(nil)
+    }
+    func windowWillClose(_ notification: Notification) {
+        if let closing = notification.object as? NSWindow, closing === window { mainWindowWasClosed = true }
+    }
+    func windowDidBecomeKey(_ notification: Notification) {
+        if let selected = notification.object as? NSWindow, selected === window { mainWindowWasClosed = false }
     }
     func applicationWillTerminate(_ notification: Notification) { controller?.prepareToClose(persistSession: false) }
     func application(_ application: NSApplication, open urls: [URL]) {
