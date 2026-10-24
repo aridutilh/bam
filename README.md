@@ -8,7 +8,8 @@ Bam explores the things that make sidebar browsers feel good: a compact sidebar 
 
 **Latest download:** [v0.15.2 prerelease](https://github.com/aridutilh/bam/releases/tag/v0.15.2) · [all releases](https://github.com/aridutilh/bam/releases) · [changelog](CHANGELOG.md)
 
-**Bam 0.15.2 (build 33)** sends Safari's user-agent suffix from tabs, Peek and Little Bam so streaming sites negotiate FairPlay playback as they do in Safari. **Bam 0.15.1 (build 32)** retains the 0.15.0 Settings and palette commands and improves tab search, history saving and extension queries. [Performance round 2](docs/performance-round2.md) records the measured gains and the remaining memory and cross-browser questions.
+**Bam 0.16.0 (build 34)** dresses Settings, Manage Spaces, Extensions, Downloads and History in the bambrowser.com look, bundles the site’s typefaces, and gives Little Bam a translucent bar with extensions, Copy Link and an Open-in-Space picker. A collapsed sidebar now hands the page the whole window, and a first launch opens bambrowser.com.
+**Bam 0.15.2 (build 33)** sent Safari's user-agent suffix from tabs, Peek and Little Bam so streaming sites negotiate FairPlay playback as they do in Safari. **Bam 0.15.1 (build 32)** retains the 0.15.0 Settings and palette commands and improves tab search, history saving and extension queries. [Performance round 2](docs/performance-round2.md) records the measured gains and the remaining memory and cross-browser questions.
 
 **Bam 0.14.0 (build 30)** adds full-color website favicons to sidebar rows, Favorites and command-palette results. Icons load asynchronously, stay cached per login profile, and preserve your custom saved icons. This version also includes the Default-profile startup correction for 0.13.1. See [CHANGELOG.md](CHANGELOG.md) and [VALIDATION.md](VALIDATION.md).
 
@@ -32,10 +33,10 @@ That builds for your machine, locally signs the app, and runs the component test
 - **A lighter browser** — sidebar rows are reused and chrome updates are coalesced; session files save on a background writer. Under critical memory pressure, ordinary static pages idle for ten minutes can sleep while the three most recently used loaded pages stay warm. Saved tabs, Splits, video, forms, scripts, and uncertain activity stay protected. See the [tab performance notes](docs/tab-performance.md) for the policy and its limits.
 - **Website icons** — full-color favicons in the sidebar, Favorites and tab search, plus site-search results. Public icon declarations and `/favicon.ico` load directly with a bounded, profile-scoped cache; no third-party favicon service. Custom saved icons take priority, and missing icons retain native symbols.
 - **Tab search** — ⌘T opens a palette *before* making a tab. Type a URL or search, jump to a tab you already have open in any Space, or type a command — “settings”, “history”, “downloads” — and press Return. Fewer duplicate tabs, more smugness.
-- **Settings, Bam-style** — ⌘, opens a Space-tinted settings window: default search engine, playback and memory toggles, per-Space names, colors and icons, extensions and About. No Aqua in sight.
+- **Settings, Bam-style** — ⌘, opens a settings window that looks like bambrowser.com: pink paper (plum in dark mode), white cards, sticker-red toggles. Default search engine, playback and memory toggles, per-Space names, colors and icons, extensions and About. No Aqua in sight.
 - **Peek** 👀 — shift-click a link to open it in an overlay without leaving your page. Like it? Promote it to a tab, a Split pane, or Little Bam. Done? Escape and it's gone.
 - **Split View** — two live pages side by side with a draggable divider and per-pane controls. The pair sticks together in the sidebar and survives restarts.
-- **Little Bam** — a compact companion window with its own address bar. When macOS hands Bam a link to open, it lands here instead of blowing up your main window; promote one with ⌘O when it earns the big screen. (Bam never makes itself your default browser behind your back.)
+- **Little Bam** — a compact companion window with a translucent bar: profile chip, site name (click to edit), extensions, Copy Link and *Open in Space* with a picker for any other Space. When macOS hands Bam a link to open, it lands here instead of blowing up your main window; promote one with ⌘O when it earns the big screen. (Bam never makes itself your default browser behind your back.)
 - **Floating video** — leave a tab while a video is playing and the video keeps playing in a rounded floating panel with hover controls. Flick it hard and it glides to a corner; drag it gently and it stays where you put it. Hit Return-to-Tab and Bam takes you back to the source. (This is Bam's own panel doing reversible HTML5-video tricks, not system Picture-in-Picture — protected players may refuse to come along.)
 - **The usual suspects** — find in page, reopen closed tab, downloads, searchable history, hard refresh, printing, zoom, a little confirmation pill that tells you your ⇧⌘C actually copied the URL, and a confirmation before quitting.
 
@@ -52,7 +53,7 @@ Every one of those is a working subset, not a finished browser feature — the [
 | ⌥⌘N | New Little Bam window |
 | ⌥⌘→ / ⌥⌘← | Next / previous Space (or swipe the sidebar) |
 | ⌥⌘1…9 | Jump to a Space |
-| ⌘S | Toggle the sidebar |
+| ⌘S | Toggle the sidebar (collapsed, the page fills the window) |
 | ⌥⌘P | Float the current video |
 | ⇧⌘C / ⇧⌘R | Copy URL / hard refresh |
 
@@ -68,6 +69,7 @@ Every one of those is a working subset, not a finished browser feature — the [
 | Close Peek | Escape, ⌘W, close button, or backdrop |
 | Promote Peek to tab / Split | ⌘O / ⇧⌘O, or its buttons |
 | Promote / close Little Bam | ⌘O / ⌘W or Escape |
+| Copy Little Bam’s link | ⇧⌘C |
 | Close one Split pane | Its × button |
 | Separate Split into tabs | View → Separate Split into Tabs |
 | Close entire Split group | ⌘W or its sidebar row close button |

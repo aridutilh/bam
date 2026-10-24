@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.16.0 prerelease — build 34
+
+- Redress Settings and every secondary panel in bambrowser.com’s own look: matte pink paper in light mode and plum in dark (following the system appearance like the site), white cards with a hairline and soft shadow, sticker-red toggles, chips, pill buttons that sit on a deep-red lip, keycaps with a bottom edge, and the site’s version sticker on About. Manage Spaces, Extensions, Downloads and History/Recently Closed share the same paper, pills and red-wash table selection.
+- Bundle the site’s typefaces, Bricolage Grotesque (display) and Instrument Sans (text), under the SIL Open Font License; Bam registers them for its own process at launch and falls back to the system fonts if they are missing.
+- Rebuild Little Bam’s chrome: a translucent bar the traffic lights share, a login-profile chip, back/forward/reload, the site name in the middle (click or ⌘L to edit the full address), an Extensions button that pops this page’s extension actions, Copy Link (⇧⌘C), and an **Open in <Space>** button with ⌘O plus a menu that opens the page in any other Space. A Space on the same login takes the page itself; a Space on another login loads the address fresh there.
+- Rename the compact window’s type to `LittleBamController`; the product name was already Little Bam.
+- Give the page the whole window when the sidebar is away. The card’s margin, corner and border fade out continuously over the last 80 points of collapse, and the old strip with the address, sidebar toggle and keep button no longer appears; ⌘S or the View menu brings the sidebar back and ⌘L still opens the address palette.
+- Open bambrowser.com in a single tab on the very first launch of an installed Bam, instead of the three-Space demo session with “A little space” tabs. The demo session remains the offline fixture for fresh previews and tests, and an existing session file is loaded unchanged.
+
 ## 0.15.2 prerelease — build 33
 
 - Send Safari's user-agent suffix ("Version/<installed Safari> Safari/605.1.15") from tabs, Peek and Little Bam. A bare WKWebView already exposes FairPlay, but streaming sites such as Netflix, Spotify and Disney+ read the Safari token to choose their FairPlay playback path and can refuse playback without it. The suffix mirrors the installed Safari's version so it tracks macOS updates; Widevine and PlayReady remain unavailable, as in Safari.
