@@ -4,6 +4,17 @@
 
 Remaining work is tracked with acceptance criteria in [FEATURE-INVENTORY.md](FEATURE-INVENTORY.md). An inventory item is complete only after its full behavior is verified.
 
+## 0.4.0 prerelease — build 12
+
+Build 12 passed all six component and five packaged runtime suites, installation, strict signature, executable identity and all 50 source/resource/build input comparisons; all 12 existing tab identifiers were retained. Physical verification remains pending. Build 11’s assisted YouTube check confirmed rounded rendering and native Pause, but physical feedback requested stronger corner attraction. Build 12 addresses that feedback with directed corner flicks and stronger local attraction while retaining slow free placement farther away. No Arc parity is claimed.
+
+- Cover the existing web view during PiP entry and return until a bounded WebKit rendering wait completes. Animate an inert panel snapshot into the restored page instead of resizing live video, with cancellation, timeout cleanup and Reduce Motion support. Suppress the competing Space-content crossfade during this handoff.
+- Make explicit Return reveal the source tab and Space, dismiss its retained Peek, restore a hidden or minimized browser window, activate Ark, and focus the correct Split pane. Silent restoration and Close/Escape do not request app activation.
+- Move floating video by hovering and scrolling with two fingers, including over native controls. Build 12 sends fast flicks to a corner in their direction with deceleration. Expand the local corner magnet to 240 points so slow releases near corners also settle sooner; positions farther away remain free. Keep targets 8 points inside visible screen bounds. This independently implemented tuning follows the reference’s behavior rather than recovered constants.
+- Normalize physical movement direction, ignore OS momentum, and cancel stale movement on reversal, resize, return or close. Fit release targets to visible display bounds.
+- Retain actual-media rendering, cancellation, minimized Return, Peek and Split focus coverage. Build 12 passed 70 positioning, 84 controller interaction, 85 automatic PiP and 51 browsing-feature checks.
+- Require exactly one suite-specific terminal PASS and a successful process exit in the runtime harness. Prevent fixture window closure from ending a test early, and add bounded watchdog/precondition handling without weakening Return assertions. Explicit foreground activation is confined to fixture setup; the post-Return checks receive no corrective activation.
+
 ## 0.3.4 — 2026-10-23
 
 - Handle Space swipes in the native tab-list and sidebar scroll receivers as well as the local event monitor. Request horizontal responder forwarding and deduplicate repeated delivery of the same event object, while preserving native vertical and mouse-wheel scrolling.

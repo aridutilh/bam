@@ -1,4 +1,4 @@
-# Ark 0.3.4
+# Ark 0.4.0 prerelease
 
 <img src="Resources/ArkIcon.png" width="128" alt="Ark’s crayon-drawn icon">
 
@@ -6,9 +6,9 @@ An open-source macOS browser prototype built with Swift, AppKit, Core Animation,
 
 The original application code is available under the [MIT license](LICENSE). The public source includes no extracted Arc artwork, animation frames, fonts, textures, binaries, or decompiler output. The app icon is a crayon-drawn reinterpretation of Arc’s mark; [branding notes](docs/branding.md) record its source and generation prompt. Sidebar controls use macOS SF Symbols, and the Spaces button uses an original native animation.
 
-[Download v0.3.4](https://github.com/aridutilh/ark/releases/tag/v0.3.4) · [Source repository](https://github.com/aridutilh/ark) · [Feature checklist](FEATURE-INVENTORY.md) · [Validation status](VALIDATION.md)
+[v0.4.0 prerelease](https://github.com/aridutilh/ark/releases/tag/v0.4.0) · [Previous v0.3.4 download](https://github.com/aridutilh/ark/releases/tag/v0.3.4) · [Source repository](https://github.com/aridutilh/ark) · [Feature checklist](FEATURE-INVENTORY.md) · [Validation status](VALIDATION.md)
 
-Version **0.3.4 (build 8)** adds native scroll receivers and horizontal forwarding for Space swipes. All automated suites passed, and a limited physical check completed eight of eight gentle swipes. Broader device coverage and subjective feel remain unverified.
+**Current prerelease: 0.4.0 (build 12).** This adds a rendering handoff for floating video, explicit Return that reveals the source window, and two-finger hover movement. Fast flicks commit to a corner in their direction. Slow releases also pull toward nearby corners sooner, while placement farther away stays free. All six component and five packaged runtime suites passed; the installed app matches the tested executable and retains all 12 existing tabs. Physical verification of build 12 remains pending after build 11 feedback requested stronger corner attraction. The previous release is **0.3.4 (build 8)**.
 
 ## Build and run
 
@@ -29,7 +29,7 @@ Run the integrated local fixtures after building:
 bash scripts/test-runtime.sh
 ```
 
-This starts a loopback fixture server and runs the packaged app's WebKit, manual PiP, native interaction, automatic PiP, and feature tests. Tests open native windows. The script manages its temporary server and files. All six build/component suites and all five packaged runtime suites passed for v0.3.4 (11 suites total), including 84 controller interaction, 58 automatic PiP, and 46 browsing-feature checks. The bundle passed strict code-signature verification. The 16 new interaction checks exercise native sidebar receivers, duplicate-event handling, and preserved vertical scrolling. They do not simulate OS trackpad dispatch. Earlier installed-app UI checks confirmed PiP controls, Return to Tab, and the dark collapsed toolbar; the corresponding runtime suites passed again. [VALIDATION.md](VALIDATION.md) records the automated results and limited physical swipe check.
+This starts a loopback fixture server and runs the packaged app's WebKit, manual PiP, native interaction, automatic PiP, and feature tests. Tests open native windows. Each run must exit successfully and emit exactly one matching terminal PASS; a subtest PASS or an early zero exit is insufficient. Fixture windows cannot trigger the normal last-window autoquit behavior. **Build 12 passed all six component and five packaged runtime suites**, including 70 positioning, 84 controller interaction, 85 automatic PiP and 51 browsing-feature checks. The strict runtime script completed successfully with each suite’s terminal PASS. The installed app passed strict signature verification and matches the tested executable; all 50 source/resource/build inputs match the final isolated copy. [VALIDATION.md](VALIDATION.md) separates these automated results from earlier assisted player checks and physical feedback. Tests do not reproduce every device’s physical input.
 
 The bundled video is a generated test pattern. To regenerate it, install FFmpeg and run `bash scripts/generate-demo.sh`; FFmpeg is not needed for an ordinary build.
 
@@ -41,7 +41,7 @@ The bundled video is a generated test pattern. To regenerate it, install FFmpeg 
 - **Peek:** Shift-click a link, or follow a cross-host link from a pinned page, to open a retained overlay. Close it or transfer the same page into a tab, Split View, or Little Ark.
 - **Little Ark:** a compact browsing window with address/navigation controls and promotion into the main browser. HTTP(S) URLs delivered by macOS open here. Ark does not automatically make itself the default browser.
 - **Split View:** two live pages, draggable divider, per-pane address/navigation controls, focused-pane commands, close-one-pane, and separate-into-tabs. Pair membership is saved.
-- **Floating video:** tab/Space departure can move a playing video's existing page into a rounded, borderless panel with native hover controls for play/pause, ±10 seconds, mute/volume, Return to Tab, and resizing. The panel follows the video's aspect ratio. Selecting the source restores it; Return to Tab also selects and focuses the source. Automatic behavior can be disabled, and manual floating video is available.
+- **Floating video:** tab/Space departure can move a playing video's existing page into a rounded, borderless panel with native hover controls for play/pause, ±10 seconds, mute/volume, Return to Tab, and resizing. The panel follows the video's aspect ratio. Selecting the source restores it. In the 0.4.0 prerelease, explicit Return also brings Ark forward, restores a minimized source window, dismisses a covering Peek, and focuses the correct Split pane. Hovering and scrolling with two fingers moves the panel. Build 12 directs fast flicks to a corner and attracts slow releases near corners while preserving free placement farther away. Automated checks passed; physical verification of the stronger attraction remains pending. Build 9 received positive limited feedback on the combined movement/Return/transition check; its assisted Return check alone does not establish cross-app activation. Automatic behavior can be disabled, and manual floating video is available.
 - **Page tools:** find in page, full URL copy, system printing, file-upload selection, and WebKit media permission prompts.
 - **Downloads and local Library:** destination selection, progress, cancel, open/reveal, plus a durable visit list and recently closed records. History and recently closed records can be searched and cleared separately. This is not automatic tab archiving.
 
@@ -82,6 +82,7 @@ These are implementation subsets, not a complete browser compatibility claim. Se
 | Return and select video tab | PiP Return to Tab button, R, or double-click the video background |
 | Close floating panel without changing the selected tab | PiP × button or Escape |
 | PiP playback / seek / volume / mute | Space / ← or → (10 seconds) / ↑ or ↓ / M; also native overlay controls |
+| Move floating video (0.4.0) | Drag its background, or hover and scroll with two fingers; fast flick toward a corner, move slowly for free placement |
 | Resize floating video | Drag its bottom-right grip; Tab to the grip and use arrow keys |
 | Zoom | ⌘+ / ⌘− / ⌘0 |
 
@@ -96,6 +97,10 @@ Space swipes tolerate small diagonal or vertical pickup noise before locking dir
 Physical testing of v0.3.3 lost the follow-up events for all 12 tiny-start swipes in the captured sample. Version 0.3.4 also handles events in the native tab-list and sidebar receivers, requests horizontal responder forwarding, and processes each event object only once. A new physical sample completed all eight gentle swipes, including their movement, release and Space commit. That sample stayed on the monitored path; receiver-only recovery is covered by automated tests. Native vertical scrolling passed its fixture; broader physical vertical-scroll and device testing remain open.
 
 For an intermittent swipe failure, View → Record Space Swipes (60 Seconds) starts a local diagnostic capture at `~/Library/Caches/Ark/space-swipe-diagnostics.jsonl`. It stops after 60 seconds or 5,000 records and replaces the previous trace only when explicitly started again. Capture is off by default. It records gesture values and routing decisions, excluding URLs, titles, tab identifiers, and page content; no trace is uploaded automatically.
+
+The 0.4.0 media transition keeps the same live web view at its destination size. Static page and video snapshots cover the transfer while WebKit restores layout and completes a bounded rendering wait. Only the inert panel snapshot moves or changes size during Return; the live video viewport is not animated. A timeout cleans up stalled handoffs, and Reduce Motion skips the motion. The controller suppresses its ordinary Space-content crossfade while this handoff is active. One YouTube player rendered correctly in assisted checks on builds 9 and 11; build 11’s native Pause control was also checked. Build 9 received positive feedback on the combined movement, Return and transition check. Build 11’s physical feedback still asked for stronger corner attraction, prompting build 12. These are limited observations, not comprehensive device or player coverage. Build 12’s automated and installation checks passed; its physical confirmation remains pending. See [validation](VALIDATION.md).
+
+Two-finger panel movement follows physical input and ignores the operating system’s inertial tail. Ark uses its own short velocity estimate. Build 12 directs a fast flick to a corner with deceleration. A wider local attraction zone also pulls slow releases toward nearby corners; positions farther away remain free. Automated checks passed; physical verification of this revised behavior remains pending. Release keeps the panel within visible display bounds. The motion was guided by an Arc reference; the implementation and tuning are Ark’s own. Movement and snapping do not activate Ark; explicit Return does. Placement is not saved across sessions, and edge hiding is not implemented.
 
 ## Page ownership and limitations
 
