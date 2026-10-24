@@ -83,10 +83,10 @@ import AppKit
         results.update(tabs: [kept, favorite], query: "", activeID: kept.id, canCreate: false, spaces: renamedSpaces)
         require(labels(in: results).contains("Project Atlas") && labels(in: results).contains("Lab · Current"),
                 "A kept result uses its custom title and current Space name")
-        require(labels(in: results).filter { $0 == "Favorite · All Spaces" }.count == 1
+        require(labels(in: results).filter { $0 == "Favorite · Default" }.count == 1
                     && labels(in: results).contains("Global Inbox")
                     && labels(in: results).contains("Sleeping · https://favorite.example/home"),
-                "A sleeping global Favorite must show one result with its global scope and state")
+                "A sleeping Favorite must show one result with its login profile and state")
         results.moveSelection(delta: 1)
         require(results.activateSelection() && chosen == favorite.id,
                 "Opening a sleeping search result passes the existing saved-tab identity to the controller")

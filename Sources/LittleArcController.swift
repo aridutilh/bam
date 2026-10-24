@@ -7,6 +7,7 @@ import WebKit
 /// https://resources.arc.net/hc/en-us/articles/20498463803799-Arc-for-macOS-2021-Release-Notes
 @MainActor final class LittleArcController: NSWindowController, NSWindowDelegate, NSTextFieldDelegate {
     var onPromote: ((WKWebView) -> Void)?
+    var canPromote: (() -> Bool)?
     var onClose: (() -> Void)?
     var onDownload: ((WKDownload) -> Void)? { didSet { content?.onDownload = onDownload } }
     var onVisit: ((String, String) -> Void)? { didSet { content?.onVisit = onVisit } }
@@ -15,8 +16,10 @@ import WebKit
     private var content: PreviewWebContent?
     private let root = LittleOrbitRoot()
     private var didClose = false
+    private let beforeLoad: PreviewNavigationReadiness?
 
-    init(websiteDataStore: WKWebsiteDataStore) {
+    init(websiteDataStore: WKWebsiteDataStore, configure: ((WKWebViewConfiguration) -> Void)? = nil, beforeLoad: PreviewNavigationReadiness? = nil) {
+        self.beforeLoad = beforeLoad
         let window = LittleOrbitWindow(contentRect: NSRect(x: 0, y: 0, width: 760, height: 620),
                                        styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         super.init(window: window)
@@ -36,6 +39,7 @@ import WebKit
         root.promote.target = self; root.promote.action = #selector(promoteAction)
         let configuration = WKWebViewConfiguration(); configuration.websiteDataStore = websiteDataStore
         configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
+        configure?(configuration)
         adopt(webView: PreviewWKWebView(frame: .zero, configuration: configuration))
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
@@ -51,7 +55,7 @@ import WebKit
         let previous = content?.takeWebView()
         if previous !== webView { previous?.stopLoading() }
         webView.removeFromSuperview()
-        let content = PreviewWebContent(webView: webView)
+        let content = PreviewWebContent(webView: webView, beforeLoad: beforeLoad)
         self.content = content
         content.onDownload = onDownload
         content.onVisit = onVisit
@@ -59,6 +63,8 @@ import WebKit
         content.onCloseRequest = { [weak self] in self?.close() }
         root.browserHost.addSubview(webView)
         webView.frame = root.browserHost.bounds; webView.autoresizingMask = [.width, .height]
+        // A queued navigation belongs to the adopted view, not its obsolete host.
+        if let requested = (webView as? PreviewWKWebView)?.pendingReadyURL { _ = content.load(url: requested) }
         refresh()
     }
 
@@ -76,7 +82,7 @@ import WebKit
     }
 
     func promoteToOrbit() {
-        guard let callback = onPromote, let web = content?.takeWebView() else { return }
+        guard canPromote?() != false, let callback = onPromote, let web = content?.takeWebView() else { return }
         content = nil
         close()
         callback(web)

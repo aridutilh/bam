@@ -6,16 +6,38 @@ struct SpaceEditPlan {
     let originalIDs: Set<Int>
     var spaces: [BrowserSpace]
     var removalDestinations: [Int: Int] = [:]
+    var profiles: [BrowserProfile]? = nil
 
     func applying(to current: BrowserSession) -> BrowserSession? {
         guard Set(current.spaceIDs) == originalIDs, !spaces.isEmpty,
               spaces.count <= BrowserSession.maximumSpaces,
               Set(spaces.map(\.id)).count == spaces.count else { return nil }
         var result = current
+        if let profiles {
+            let zero = UUID(uuid: (0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0))
+            guard !profiles.isEmpty, profiles.count <= max(BrowserSession.maximumProfiles, current.profiles.count),
+                  Set(profiles.map(\.id)).count == profiles.count,
+                  !profiles.contains(where: { $0.id == zero }),
+                  profiles.contains(where: { $0.id == BrowserProfile.defaultID }) else { return nil }
+            var merged = current.profiles
+            for profile in profiles {
+                let name = profile.name.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !name.isEmpty, name.count <= 60,
+                      !name.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else { return nil }
+                let normalized = BrowserProfile(id: profile.id, name: name)
+                if let index = merged.firstIndex(where: { $0.id == profile.id }) { merged[index] = normalized }
+                else { merged.append(normalized) }
+            }
+            guard merged.count <= max(BrowserSession.maximumProfiles, current.profiles.count),
+                  Set(merged.map { $0.name.lowercased() }).count == merged.count else { return nil }
+            // Merge definitions only; retain latest tabs and any profile added
+            // elsewhere. Applying the final names together also supports swaps.
+            result.profiles = merged
+        }
         var identifiers: [Int: Int] = [:]
         for definition in spaces {
             if originalIDs.contains(definition.id) {
-                guard result.updateSpace(id: definition.id, name: definition.name, symbol: definition.symbol, colorIndex: definition.colorIndex) else { return nil }
+                guard result.updateSpace(id: definition.id, name: definition.name, symbol: definition.symbol, colorIndex: definition.colorIndex, profileID: definition.profileID) else { return nil }
                 identifiers[definition.id] = definition.id
             } else {
                 // Negative IDs belong only to this unsaved sheet, never to disk.
@@ -52,12 +74,12 @@ struct SpaceEditPlan {
         if removedIDs.contains(survivor) {
             guard let draftTarget = destinations[survivor],
                   let definition = spaces.first(where: { $0.id == draftTarget }),
-                  let target = result.createSpace(name: definition.name, symbol: definition.symbol, colorIndex: definition.colorIndex),
+                  let target = result.createSpace(name: definition.name, symbol: definition.symbol, colorIndex: definition.colorIndex, profileID: definition.profileID),
                   result.deleteSpace(id: survivor, movingTabsTo: target) else { return nil }
             identifiers[draftTarget] = target
         }
         for definition in spaces where identifiers[definition.id] == nil {
-            guard let id = result.createSpace(name: definition.name, symbol: definition.symbol, colorIndex: definition.colorIndex) else { return nil }
+            guard let id = result.createSpace(name: definition.name, symbol: definition.symbol, colorIndex: definition.colorIndex, profileID: definition.profileID) else { return nil }
             identifiers[definition.id] = id
         }
         for (tab, draftTarget) in pendingMoves {
@@ -65,6 +87,14 @@ struct SpaceEditPlan {
         }
         for (index, definition) in spaces.enumerated() {
             guard let id = identifiers[definition.id], result.reorderSpace(id: id, to: index) else { return nil }
+        }
+        // Temporary holding Spaces used for a full replacement must not erase
+        // sleeping state when the final login profile is unchanged.
+        let oldTabs = Dictionary(current.tabs.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        for index in result.tabs.indices {
+            if let old = oldTabs[result.tabs[index].id], current.profileID(for: old) == result.profileID(for: result.tabs[index]) {
+                result.tabs[index].sleepState = old.sleepState
+            }
         }
         result.sanitize()
         return result
@@ -75,7 +105,7 @@ struct SpaceEditPlan {
     @objc func manageSpaces(_ sender: Any?) {
         guard !isShuttingDown, spaceManager == nil, let window = view.window, window.attachedSheet == nil else { return }
         cancelPaging(); dismissAddress(); findBar.hide(); pageFeedback.hide()
-        let manager = SpaceManagementController(spaces: session.spaces, selectedID: session.space)
+        let manager = SpaceManagementController(spaces: session.spaces, selectedID: session.space, profiles: session.profiles)
         spaceManager = manager
         manager.onSave = { [weak self] plan in self?.applySpaceEdits(plan) ?? false }
         manager.onDismiss = { [weak self] in
@@ -87,15 +117,17 @@ struct SpaceEditPlan {
     }
     @discardableResult func applySpaceEdits(_ plan: SpaceEditPlan) -> Bool {
         guard let updated = plan.applying(to: session) else { return false }
-        cancelPaging(); session = updated
-        showActive(); refreshPaletteResults(); save(); onSpacesChanged?()
-        return true
+        return applyProfileAwareSession(updated, rebase: { plan.applying(to: $0) })
     }
     @discardableResult func moveTab(_ id: UUID, toSpace destination: Int) -> Bool {
         guard session.spaceDefinition(destination) != nil else { return false }
-        cancelPaging(); dismissAddress()
-        guard session.moveTab(id: id, toSpace: destination) else { return false }
-        showActive(); save()
+        var updated = session
+        guard updated.moveTab(id: id, toSpace: destination) else { return false }
+        guard applyProfileAwareSession(updated, rebase: { current in
+            var latest = current
+            return latest.moveTab(id: id, toSpace: destination) ? latest : nil
+        }) else { return false }
+        dismissAddress()
         return true
     }
 }
@@ -109,6 +141,9 @@ struct SpaceEditPlan {
     let iconPicker = NSPopUpButton()
     let colorPicker = NSPopUpButton()
     let destinationPicker = NSPopUpButton()
+    let profilePicker = NSPopUpButton()
+    let profileNameField = NSTextField()
+    private let newProfileButton = NSButton(title: "New Profile", target: nil, action: nil)
     private let status = NSTextField(wrappingLabelWithString: "")
     private let saveButton = NSButton(title: "Save Changes", target: nil, action: nil)
     private let addButton = NSButton(title: "New Space", target: nil, action: nil)
@@ -120,10 +155,10 @@ struct SpaceEditPlan {
     private var updating = false
     private static let pasteboardType = NSPasteboard.PasteboardType("com.ari.bam.space-order")
 
-    init(spaces: [BrowserSpace], selectedID: Int) {
-        plan = SpaceEditPlan(originalIDs: Set(spaces.map(\.id)), spaces: spaces)
+    init(spaces: [BrowserSpace], selectedID: Int, profiles: [BrowserProfile] = BrowserProfile.defaults) {
+        plan = SpaceEditPlan(originalIDs: Set(spaces.map(\.id)), spaces: spaces, profiles: profiles)
         self.selectedID = selectedID
-        let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 650, height: 440), styleMask: [.titled], backing: .buffered, defer: false)
+        let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 650, height: 526), styleMask: [.titled], backing: .buffered, defer: false)
         panel.title = "Manage Spaces"; panel.isReleasedWhenClosed = false
         super.init(window: panel)
         buildContent()
@@ -132,13 +167,13 @@ struct SpaceEditPlan {
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
     private func buildContent() {
         guard let window else { return }
-        let root = FlippedContainer(frame: NSRect(x: 0, y: 0, width: 650, height: 440)); window.contentView = root
+        let root = FlippedContainer(frame: NSRect(x: 0, y: 0, width: 650, height: 526)); window.contentView = root
         func label(_ text: String, _ frame: NSRect, size: CGFloat = 12, weight: NSFont.Weight = .regular) {
             let label = NSTextField(labelWithString: text); label.font = .systemFont(ofSize: size, weight: weight); label.frame = frame; root.addSubview(label)
         }
         label("Your Spaces", NSRect(x: 24, y: 20, width: 580, height: 27), size: 21, weight: .semibold)
         label("Create a place for each part of your day.", NSRect(x: 24, y: 51, width: 580, height: 19))
-        let scroll = NSScrollView(frame: NSRect(x: 24, y: 85, width: 226, height: 260))
+        let scroll = NSScrollView(frame: NSRect(x: 24, y: 85, width: 226, height: 330))
         scroll.borderType = .bezelBorder; scroll.hasVerticalScroller = true; scroll.autohidesScrollers = true
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("space")); column.width = 220
         table.addTableColumn(column); table.headerView = nil; table.rowHeight = 36
@@ -161,18 +196,31 @@ struct SpaceEditPlan {
         colorPicker.frame = NSRect(x: 456, y: 173, width: 170, height: 28)
         colorPicker.addItems(withTitles: BrowserSpace.colorNames); colorPicker.target = self; colorPicker.action = #selector(editAppearance)
         colorPicker.setAccessibilityLabel("Space color"); root.addSubview(colorPicker)
-        label("Move this Space’s tabs to", NSRect(x: 278, y: 231, width: 344, height: 19), weight: .medium)
-        destinationPicker.frame = NSRect(x: 274, y: 256, width: 216, height: 28); destinationPicker.setAccessibilityLabel("Destination when removing Space"); root.addSubview(destinationPicker)
-        removeButton.frame = NSRect(x: 492, y: 254, width: 134, height: 30); removeButton.target = self; removeButton.action = #selector(removeSpace); root.addSubview(removeButton)
-        label("Removing a Space keeps all its tabs.", NSRect(x: 278, y: 291, width: 344, height: 19), size: 11)
-        addButton.frame = NSRect(x: 18, y: 351, width: 118, height: 30); addButton.target = self; addButton.action = #selector(addSpace); root.addSubview(addButton)
-        upButton.frame = NSRect(x: 164, y: 351, width: 40, height: 30); upButton.target = self; upButton.action = #selector(moveSpaceEarlier); upButton.setAccessibilityLabel("Move Space earlier"); root.addSubview(upButton)
-        downButton.frame = NSRect(x: 206, y: 351, width: 40, height: 30); downButton.target = self; downButton.action = #selector(moveSpaceLater); downButton.setAccessibilityLabel("Move Space later"); root.addSubview(downButton)
-        status.frame = NSRect(x: 278, y: 325, width: 344, height: 52); status.font = .systemFont(ofSize: 11); status.textColor = .secondaryLabelColor; root.addSubview(status)
+        label("Login profile", NSRect(x: 278, y: 211, width: 190, height: 19), weight: .medium)
+        profilePicker.frame = NSRect(x: 274, y: 235, width: 200, height: 28)
+        profilePicker.target = self; profilePicker.action = #selector(selectProfile)
+        profilePicker.setAccessibilityLabel("Space login profile"); root.addSubview(profilePicker)
+        label("Profile name", NSRect(x: 482, y: 211, width: 140, height: 19), weight: .medium)
+        profileNameField.frame = NSRect(x: 480, y: 236, width: 142, height: 26)
+        profileNameField.delegate = self; profileNameField.setAccessibilityLabel("Login profile name"); root.addSubview(profileNameField)
+        let profileHelp = NSTextField(wrappingLabelWithString: "Spaces using the same profile share logins and Favorites. Other profiles stay separate.")
+        profileHelp.frame = NSRect(x: 278, y: 276, width: 208, height: 62); profileHelp.font = .systemFont(ofSize: 11)
+        profileHelp.textColor = .secondaryLabelColor; root.addSubview(profileHelp)
+        newProfileButton.frame = NSRect(x: 492, y: 273, width: 134, height: 30)
+        newProfileButton.target = self; newProfileButton.action = #selector(addProfile)
+        newProfileButton.setAccessibilityLabel("New login profile"); root.addSubview(newProfileButton)
+        label("Move this Space’s tabs to", NSRect(x: 278, y: 352, width: 344, height: 19), weight: .medium)
+        destinationPicker.frame = NSRect(x: 274, y: 377, width: 216, height: 28); destinationPicker.setAccessibilityLabel("Destination when removing Space"); root.addSubview(destinationPicker)
+        removeButton.frame = NSRect(x: 492, y: 375, width: 134, height: 30); removeButton.target = self; removeButton.action = #selector(removeSpace); root.addSubview(removeButton)
+        label("Removing a Space keeps all its tabs.", NSRect(x: 278, y: 412, width: 344, height: 19), size: 11)
+        addButton.frame = NSRect(x: 18, y: 421, width: 118, height: 30); addButton.target = self; addButton.action = #selector(addSpace); root.addSubview(addButton)
+        upButton.frame = NSRect(x: 164, y: 421, width: 40, height: 30); upButton.target = self; upButton.action = #selector(moveSpaceEarlier); upButton.setAccessibilityLabel("Move Space earlier"); root.addSubview(upButton)
+        downButton.frame = NSRect(x: 206, y: 421, width: 40, height: 30); downButton.target = self; downButton.action = #selector(moveSpaceLater); downButton.setAccessibilityLabel("Move Space later"); root.addSubview(downButton)
+        status.frame = NSRect(x: 278, y: 440, width: 344, height: 34); status.font = .systemFont(ofSize: 11); status.textColor = .secondaryLabelColor; root.addSubview(status)
         let cancel = NSButton(title: "Cancel", target: self, action: #selector(cancel(_:)))
-        cancel.frame = NSRect(x: 398, y: 395, width: 100, height: 30); cancel.keyEquivalent = "\u{1b}"; root.addSubview(cancel)
-        saveButton.frame = NSRect(x: 501, y: 395, width: 126, height: 30); saveButton.target = self; saveButton.action = #selector(saveChanges); saveButton.keyEquivalent = "\r"; root.addSubview(saveButton)
-        for button in [saveButton, addButton, removeButton, upButton, downButton, cancel] { button.bezelStyle = .rounded }
+        cancel.frame = NSRect(x: 398, y: 481, width: 100, height: 30); cancel.keyEquivalent = "\u{1b}"; root.addSubview(cancel)
+        saveButton.frame = NSRect(x: 501, y: 481, width: 126, height: 30); saveButton.target = self; saveButton.action = #selector(saveChanges); saveButton.keyEquivalent = "\r"; root.addSubview(saveButton)
+        for button in [saveButton, addButton, removeButton, upButton, downButton, newProfileButton, cancel] { button.bezelStyle = .rounded }
     }
     func present(on parent: NSWindow) {
         guard let window else { return }
@@ -190,12 +238,20 @@ struct SpaceEditPlan {
         storeFields()
         guard validNames else { updateStatus(); return }
         guard onSave?(plan) == true else {
-            status.stringValue = "Couldn’t save these changes. Reopen Spaces and try again."; return
+            // A declined profile reload is an expected result. Keep the draft
+            // available so the user can revise it or choose Save Changes again.
+            status.stringValue = "Changes haven’t been applied."; return
         }
         dismiss()
     }
     private var validNames: Bool {
-        plan.spaces.allSatisfy { let name = $0.name.trimmingCharacters(in: .whitespacesAndNewlines); return !name.isEmpty && name.count <= 60 && !name.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) }
+        let names = plan.spaces.map(\.name)
+        let profileNames = (plan.profiles ?? []).map(\.name)
+        let valid = (names + profileNames).allSatisfy { raw in
+            let name = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            return !name.isEmpty && name.count <= 60 && !name.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) })
+        }
+        return valid && Set(profileNames.map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }).count == profileNames.count
     }
     func numberOfRows(in tableView: NSTableView) -> Int { plan.spaces.count }
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
@@ -221,6 +277,10 @@ struct SpaceEditPlan {
     private func storeFields() {
         guard !updating, let index = plan.spaces.firstIndex(where: { $0.id == selectedID }) else { return }
         plan.spaces[index].name = nameField.stringValue
+        if let profileIndex = plan.profiles?.firstIndex(where: { $0.id == plan.spaces[index].profileID }) {
+            plan.profiles?[profileIndex].name = profileNameField.stringValue
+            profilePicker.itemArray.first(where: { ($0.representedObject as? UUID) == plan.spaces[index].profileID })?.title = profileNameField.stringValue
+        }
         if BrowserSpace.symbols.indices.contains(iconPicker.indexOfSelectedItem) { plan.spaces[index].symbol = BrowserSpace.symbols[iconPicker.indexOfSelectedItem] }
         plan.spaces[index].colorIndex = max(0, colorPicker.indexOfSelectedItem)
         updateStatus()
@@ -229,6 +289,14 @@ struct SpaceEditPlan {
         guard let space = plan.spaces.first(where: { $0.id == selectedID }) else { return }
         updating = true
         nameField.stringValue = space.name
+        profilePicker.removeAllItems()
+        for profile in plan.profiles ?? BrowserProfile.defaults {
+            profilePicker.addItem(withTitle: profile.name.isEmpty ? "Unnamed profile" : profile.name)
+            profilePicker.lastItem?.representedObject = profile.id
+            if profile.id == space.profileID {
+                profilePicker.select(profilePicker.lastItem); profileNameField.stringValue = profile.name
+            }
+        }
         iconPicker.selectItem(at: BrowserSpace.symbols.firstIndex(of: space.symbol) ?? 0); colorPicker.selectItem(at: space.colorIndex)
         destinationPicker.removeAllItems()
         for target in plan.spaces where target.id != selectedID {
@@ -241,20 +309,41 @@ struct SpaceEditPlan {
         upButton.isEnabled = index > 0; downButton.isEnabled = index + 1 < plan.spaces.count
         addButton.isEnabled = plan.spaces.count < BrowserSession.maximumSpaces
         removeButton.isEnabled = plan.spaces.count > 1; destinationPicker.isEnabled = removeButton.isEnabled
+        newProfileButton.isEnabled = (plan.profiles?.count ?? 0) < BrowserSession.maximumProfiles
         saveButton.isEnabled = validNames
-        status.stringValue = validNames ? "Changes apply when you save. Drag Spaces in the list or use the arrows to reorder." : "Give every Space a name of 1–60 characters."
+        status.stringValue = validNames ? "Changes apply when you save. Drag Spaces in the list or use the arrows to reorder." : "Use names of 1–60 characters and a different name for each profile."
     }
     private func reload(selectedID: Int) {
         self.selectedID = selectedID; updating = true; table.reloadData()
         if let index = plan.spaces.firstIndex(where: { $0.id == selectedID }) { table.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false); table.scrollRowToVisible(index) }
         updating = false; loadFields()
     }
+    @objc func selectProfile(_ sender: Any?) {
+        guard let profile = profilePicker.selectedItem?.representedObject as? UUID else { return }
+        storeFields()
+        guard let index = plan.spaces.firstIndex(where: { $0.id == selectedID }) else { return }
+        plan.spaces[index].profileID = profile; loadFields()
+    }
+    @objc func addProfile(_ sender: Any?) {
+        storeFields()
+        guard (plan.profiles?.count ?? 0) < BrowserSession.maximumProfiles,
+              let index = plan.spaces.firstIndex(where: { $0.id == selectedID }) else { return }
+        var suffix = 1, name = "New Profile"
+        while (plan.profiles ?? []).contains(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame }) {
+            suffix += 1; name = "New Profile \(suffix)"
+        }
+        let profile = BrowserProfile(id: UUID(), name: name)
+        if plan.profiles == nil { plan.profiles = BrowserProfile.defaults }
+        plan.profiles?.append(profile); plan.spaces[index].profileID = profile.id
+        loadFields(); window?.makeFirstResponder(profileNameField); profileNameField.selectText(nil)
+    }
     @objc func addSpace(_ sender: Any?) {
         guard plan.spaces.count < BrowserSession.maximumSpaces else { return }
         var suffix = 1, name = "New Space"
         while plan.spaces.contains(where: { $0.name == name }) { suffix += 1; name = "New Space \(suffix)" }
         let id = draftID; draftID -= 1
-        plan.spaces.append(BrowserSpace(id: id, name: name, symbol: "sparkles", colorIndex: plan.spaces.count % BrowserSpace.colorNames.count))
+        plan.spaces.append(BrowserSpace(id: id, name: name, symbol: "sparkles", colorIndex: plan.spaces.count % BrowserSpace.colorNames.count,
+                                        profileID: plan.spaces.first(where: { $0.id == selectedID })?.profileID ?? BrowserProfile.defaultID))
         reload(selectedID: id); window?.makeFirstResponder(nameField); nameField.selectText(nil)
     }
     @objc func removeSpace(_ sender: Any?) {

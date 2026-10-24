@@ -6,7 +6,7 @@ import WebKit
         // Build indexes once per update, rather than scan the entire session
         // for every sidebar row. A thousand metadata-only tabs must stay cheap.
         let tabsByID = Dictionary(snapshot.tabs.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
-        let favoriteCount = snapshot.tabs.reduce(0) { $0 + ($1.isFavorite ? 1 : 0) }
+        let favoriteCount = snapshot.favoriteTabs.count
         var companions: [UUID: BrowserTab] = [:]
         for split in snapshot.splits ?? [] { companions[split.primaryID] = tabsByID[split.secondaryID] }
         return snapshot.visibleTabs.map { tab in
@@ -68,11 +68,17 @@ import WebKit
         // A shared Favorite cannot belong to a Space-specific Split. Promote
         // its Peek to a normal tab instead, preserving the already loaded page.
         guard !primary.isFavorite else { _ = adoptWebView(web); return }
+        if let sourceProfile = profileID(of: web), sourceProfile != session.profileID(for: primary) {
+            _ = adoptWebView(web); return
+        }
         cancelPaging(); dismissAddress(); session.select(primary.id)
         if session.split(for: primary.id) != nil { unsplit(primary.id) }
-        let address = ((web as? PreviewWKWebView)?.promotionURL ?? web.url).flatMap { URLInput.directURL($0.absoluteString) }?.absoluteString ?? "orbit://newtab"
+        let pendingURL = (web as? PreviewWKWebView)?.pendingReadyURL
+        (web as? PreviewWKWebView)?.pendingReadyURL = nil
+        let address = (pendingURL ?? (web as? PreviewWKWebView)?.promotionURL ?? web.url).flatMap { URLInput.directURL($0.absoluteString) }?.absoluteString ?? "orbit://newtab"
         let id = session.add(address: address, title: web.title)
         web.removeFromSuperview(); register(web, id: id)
+        if pendingURL != nil { load(address, in: web, id: id) }
         if web.isLoading { pendingLoads.insert(id) }
         session.makeSplit(primary: primary.id, secondary: id)
         showActive()

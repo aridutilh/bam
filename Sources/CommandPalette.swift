@@ -198,7 +198,7 @@ extension BrowserController {
     private func applyPaletteResults() {
         guard let field = addressField else { return }
         tabSearchResults?.update(tabs: session.tabs, query: field.stringValue, activeID: focusedTabID,
-                                 canCreate: true, spaces: session.spaces,
+                                 canCreate: true, spaces: session.spaces, profiles: session.profiles,
                                  engine: paletteEngine, suggestions: paletteSuggestions)
         layoutBrowser()
     }
