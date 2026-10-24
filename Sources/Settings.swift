@@ -48,7 +48,7 @@ struct SettingsSnapshot {
 struct SettingsActions {
     var setShowsPlayingVideo: (Bool) -> Void = { _ in }
     var setSleepsIdlePages: (Bool) -> Void = { _ in }
-    var setKeepsCurrentSiteAwake: (Bool) -> Void = { _ in }
+    var setKeepsSiteAwake: (String, Bool) -> Void = { _, _ in }
     var setSearchEngine: (DefaultSearchEngine) -> Void = { _ in }
     var editSpace: (BrowserSpace) -> Bool = { _ in false }
     var manageSpaces: () -> Void = {}
@@ -83,6 +83,7 @@ struct SettingsActions {
     private let scroll = NSScrollView()
     private let column = NSStackView()
     private var shownOnce = false
+    private var renderQueued = false
     private var accent: NSColor { ArkPalette.spaceColor(snapshot.accentIndex) }
 
     init(snapshot provider: @escaping () -> SettingsSnapshot, actions: SettingsActions) {
@@ -168,7 +169,7 @@ struct SettingsActions {
     }
 
     func show(section: SettingsSection, relativeTo parent: NSWindow?) {
-        refresh()
+        reload()
         select(section)
         if !shownOnce {
             shownOnce = true
@@ -180,12 +181,23 @@ struct SettingsActions {
         window.makeKeyAndOrderFront(nil)
     }
 
-    /// Re-reads the browser and rebuilds the visible section in place.
+    /// Re-reads the browser and rebuilds the visible section on the next
+    /// run-loop turn, so a change that arrives from inside a control's own
+    /// callback never tears that control down mid-call. Rebuilds coalesce.
     func refresh() {
+        reload()
+        guard !renderQueued else { return }
+        renderQueued = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.renderQueued = false
+            self.render()
+        }
+    }
+    private func reload() {
         snapshot = provider()
         backdrop.tint(colorIndex: snapshot.accentIndex)
         for (_, button) in railButtons { button.accent = accent }
-        render()
     }
     func select(_ section: SettingsSection) {
         self.section = section
@@ -195,9 +207,11 @@ struct SettingsActions {
     }
     @objc private func pickSection(_ sender: SettingsRailButton) { select(sender.section) }
 
+    /// A toggle or chip already shows its new state; only the snapshot moves,
+    /// so keyboard focus stays on the control that was just used.
     private func act(_ work: () -> Void) {
         work()
-        refresh()
+        reload()
     }
 
     // MARK: Sections
@@ -258,8 +272,9 @@ struct SettingsActions {
                           detail: "Idle tabs unload when macOS runs low on memory, then reload on return.",
                           control: toggle(snapshot.sleepsIdlePages, actions.setSleepsIdlePages)))
         if let host = snapshot.keepAwakeHost {
+            let keep = actions.setKeepsSiteAwake
             memory.add(BamRow(title: "Keep \(host) awake", detail: "Never sleep this site’s tabs.",
-                              control: toggle(snapshot.keepsCurrentSiteAwake, actions.setKeepsCurrentSiteAwake)))
+                              control: toggle(snapshot.keepsCurrentSiteAwake, { keep(host, $0) })))
         } else {
             memory.add(BamRow(title: "Keep this site awake", detail: "Open a website to protect it from sleeping.",
                               control: toggle(false, enabled: false, { _ in }), enabled: false))
@@ -275,6 +290,7 @@ struct SettingsActions {
     private func searchCards() -> [NSView] {
         let card = BamCard(frame: .zero)
         let chips = NSStackView()
+        engineChips = chips
         chips.orientation = .horizontal; chips.spacing = 8
         for engine in DefaultSearchEngine.allCases {
             let dot = SiteSearchCatalog.engines.first { $0.host == engine.rawValue }?.color ?? accent
@@ -286,27 +302,32 @@ struct SettingsActions {
             chip.tag = DefaultSearchEngine.allCases.firstIndex(of: engine) ?? 0
             chips.addArrangedSubview(chip)
         }
-        card.add(BamRow(title: "Default search engine", detail: "Also supplies suggestions as you type.", control: chips))
+        card.add(BamRow(title: "Default search engine", detail: "Where plain words go. Suggestions come from it when it offers them.", control: chips))
         let tip = BamCard(frame: .zero)
         tip.add(BamRow(title: "Search one site instead",
                        detail: "Type a site name in the palette — YouTube, Wikipedia, GitHub and more — and press Tab to search it directly.",
                        control: BamKeycap("⇥")))
         return [caption("Engine"), card, caption("Tip"), tip]
     }
+    private weak var engineChips: NSStackView?
     @objc private func pickEngine(_ sender: BamChip) {
         guard DefaultSearchEngine.allCases.indices.contains(sender.tag) else { return }
         let engine = DefaultSearchEngine.allCases[sender.tag]
         act { actions.setSearchEngine(engine) }
+        for case let chip as BamChip in engineChips?.arrangedSubviews ?? [] { chip.isPicked = chip === sender }
     }
 
     private func spacesCards() -> [NSView] {
         var cards: [NSView] = []
         for space in snapshot.spaces {
             let editor = SpaceEditorCard(space: space, isCurrent: space.id == snapshot.currentSpaceID, accent: accent)
+            // A successful edit reaches the app's onSpacesChanged, which refreshes
+            // this window; a rejected one leaves the card as it was.
             editor.onEdit = { [weak self] updated in
-                guard let self else { return }
-                if !self.actions.editSpace(updated) { NSSound.beep() }
-                self.refresh()
+                guard let self else { return false }
+                let applied = self.actions.editSpace(updated)
+                if !applied { NSSound.beep() }
+                return applied
             }
             cards.append(editor)
         }
@@ -424,7 +445,7 @@ struct SettingsActions {
 /// A card editing one Space in place: name, color and icon. Each change
 /// applies immediately; the browser retints behind the window.
 @MainActor final class SpaceEditorCard: BamCard {
-    var onEdit: ((BrowserSpace) -> Void)?
+    var onEdit: ((BrowserSpace) -> Bool)?
     private var space: BrowserSpace
     private let accent: NSColor
     private var swatches: [SettingsSwatch] = []
@@ -448,8 +469,11 @@ struct SettingsActions {
         preview.heightAnchor.constraint(equalToConstant: 36).isActive = true
         field.setAccessibilityLabel("\(space.name) Space name")
         field.onCommit = { [weak self] name in
-            guard let self, let valid = BrowserSpace.validName(name) else { NSSound.beep(); self?.field.stringValue = self?.space.name ?? ""; return }
-            self.space.name = valid; self.onEdit?(self.space)
+            guard let self, let valid = BrowserSpace.validName(name) else { NSSound.beep(); return false }
+            var proposed = self.space; proposed.name = valid
+            guard self.onEdit?(proposed) == true else { return false }
+            self.space = proposed
+            return true
         }
         field.widthAnchor.constraint(greaterThanOrEqualToConstant: 220).isActive = true
         header.addArrangedSubview(preview)
@@ -499,15 +523,19 @@ struct SettingsActions {
     }
     @objc private func pickColor(_ sender: SettingsSwatch) {
         guard sender.colorIndex != space.colorIndex else { return }
-        space.colorIndex = sender.colorIndex
+        var proposed = space; proposed.colorIndex = sender.colorIndex
+        guard onEdit?(proposed) == true else { return }
+        space = proposed
         for swatch in swatches { swatch.isPicked = swatch.colorIndex == space.colorIndex }
-        updatePreview(); onEdit?(space)
+        updatePreview()
     }
     @objc private func pickGlyph(_ sender: SettingsGlyph) {
         guard sender.symbol != space.symbol else { return }
-        space.symbol = sender.symbol
+        var proposed = space; proposed.symbol = sender.symbol
+        guard onEdit?(proposed) == true else { return }
+        space = proposed
         for glyph in glyphs { glyph.isPicked = glyph.symbol == space.symbol }
-        updatePreview(); onEdit?(space)
+        updatePreview()
     }
 }
 

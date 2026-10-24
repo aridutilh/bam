@@ -67,8 +67,9 @@ enum PaletteCommandCatalog {
 
     /// Ranks: 0 — the whole query starts a title or keyword ("sett" → Settings);
     /// 1 — it starts a later word ("spaces" → Manage Spaces); 2 — every typed
-    /// token starts some word ("bam about"). Only rank 0 with three or more
-    /// characters leads, so "se" or "hi" never hijacks Return from a web search.
+    /// token starts some word ("bam about"). Only a title prefix of three or
+    /// more characters leads: "settings" runs Settings on Return, while a
+    /// keyword hit like "pdf" or "video" stays below the web-search row.
     static func matches(_ raw: String, limit: Int = 3) -> [PaletteCommandMatch] {
         let query = normalized(raw)
         guard query.count >= 2, limit > 0 else { return [] }
@@ -81,7 +82,8 @@ enum PaletteCommandCatalog {
             else if words.contains(where: { $0.hasPrefix(query) }) { rank = 1 }
             else if tokens.count > 1, tokens.allSatisfy({ token in words.contains { $0.hasPrefix(token) } }) { rank = 2 }
             else { return nil }
-            return (PaletteCommandMatch(command: command, leading: rank == 0 && query.count >= 3), rank, index)
+            let leading = query.count >= 3 && command.title.lowercased().hasPrefix(query)
+            return (PaletteCommandMatch(command: command, leading: leading), rank, index)
         }.sorted { lhs, rhs in lhs.1 != rhs.1 ? lhs.1 < rhs.1 : lhs.2 < rhs.2 }
         .prefix(limit).map { $0.0 }
     }

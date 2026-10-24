@@ -35,7 +35,7 @@ import WebKit
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("OrbitPrototype", isDirectory: true)
         let preview = CommandLine.arguments.contains("--fresh-preview")
         let sessionFileExists = FileManager.default.fileExists(atPath: support.appendingPathComponent("session.json").path)
-        BrowserController.restoreDefaultSearchEngine()
+        if !preview { BrowserController.restoreDefaultSearchEngine() }
         if #available(macOS 15.4, *) {
             ExtensionManagement.dress = { BamSheetStyle.dress(window: $0, root: $1, colorIndex: BrowserSpace.flatColorCount - 1) }
         }

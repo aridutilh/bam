@@ -27,18 +27,12 @@ import AppKit
         actions.setShowsPlayingVideo = { [weak self] on in
             guard let self, self.automaticallyShowsVideo != on else { return }
             self.toggleAutomaticVideo(nil)
-            NSApp.mainMenu?.items.compactMap(\.submenu).forEach { menu in
-                menu.items.first { $0.action == #selector(BrowserController.toggleAutomaticVideo(_:)) }?.state = on ? .on : .off
-            }
         }
         actions.setSleepsIdlePages = { [weak self] on in
             guard let self, self.automaticTabSleeping != on else { return }
             self.toggleAutomaticTabSleeping(nil)
         }
-        actions.setKeepsCurrentSiteAwake = { [weak self] on in
-            guard let self, let host = self.currentSleepProtectionHost, self.keepAwakeHosts.contains(host) != on else { return }
-            self.toggleSiteKeepAwake(nil)
-        }
+        actions.setKeepsSiteAwake = { [weak self] host, on in self?.setKeepAwake(host: host, on) }
         actions.setSearchEngine = { [weak self] engine in self?.setDefaultSearchEngine(engine) }
         actions.editSpace = { [weak self] space in self?.editSpace(space) ?? false }
         actions.manageSpaces = { [weak self] in self?.manageSpaces(nil) }
@@ -46,12 +40,19 @@ import AppKit
         actions.showWelcome = showWelcome
         actions.openURL = { [weak self] url in
             guard let self, URLInput.directURL(url.absoluteString) != nil else { return }
+            self.cancelPaging(); self.dismissAddress()
             self.session.add(address: url.absoluteString); self.showActive(); self.save()
             self.view.window?.makeKeyAndOrderFront(nil)
         }
         return actions
     }
 
+    /// The Settings row names a host; protect exactly that one, whatever tab is active now.
+    func setKeepAwake(host: String, _ on: Bool) {
+        guard keepAwakeHosts.contains(host) != on else { return }
+        if on { keepAwakeHosts.insert(host) } else { keepAwakeHosts.remove(host) }
+        if !privateMode { UserDefaults.standard.set(keepAwakeHosts.sorted(), forKey: "KeepAwakeHosts") }
+    }
     func setDefaultSearchEngine(_ engine: DefaultSearchEngine) {
         URLInput.searchEngine = engine
         if !privateMode { UserDefaults.standard.set(engine.rawValue, forKey: DefaultSearchEngine.defaultsKey) }

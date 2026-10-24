@@ -93,7 +93,9 @@ import AppKit
         // Browser commands: typed names lead, loose matches trail the tabs.
         let settingsHit = PaletteCommandCatalog.matches("setting")
         require(settingsHit.first?.command.id == "settings" && settingsHit.first?.leading == true, "A typed command name leads")
-        require(PaletteCommandCatalog.matches("preferences").first?.command.id == "settings", "Keywords find Settings")
+        let preferences = PaletteCommandCatalog.matches("preferences")
+        require(preferences.first?.command.id == "settings" && preferences.first?.leading == false, "Keywords find Settings but never lead")
+        require(PaletteCommandCatalog.matches("pdf").first?.leading == false && PaletteCommandCatalog.matches("video").first?.leading == false, "Search-like keywords leave Return to the web search")
         require(PaletteCommandCatalog.matches("se").first?.leading == false, "Two characters never lead, so Return still searches")
         require(PaletteCommandCatalog.matches("spaces").first?.command.id == "manage-spaces", "A keyword names Manage Spaces outright")
         let page = PaletteCommandCatalog.matches("page")

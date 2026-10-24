@@ -60,8 +60,12 @@ import WebKit
 /// The command palette: open/search, Arc-style Tab-to-search site scoping,
 /// remote suggestions, layout and dismissal.
 extension BrowserController {
+    /// The chosen default engine supplies suggestions when it has an endpoint;
+    /// otherwise DuckDuckGo keeps autocomplete alive.
     private var defaultSuggestionEngine: SiteSearchEngine? {
-        SiteSearchCatalog.engines.first { $0.host == URLInput.searchEngine.rawValue }
+        let chosen = SiteSearchCatalog.engines.first { $0.host == URLInput.searchEngine.rawValue }
+        if chosen?.suggestTemplate != nil { return chosen }
+        return SiteSearchCatalog.engines.first { $0.host == "duckduckgo.com" }
     }
 
     func openAddress(newTab: Bool, empty: Bool) {

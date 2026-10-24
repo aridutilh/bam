@@ -60,7 +60,10 @@ import UniformTypeIdentifiers
     private var selection: BrowserExtensionRecord? { items.indices.contains(table.selectedRow) ? items[table.selectedRow] : nil }
     private func updateControls() {
         let selected = selection
-        toggle.title = selected?.enabled == true ? "Disable" : "Enable"
+        let toggleTitle = selected?.enabled == true ? "Disable" : "Enable"
+        // Keep whatever styling the app dressed the button in.
+        let attributes = toggle.attributedTitle.length > 0 ? toggle.attributedTitle.attributes(at: 0, effectiveRange: nil) : [:]
+        toggle.attributedTitle = NSAttributedString(string: toggleTitle, attributes: attributes)
         toggle.isEnabled = !busy && selected != nil; removeButton.isEnabled = !busy && selected != nil; revoke.isEnabled = !busy && selected != nil; importButton.isEnabled = !busy
         let guidance = "Reload already open pages after enabling, disabling, or revoking access. Code injected into a page cannot be removed until that page reloads. Extension storage stays local to this profile."
         status.stringValue = selected.flatMap { host?.errors[$0.id] } ?? host?.lastError

@@ -163,6 +163,9 @@ extension BrowserController: NSMenuItemValidation {
         case #selector(toggleAutomaticTabSleeping(_:)):
             menuItem.state = automaticTabSleeping ? .on : .off
             return true
+        case #selector(toggleAutomaticVideo(_:)):
+            menuItem.state = automaticallyShowsVideo ? .on : .off
+            return true
         case #selector(toggleSiteKeepAwake(_:)):
             guard let host = currentSleepProtectionHost else { return false }
             menuItem.state = keepAwakeHosts.contains(host) ? .on : .off

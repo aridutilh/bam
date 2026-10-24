@@ -292,7 +292,8 @@ import QuartzCore
 
 /// A borderless editable field on a translucent box; Escape reverts.
 @MainActor final class BamTextField: NSTextField {
-    var onCommit: ((String) -> Void)?
+    /// Return true to accept the value; false reverts the field.
+    var onCommit: ((String) -> Bool)?
     private var committed = ""
     init(string: String, placeholder: String) {
         super.init(frame: .zero)
@@ -321,8 +322,7 @@ import QuartzCore
     }
     @objc private func commit() {
         guard stringValue != committed else { return }
-        committed = stringValue
-        onCommit?(stringValue)
+        if onCommit?(stringValue) == true { committed = stringValue } else { stringValue = committed }
     }
     override func cancelOperation(_ sender: Any?) {
         stringValue = committed
