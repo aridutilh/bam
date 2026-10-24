@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased — 0.12.0 local draft, build 26
+## 0.12.0 prerelease — build 26
 
 Two parallel draft lines each used the 0.10–0.11 numbers; this merge renumbers them as one release. Both lines' entries follow.
 
