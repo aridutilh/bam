@@ -76,7 +76,7 @@ import WebKit
         let transferred = deferredContent.takeWebView()
         try check(transferred === deferredWeb && deferredWeb.pendingReadyURL == urlA, "Pending promotion lost its requested URL or view")
         var adoptedPending: [@MainActor () -> Void] = []
-        let little = LittleArcController(websiteDataStore: deferredConfiguration.websiteDataStore, beforeLoad: { adoptedPending.append($0) })
+        let little = LittleBamController(websiteDataStore: deferredConfiguration.websiteDataStore, beforeLoad: { adoptedPending.append($0) })
         defer { little.close() }
         little.adopt(webView: deferredWeb)
         try check(adoptedPending.count == 1 && little.webView === deferredWeb, "Little Bam failed to adopt the pending navigation through its readiness gate")

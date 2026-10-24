@@ -46,7 +46,7 @@ import WebKit
             try check(promoted === original && !peek.isPresented && dismissals == 1, "Peek promotion did not detach the original view once")
             try check(original.navigationDelegate == nil && original.uiDelegate == nil, "Peek left its delegates installed after transfer")
             try check(try js(original, "window.__orbitCounter + ':' + document.getElementById('entry').value") as? String == "41:kept", "Promotion lost page state")
-            let little = LittleArcController(websiteDataStore: store)
+            let little = LittleBamController(websiteDataStore: store)
             little.adopt(webView: original)
             try check(little.webView === original, "Little Orbit recreated the adopted web view")
             if CommandLine.arguments.count > 2, let downloadBase = URL(string: CommandLine.arguments[2]) {

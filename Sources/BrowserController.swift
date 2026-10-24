@@ -216,7 +216,7 @@ import QuartzCore
     var suspendsChromeInteraction = false
     var automaticallyShowsVideo = true
     var peeks: [UUID: PeekCoordinator] = [:] { didSet { invalidateExtensionSurfaceTopology() } }
-    var littleWindows: [UUID: LittleArcController] = [:] { didSet { invalidateExtensionSurfaceTopology() } }
+    var littleWindows: [UUID: LittleBamController] = [:] { didSet { invalidateExtensionSurfaceTopology() } }
     var swipe = SpaceSwipeStateMachine()
     var scrollMonitor: Any?
     var trackingSwipe = false

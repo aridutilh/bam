@@ -127,12 +127,33 @@ import WebKit
         return id
     }
     @objc func newLittleOrbit(_ sender: Any?) { openLittleOrbit(url: nil) }
+    /// Little Bam's "Open in <Space>" picker. A Space on the same login takes
+    /// the page itself; a Space on another login loads the address fresh
+    /// there, because a web view never crosses website-data stores.
+    func promote(_ web: WKWebView, into spaceID: Int, from profile: UUID) {
+        guard let target = session.spaceDefinition(spaceID) else { _ = adoptWebView(web); return }
+        if target.profileID == profile {
+            if session.space != target.id { session.changeSpace(target.id); onSpacesChanged?() }
+            _ = adoptWebView(web)
+            return
+        }
+        // The window is already closed and the web view taken by now, so an
+        // empty Little Bam still lands somewhere: on a new tab, like adoptWebView.
+        let pendingURL = (web as? PreviewWKWebView)?.pendingReadyURL
+        let address = (pendingURL ?? (web as? PreviewWKWebView)?.promotionURL ?? web.url)
+            .flatMap({ URLInput.directURL($0.absoluteString) })?.absoluteString ?? "orbit://newtab"
+        web.stopLoading(); web.removeFromSuperview()
+        cancelPaging(); dismissAddress()
+        if session.space != target.id { session.changeSpace(target.id); onSpacesChanged?() }
+        _ = session.add(address: address, title: web.title?.isEmpty == false ? web.title : nil)
+        showActive(); save(); view.window?.makeKeyAndOrderFront(nil)
+    }
     func openLittleOrbit(url: URL? = nil, adopting web: WKWebView? = nil, profileID sourceProfile: UUID? = nil) {
         if let url, URLInput.directURL(url.absoluteString) == nil { return }
         let id = UUID()
         let profile = sourceProfile ?? web.flatMap { profileID(of: $0) } ?? commandWebView.flatMap { profileID(of: $0) } ?? session.currentProfileID
         let store = web?.configuration.websiteDataStore ?? profileStores.store(for: profile)
-        let little = LittleArcController(websiteDataStore: store, configure: { [weak self] in self?.configureExtensions($0, profileID: profile) }, beforeLoad: { [weak self] action in self?.whenExtensionsReady(profileID: profile, perform: action) })
+        let little = LittleBamController(websiteDataStore: store, configure: { [weak self] in self?.configureExtensions($0, profileID: profile) }, beforeLoad: { [weak self] action in self?.whenExtensionsReady(profileID: profile, perform: action) })
         little.onDownload = { [weak self] download in self?.downloads.start(download: download) }
         little.onVisit = { [weak self] title, address in self?.library(for: profile).recordVisit(title: title, address: address) }
         littleWindows[id] = little
@@ -147,6 +168,26 @@ import WebKit
             return true
         }
         little.onPromote = { [weak self] web in _ = self?.adoptWebView(web) }
+        little.onPromoteTo = { [weak self] web, spaceID in self?.promote(web, into: spaceID, from: profile) }
+        little.profileName = session.profileName(profile)
+        little.destinations = { [weak self] in
+            guard let self else { return [] }
+            let landing = self.session.currentProfileID == profile ? self.session.space : self.session.spaceID(forProfile: profile)
+            return self.session.spaces.map {
+                LittleBamDestination(id: $0.id, name: $0.name, symbol: $0.symbol, colorIndex: $0.colorIndex, isDefault: $0.id == landing)
+            }
+        }
+        if #available(macOS 15.4, *) {
+            little.extensionsMenu = { [weak self] anchor in
+                guard let self else { return nil }
+                self.browserExtensions.reconcile()
+                let menu = self.browserExtensions.actionsMenu(profileID: profile, tabID: id, anchor: anchor)
+                if !menu.items.isEmpty { menu.addItem(.separator()) }
+                let manage = NSMenuItem(title: "Manage Extensions…", action: #selector(self.manageExtensions(_:)), keyEquivalent: "")
+                manage.target = self; menu.addItem(manage)
+                return menu
+            }
+        }
         if let web { little.adopt(webView: web) }
         else if let url { _ = little.open(url: url) }
         little.show(relativeTo: view.window); scheduleExtensionRefresh()
