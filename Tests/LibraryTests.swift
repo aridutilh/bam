@@ -107,6 +107,28 @@ import AppKit
         mixedLoaded.recordVisit(title: "Still writable", address: "https://example.com/after-repair")
         check(mixedLoaded.history.count == 2 && mixedLoaded.lastStorageError == nil, "Partially damaged compatible files remain usable")
 
+        // A fully decodable file must apply the same safety, identity, and size
+        // rules as the damaged-record salvage path.
+        let typedFile = root.appendingPathComponent("typed.json")
+        let typed: [String: Any] = ["version": 1, "history": [try object(entry), unsafeEntry, try object(entry)],
+                                  "closedRecords": [try object(closed), invalidClosed, try object(negativeSpace), try object(closed)]]
+        try JSONSerialization.data(withJSONObject: typed).write(to: typedFile)
+        let typedLoaded = BrowserLibrary(storageURL: typedFile)
+        check(typedLoaded.history.map(\.id) == [entry.id] && typedLoaded.closedRecords.map(\.id) == [closed.id],
+              "Whole-file decoding still rejects unsafe entries, invalid archives, and duplicate identities")
+        var legacy = typed; legacy.removeValue(forKey: "version")
+        try JSONSerialization.data(withJSONObject: legacy).write(to: typedFile)
+        let legacyLoaded = BrowserLibrary(storageURL: typedFile)
+        check(legacyLoaded.history.map(\.id) == [entry.id] && legacyLoaded.closedRecords.map(\.id) == [closed.id],
+              "Legacy files without a version retain per-record validation")
+        var future = typed; future["version"] = 2
+        let futureBytes = try JSONSerialization.data(withJSONObject: future)
+        try futureBytes.write(to: typedFile)
+        let futureLoaded = BrowserLibrary(storageURL: typedFile)
+        futureLoaded.recordVisit(title: "Do not replace", address: "https://example.com")
+        check(futureLoaded.lastStorageError != nil && futureLoaded.history.isEmpty && (try? Data(contentsOf: typedFile)) == futureBytes,
+              "Fully decodable future files cannot bypass format protection")
+
         for (name, bytes) in [("future.json", Data("{\"version\":2,\"history\":[]}".utf8)), ("broken.json", Data("not JSON".utf8))] {
             let url = root.appendingPathComponent(name); try bytes.write(to: url)
             let guarded = BrowserLibrary(storageURL: url)
@@ -119,8 +141,12 @@ import AppKit
         let failed = BrowserLibrary(storageURL: blocker.appendingPathComponent("library.json"))
         var errors = 0; failed.onStorageError = { _ in errors += 1 }
         failed.recordVisit(title: "Unsaveable", address: "https://example.com")
+        check(!failed.flush() && failed.history.count == 1 && !failed.isLatestSnapshotSaved,
+              "A failed visit write retains the accepted history as dirty")
         failed.recordClosed(tabs: [home], split: false)
-        check(failed.history.isEmpty && failed.closedRecords.isEmpty && errors == 2 && failed.lastStorageError != nil, "Write failures roll back mutations and report errors")
+        check(failed.history.count == 1 && failed.closedRecords.isEmpty && errors == 2 && failed.lastStorageError != nil,
+              "Explicit write failures roll back archive changes while retaining dirty visits")
+        check(mixedLoaded.flush(), "Pending salvaged-library visits finish before fixture cleanup")
         print("PASS: \(checks) library metadata checks")
     }
 }

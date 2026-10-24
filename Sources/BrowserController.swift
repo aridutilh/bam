@@ -622,7 +622,13 @@ import QuartzCore
         for little in Array(littleWindows.values) { little.close() }
         if let monitor = scrollMonitor { NSEvent.removeMonitor(monitor); scrollMonitor = nil }
         cancelPaging(); animator.stop()
-        if persistSession { save(); _ = sessionWriter?.flush(timeout: 2) }
+        if persistSession {
+            let deadline = ProcessInfo.processInfo.systemUptime + 2
+            save(); _ = sessionWriter?.flush(timeout: 2)
+            for library in profileLibraries.values {
+                _ = library.flush(timeout: max(0, deadline - ProcessInfo.processInfo.systemUptime))
+            }
+        }
     }
     func updateMetadata(_ web: WKWebView) {
         guard let pair = browsers.first(where: { $0.value === web }), let i = session.tabs.firstIndex(where: { $0.id == pair.key }) else { return }
@@ -1087,14 +1093,21 @@ import QuartzCore
     /// Called before teardown. New edits made during an async write must also
     /// reach disk before the main actor allows the application to terminate.
     func flushSessionForTermination(timeout: TimeInterval = 5) async -> Bool {
-        guard !privateMode, let writer = sessionWriter else { return true }
+        guard !privateMode else { return true }
         save()
         let deadline = ProcessInfo.processInfo.systemUptime + max(0, timeout)
         repeat {
-            let remaining = max(0, deadline - ProcessInfo.processInfo.systemUptime)
-            guard await writer.flushAsync(timeout: remaining) else { return false }
+            if let writer = sessionWriter {
+                guard await writer.flushAsync(timeout: max(0, deadline - ProcessInfo.processInfo.systemUptime)) else { return false }
+            }
+            // Awaiting disk keeps the app responsive: another profile may gain
+            // a visit during either flush. Recheck every live library below.
+            for library in Array(profileLibraries.values) {
+                guard await library.flushAsync(timeout: max(0, deadline - ProcessInfo.processInfo.systemUptime)) else { return false }
+            }
             if saveWork != nil { save(); continue }
-            if writer.isLatestSnapshotSaved { return true }
+            if sessionWriter?.isLatestSnapshotSaved != false,
+               profileLibraries.values.allSatisfy(\.isLatestSnapshotSaved) { return true }
         } while ProcessInfo.processInfo.systemUptime < deadline
         return false
     }

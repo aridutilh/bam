@@ -111,8 +111,8 @@ import WebKit
             await controller.flushSessionForTermination()
         }, saveFailure: {
             let alert = NSAlert()
-            alert.messageText = "Your latest tabs haven’t been saved"
-            alert.informativeText = "Bam couldn’t finish saving this session. You can stay in the browser, retry, or quit without the latest changes."
+            alert.messageText = "Your latest browsing changes haven’t been saved"
+            alert.informativeText = "Bam couldn’t finish saving your tabs or history. You can stay in the browser, retry, or quit without the latest changes."
             alert.addButton(withTitle: "Cancel Quit")
             alert.addButton(withTitle: "Retry")
             alert.addButton(withTitle: "Quit Without Saving")
