@@ -9,15 +9,18 @@ import QuartzCore
     var previewProgress: CGFloat = 0 { didSet { needsDisplay = true } }
     override var isFlipped: Bool { true }
     override func layout() { super.layout(); onLayout?() }
+    /// Per-space window gradients. Onboarding previews the same table, so the
+    /// chosen color shows exactly what the browser will wear.
+    static let palettes: [[NSColor]] = [
+        [NSColor(srgbRed: 0.20, green: 0.17, blue: 0.25, alpha: 1), NSColor(srgbRed: 0.29, green: 0.23, blue: 0.29, alpha: 1)],
+        [NSColor(srgbRed: 0.17, green: 0.24, blue: 0.22, alpha: 1), NSColor(srgbRed: 0.27, green: 0.29, blue: 0.22, alpha: 1)],
+        [NSColor(srgbRed: 0.16, green: 0.22, blue: 0.29, alpha: 1), NSColor(srgbRed: 0.26, green: 0.23, blue: 0.34, alpha: 1)],
+        [NSColor(srgbRed: 0.29, green: 0.17, blue: 0.23, alpha: 1), NSColor(srgbRed: 0.34, green: 0.23, blue: 0.27, alpha: 1)],
+        [NSColor(srgbRed: 0.28, green: 0.22, blue: 0.15, alpha: 1), NSColor(srgbRed: 0.34, green: 0.28, blue: 0.21, alpha: 1)],
+        [NSColor(srgbRed: 0.18, green: 0.19, blue: 0.21, alpha: 1), NSColor(srgbRed: 0.28, green: 0.29, blue: 0.31, alpha: 1)]
+    ]
     override func draw(_ dirtyRect: NSRect) {
-        let palettes: [[NSColor]] = [
-            [NSColor(srgbRed: 0.20, green: 0.17, blue: 0.25, alpha: 1), NSColor(srgbRed: 0.29, green: 0.23, blue: 0.29, alpha: 1)],
-            [NSColor(srgbRed: 0.17, green: 0.24, blue: 0.22, alpha: 1), NSColor(srgbRed: 0.27, green: 0.29, blue: 0.22, alpha: 1)],
-            [NSColor(srgbRed: 0.16, green: 0.22, blue: 0.29, alpha: 1), NSColor(srgbRed: 0.26, green: 0.23, blue: 0.34, alpha: 1)],
-            [NSColor(srgbRed: 0.29, green: 0.17, blue: 0.23, alpha: 1), NSColor(srgbRed: 0.34, green: 0.23, blue: 0.27, alpha: 1)],
-            [NSColor(srgbRed: 0.28, green: 0.22, blue: 0.15, alpha: 1), NSColor(srgbRed: 0.34, green: 0.28, blue: 0.21, alpha: 1)],
-            [NSColor(srgbRed: 0.18, green: 0.19, blue: 0.21, alpha: 1), NSColor(srgbRed: 0.28, green: 0.29, blue: 0.31, alpha: 1)]
-        ]
+        let palettes = Self.palettes
         let base = palettes[min(palettes.count - 1, max(0, space))]
         let colors: [NSColor]
         if let previewSpace { colors = zip(base, palettes[min(palettes.count - 1, max(0, previewSpace))]).map { $0.blended(withFraction: min(1,max(0,previewProgress)), of: $1) ?? $0 } }

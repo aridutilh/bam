@@ -45,6 +45,14 @@ struct OnboardingTests {
         }
         try expect(OnboardingGate.shouldGrandfather(arguments: [], sessionFileExists: true, completed: false),
                    "Pre-onboarding profiles are grandfathered")
+        try expect(!OnboardingGate.shouldGrandfather(arguments: ["--onboarding"], sessionFileExists: true, completed: false),
+                   "--onboarding is never swallowed by grandfathering")
+        try expect(!OnboardingGate.shouldGrandfather(arguments: [], sessionFileExists: true, completed: false, started: true),
+                   "A welcome cut short by quitting is not grandfathered")
+        try expect(OnboardingGate.shouldPresent(arguments: [], sessionFileExists: true, completed: false, started: true),
+                   "A welcome cut short by quitting returns on the next launch")
+        try expect(!OnboardingGate.shouldPresent(arguments: [], sessionFileExists: true, completed: true, started: true),
+                   "A finished welcome never returns on its own, started or not")
         try expect(!OnboardingGate.shouldGrandfather(arguments: ["--fresh-preview"], sessionFileExists: true, completed: false),
                    "Previews never write the grandfather flag")
         try expect(!OnboardingGate.shouldGrandfather(arguments: ["--feature-test"], sessionFileExists: true, completed: false),
@@ -130,6 +138,12 @@ struct OnboardingTests {
         try expect(found.map(\.address) == ["https://github.com", "https://example.com/page", "https://nested.example"],
                    "Bar entries parse in order: deduplicated, HTTP(S) only, one folder deep, bar only — got \(found.map(\.address))")
         try expect(found[1].title == "example.com", "Untitled bookmarks fall back to their host")
+
+        let control = ChromeBookmarks.parse(Data("""
+        {"roots": {"bookmark_bar": {"children": [{"type": "url", "name": "Docs\\tWork\\n", "url": "https://docs.example"}]}}}
+        """.utf8))
+        try expect(control.first?.title == "Docs Work",
+                   "Interior control characters are cleaned so saved titles survive sanitize — got \(control.first?.title ?? "nil")")
         try expect(ChromeBookmarks.parse(Data("not json".utf8)).isEmpty, "Garbage input parses to nothing")
         try expect(ChromeBookmarks.parse(Data("{\"roots\": {}}".utf8)).isEmpty, "A missing bar parses to nothing")
 

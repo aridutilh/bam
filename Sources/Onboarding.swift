@@ -122,10 +122,13 @@ import QuartzCore
             context.duration = 0.45
             context.timingFunction = CAMediaTimingFunction(name: .easeIn)
             window.animator().alphaValue = 0
-            let zoom = CABasicAnimation(keyPath: "transform.scale")
-            zoom.fromValue = 1; zoom.toValue = 1.035
-            zoom.duration = 0.45; zoom.timingFunction = CAMediaTimingFunction(name: .easeIn)
-            overlay.layer?.add(zoom, forKey: "zoom")
+            if let layer = overlay.layer {
+                OnboardingMotion.centerAnchor(layer)
+                let zoom = CABasicAnimation(keyPath: "transform.scale")
+                zoom.fromValue = 1; zoom.toValue = 1.035
+                zoom.duration = 0.45; zoom.timingFunction = CAMediaTimingFunction(name: .easeIn)
+                layer.add(zoom, forKey: "zoom")
+            }
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.46, execute: DispatchWorkItem { finish() })
     }
@@ -477,6 +480,9 @@ import QuartzCore
         let title = OnboardingText.title("Make it official?")
         let subtitle = OnboardingText.subtitle("Links from other apps would open in Bam.\nmacOS will ask you to confirm.")
         let primary = OnboardingPillButton(title: "Make Bam my default", prominent: true)
+        // Every step so far taught Return to mean "continue"; a system-level
+        // change must never ride on that habit, so Return skips instead.
+        primary.keyEquivalent = ""
         primary.target = self; primary.action = #selector(requestDefaultBrowser)
         let later = OnboardingQuietButton(title: "Maybe later")
         later.target = self; later.action = #selector(advance)
@@ -525,8 +531,22 @@ extension OnboardingController: NSWindowDelegate {
 // MARK: - Motion
 
 @MainActor enum OnboardingMotion {
+    /// AppKit pins layer-backed views at anchorPoint (0,0); scaling or
+    /// rotating there grows from the corner. Re-anchor at the center, keeping
+    /// the rendered frame where it is.
+    static func centerAnchor(_ layer: CALayer) {
+        let target = CGPoint(x: 0.5, y: 0.5)
+        guard layer.anchorPoint != target else { return }
+        let bounds = layer.bounds
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        layer.position = CGPoint(x: layer.position.x + (target.x - layer.anchorPoint.x) * bounds.width,
+                                 y: layer.position.y + (target.y - layer.anchorPoint.y) * bounds.height)
+        layer.anchorPoint = target
+        CATransaction.commit()
+    }
     static func pop(_ layer: CALayer?, from scale: CGFloat, wobble: Bool = false) {
         guard let layer else { return }
+        centerAnchor(layer)
         let spring = CASpringAnimation(keyPath: "transform.scale")
         spring.fromValue = scale; spring.toValue = 1
         spring.mass = 1; spring.stiffness = 210; spring.damping = 15
@@ -560,16 +580,9 @@ extension OnboardingController: NSWindowDelegate {
     private let glow = CAGradientLayer()
     private var confetti: CAEmitterLayer?
 
-    /// Mirrors the per-space window gradients in CanvasView so the chosen
+    /// The stage wears CanvasView's own per-space gradients, so the chosen
     /// color previews exactly what the browser behind will wear.
-    static let backgrounds: [[NSColor]] = [
-        [NSColor(srgbRed: 0.20, green: 0.17, blue: 0.25, alpha: 1), NSColor(srgbRed: 0.29, green: 0.23, blue: 0.29, alpha: 1)],
-        [NSColor(srgbRed: 0.17, green: 0.24, blue: 0.22, alpha: 1), NSColor(srgbRed: 0.27, green: 0.29, blue: 0.22, alpha: 1)],
-        [NSColor(srgbRed: 0.16, green: 0.22, blue: 0.29, alpha: 1), NSColor(srgbRed: 0.26, green: 0.23, blue: 0.34, alpha: 1)],
-        [NSColor(srgbRed: 0.29, green: 0.17, blue: 0.23, alpha: 1), NSColor(srgbRed: 0.34, green: 0.23, blue: 0.27, alpha: 1)],
-        [NSColor(srgbRed: 0.28, green: 0.22, blue: 0.15, alpha: 1), NSColor(srgbRed: 0.34, green: 0.28, blue: 0.21, alpha: 1)],
-        [NSColor(srgbRed: 0.18, green: 0.19, blue: 0.21, alpha: 1), NSColor(srgbRed: 0.28, green: 0.29, blue: 0.31, alpha: 1)]
-    ]
+    static var backgrounds: [[NSColor]] { CanvasView.palettes }
 
     override init(frame: NSRect) {
         super.init(frame: frame)

@@ -3,7 +3,7 @@
 ## Unreleased — 0.10.0 local draft, build 24
 
 - Add a first-run onboarding: a full-screen stage window with a popping icon welcome, Space color choice that retints the stage live, first-Space naming with symbol choice, optional Chrome bookmark-bar favorite import, interactive ⌘T/⌘S training, a user-initiated default-browser offer and a confetti finale. Keyboard-first (Return advances, Escape goes back, arrows pick colors), with native minimize/close controls (close skips), Reduce Motion fades and a progress-dot/back cluster kept clear of the menu-bar corner.
-- Gate it to true first launches (no session file); existing profiles are grandfathered silently and fixtures never see it. `--onboarding` forces it (demo: `bash scripts/preview-onboarding.sh`), and Bam ▸ “Welcome to Bam…” replays it. Finishing updates the first Space and adds chosen favorites as unloaded Favorites within the cap; skipping changes nothing. Browser swipes and chrome menu items stand down while the stage is up.
+- Gate it to true first launches (no session file); existing profiles are grandfathered silently and fixtures never see it, while a welcome cut short by quitting returns on the next launch. `--onboarding` forces it anywhere (demo: `bash scripts/preview-onboarding.sh`), and Bam ▸ “Welcome to Bam…” replays it. Finishing updates the first Space and adds chosen favorites as unloaded Favorites within the cap; skipping changes nothing, and Return never triggers the default-browser change — that takes a deliberate click. Browser swipes and chrome menu items stand down while the stage is up.
 - Local only; installation and publication remain on hold. Verification is recorded in [VALIDATION.md](VALIDATION.md).
 
 ## Unreleased — 0.9.0 local draft, build 23

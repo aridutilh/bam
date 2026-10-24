@@ -127,7 +127,7 @@ struct BrowserSpace: Codable, Equatable, Identifiable {
     ]
     static let legacyDefaults = defaults
 
-    fileprivate static func validName(_ raw: String) -> String? {
+    static func validName(_ raw: String) -> String? {
         let name = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty, name.count <= 60,
               !name.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else { return nil }

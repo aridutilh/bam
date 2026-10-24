@@ -6,23 +6,29 @@ import Foundation
 
 enum OnboardingGate {
     static let completedKey = "OnboardingCompleted"
+    static let startedKey = "OnboardingStarted"
     static let testArguments: Set<String> = ["--web-test", "--pip-test", "--interaction-test",
                                              "--auto-pip-test", "--feature-test", "--resource-test"]
 
     /// First launches with no profile get the welcome; existing profiles are
-    /// grandfathered silently. Fixtures never see it. `--onboarding` forces it,
-    /// including over `--fresh-preview`, so demos stay reproducible.
-    static func shouldPresent(arguments: [String], sessionFileExists: Bool, completed: Bool) -> Bool {
+    /// grandfathered silently — unless the welcome already started and was cut
+    /// short (a quit mid-onboarding writes a session but must not grandfather).
+    /// Fixtures never see it. `--onboarding` forces it, including over
+    /// `--fresh-preview` and over an existing profile, so demos stay possible.
+    static func shouldPresent(arguments: [String], sessionFileExists: Bool,
+                              completed: Bool, started: Bool = false) -> Bool {
         guard !arguments.contains(where: { testArguments.contains($0) }) else { return false }
         if arguments.contains("--onboarding") { return true }
         guard !arguments.contains("--fresh-preview") else { return false }
-        return !completed && !sessionFileExists
+        return !completed && (!sessionFileExists || started)
     }
 
     /// An existing profile that predates onboarding should never be welcomed
     /// as new on a later launch.
-    static func shouldGrandfather(arguments: [String], sessionFileExists: Bool, completed: Bool) -> Bool {
-        !completed && sessionFileExists && !arguments.contains("--fresh-preview")
+    static func shouldGrandfather(arguments: [String], sessionFileExists: Bool,
+                                  completed: Bool, started: Bool = false) -> Bool {
+        !completed && !started && sessionFileExists
+            && !arguments.contains("--onboarding") && !arguments.contains("--fresh-preview")
             && !arguments.contains(where: { testArguments.contains($0) })
     }
 }
@@ -84,12 +90,9 @@ struct OnboardingModel {
     }
 
     var result: OnboardingResult {
-        let trimmed = spaceName.trimmingCharacters(in: .whitespacesAndNewlines)
-        let name = trimmed.isEmpty || trimmed.count > 60
-            || trimmed.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) })
-            ? "Studio" : trimmed
-        return OnboardingResult(spaceName: name, spaceSymbol: spaceSymbol, colorIndex: colorIndex,
-                                favorites: bookmarks.filter { selectedBookmarkAddresses.contains($0.address) })
+        OnboardingResult(spaceName: BrowserSpace.validName(spaceName) ?? "Studio",
+                         spaceSymbol: spaceSymbol, colorIndex: colorIndex,
+                         favorites: bookmarks.filter { selectedBookmarkAddresses.contains($0.address) })
     }
 }
 
@@ -138,7 +141,11 @@ enum ChromeBookmarks {
     }
 
     static func load(from url: URL) -> [OnboardingBookmark] {
-        guard let data = try? Data(contentsOf: url), data.count < 20_000_000 else { return [] }
+        // This runs synchronously at launch: refuse oversized stores before
+        // touching their bytes, and map rather than copy the rest.
+        guard let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize,
+              size < 20_000_000,
+              let data = try? Data(contentsOf: url, options: .mappedIfSafe) else { return [] }
         return parse(data)
     }
 
@@ -159,7 +166,11 @@ enum ChromeBookmarks {
             guard found.count < maximumOffered, let child = child as? [String: Any] else { continue }
             if child["type"] as? String == "url", let address = child["url"] as? String,
                let url = URLInput.directURL(address), seen.insert(url.absoluteString).inserted {
-                let title = (child["name"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                // Interior control characters would void the saved custom title
+                // later in sanitize; clean them here where the data enters.
+                let scalars = (child["name"] as? String ?? "").unicodeScalars
+                    .map { CharacterSet.controlCharacters.contains($0) ? " " : Character($0) }
+                let title = String(scalars).trimmingCharacters(in: .whitespacesAndNewlines)
                 found.append(OnboardingBookmark(title: title.isEmpty ? (url.host ?? address) : title,
                                                 address: url.absoluteString))
             } else if child["type"] as? String == "folder", depth < 1 {

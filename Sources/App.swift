@@ -43,10 +43,13 @@ import WebKit
         buildMenus(); window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
         for url in pendingExternalURLs { controller.openLittleOrbit(url: url) }; pendingExternalURLs.removeAll()
         let completed = UserDefaults.standard.bool(forKey: OnboardingGate.completedKey)
-        if OnboardingGate.shouldGrandfather(arguments: CommandLine.arguments, sessionFileExists: sessionFileExists, completed: completed) {
+        let started = UserDefaults.standard.bool(forKey: OnboardingGate.startedKey)
+        if OnboardingGate.shouldGrandfather(arguments: CommandLine.arguments, sessionFileExists: sessionFileExists,
+                                            completed: completed, started: started) {
             // Profiles that predate onboarding are never welcomed as new.
             UserDefaults.standard.set(true, forKey: OnboardingGate.completedKey)
-        } else if OnboardingGate.shouldPresent(arguments: CommandLine.arguments, sessionFileExists: sessionFileExists, completed: completed) {
+        } else if OnboardingGate.shouldPresent(arguments: CommandLine.arguments, sessionFileExists: sessionFileExists,
+                                               completed: completed, started: started) {
             presentOnboarding()
         }
     }
@@ -60,12 +63,18 @@ import WebKit
         }
         let welcome = OnboardingController(model: model)
         welcome.onApply = { [weak self] result in self?.controller?.applyOnboarding(result) }
+        // A quit mid-welcome writes a session; the started mark keeps the next
+        // launch from mistaking that profile for a pre-onboarding one.
+        if controller.privateMode != true { UserDefaults.standard.set(true, forKey: OnboardingGate.startedKey) }
         welcome.onDismiss = { [weak self] _ in
             guard let self else { return }
             self.onboarding = nil
             self.controller?.setOnboardingActive(false)
             // Seen once is seen: skipping must not re-welcome on the next launch.
-            if self.controller?.privateMode != true { UserDefaults.standard.set(true, forKey: OnboardingGate.completedKey) }
+            if self.controller?.privateMode != true {
+                UserDefaults.standard.set(true, forKey: OnboardingGate.completedKey)
+                UserDefaults.standard.removeObject(forKey: OnboardingGate.startedKey)
+            }
             self.window?.makeKeyAndOrderFront(nil)
             self.window?.makeFirstResponder(self.controller?.commandWebView)
         }
@@ -75,8 +84,7 @@ import WebKit
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         // Fixtures deliberately minimize, replace, and close their windows.
         // Only their explicit terminal result may finish a smoke-test process.
-        let testArguments: Set<String> = ["--web-test", "--pip-test", "--interaction-test", "--auto-pip-test", "--feature-test", "--resource-test"]
-        return !CommandLine.arguments.contains { testArguments.contains($0) }
+        return !CommandLine.arguments.contains { OnboardingGate.testArguments.contains($0) }
     }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         // Runtime fixtures own their controllers and exit explicitly. Both
