@@ -1,12 +1,24 @@
 # Changelog
 
-## Unreleased — 0.12.0 local draft, build 26
+## Unreleased — 0.13.0 local draft, build 27
 
 - Create Spaces the Arc way: overscrolling past the last Space fills a circled plus; completing the pull and releasing opens a sidebar creation panel with a native stacked-cards illustration, name field, profile picker and theme swatches that live-preview the Space gradient. Create switches to the new Space; Escape, Cancel or any Space change dismisses without creating.
 - A partial pull springs back without creating, cancellation abandons even a completed pull, overscroll on the leading edge or a middle Space never offers creation, and reduced motion skips the pop animations.
+- The new Prism and Clear appearances join the six flat colors in the creation panel's theme swatches; new Spaces still default to cycling the flat colors.
 - Local only; publication and installation remain on hold. See [VALIDATION.md](VALIDATION.md).
 
-## Unreleased — 0.11.0 local draft, build 25
+## Unreleased — 0.12.0 local draft, build 26
+
+Two parallel draft lines each used the 0.10–0.11 numbers; this merge renumbers them as one release. Both lines' entries follow.
+
+### Onboarding and Space appearances line (formerly 0.10.0–0.11.0, builds 24–25)
+
+- Add two Space appearances beyond the six flat colors: **Prism**, a slowly shifting spectrum (a 24-second curated hue cycle that skips the muddy yellow-green band; static under Reduce Motion), and **Clear**, which turns the window translucent over a behind-window blur so the desktop shows through. Both are picked anywhere colors are — Manage Spaces, the onboarding color step (with a rainbow and a glass swatch) — persist as ordinary colorIndex values, and carry fallback gradients so Space swipes still blend toward them. New Spaces cycle the flat colors only; sanitize repairs out-of-range indices to a flat color, so the appearances apply only by explicit choice.
+- Add a first-run onboarding: a full-screen stage window with a popping icon welcome, Space color choice that retints the stage live, first-Space naming with symbol choice, optional Chrome bookmark-bar favorite import, interactive ⌘T/⌘S training, a user-initiated default-browser offer (Return skips; the change takes a deliberate click) and a confetti finale. Keyboard-first, with native minimize/close controls (close skips), Reduce Motion fades and a progress-dot/back cluster kept clear of the menu-bar corner.
+- Gate onboarding to true first launches; existing profiles are grandfathered silently, fixtures never see it, and a welcome cut short by quitting returns on the next launch. `--onboarding` forces it anywhere (demo: `bash scripts/preview-onboarding.sh`), and Bam ▸ “Welcome to Bam…” replays it. Finishing updates the first Space and adds chosen favorites as unloaded Favorites within the cap; skipping changes nothing. Browser swipes and chrome menu items stand down while the stage is up.
+
+
+### Command palette, login profiles and extensions line (formerly 0.10.0–0.11.0, builds 24–25)
 
 - Redesign the command palette as a single translucent card in the system appearance: icon-led input row, separator, and Arc-style single-line results with a full-width accent selection, inline dimmed addresses and trailing Space labels. The forced-light card, heading and shortcut footer are removed.
 - Offer Tab-to-search for nineteen sites (YouTube, Google, Google Maps, Gmail, Google Drive, Wikipedia, Amazon, Reddit, GitHub, X, Spotify, Netflix, IMDb, Hacker News, Stack Overflow, ChatGPT, Claude, Perplexity, DuckDuckGo). Typing a site name, domain or alias shows a trailing “Search <Site> ⇥” hint; Tab scopes the palette with a pill, bloom and interior wash in the site’s color, Return searches the site, and Backspace in an empty field removes the pill. Pasted URLs with paths, bare “www” prefixes and multi-word text never trigger the hint.

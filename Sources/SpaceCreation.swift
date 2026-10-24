@@ -398,7 +398,8 @@ extension BrowserController {
         // Stop the rubber-band settle; its per-frame preview writes and
         // completion would otherwise clobber the panel's theme preview.
         cancelPaging()
-        let initialColor = session.spaces.count % CanvasView.palettes.count
+        // Default to cycling the flat colors; Prism/Clear apply only by choice.
+        let initialColor = session.spaces.count % BrowserSpace.flatColorCount
         let panel = SpaceCreationPanel(profiles: session.profiles, defaultName: nextSpaceName(), initialColorIndex: initialColor)
         panel.onCancel = { [weak self] in self?.dismissSpaceCreation() }
         panel.onPreviewTheme = { [weak self] index in

@@ -342,7 +342,9 @@ struct SpaceEditPlan {
         var suffix = 1, name = "New Space"
         while plan.spaces.contains(where: { $0.name == name }) { suffix += 1; name = "New Space \(suffix)" }
         let id = draftID; draftID -= 1
-        plan.spaces.append(BrowserSpace(id: id, name: name, symbol: "sparkles", colorIndex: plan.spaces.count % BrowserSpace.colorNames.count,
+        // New Spaces cycle the flat colors only; the Prism and Clear
+        // appearances apply by explicit choice, never as a default.
+        plan.spaces.append(BrowserSpace(id: id, name: name, symbol: "sparkles", colorIndex: plan.spaces.count % BrowserSpace.flatColorCount,
                                         profileID: plan.spaces.first(where: { $0.id == selectedID })?.profileID ?? BrowserProfile.defaultID))
         reload(selectedID: id); window?.makeFirstResponder(nameField); nameField.selectText(nil)
     }

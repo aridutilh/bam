@@ -8,7 +8,7 @@ Bam explores the things that make sidebar browsers feel good: a compact sidebar 
 
 **Latest download:** [v0.6.0 prerelease](https://github.com/aridutilh/bam/releases/tag/v0.6.0) · [all releases](https://github.com/aridutilh/bam/releases) · [changelog](CHANGELOG.md)
 
-**Source on `main`: Bam 0.10.0 (build 24), unreleased.** This source includes Favorites, kept tabs, performance improvements, login profiles, and a local extension host. The downloadable app above is still v0.6.0.
+**Source on `main`: Bam 0.12.0 (build 26).** This source includes Favorites, kept tabs, performance improvements, login profiles, a local extension host, the redesigned command palette with Tab-to-search, a full-screen first-run onboarding (replay it from Bam ▸ "Welcome to Bam…", or demo with `bash scripts/preview-onboarding.sh`), and two new Space appearances: **Prism**, a slowly shifting spectrum, and **Clear**, a translucent window that lets your desktop show through. See [CHANGELOG.md](CHANGELOG.md) and [VALIDATION.md](VALIDATION.md).
 
 ## Try it
 

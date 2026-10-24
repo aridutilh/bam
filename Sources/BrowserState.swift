@@ -160,7 +160,14 @@ struct BrowserSpace: Codable, Equatable, Identifiable {
     }
 
     static let symbols = ["sparkles", "sun.max", "globe", "briefcase", "house", "heart", "book", "paintbrush", "terminal", "bolt", "leaf", "music.note"]
-    static let colorNames = ["Violet", "Sage", "Ocean", "Rose", "Amber", "Graphite"]
+    /// Prism (a slowly shifting spectrum) and Clear (a translucent window that
+    /// shows the desktop) are appearances, not flat colors; their indices are
+    /// stable because sessions persist colorIndex.
+    static let colorNames = ["Violet", "Sage", "Ocean", "Rose", "Amber", "Graphite", "Prism", "Clear"]
+    /// The first six entries are flat colors; the appearances follow them.
+    static let flatColorCount = 6
+    static let prismColorIndex = flatColorCount
+    static let clearColorIndex = flatColorCount + 1
     static let defaults = [
         BrowserSpace(id: 0, name: "Studio", symbol: "sparkles", colorIndex: 0),
         BrowserSpace(id: 1, name: "Life", symbol: "sun.max", colorIndex: 1),
@@ -168,7 +175,7 @@ struct BrowserSpace: Codable, Equatable, Identifiable {
     ]
     static let legacyDefaults = defaults
 
-    fileprivate static func validName(_ raw: String) -> String? {
+    static func validName(_ raw: String) -> String? {
         let name = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty, name.count <= 60,
               !name.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else { return nil }
@@ -560,7 +567,11 @@ struct BrowserSession: Codable {
             return BrowserSpace(id: definition.id,
                                 name: BrowserSpace.validName(definition.name) ?? "Space \(definition.id)",
                                 symbol: BrowserSpace.normalizedSymbol(definition.symbol),
-                                colorIndex: min(BrowserSpace.colorNames.count - 1, max(0, definition.colorIndex)),
+                                // Out-of-range indices repair to a flat color;
+                                // Prism and Clear apply only by explicit choice.
+                                colorIndex: BrowserSpace.colorNames.indices.contains(definition.colorIndex)
+                                    ? definition.colorIndex
+                                    : min(BrowserSpace.flatColorCount - 1, max(0, definition.colorIndex)),
                                 profileID: validProfiles.contains(definition.profileID) ? definition.profileID : BrowserProfile.defaultID)
         }
         if spaces.isEmpty { spaces = BrowserSpace.defaults }

@@ -2,29 +2,153 @@ import AppKit
 import WebKit
 import QuartzCore
 
+/// The slowly shifting spectrum a Prism Space wears. Hues stay dark and
+/// desaturated enough that sidebar text keeps its contrast at every phase.
+@MainActor enum PrismBackground {
+    static func makeLayer() -> CAGradientLayer {
+        let layer = CAGradientLayer()
+        layer.startPoint = CGPoint(x: 0.1, y: 1)
+        layer.endPoint = CGPoint(x: 0.9, y: 0)
+        let frames = colorFrames()
+        layer.colors = frames[0]
+        guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { return layer }
+        let cycle = CAKeyframeAnimation(keyPath: "colors")
+        cycle.values = frames + [frames[0]]
+        cycle.duration = 24
+        cycle.calculationMode = .linear
+        cycle.repeatCount = .infinity
+        layer.add(cycle, forKey: "prism")
+        return layer
+    }
+    private static func colorFrames() -> [[CGColor]] {
+        // A curated hue path (blue → violet → magenta → red → amber → teal)
+        // that skips the muddy yellow-green band a plain wheel sweep hits.
+        [0.62, 0.75, 0.88, 0.98, 0.08, 0.45].map { (hue: CGFloat) in
+            [NSColor(calibratedHue: hue, saturation: 0.56, brightness: 0.34, alpha: 1).cgColor,
+             NSColor(calibratedHue: fmod(hue + 0.12, 1), saturation: 0.48, brightness: 0.47, alpha: 1).cgColor]
+        }
+    }
+}
+
 @MainActor final class CanvasView: NSView {
     var onLayout: (() -> Void)?
-    var space = 0 { didSet { if space != oldValue { previewSpace = nil; previewProgress = 0 }; needsDisplay = true } }
-    var previewSpace: Int? { didSet { needsDisplay = true } }
-    var previewProgress: CGFloat = 0 { didSet { needsDisplay = true } }
+    var space = 0 {
+        didSet {
+            if space != oldValue { previewSpace = nil; previewProgress = 0; updateAppearanceLayers() }
+            needsDisplay = true
+        }
+    }
+    var previewSpace: Int? { didSet { needsDisplay = true; updatePreviewEffects() } }
+    var previewProgress: CGFloat = 0 { didSet { needsDisplay = true; updatePreviewEffects() } }
+    /// Fires when the selected Space's appearance needs the window itself to
+    /// turn translucent (Clear) or opaque again.
+    var onTranslucencyChange: ((Bool) -> Void)?
+    private var prism: CAGradientLayer?
+    private var glass: NSVisualEffectView?
     override var isFlipped: Bool { true }
-    override func layout() { super.layout(); onLayout?() }
-    /// Space theme gradients, ordered to match BrowserSpace.colorNames.
+    override func layout() {
+        super.layout()
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        prism?.frame = bounds
+        CATransaction.commit()
+        glass?.frame = bounds
+        onLayout?()
+    }
+    /// Per-space window gradients. Onboarding previews the same table, so the
+    /// chosen color shows exactly what the browser will wear. Prism and Clear
+    /// carry fallback pairs here so swipe previews can still blend toward them.
     static let palettes: [[NSColor]] = [
         [NSColor(srgbRed: 0.20, green: 0.17, blue: 0.25, alpha: 1), NSColor(srgbRed: 0.29, green: 0.23, blue: 0.29, alpha: 1)],
         [NSColor(srgbRed: 0.17, green: 0.24, blue: 0.22, alpha: 1), NSColor(srgbRed: 0.27, green: 0.29, blue: 0.22, alpha: 1)],
         [NSColor(srgbRed: 0.16, green: 0.22, blue: 0.29, alpha: 1), NSColor(srgbRed: 0.26, green: 0.23, blue: 0.34, alpha: 1)],
         [NSColor(srgbRed: 0.29, green: 0.17, blue: 0.23, alpha: 1), NSColor(srgbRed: 0.34, green: 0.23, blue: 0.27, alpha: 1)],
         [NSColor(srgbRed: 0.28, green: 0.22, blue: 0.15, alpha: 1), NSColor(srgbRed: 0.34, green: 0.28, blue: 0.21, alpha: 1)],
-        [NSColor(srgbRed: 0.18, green: 0.19, blue: 0.21, alpha: 1), NSColor(srgbRed: 0.28, green: 0.29, blue: 0.31, alpha: 1)]
+        [NSColor(srgbRed: 0.18, green: 0.19, blue: 0.21, alpha: 1), NSColor(srgbRed: 0.28, green: 0.29, blue: 0.31, alpha: 1)],
+        [NSColor(srgbRed: 0.19, green: 0.12, blue: 0.30, alpha: 1), NSColor(srgbRed: 0.31, green: 0.15, blue: 0.28, alpha: 1)],
+        [NSColor(srgbRed: 0.12, green: 0.12, blue: 0.14, alpha: 1), NSColor(srgbRed: 0.18, green: 0.18, blue: 0.21, alpha: 1)]
     ]
     override func draw(_ dirtyRect: NSRect) {
         let palettes = Self.palettes
-        let base = palettes[min(palettes.count - 1, max(0, space))]
-        let colors: [NSColor]
-        if let previewSpace { colors = zip(base, palettes[min(palettes.count - 1, max(0, previewSpace))]).map { $0.blended(withFraction: min(1,max(0,previewProgress)), of: $1) ?? $0 } }
-        else { colors = base }
+        func pair(_ index: Int) -> [NSColor] { palettes[min(palettes.count - 1, max(0, index))] }
+        var colors = pair(space)
+        if let previewSpace {
+            let progress = min(1, max(0, previewProgress))
+            colors = zip(colors, pair(previewSpace)).map { $0.blended(withFraction: progress, of: $1) ?? $0 }
+            // Glass hides during swipes, so previews into or out of Clear fade
+            // the gradient itself toward transparency.
+            let fromClear = space == BrowserSpace.clearColorIndex
+            let toClear = previewSpace == BrowserSpace.clearColorIndex
+            if fromClear || toClear {
+                let clearAmount = fromClear && toClear ? 1 : fromClear ? 1 - progress : progress
+                let alpha = 1 - clearAmount * 0.9
+                colors = colors.map { $0.withAlphaComponent(alpha) }
+            }
+        } else if space == BrowserSpace.clearColorIndex {
+            // At rest the glass and translucent window carry the look.
+            colors = colors.map { $0.withAlphaComponent(0.1) }
+        }
         NSGradient(colors: colors)?.draw(in: bounds, angle: 65)
+    }
+
+    private func updateAppearanceLayers() {
+        let clear = space == BrowserSpace.clearColorIndex
+        let prismActive = space == BrowserSpace.prismColorIndex
+        if prismActive {
+            installPrism()
+        } else if let prism {
+            // The spectrum's infinite animation must not outlive its Space.
+            prism.removeFromSuperlayer()
+            self.prism = nil
+        }
+        if clear, glass == nil {
+            wantsLayer = true
+            let view = NSVisualEffectView(frame: bounds)
+            view.material = .hudWindow
+            view.blendingMode = .behindWindow
+            view.state = .active
+            view.autoresizingMask = [.width, .height]
+            view.setAccessibilityElement(false)
+            addSubview(view, positioned: .below, relativeTo: subviews.first)
+            glass = view
+        }
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        prism?.isHidden = !prismActive
+        prism?.opacity = 1
+        CATransaction.commit()
+        glass?.isHidden = !clear
+        if lastReportedTranslucency != clear {
+            lastReportedTranslucency = clear
+            onTranslucencyChange?(clear)
+        }
+    }
+    private var lastReportedTranslucency = false
+    private func installPrism() {
+        guard prism == nil else { return }
+        wantsLayer = true
+        // Re-creating per visit also re-samples Reduce Motion.
+        let layer = PrismBackground.makeLayer()
+        layer.frame = bounds
+        self.layer?.insertSublayer(layer, at: 0)
+        prism = layer
+    }
+    private func updatePreviewEffects() {
+        let progress = Float(min(1, max(0, previewProgress)))
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        if space == BrowserSpace.prismColorIndex {
+            prism?.opacity = previewSpace == nil ? 1 : 1 - progress
+        } else if previewSpace == BrowserSpace.prismColorIndex {
+            // Fade the spectrum in while swiping toward a Prism Space.
+            installPrism()
+            prism?.isHidden = false
+            prism?.opacity = progress
+        } else if let prism, previewSpace == nil {
+            prism.removeFromSuperlayer()
+            self.prism = nil
+        }
+        CATransaction.commit()
+        // Glass cannot blend; it steps aside during swipes so the gradient
+        // fade in draw() shows, and returns when the preview settles.
+        glass?.isHidden = !(space == BrowserSpace.clearColorIndex && previewSpace == nil)
     }
 }
 
@@ -80,6 +204,9 @@ import QuartzCore
     var retiringViews: [ObjectIdentifier: NSView] = [:]
     var splitCoordinators: [UUID: SplitViewCoordinator] = [:]
     var isShuttingDown = false
+    /// While first-run onboarding covers the window, browser chrome must not
+    /// react to swipes or menu commands behind it.
+    var suspendsChromeInteraction = false
     var automaticallyShowsVideo = true
     var peeks: [UUID: PeekCoordinator] = [:]
     var littleWindows: [UUID: LittleArcController] = [:]
@@ -168,6 +295,7 @@ import QuartzCore
         view = root; root.wantsLayer = true; root.layer?.masksToBounds = true
         animator.animationView = root; pagingAnimator.animationView = root
         root.onLayout = { [weak self] in self?.layoutBrowser() }
+        root.onTranslucencyChange = { [weak self] clear in self?.windowTranslucent = clear }
         [sidebar, card, handle].forEach(root.addSubview)
         card.wantsLayer = true; card.layer?.backgroundColor = NSColor(white: 0.10, alpha: 1).cgColor
         card.layer?.cornerRadius = 9; card.layer?.masksToBounds = true
@@ -220,6 +348,17 @@ import QuartzCore
         handle.onReset = { [weak self] in self?.resetSidebar(nil) }
         startTabResourceMonitoring(); showActive(); refresh()
     }
+
+    /// A Clear Space needs the window itself non-opaque so the desktop shows
+    /// through; every other appearance restores the solid window.
+    var windowTranslucent = false { didSet { applyWindowTranslucency() } }
+    func applyWindowTranslucency() {
+        guard let window = view.window else { return }
+        window.isOpaque = !windowTranslucent
+        window.backgroundColor = windowTranslucent ? .clear : NSColor(white: 0.10, alpha: 1)
+        window.invalidateShadow()
+    }
+    override func viewDidAppear() { super.viewDidAppear(); applyWindowTranslucency() }
 
     var focusedTabID: UUID {
         guard let group = session.split(for: session.activeID), splitCoordinators[group.primaryID]?.focusedSide == .right else { return session.activeID }
@@ -616,6 +755,7 @@ import QuartzCore
         finishPaging(commit: space, initialVelocity: velocity)
     }
     func handleSpaceScroll(_ event: NSEvent, source: SpaceScrollSource = .monitor) -> NSEvent? {
+        guard !suspendsChromeInteraction else { return event }
         if let previous = recentSpaceScrollEvents.last(where: { $0.event === event }) {
             SpaceSwipeDiagnostics.shared.record(["kind": "duplicate", "source": source.rawValue,
                                                  "consumed": previous.consumed])
