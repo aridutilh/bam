@@ -376,16 +376,18 @@ struct BrowserExtensionPermissionReview {
     let controller: WKWebExtensionController
     let extensionContentController = WKUserContentController()
     var contexts: [UUID: WKWebExtensionContext] = [:]
-    var tabs: [UUID: BrowserExtensionTab] = [:]
-    var windows: [ObjectIdentifier: BrowserExtensionWindow] = [:] { didSet { topologyCache = nil } }
+    var tabs: [UUID: BrowserExtensionTab] = [:] { didSet { invalidateTopologyCache() } }
+    var windows: [ObjectIdentifier: BrowserExtensionWindow] = [:] { didSet { invalidateTopologyCache() } }
     var snapshots: [UUID: BrowserExtensionSurface] = [:]
-    var orderedIDs: [UUID] = [] { didSet { topologyCache = nil } }
+    var orderedIDs: [UUID] = [] { didSet { invalidateTopologyCache() } }
     private struct WindowTopology {
         var ids: [UUID]
         var indices: [UUID: Int]
         var activeID: UUID?
+        var adapters: [any WKWebExtensionTab]
     }
     private var topologyCache: (revision: UInt64, windows: [ObjectIdentifier: WindowTopology])?
+    private var topologyMutation: UInt64 = 0
     weak var popupAnchor: NSView?
     private var activePopup: WKWebExtension.Action?
     private var lastFocusedWindow: ObjectIdentifier?
@@ -456,9 +458,15 @@ struct BrowserExtensionPermissionReview {
         }
         return orderedIDs.compactMap { live[$0] }
     }
-    /// Cache only scalar topology, never page objects or permission decisions.
+    private func invalidateTopologyCache() {
+        topologyMutation &+= 1
+        topologyCache = nil
+    }
+    /// Cache topology and lightweight adapters, never page objects or permission
+    /// decisions. Adapters hold a weak runtime and still authorize every live read.
     /// Hosts unable to guarantee synchronous invalidation retain fully live reads.
     private func topology() -> [ObjectIdentifier: WindowTopology] {
+        let mutation = topologyMutation
         let revision = owner?.surfaceRevision?(profileID)
         if let revision, let cached = topologyCache, cached.revision == revision { return cached.windows }
         let grouped = Dictionary(grouping: currentSurfaces(), by: windowKey)
@@ -466,16 +474,25 @@ struct BrowserExtensionPermissionReview {
         for (key, members) in grouped {
             let ids = members.map(\.id)
             let indices = Dictionary(ids.enumerated().map { ($0.element, $0.offset) }, uniquingKeysWith: { first, _ in first })
-            result[key] = WindowTopology(ids: ids, indices: indices, activeID: windows[key]?.activeID(in: members))
+            result[key] = WindowTopology(ids: ids, indices: indices, activeID: windows[key]?.activeID(in: members), adapters: [])
         }
         // A host callback is allowed to change its revision while producing data.
         // Do not retain a result from a changing or unversioned host.
-        if let revision, owner?.surfaceRevision?(profileID) == revision {
+        let stable = revision.map { owner?.surfaceRevision?(profileID) == $0 && topologyMutation == mutation } ?? false
+        // Materialize adapters after the last host callback: a callback can
+        // replace an adapter even when the host's own revision stays unchanged.
+        result = result.mapValues { topology in
+            var topology = topology
+            topology.adapters = topology.ids.compactMap { tabs[$0] }
+            return topology
+        }
+        if let revision, stable {
             topologyCache = (revision, result)
         } else { topologyCache = nil }
         return result
     }
     func tabIDs(in key: ObjectIdentifier) -> [UUID] { topology()[key]?.ids ?? [] }
+    func tabAdapters(in key: ObjectIdentifier) -> [any WKWebExtensionTab] { topology()[key]?.adapters ?? [] }
     func tabIndex(_ id: UUID, in key: ObjectIdentifier) -> Int { topology()[key]?.indices[id] ?? NSNotFound }
     func activeTabID(in key: ObjectIdentifier) -> UUID? { topology()[key]?.activeID }
 
@@ -668,7 +685,7 @@ struct BrowserExtensionPermissionReview {
         else if rememberedActiveID.map({ id in members.contains { $0.id == id } }) != true { rememberedActiveID = members.first?.id }
         return rememberedActiveID
     }
-    func tabs(for context: WKWebExtensionContext) -> [any WKWebExtensionTab] { guard runtime?.owns(context) == true else { return [] }; return tabIDs.compactMap { runtime?.tabs[$0] } }
+    func tabs(for context: WKWebExtensionContext) -> [any WKWebExtensionTab] { guard runtime?.owns(context) == true else { return [] }; return runtime?.tabAdapters(in: key) ?? [] }
     func activeTab(for context: WKWebExtensionContext) -> (any WKWebExtensionTab)? { guard runtime?.owns(context) == true else { return nil }; return activeID.flatMap { runtime?.tabs[$0] } }
     func isPrivate(for context: WKWebExtensionContext) -> Bool { runtime?.owner?.isPrivate == true }
     func windowType(for context: WKWebExtensionContext) -> WKWebExtension.WindowType { .normal }

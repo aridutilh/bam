@@ -150,13 +150,67 @@ import WebKit
                   && !ownedAdapter.isSelected(for: foreignContext) && calls == 0 && lookupCalls == 0,
                   "An unowned context must be rejected before any host lookup")
 
+        func adapterIDs(_ adapters: [any WKWebExtensionTab]) -> [UUID] {
+            adapters.compactMap { ($0 as? BrowserExtensionTab)?.id }
+        }
+        // WebKit can request the same full window array for each tab it checks.
+        // Its wrappers may be reused, but their identity, order and live authority
+        // must still follow changes made before event reconciliation.
+        supplied = [page(a), page(b), page(c, active: true)]
+        live = Dictionary(supplied.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        revision &+= 1; runtime.reconcile()
+        calls = 0
+        for _ in 0..<10 {
+            try check(adapterIDs(window.tabs(for: context)) == [a, b, c]
+                      && (window.activeTab(for: context) as? BrowserExtensionTab)?.id == c,
+                      "Repeated window enumeration changed adapter order or active selection")
+        }
+        try check(calls <= 1, "Stable window callbacks must share their live topology snapshot")
+        let originalA = runtime.tabs[a]!
+        let replacement = BrowserExtensionTab(runtime: runtime, id: b)
+        runtime.tabs[b] = replacement
+        try check((window.tabs(for: context).first { ($0 as? BrowserExtensionTab)?.id == b } as? BrowserExtensionTab) === replacement,
+                  "Replacing an adapter under an unchanged host revision must replace its cached window entry")
+        runtime.tabs.removeValue(forKey: a)
+        try check(adapterIDs(window.tabs(for: context)) == [b, c], "Removing an adapter must invalidate its cached window entry")
+        runtime.tabs[a] = originalA
+        try check(adapterIDs(window.tabs(for: context)) == [a, b, c], "Restoring a current adapter must restore its ordered window entry")
+        runtime.orderedIDs = [c, b, a]
+        try check(adapterIDs(window.tabs(for: context)) == [c, b, a] && originalA.indexInWindow(for: context) == 2,
+                  "Reconciled order changes must invalidate the full window array and indices")
+
+        // A host callback may replace a wrapper while a topology is being built.
+        // Return the current wrapper and do not retain that changing snapshot.
+        let reentrantReplacement = BrowserExtensionTab(runtime: runtime, id: b)
+        var revisionReads = 0
+        host.surfaceRevision = { _ in
+            revisionReads += 1
+            if revisionReads == 2 { runtime.tabs[b] = reentrantReplacement }
+            return revision
+        }
+        runtime.orderedIDs = [a, b, c]
+        try check((window.tabs(for: context)[1] as? BrowserExtensionTab) === reentrantReplacement,
+                  "An adapter replaced by a host callback must not return the superseded wrapper")
+        calls = 0
+        _ = window.tabs(for: context)
+        try check(calls == 1, "A topology whose wrappers changed during construction must not be retained")
+        host.surfaceRevision = { _ in revision }
+
+        supplied.removeAll { $0.id == b }; live.removeValue(forKey: b); revision &+= 1
+        try check(adapterIDs(window.tabs(for: context)) == [a, c] && reentrantReplacement.title(for: context) == nil,
+                  "A profile move must remove the window entry before reconciliation and deny its old wrapper")
+        calls = 0; lookupCalls = 0
+        try check(window.tabs(for: foreignContext).isEmpty && window.activeTab(for: foreignContext) == nil
+                  && calls == 0 && lookupCalls == 0,
+                  "A cached window array must not be exposed to an unowned context")
+
         // Unversioned/previews explicitly opt out: changing the live provider
         // without an invalidation signal must still update its window membership.
         host.surfaceRevision = { _ in nil }
         let fallbackID = supplied[0].id
-        _ = window.tabIDs
+        _ = window.tabs(for: context)
         supplied.removeFirst(); live.removeValue(forKey: fallbackID)
-        try check(!window.tabIDs.contains(fallbackID), "An unversioned host must not reuse cached topology")
+        try check(!adapterIDs(window.tabs(for: context)).contains(fallbackID), "An unversioned host must not reuse cached window adapters")
 
         // Even a broken host revision cannot authorize a stale tab: the cache is
         // advisory metadata, while the direct resolver remains the authority.
