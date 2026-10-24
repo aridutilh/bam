@@ -4,12 +4,12 @@ import WebKit
 /// Exercises the actual adapters without creating windows, renderers or extension processes.
 @main @MainActor enum BrowserExtensionEnumerationTests {
     struct Failure: Error { let message: String }
-    static func main() throws {
+    static func main() async throws {
         guard #available(macOS 15.4, *) else { print("SKIP: Extension enumeration requires macOS 15.4"); return }
-        try run()
+        try await run()
     }
     @available(macOS 15.4, *)
-    static func run() throws {
+    static func run() async throws {
         var checks = 0
         func check(_ condition: Bool, _ message: String) throws {
             guard condition else { throw Failure(message: message) }; checks += 1
@@ -72,6 +72,101 @@ import WebKit
             calls = 0
             try check(window.activeID == supplied.last?.id && calls == 1, "Active-tab enumeration must take one live snapshot at \(count) tabs")
         }
+        // Exercise the actual owned-context delegate methods. This inert original
+        // extension has no scripts, pages, WebViews, windows, or network access.
+        let package = FileManager.default.temporaryDirectory.appendingPathComponent("bam-enumeration-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: package, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: package) }
+        try Data(#"{"manifest_version":3,"name":"Enumeration Fixture","version":"1.0","permissions":["tabs"]}"#.utf8).write(to: package.appendingPathComponent("manifest.json"))
+        let extensionObject = try await WKWebExtension(resourceBaseURL: package)
+        let context = WKWebExtensionContext(for: extensionObject)
+        try runtime.controller.load(context)
+        defer { try? runtime.controller.unload(context) }
+        var revision: UInt64 = 0
+        var live: [UUID: BrowserExtensionSurface] = [:]
+        host.surface = { requestedProfile, id in
+            lookupCalls += 1
+            return requestedProfile == profile ? live[id] : nil
+        }
+        host.surfaceRevision = { _ in revision }
+        for count in [100, 500, 1000] {
+            supplied = (0..<count).map { page(UUID(), title: "Current \($0)") }
+            supplied[count - 1].isActive = true
+            live = Dictionary(supplied.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+            revision &+= 1
+            runtime.reconcile()
+            calls = 0; lookupCalls = 0
+            var positionsCorrect = true, titlesCorrect = true, selectionCorrect = true
+            for (index, item) in supplied.enumerated() {
+                guard let adapter = runtime.tabs[item.id] else { throw Failure(message: "Missing live adapter") }
+                positionsCorrect = positionsCorrect && adapter.indexInWindow(for: context) == index
+                titlesCorrect = titlesCorrect && adapter.title(for: context) == item.title && adapter.url(for: context) == item.url
+                selectionCorrect = selectionCorrect && adapter.isSelected(for: context) == (index == count - 1)
+            }
+            try check(positionsCorrect && titlesCorrect && selectionCorrect, "Owned-context enumeration returned wrong metadata/order/selection at \(count) tabs")
+            try check(calls <= 1 && lookupCalls == count * 4, "Owned-context enumeration must share one topology but authorize each property live at \(count) tabs")
+
+            let renamedID = supplied[0].id
+            live[renamedID] = BrowserExtensionSurface(id: renamedID, title: "Live renamed title", url: URL(string: "https://example.invalid/changed"), webView: nil, window: nil, isPinned: true)
+            try check(runtime.tabs[renamedID]!.title(for: context) == "Live renamed title"
+                      && runtime.tabs[renamedID]!.url(for: context)?.path == "/changed"
+                      && runtime.tabs[renamedID]!.isPinned(for: context),
+                      "Cached topology must not cache live title, URL, or retention metadata")
+
+            // Removal/profile migration is visible before event reconciliation,
+            // including changed indices and rejection of the old adapter's actions.
+            let removedID = supplied.removeFirst().id, lastID = supplied.last!.id
+            let removedAdapter = runtime.tabs[removedID]!
+            live.removeValue(forKey: removedID); revision &+= 1
+            try check(removedAdapter.title(for: context) == nil && removedAdapter.indexInWindow(for: context) == NSNotFound,
+                      "A cached topology must never expose a removed/profile-moved tab")
+            try check(runtime.tabs[lastID]!.indexInWindow(for: context) == count - 2,
+                      "Removing an earlier member must update subsequent indices before reconcile")
+            var actionCalls = 0, actionErrors = 0
+            host.closeTab = { _ in actionCalls += 1; return true }
+            host.navigateTab = { _, _ in actionCalls += 1; return true }
+            host.reloadTab = { _, _ in actionCalls += 1; return true }
+            removedAdapter.close(for: context) { if $0 != nil { actionErrors += 1 } }
+            removedAdapter.loadURL(URL(string: "https://example.invalid/new")!, for: context) { if $0 != nil { actionErrors += 1 } }
+            removedAdapter.reload(fromOrigin: false, for: context) { if $0 != nil { actionErrors += 1 } }
+            try check(actionCalls == 0 && actionErrors == 3, "A removed adapter must fail live authorization before action callbacks")
+
+            let firstID = supplied[0].id
+            for index in supplied.indices { supplied[index].isActive = index == 0 }
+            live = Dictionary(supplied.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first }); revision &+= 1
+            try check(runtime.tabs[firstID]!.isSelected(for: context) && !runtime.tabs[lastID]!.isSelected(for: context),
+                      "A selection change must invalidate effective active selection before reconcile")
+            for index in supplied.indices { supplied[index].isActive = false }
+            live = Dictionary(supplied.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first }); revision &+= 1
+            try check(window.activeID == firstID, "Hiding the profile must preserve its last live active member")
+            supplied.removeFirst(); live.removeValue(forKey: firstID); revision &+= 1
+            try check(window.activeID == supplied.first?.id, "Deleting the remembered selection must choose a surviving member")
+        }
+        let foreignContext = WKWebExtensionContext(for: extensionObject)
+        calls = 0; lookupCalls = 0
+        let ownedAdapter = runtime.tabs[supplied[0].id]!
+        try check(ownedAdapter.title(for: foreignContext) == nil
+                  && ownedAdapter.indexInWindow(for: foreignContext) == NSNotFound
+                  && !ownedAdapter.isSelected(for: foreignContext) && calls == 0 && lookupCalls == 0,
+                  "An unowned context must be rejected before any host lookup")
+
+        // Unversioned/previews explicitly opt out: changing the live provider
+        // without an invalidation signal must still update its window membership.
+        host.surfaceRevision = { _ in nil }
+        let fallbackID = supplied[0].id
+        _ = window.tabIDs
+        supplied.removeFirst(); live.removeValue(forKey: fallbackID)
+        try check(!window.tabIDs.contains(fallbackID), "An unversioned host must not reuse cached topology")
+
+        // Even a broken host revision cannot authorize a stale tab: the cache is
+        // advisory metadata, while the direct resolver remains the authority.
+        host.surfaceRevision = { _ in revision }
+        let revokedID = supplied[0].id
+        _ = window.tabIDs
+        live.removeValue(forKey: revokedID)
+        try check(runtime.tabs[revokedID]!.title(for: context) == nil && runtime.tabs[revokedID]!.indexInWindow(for: context) == NSNotFound,
+                  "A cached membership entry must not override fresh resolver denial")
+        host.surface = nil; host.surfaceRevision = nil
         supplied = []
         runtime.reconcile()
         try check(runtime.tabs.isEmpty && runtime.windows.isEmpty && runtime.orderedIDs.isEmpty, "Closing all live tabs must clear adapters and window topology")

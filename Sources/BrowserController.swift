@@ -193,10 +193,13 @@ import QuartzCore
     var profileLibraries: [UUID: BrowserLibrary] = [:]
     var library: BrowserLibrary { library(for: commandProfileID) }
     var confirmProfileChange: ((String) -> Bool)?
-    var isApplyingProfileChange = false
+    var isApplyingProfileChange = false { didSet { invalidateExtensionSurfaceTopology() } }
     var extensionStorage: AnyObject?
     var extensionRefreshWork: DispatchWorkItem?
-    var peekExtensionIDs: [UUID: UUID] = [:]
+    var extensionSurfaceRevision: UInt64 = 0
+    var extensionSurfaceWindow: ObjectIdentifier?
+    var extensionTabIndices: [UUID: Int]?
+    var peekExtensionIDs: [UUID: UUID] = [:] { didSet { invalidateExtensionSurfaceTopology() } }
     var navigationTokens: [UUID: UUID] = [:]
     var browserExtensionOrigins: [UUID: String] = [:]
     var displayedTabID: UUID?
@@ -206,14 +209,14 @@ import QuartzCore
     private var automaticProbeToken: UUID?
     private var automaticProbeTabID: UUID?
     var retiringViews: [ObjectIdentifier: NSView] = [:]
-    var splitCoordinators: [UUID: SplitViewCoordinator] = [:]
-    var isShuttingDown = false
+    var splitCoordinators: [UUID: SplitViewCoordinator] = [:] { didSet { invalidateExtensionSurfaceTopology() } }
+    var isShuttingDown = false { didSet { invalidateExtensionSurfaceTopology() } }
     /// While first-run onboarding covers the window, browser chrome must not
     /// react to swipes or menu commands behind it.
     var suspendsChromeInteraction = false
     var automaticallyShowsVideo = true
-    var peeks: [UUID: PeekCoordinator] = [:]
-    var littleWindows: [UUID: LittleArcController] = [:]
+    var peeks: [UUID: PeekCoordinator] = [:] { didSet { invalidateExtensionSurfaceTopology() } }
+    var littleWindows: [UUID: LittleArcController] = [:] { didSet { invalidateExtensionSurfaceTopology() } }
     var swipe = SpaceSwipeStateMachine()
     var scrollMonitor: Any?
     var trackingSwipe = false
@@ -230,9 +233,9 @@ import QuartzCore
     // Retain a small identity cache so nested dispatch cannot apply it twice.
     private var recentSpaceScrollEvents: [(event: NSEvent, consumed: Bool)] = []
     let sessionURL: URL
-    var session: BrowserSession
+    var session: BrowserSession { didSet { invalidateExtensionSurfaceTopology() } }
     var displayedWidth: CGFloat
-    var browsers: [UUID: WKWebView] = [:]
+    var browsers: [UUID: WKWebView] = [:] { didSet { invalidateExtensionSurfaceTopology() } }
     var observations: [UUID: [NSKeyValueObservation]] = [:]
     var addressOverlay: DismissView?
     var addressField: PaletteField?
