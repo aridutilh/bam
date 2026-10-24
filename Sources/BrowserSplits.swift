@@ -2,9 +2,21 @@ import AppKit
 import WebKit
 
 @MainActor extension BrowserController {
-    func sidebarItem(_ tab: BrowserTab, activeID: UUID) -> SidebarTabItem {
-        let companion = session.split(for: tab.id).flatMap { group in session.tabs.first { $0.id == group.secondaryID } }
-        return SidebarTabItem(id: tab.id, title: companion.map { "\(tab.displayTitle) · \($0.displayTitle)" } ?? tab.displayTitle, subtitle: companion.map { "\(tab.address) | \($0.address)" } ?? tab.address, symbol: companion == nil ? tab.symbol : "rectangle.split.2x1", isPinned: tab.pinned, isActive: tab.id == activeID, isFavorite: tab.isFavorite, isUnloaded: tab.isUnloaded, isSplit: companion != nil, canFavorite: companion == nil && (tab.isFavorite || session.favoriteTabs.count < 12))
+    func sidebarItems(in snapshot: BrowserSession) -> [SidebarTabItem] {
+        // Build indexes once per update, rather than scan the entire session
+        // for every sidebar row. A thousand metadata-only tabs must stay cheap.
+        let tabsByID = Dictionary(snapshot.tabs.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let favoriteCount = snapshot.tabs.reduce(0) { $0 + ($1.isFavorite ? 1 : 0) }
+        var companions: [UUID: BrowserTab] = [:]
+        for split in snapshot.splits ?? [] { companions[split.primaryID] = tabsByID[split.secondaryID] }
+        return snapshot.visibleTabs.map { tab in
+            let companion = companions[tab.id]
+            return SidebarTabItem(id: tab.id, title: companion.map { "\(tab.displayTitle) · \($0.displayTitle)" } ?? tab.displayTitle,
+                subtitle: companion.map { "\(tab.address) | \($0.address)" } ?? tab.address,
+                symbol: companion == nil ? tab.symbol : "rectangle.split.2x1", isPinned: tab.pinned,
+                isActive: tab.id == snapshot.activeID, isFavorite: tab.isFavorite, isUnloaded: tab.isUnloaded,
+                isSplit: companion != nil, canFavorite: companion == nil && (tab.isFavorite || favoriteCount < BrowserSession.maximumFavorites))
+        }
     }
     func showSplit(_ group: BrowserSplit) {
         guard let left = session.tabs.first(where: { $0.id == group.primaryID }), let right = session.tabs.first(where: { $0.id == group.secondaryID }) else { return }

@@ -103,6 +103,7 @@ import QuartzCore
     var savedTabEditor: SavedTabEditorController?
     var onSpacesChanged: (() -> Void)?
     var saveWork: DispatchWorkItem?
+    private var chromeRefreshWork: DispatchWorkItem?
     var tabErrors: [UUID: String] = [:]
     var pendingHome: Set<UUID> = []
     var pendingLoads: Set<UUID> = []
@@ -249,8 +250,12 @@ import QuartzCore
         observations[id] = [
             browser.observe(\.title, options: [.new]) { [weak self] web, _ in DispatchQueue.main.async { self?.updateMetadata(web) } },
             browser.observe(\.url, options: [.new]) { [weak self] web, _ in DispatchQueue.main.async { self?.updateMetadata(web) } },
-            browser.observe(\.estimatedProgress, options: [.new]) { [weak self] _, _ in DispatchQueue.main.async { self?.layoutBrowser() } },
-            browser.observe(\.isLoading, options: [.new]) { [weak self] _, _ in DispatchQueue.main.async { self?.refresh() } }
+            browser.observe(\.estimatedProgress, options: [.new]) { [weak self] _, _ in DispatchQueue.main.async {
+                guard let self, self.visibleMemberIDs.contains(id) else { return }; self.layoutBrowser()
+            } },
+            browser.observe(\.isLoading, options: [.new]) { [weak self] _, _ in DispatchQueue.main.async {
+                guard let self, self.visibleMemberIDs.contains(id) else { return }; self.scheduleChromeRefresh()
+            } }
         ]
     }
     func load(_ address: String, in browser: WKWebView, id: UUID) {
@@ -374,6 +379,7 @@ import QuartzCore
         retiringViews.removeAll()
     }
     func prepareToClose() {
+        chromeRefreshWork?.cancel(); chromeRefreshWork = nil
         spaceManager?.cancel(nil)
         savedTabEditor?.cancel(nil)
         isShuttingDown = true; cancelAutomaticDepartures(); findBar.hide(); pageFeedback.hide(); downloads.cancelAll(); pictureInPicture.restore()
@@ -385,6 +391,7 @@ import QuartzCore
     func updateMetadata(_ web: WKWebView) {
         guard let pair = browsers.first(where: { $0.value === web }), let i = session.tabs.firstIndex(where: { $0.id == pair.key }) else { return }
         guard !pendingLoads.contains(pair.key), tabErrors[pair.key] == nil else { return }
+        let previous = session.tabs[i]
         if let url = web.url, ["https", "http"].contains(url.scheme ?? "") {
             session.tabs[i].address = url.absoluteString
             session.tabs[i].title = web.title?.isEmpty == false ? web.title! : url.host ?? "New tab"
@@ -393,13 +400,24 @@ import QuartzCore
         } else if web.url?.standardizedFileURL == Bundle.main.url(forResource: "Home", withExtension: "html")?.standardizedFileURL || (web.url == nil && pendingHome.contains(pair.key)) {
             session.tabs[i].address = "orbit://newtab"; session.tabs[i].title = "A little space"
         }
-        refresh(); scheduleSave()
+        guard session.tabs[i] != previous else { return }
+        let tab = session.tabs[i]
+        if tab.isFavorite || tab.space == session.space || tab.space == pagingTarget { scheduleChromeRefresh() }
+        scheduleSave()
+    }
+    private func scheduleChromeRefresh() {
+        guard chromeRefreshWork == nil, !isShuttingDown else { return }
+        let work = DispatchWorkItem { [weak self] in
+            self?.chromeRefreshWork = nil; self?.refresh()
+        }
+        chromeRefreshWork = work
+        DispatchQueue.main.async(execute: work)
     }
     func refresh() {
         guard isViewLoaded else { return }
         root.space = session.spaceDefinition(session.space)?.colorIndex ?? 0
         sidebar.configureSpaces(session.spaces)
-        let tabs = session.visibleTabs.map { sidebarItem($0, activeID: session.activeID) }
+        let tabs = sidebarItems(in: session)
         sidebar.update(tabs: tabs, space: session.space, canGoBack: activeWebView?.canGoBack ?? false, canGoForward: activeWebView?.canGoForward ?? false, isLoading: activeWebView?.isLoading ?? false)
         if let target = pagingTarget, target != session.space {
             sidebar.beginPaging(tabs: sidebarItems(for: target), space: target, direction: spaceDirection(to: target))
@@ -457,7 +475,7 @@ import QuartzCore
     }
     func sidebarItems(for space: Int) -> [SidebarTabItem] {
         var preview = session; preview.changeSpace(space)
-        return preview.visibleTabs.map { sidebarItem($0, activeID: preview.activeID) }
+        return sidebarItems(in: preview)
     }
     func cancelPaging() {
         SpaceSwipeDiagnostics.shared.record(["kind": "cancel", "space": session.space,

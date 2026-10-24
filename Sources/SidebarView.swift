@@ -24,6 +24,7 @@ struct SidebarTabItem: Equatable {
     let isActive: Bool
     var isFavorite: Bool = false
     var isUnloaded: Bool = false
+    var isSleeping: Bool = false
     var isSplit: Bool = false
     var canFavorite: Bool = true
 }
@@ -359,7 +360,9 @@ struct SidebarTabItem: Equatable {
     }
 }
 
-@MainActor private final class SidebarPage: ArkFlippedView {
+/// Keep a lightweight model for every tab; AppKit creates/reuses only the rows
+/// near the viewport, and supplies native accessibility for offscreen table rows.
+@MainActor private final class SidebarPage: ArkFlippedView, NSTableViewDataSource, NSTableViewDelegate {
     var select: ((UUID)->Void)?; var close: ((UUID)->Void)?; var pin: ((UUID)->Void)?; var newTab: (()->Void)?
     var manageSpaces: (() -> Void)?
     var move: ((UUID, Int) -> Void)?
@@ -368,69 +371,176 @@ struct SidebarTabItem: Equatable {
     var resetSaved: ((UUID) -> Void)?
     var reorderSaved: ((UUID, Int) -> Void)?
     let heading = ArkSpaceHeading()
-    let scroll = SidebarScrollView(); let content = ArkFlippedView(); let newButton = ArkNewTabButton()
-    let divider = NSView()
-    var rows: [ArkTabRow] = []
-    var tabs: [SidebarTabItem] = []
+    let scroll = SidebarScrollView()
+    private let table = NSTableView()
+    private let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("tabs"))
+    private enum Entry { case tab(Int), divider, newTab }
+    private var entries: [Entry] = []
+    private var rowByID: [UUID: Int] = [:]
+    private var keptFirst: UUID?
+    private var keptLast: UUID?
+    private var spaceAppearance: BrowserSpace?
+    private var destinations: [BrowserSpace] = []
+    private var synchronizingSelection = false
+    private(set) var tabs: [SidebarTabItem] = []
+
     override init(frame: NSRect) {
         super.init(frame: frame); wantsLayer = true
         addSubview(heading); addSubview(scroll)
-        scroll.drawsBackground = false; scroll.hasVerticalScroller = true; scroll.autohidesScrollers = true; scroll.scrollerStyle = .overlay
-        // The tab list has no horizontal content. Unclaimed startup movement
-        // must not bounce just the rows and look like an attempted Space switch.
-        scroll.hasHorizontalScroller = false
-        scroll.horizontalScrollElasticity = .none
-        scroll.documentView = content; content.wantsLayer = true
-        divider.wantsLayer = true; divider.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.13).cgColor
-        content.addSubview(divider); content.addSubview(newButton)
-        newButton.handler = { [weak self] in self?.newTab?() }
+        scroll.drawsBackground = false; scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true; scroll.scrollerStyle = .overlay
+        scroll.hasHorizontalScroller = false; scroll.horizontalScrollElasticity = .none
+        column.resizingMask = .autoresizingMask
+        table.addTableColumn(column)
+        table.headerView = nil; table.backgroundColor = .clear
+        table.style = .plain; table.intercellSpacing = NSSize(width: 0, height: 4)
+        table.rowSizeStyle = .custom; table.rowHeight = 33
+        table.usesAutomaticRowHeights = false; table.selectionHighlightStyle = .none
+        table.focusRingType = .none; table.allowsEmptySelection = true
+        table.allowsMultipleSelection = false; table.allowsColumnSelection = false
+        table.allowsColumnReordering = false; table.allowsColumnResizing = false
+        table.dataSource = self; table.delegate = self
+        table.identifier = NSUserInterfaceItemIdentifier("sidebar-tab-list")
+        scroll.documentView = table
         heading.handler = { [weak self] in self?.manageSpaces?() }
     }
     required init?(coder: NSCoder) { fatalError() }
+
     func configure(_ items: [SidebarTabItem], space: BrowserSpace, destinations: [BrowserSpace]) {
         let items = items.filter { !$0.isFavorite }
-        tabs = items
-        let keptIDs = items.filter(\.isPinned).map(\.id)
-        let scrollOrigin = scroll.contentView.bounds.origin
-        let existing = Dictionary(uniqueKeysWithValues: rows.map { ($0.item.id, $0) })
-        let surviving = Set(items.map(\.id))
-        rows.filter { !surviving.contains($0.item.id) }.forEach { $0.removeFromSuperview() }
-        rows = items.map { item in
-            let row = existing[item.id] ?? ArkTabRow(item: item)
-            row.update(item)
-            row.select = { [weak self] in self?.select?(item.id) }; row.close = { [weak self] in self?.close?(item.id) }; row.pin = { [weak self] in self?.pin?(item.id) }
-            row.move = { [weak self] destination in self?.move?(item.id, destination) }
-            row.favorite = { [weak self] in self?.favorite?(item.id) }
-            row.editSaved = { [weak self] in self?.editSaved?(item.id) }
-            row.resetSaved = { [weak self] in self?.resetSaved?(item.id) }
-            row.reorderSaved = { [weak self] in self?.reorderSaved?(item.id, $0) }
-            row.canMoveEarlier = keptIDs.first != item.id
-            row.canMoveLater = keptIDs.last != item.id
-            if row.superview == nil { content.addSubview(row) }; return row
+        let structureChanged = tabs.count != items.count || zip(tabs, items).contains {
+            $0.id != $1.id || $0.isPinned != $1.isPinned
         }
+        let changed = structureChanged ? [] : items.indices.filter { tabs[$0] != items[$0] }
+        let origin = scroll.contentView.bounds.origin
+        tabs = items
         configureAppearance(space: space, destinations: destinations)
-        needsLayout = true; layoutSubtreeIfNeeded(); scroll.contentView.scroll(to: scrollOrigin); scroll.reflectScrolledClipView(scroll.contentView)
+        if structureChanged || entries.isEmpty {
+            entries = []; rowByID = [:]
+            let kept = tabs.indices.filter { tabs[$0].isPinned }
+            keptFirst = kept.first.map { tabs[$0].id }; keptLast = kept.last.map { tabs[$0].id }
+            for index in kept { rowByID[tabs[index].id] = entries.count; entries.append(.tab(index)) }
+            if !kept.isEmpty { entries.append(.divider) }
+            entries.append(.newTab)
+            for index in tabs.indices where !tabs[index].isPinned {
+                rowByID[tabs[index].id] = entries.count; entries.append(.tab(index))
+            }
+            synchronizingSelection = true
+            table.reloadData()
+            synchronizingSelection = false
+            needsLayout = true; layoutSubtreeIfNeeded()
+            // Table reloads/reorders must not reset a Space's retained scroll position.
+            scroll.contentView.scroll(to: scroll.contentView.constrainBoundsRect(NSRect(origin: origin, size: scroll.contentView.bounds.size)).origin)
+            scroll.reflectScrolledClipView(scroll.contentView)
+        } else {
+            // Most updates are a selection pair or one title. Do not recreate
+            // symbols, callbacks, tracking areas or layout for unchanged rows.
+            for index in changed {
+                guard let row = rowByID[tabs[index].id],
+                      let cell = table.view(atColumn: 0, row: row, makeIfNecessary: false) as? SidebarTabCell else { continue }
+                configure(cell, item: tabs[index])
+            }
+        }
+        synchronizeSelection()
     }
+
     func configureAppearance(space: BrowserSpace, destinations: [BrowserSpace]) {
+        guard spaceAppearance != space || self.destinations != destinations else { return }
+        spaceAppearance = space; self.destinations = destinations
         identifier = NSUserInterfaceItemIdentifier("sidebar-space-\(space.id)")
         heading.configure(space)
+        table.setAccessibilityLabel("Tabs in \(space.name)")
         let tint = ArkPalette.spaceColor(space.colorIndex)
-        for row in rows { row.configureSpace(id: space.id, tint: tint, destinations: destinations) }
+        table.enumerateAvailableRowViews { [weak self] _, index in
+            guard let self, let cell = self.table.view(atColumn: 0, row: index, makeIfNecessary: false) as? SidebarTabCell else { return }
+            cell.row.configureSpace(id: space.id, tint: tint, destinations: destinations)
+        }
+    }
+
+    private func configure(_ cell: SidebarTabCell, item: SidebarTabItem) {
+        let row = cell.row
+        if row.item.id != item.id, let focused = window?.firstResponder as? NSView,
+           focused === row || focused.isDescendant(of: row) { window?.makeFirstResponder(table) }
+        row.update(item)
+        if let spaceAppearance { row.configureSpace(id: spaceAppearance.id, tint: ArkPalette.spaceColor(spaceAppearance.colorIndex), destinations: destinations) }
+        row.canMoveEarlier = keptFirst != item.id; row.canMoveLater = keptLast != item.id
+        // Read the cell's current identity: AppKit can recycle it for a different tab.
+        row.select = { [weak self, weak row] in if let id = row?.item.id { self?.select?(id) } }
+        row.close = { [weak self, weak row] in if let id = row?.item.id { self?.close?(id) } }
+        row.pin = { [weak self, weak row] in if let id = row?.item.id { self?.pin?(id) } }
+        row.move = { [weak self, weak row] destination in if let id = row?.item.id { self?.move?(id, destination) } }
+        row.favorite = { [weak self, weak row] in if let id = row?.item.id { self?.favorite?(id) } }
+        row.editSaved = { [weak self, weak row] in if let id = row?.item.id { self?.editSaved?(id) } }
+        row.resetSaved = { [weak self, weak row] in if let id = row?.item.id { self?.resetSaved?(id) } }
+        row.reorderSaved = { [weak self, weak row] direction in if let id = row?.item.id { self?.reorderSaved?(id, direction) } }
+    }
+    private func synchronizeSelection() {
+        let selected = tabs.first(where: \.isActive).flatMap { rowByID[$0.id] }
+        guard table.selectedRow != (selected ?? -1) else { return }
+        synchronizingSelection = true
+        if let selected { table.selectRowIndexes(IndexSet(integer: selected), byExtendingSelection: false) }
+        else { table.deselectAll(nil) }
+        synchronizingSelection = false
+    }
+    func numberOfRows(in tableView: NSTableView) -> Int { entries.count }
+    func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
+        switch entries[row] { case .tab: return 33; case .divider: return 14; case .newTab: return 32 }
+    }
+    func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool {
+        guard entries.indices.contains(row) else { return false }
+        if case .tab = entries[row] { return true }; return false
+    }
+    func tableViewSelectionDidChange(_ notification: Notification) {
+        guard !synchronizingSelection, entries.indices.contains(table.selectedRow),
+              case .tab(let index) = entries[table.selectedRow] else { return }
+        select?(tabs[index].id)
+    }
+    func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? { SidebarTableRowView() }
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        switch entries[row] {
+        case .tab(let index):
+            let key = NSUserInterfaceItemIdentifier("sidebar-tab-cell")
+            let cell = tableView.makeView(withIdentifier: key, owner: self) as? SidebarTabCell ?? SidebarTabCell(item: tabs[index])
+            cell.identifier = key; configure(cell, item: tabs[index]); return cell
+        case .newTab:
+            let key = NSUserInterfaceItemIdentifier("sidebar-new-tab")
+            let button = tableView.makeView(withIdentifier: key, owner: self) as? ArkNewTabButton ?? ArkNewTabButton()
+            button.identifier = key; button.handler = { [weak self] in self?.newTab?() }; return button
+        case .divider:
+            let key = NSUserInterfaceItemIdentifier("sidebar-divider")
+            let divider = tableView.makeView(withIdentifier: key, owner: self) as? SidebarDividerCell ?? SidebarDividerCell(frame: .zero)
+            divider.identifier = key; return divider
+        }
     }
     override func layout() {
         super.layout(); let w = bounds.width
         heading.frame = NSRect(x: 12, y: 1, width: max(0, w-24), height: 26)
-        scroll.frame = NSRect(x: 7, y: 32, width: w-14, height: max(0,bounds.height-32))
-        let rw = scroll.contentSize.width
-        var y: CGFloat = 0
-        for row in rows.filter({$0.item.isPinned}) { row.frame = NSRect(x: 0, y: y, width: rw, height: 33); y += 37 }
-        divider.isHidden = !rows.contains { $0.item.isPinned }
-        if !divider.isHidden {
-            divider.frame = NSRect(x: 9, y: y+8, width: max(0,rw-18), height: 0.5); y += 18
-        }
-        newButton.frame = NSRect(x: 0, y: y, width: rw, height: 32); y += 36
-        for row in rows.filter({!$0.item.isPinned}) { row.frame = NSRect(x: 0, y: y, width: rw, height: 33); y += 37 }
-        content.frame = NSRect(x: 0, y: 0, width: rw, height: max(scroll.contentSize.height,y+8))
+        scroll.frame = NSRect(x: 7, y: 32, width: max(0,w-14), height: max(0,bounds.height-32))
+        let width = scroll.contentSize.width
+        if table.frame.width != width { table.setFrameSize(NSSize(width: width, height: table.frame.height)) }
+        if column.width != width { column.width = width }
+    }
+}
+
+@MainActor private final class SidebarTableRowView: NSTableRowView {
+    override func drawBackground(in dirtyRect: NSRect) {}
+    override func drawSelection(in dirtyRect: NSRect) {}
+}
+@MainActor private final class SidebarTabCell: NSTableCellView {
+    let row: ArkTabRow
+    init(item: SidebarTabItem) {
+        row = ArkTabRow(item: item)
+        super.init(frame: .zero); addSubview(row)
+    }
+    required init?(coder: NSCoder) { fatalError() }
+    override func layout() { super.layout(); row.frame = bounds }
+}
+@MainActor private final class SidebarDividerCell: NSView {
+    override init(frame: NSRect) { super.init(frame: frame); setAccessibilityElement(false) }
+    required init?(coder: NSCoder) { fatalError() }
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor.white.withAlphaComponent(0.13).setFill()
+        NSRect(x: 9, y: bounds.midY, width: max(0,bounds.width-18), height: 0.5).fill()
     }
 }
 
@@ -560,9 +670,9 @@ private final class ArkFavoriteButton: ArkHoverButton {
         self.item = item; self.canMoveEarlier = canMoveEarlier; self.canMoveLater = canMoveLater
         identifier = NSUserInterfaceItemIdentifier("favorite-\(item.id.uuidString)")
         setAccessibilityLabel(item.title.isEmpty ? "Favorite" : item.title)
-        setAccessibilityValue([item.isActive ? "Selected" : nil, item.isUnloaded ? "Unloaded" : nil].compactMap { $0 }.joined(separator: ", "))
+        setAccessibilityValue([item.isActive ? "Selected" : nil, item.isUnloaded ? "Unloaded" : item.isSleeping ? "Sleeping" : nil].compactMap { $0 }.joined(separator: ", "))
         setAccessibilityHelp("Favorite shared by all Spaces. \(item.isUnloaded ? "Select to open its saved page." : "Select to show its page.")")
-        toolTip = [item.title, item.subtitle, item.isUnloaded ? "Unloaded — opens saved page" : "Favorite"].filter { !$0.isEmpty }.joined(separator: "\n")
+        toolTip = [item.title, item.subtitle, item.isUnloaded ? "Unloaded — opens saved page" : item.isSleeping ? "Sleeping — reloads when selected" : "Favorite"].filter { !$0.isEmpty }.joined(separator: "\n")
         needsDisplay = true
     }
     override var acceptsFirstResponder: Bool { true }
@@ -573,8 +683,8 @@ private final class ArkFavoriteButton: ArkHoverButton {
     override func draw(_ dirtyRect: NSRect) {
         fill(NSColor.white.withAlphaComponent(item.isActive ? 0.18 : hovered ? 0.14 : 0.08), radius: 9)
         symbol(item.symbol, rect: NSRect(x: (bounds.width - 19) / 2, y: (bounds.height - 19) / 2, width: 19, height: 19),
-               color: item.isUnloaded ? ArkPalette.secondary.withAlphaComponent(0.66) : ArkPalette.ink, size: 18)
-        if item.isUnloaded {
+               color: item.isUnloaded || item.isSleeping ? ArkPalette.secondary.withAlphaComponent(0.66) : ArkPalette.ink, size: 18)
+        if item.isUnloaded || item.isSleeping {
             symbol("moon", rect: NSRect(x: bounds.width - 13, y: bounds.height - 13, width: 8, height: 8), color: ArkPalette.secondary, size: 8)
         }
     }
@@ -690,6 +800,7 @@ private final class ArkTabRow: ArkFlippedView {
     private let closeButton = ArkIconButton(symbol: "xmark", label: "Close tab")
     private var hovered = false
     private var area: NSTrackingArea?
+    private var configured = false
     init(item: SidebarTabItem) {
         self.item = item
         titleLabel = arkLabel(item.title.isEmpty ? "New Tab" : item.title, size: 12, weight: item.isActive ? .medium : .regular)
@@ -710,25 +821,38 @@ private final class ArkTabRow: ArkFlippedView {
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     func update(_ newItem: SidebarTabItem) {
-        item = newItem
-        identifier = NSUserInterfaceItemIdentifier("tab-row-\(item.id.uuidString)")
-        titleLabel.stringValue = item.title.isEmpty ? "New Tab" : item.title
-        titleLabel.font = .systemFont(ofSize: 12, weight: item.isActive ? .medium : .regular)
-        titleLabel.textColor = item.isUnloaded ? ArkPalette.secondary : ArkPalette.ink
-        subtitleLabel.stringValue = item.subtitle
-        iconView.image = NSImage(systemSymbolName: item.symbol, accessibilityDescription: nil)
-        iconView.contentTintColor = item.isActive ? spaceTint : ArkPalette.secondary
-        iconView.alphaValue = item.isUnloaded ? 0.55 : 1
-        closeButton.setSymbol("xmark", label: item.isSplit ? "Close Split" : item.isPinned ? "Unload tab" : "Close tab")
-        closeButton.setAccessibilityHelp(item.isSplit ? "Saved panes unload and remain in the sidebar; ordinary panes close." : nil)
+        let old = item, first = !configured
+        guard first || old != newItem else { return }
+        item = newItem; configured = true
+        if first || old.id != item.id {
+            hovered = false; closeButton.hovered = false
+            identifier = NSUserInterfaceItemIdentifier("tab-row-\(item.id.uuidString)")
+        }
+        if first || old.title != item.title { titleLabel.stringValue = item.title.isEmpty ? "New Tab" : item.title; setAccessibilityLabel(item.title) }
+        if first || old.isActive != item.isActive { titleLabel.font = .systemFont(ofSize: 12, weight: item.isActive ? .medium : .regular) }
+        if first || old.isUnloaded != item.isUnloaded || old.isSleeping != item.isSleeping {
+            titleLabel.textColor = item.isUnloaded || item.isSleeping ? ArkPalette.secondary : ArkPalette.ink
+            iconView.alphaValue = item.isUnloaded || item.isSleeping ? 0.55 : 1
+        }
+        if first || old.subtitle != item.subtitle { subtitleLabel.stringValue = item.subtitle }
+        if first || old.symbol != item.symbol { iconView.image = NSImage(systemSymbolName: item.symbol, accessibilityDescription: nil) }
+        if first || old.isActive != item.isActive { iconView.contentTintColor = item.isActive ? spaceTint : ArkPalette.secondary }
+        if first || old.isSplit != item.isSplit || old.isPinned != item.isPinned {
+            closeButton.setSymbol("xmark", label: item.isSplit ? "Close Split" : item.isPinned ? "Unload tab" : "Close tab")
+            closeButton.setAccessibilityHelp(item.isSplit ? "Saved panes unload and remain in the sidebar; ordinary panes close." : nil)
+            setAccessibilityHelp(item.isSplit ? "Split. Closing unloads saved panes and keeps their saved tabs; ordinary panes close." : item.isPinned ? "Kept tab. Closing unloads its page and keeps the saved tab." : "Tab")
+        }
         closeButton.isHidden = item.isUnloaded || (!hovered && !item.isActive)
-        setAccessibilityLabel(item.title)
-        setAccessibilityValue([item.isActive ? "Selected" : nil, item.isUnloaded ? "Unloaded" : nil].compactMap { $0 }.joined(separator: ", "))
-        setAccessibilityHelp(item.isSplit ? "Split. Closing unloads saved panes and keeps their saved tabs; ordinary panes close." : item.isPinned ? "Kept tab. Closing unloads its page and keeps the saved tab." : "Tab")
-        toolTip = [item.title, item.subtitle, item.isUnloaded ? "Unloaded — opens saved page" : ""].filter { !$0.isEmpty }.joined(separator: "\n")
+        if first || old.isActive != item.isActive || old.isUnloaded != item.isUnloaded || old.isSleeping != item.isSleeping {
+            setAccessibilityValue([item.isActive ? "Selected" : nil, item.isUnloaded ? "Unloaded" : item.isSleeping ? "Sleeping" : nil].compactMap { $0 }.joined(separator: ", "))
+        }
+        if first || old.title != item.title || old.subtitle != item.subtitle || old.isUnloaded != item.isUnloaded || old.isSleeping != item.isSleeping {
+            toolTip = [item.title, item.subtitle, item.isUnloaded ? "Unloaded — opens saved page" : item.isSleeping ? "Sleeping — reloads when selected" : ""].filter { !$0.isEmpty }.joined(separator: "\n")
+        }
         needsDisplay = true
     }
     func configureSpace(id: Int, tint: NSColor, destinations: [BrowserSpace]) {
+        guard currentSpace != id || !spaceTint.isEqual(tint) || self.destinations != destinations else { return }
         currentSpace = id; spaceTint = tint; self.destinations = destinations
         iconView.contentTintColor = item.isActive ? tint : ArkPalette.secondary
     }
