@@ -18,6 +18,25 @@ import WebKit
         for _ in 0..<100 { if condition() { checks += 1; return }; await pause() }
         throw Failure.assertion("Timed out: \(message)")
     }
+    /// Establishes only the fixture's requested key-window precondition.
+    /// Find routing is checked afterwards without repairing its result.
+    func establishKeyWindow(_ target: NSWindow, label: String) async throws {
+        if NSApp.isHidden { NSApp.unhideWithoutActivation() }
+        target.orderFront(nil)
+        // Unlike cooperative activate(), this setup request activates even
+        // when a different application is frontmost. Still await actual state.
+        NSApp.activate(ignoringOtherApps: true)
+        do {
+            try await wait("\(label): application active") { NSApp.isActive }
+            target.makeKeyAndOrderFront(nil)
+            try await wait("\(label): target key window") {
+                NSApp.isActive && NSApp.keyWindow === target && target.isKeyWindow
+            }
+        } catch {
+            let frontmost = NSWorkspace.shared.frontmostApplication
+            throw Failure.assertion("Focus setup \(label) failed (\(error)): appActive=\(NSApp.isActive), appHidden=\(NSApp.isHidden), policy=\(NSApp.activationPolicy().rawValue), pid=\(ProcessInfo.processInfo.processIdentifier), frontmostPID=\(String(describing: frontmost?.processIdentifier)), frontmostBundle=\(frontmost?.bundleIdentifier ?? "nil"), targetNumber=\(target.windowNumber), keyNumber=\(String(describing: NSApp.keyWindow?.windowNumber)), targetKey=\(target.isKeyWindow), targetVisible=\(target.isVisible), targetMiniaturized=\(target.isMiniaturized), targetCanKey=\(target.canBecomeKey)")
+        }
+    }
     func js(_ web: WKWebView, _ source: String) async throws -> Any? {
         try await withCheckedThrowingContinuation { continuation in
             web.evaluateJavaScript(source) { value, error in
@@ -35,8 +54,8 @@ import WebKit
         let second = BrowserTab(title: "Second", address: "orbit://newtab", space: 0)
         controller.session = BrowserSession(tabs: [first, second], activeID: first.id)
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1150, height: 720), styleMask: [.titled, .resizable, .closable], backing: .buffered, defer: false)
-        window.contentViewController = controller; window.setContentSize(NSSize(width: 1150, height: 720)); window.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        window.contentViewController = controller; window.setContentSize(NSSize(width: 1150, height: 720))
+        try await establishKeyWindow(window, label: "initial feature browser")
         let original = controller.activeWebView!
         try await wait("original fixture") { !original.isLoading && original.title == "Orbit Feature Fixture" }
         _ = try await js(original, "window.savedOriginal=41; true")
@@ -92,16 +111,14 @@ import WebKit
         try await wait("Little Ark visit finishes") { !littleWeb.isLoading && littleWeb.url == littleURL }
         try await wait("Little Ark visit enters history") { self.controller.library.history.contains { $0.address == littleURL.absoluteString } }
         _ = try await js(littleWeb, "window.littleSentinel=43; document.body.insertAdjacentHTML('beforeend','<p>OnlyInLittleArk</p>'); true")
-        little.window?.makeKeyAndOrderFront(nil)
-        try await wait("Little Ark key window") { little.window?.isKeyWindow == true }
+        guard let littleWindow = little.window else { throw Failure.assertion("Little Ark has a native window") }
+        try await establishKeyWindow(littleWindow, label: "Little Ark before Find")
         controller.findInPage(nil); controller.findBar.searchText = "OnlyInLittleArk"
         try await wait("Little Ark find match") { self.controller.findBar.matchFound == true }
-        window.makeKeyAndOrderFront(nil)
-        try await wait("main key window for Find Next") { self.window.isKeyWindow }
+        try await establishKeyWindow(window, label: "main browser before Find Next")
         controller.findNext(nil)
         try await wait("Find Next changes page and host") { self.controller.findBar.matchFound == false && self.controller.findBar.view.window === self.window }
-        little.window?.makeKeyAndOrderFront(nil)
-        try await wait("Little Ark key window for Find Previous") { little.window?.isKeyWindow == true }
+        try await establishKeyWindow(littleWindow, label: "Little Ark before Find Previous")
         controller.findPrevious(nil)
         try await wait("Find Previous changes page and host") { self.controller.findBar.matchFound == true && self.controller.findBar.view.window === little.window }
         controller.findBar.hide()
