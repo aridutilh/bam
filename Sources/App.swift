@@ -67,6 +67,7 @@ import WebKit
         NotificationCenter.default.addObserver(forName: ShortcutStore.didChange, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.applyShortcuts() }
         }
+        ShortcutStore.shared.reservedOwner = { [weak self] combo in self?.fixedMenuItem(wearing: combo)?.title }
         for url in pendingExternalURLs { controller.openLittleOrbit(url: url) }; pendingExternalURLs.removeAll()
         let completed = UserDefaults.standard.bool(forKey: OnboardingGate.completedKey)
         let started = UserDefaults.standard.bool(forKey: OnboardingGate.startedKey)
@@ -195,6 +196,15 @@ import WebKit
     }
     @objc func selectSpace(_ sender: NSMenuItem) { controller.changeSpace(sender.tag) }
     var boundItems: [ShortcutCommand: NSMenuItem] = [:]
+    /// A menu item outside the remappable set whose key equivalent is this chord.
+    func fixedMenuItem(wearing combo: KeyCombo, in menu: NSMenu? = NSApp.mainMenu) -> NSMenuItem? {
+        for item in menu?.items ?? [] {
+            if let hit = fixedMenuItem(wearing: combo, in: item.submenu) { return hit }
+            guard !item.keyEquivalent.isEmpty, !boundItems.values.contains(where: { $0 === item }) else { continue }
+            if KeyCombo(item.keyEquivalent, item.keyEquivalentModifierMask) == combo { return item }
+        }
+        return nil
+    }
     /// Settings changed a shortcut: the menu items pick up the new chord at once.
     func applyShortcuts() {
         for (command, item) in boundItems {

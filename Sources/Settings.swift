@@ -301,13 +301,16 @@ struct SettingsActions {
         let reset = BamPillButton(title: "Reset all", symbol: "arrow.counterclockwise")
         reset.target = self; reset.action = #selector(resetShortcuts)
         reset.isEnabled = ShortcutStore.shared.anyCustom
+        resetPill = reset
         keys.add(BamRow(title: "Click a key to change it",
                         detail: "Then press the new shortcut. Escape keeps the old one, Delete restores the default.",
                         control: reset))
         return [caption("Playback"), playback, caption("Memory"), memory, caption("Keyboard"), keys]
     }
+    private weak var resetPill: BamPillButton?
     @objc private func resetShortcuts() { ShortcutStore.shared.resetAll() }
-    @objc private func shortcutsChanged() { if section == .general, window.isVisible { refresh() } }
+    /// The recorders repaint themselves; only the reset pill needs a nudge.
+    @objc private func shortcutsChanged() { resetPill?.isEnabled = ShortcutStore.shared.anyCustom }
 
     private func searchCards() -> [NSView] {
         let card = BamCard(frame: .zero)
@@ -391,12 +394,18 @@ struct SettingsActions {
         footer.add(BamRow(title: "Reorder, add or remove Spaces", detail: "Login profiles live there too.", control: manage))
         return cards + [footer]
     }
+    /// Rebuilds on the next turn, like refresh(), so the clicked row is not
+    /// torn down inside its own action; the scroll position stays put.
     @objc private func pickSpace(_ sender: SpaceListRow) {
         guard editingSpaceID != sender.spaceID else { return }
         editingSpaceID = sender.spaceID
         let offset = scroll.contentView.bounds.origin
-        render()
-        scroll.contentView.scroll(to: offset)
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.render()
+            self.scroll.contentView.scroll(to: offset)
+            self.scroll.reflectScrolledClipView(self.scroll.contentView)
+        }
     }
     @objc private func manageSpaces() { actions.manageSpaces() }
 

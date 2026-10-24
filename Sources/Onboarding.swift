@@ -250,8 +250,9 @@ import QuartzCore
             let flags = event.modifierFlags.intersection([.command, .control, .option, .shift])
             guard flags.contains(.command) else { return event }
             let key = event.charactersIgnoringModifiers?.lowercased() ?? ""
-            if flags == .command, self.model.step == .shortcuts, OnboardingModel.shortcutTargets.contains(key) {
-                self.recordShortcut(key)
+            if self.model.step == .shortcuts, let pressed = KeyCombo.from(event: event),
+               let target = OnboardingModel.shortcutTargets.first(where: { Self.trainingCombo(for: $0) == pressed }) {
+                self.recordShortcut(target)
                 return nil
             }
             // Quit, hide, minimize and full screen remain available.
@@ -280,6 +281,10 @@ import QuartzCore
         }
     }
 
+    /// The live chord for a training target, so a remapped New Tab is taught as itself.
+    static func trainingCombo(for target: String) -> KeyCombo {
+        ShortcutCommand(onboardingTarget: target).map { ShortcutStore.shared.combo(for: $0) } ?? KeyCombo(target, .command)
+    }
     private func recordShortcut(_ key: String) {
         guard model.recordShortcut(key) else { keycaps[key]?.pulse(); return }
         keycaps[key]?.markDone()
@@ -470,7 +475,7 @@ import QuartzCore
         row.orientation = .horizontal; row.spacing = 36; row.alignment = .top
         let targets = [("t", "Open anything"), ("s", "Hide the sidebar")]
         for (key, caption) in targets {
-            let keycap = OnboardingKeycapView(key: key.uppercased(), caption: caption)
+            let keycap = OnboardingKeycapView(chord: Self.trainingCombo(for: key).display, caption: caption)
             if model.shortcutsCompleted.contains(key) {
                 keycap.markDone(animated: false)
             }
@@ -1078,8 +1083,8 @@ extension OnboardingController: NSWindowDelegate {
     private let cap = NSView()
     private let keyLabel: NSTextField
     private var done: NSColor?
-    init(key: String, caption: String) {
-        keyLabel = NSTextField(labelWithString: "⌘ \(key)")
+    init(chord: String, caption: String) {
+        keyLabel = NSTextField(labelWithString: chord)
         super.init(frame: .zero)
         wantsLayer = true
         cap.wantsLayer = true
@@ -1102,7 +1107,7 @@ extension OnboardingController: NSWindowDelegate {
         translatesAutoresizingMaskIntoConstraints = false
         setAccessibilityElement(true)
         setAccessibilityRole(.group)
-        setAccessibilityLabel("Press Command \(key): \(caption)")
+        setAccessibilityLabel("Press \(chord): \(caption)")
         NSLayoutConstraint.activate([
             cap.topAnchor.constraint(equalTo: topAnchor),
             cap.centerXAnchor.constraint(equalTo: centerXAnchor),

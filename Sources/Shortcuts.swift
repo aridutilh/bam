@@ -16,6 +16,22 @@ enum ShortcutCommand: String, CaseIterable {
         case .settings: return "Settings"
         }
     }
+    /// The palette row that runs this command, so its badge shows the live chord.
+    init?(paletteID: String) {
+        switch paletteID {
+        case "settings": self = .settings
+        case "toggle-sidebar": self = .toggleSidebar
+        default: return nil
+        }
+    }
+    /// The welcome tour's training targets are keyed by their default letter.
+    init?(onboardingTarget: String) {
+        switch onboardingTarget {
+        case "t": self = .newTab
+        case "s": self = .toggleSidebar
+        default: return nil
+        }
+    }
     var defaultCombo: KeyCombo {
         switch self {
         case .newTab: return KeyCombo("t", .command)
@@ -42,19 +58,27 @@ struct KeyCombo: Equatable {
 
     /// The chord a key press describes, or nil when it cannot serve as a
     /// shortcut: modifier-only presses, Escape and Delete (the recorder's own
-    /// keys), and bare letters or digits with no ⌘, ⌃ or ⌥ to carry them.
+    /// keys), and keys with no ⌘, ⌃ or ⌥ to carry them. Only F1–F35 may go
+    /// bare; a bare arrow or Page key would steal the caret from every text field.
     static func from(event: NSEvent) -> KeyCombo? {
-        guard let characters = event.charactersIgnoringModifiers, characters.unicodeScalars.count == 1,
-              let scalar = characters.unicodeScalars.first else { return nil }
         let flags = event.modifierFlags.intersection([.command, .control, .option, .shift])
+        // Shift changes the glyph (⇧1 is "!" on a US keyboard); the chord
+        // keeps the unshifted key so it survives a layout change.
+        guard var characters = event.charactersIgnoringModifiers, characters.unicodeScalars.count == 1,
+              var scalar = characters.unicodeScalars.first else { return nil }
+        if flags.contains(.shift), !(0xF700...0xF8FF).contains(scalar.value),
+           let unshifted = event.characters(byApplyingModifiers: []), unshifted.unicodeScalars.count == 1 {
+            characters = unshifted; scalar = unshifted.unicodeScalars.first!
+        }
         if scalar.value == 0x1B || scalar.value == 0x7F || scalar.value == 0xF728 { return nil }
-        let functionKey = (0xF700...0xF8FF).contains(scalar.value)
+        let fKey = (NSF1FunctionKey...NSF35FunctionKey).contains(Int(scalar.value))
         let carried = !flags.intersection([.command, .control, .option]).isEmpty
-        guard functionKey || carried else { return nil }
-        if !functionKey, scalar.properties.isWhitespace, !carried { return nil }
+        guard fKey || carried else { return nil }
         return KeyCombo(characters, flags)
     }
 
+    /// "⌥⌘→", the palette's tighter spelling.
+    var compact: String { display.replacingOccurrences(of: " ", with: "") }
     /// "⌥ ⌘ →", the way the site's keycaps spell chords.
     var display: String {
         var parts: [String] = []
@@ -119,6 +143,9 @@ struct KeyCombo: Equatable {
 
     private(set) var persists = true
     private var custom: [ShortcutCommand: KeyCombo] = [:]
+    /// The app answers with the title of a fixed menu item (Quit, Close Tab,
+    /// Go to Space 1…) that already wears a chord, so recording it is refused.
+    var reservedOwner: ((KeyCombo) -> String?)?
 
     init() { load() }
 
@@ -132,13 +159,15 @@ struct KeyCombo: Equatable {
     func isDefault(_ command: ShortcutCommand) -> Bool { custom[command] == nil }
     var anyCustom: Bool { !custom.isEmpty }
 
-    /// The other command already wearing this chord, if any.
-    func owner(of combo: KeyCombo, besides command: ShortcutCommand) -> ShortcutCommand? {
-        ShortcutCommand.allCases.first { $0 != command && self.combo(for: $0) == combo }
+    /// The title of whatever already wears this chord: another remappable
+    /// command, or a fixed menu item the app reported.
+    func owner(of combo: KeyCombo, besides command: ShortcutCommand) -> String? {
+        if let other = ShortcutCommand.allCases.first(where: { $0 != command && self.combo(for: $0) == combo }) { return other.title }
+        return reservedOwner?(combo)
     }
 
-    /// Assigns a chord; a chord another command owns is refused so no
-    /// shortcut silently goes dark.
+    /// Assigns a chord; a chord another command or a fixed menu item owns is
+    /// refused so no shortcut silently goes dark.
     @discardableResult func set(_ combo: KeyCombo, for command: ShortcutCommand) -> Bool {
         guard owner(of: combo, besides: command) == nil else { return false }
         if combo == command.defaultCombo { custom.removeValue(forKey: command) } else { custom[command] = combo }

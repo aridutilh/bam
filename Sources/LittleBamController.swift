@@ -227,7 +227,7 @@ struct LittleBamDestination: Equatable {
         if root.address.currentEditor() == nil { root.address.stringValue = web.url?.absoluteString ?? "" }
         let host = web.url?.host?.replacingOccurrences(of: "www.", with: "", options: .anchored)
         root.site.title = host ?? (web.isLoading ? "Loading…" : "Little Bam")
-        root.site.toolTip = web.url?.absoluteString ?? "Click to enter an address (⌘L)"
+        root.site.toolTip = web.url?.absoluteString ?? "Click to enter an address (\(ShortcutStore.shared.combo(for: .openLocation).compact))"
         root.back.isEnabled = web.canGoBack; root.forward.isEnabled = web.canGoForward
         root.reload.symbol = web.isLoading ? "xmark" : "arrow.clockwise"
         root.reload.toolTip = web.isLoading ? "Stop loading" : "Reload (⌘R)"
