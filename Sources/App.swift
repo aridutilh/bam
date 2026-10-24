@@ -36,6 +36,9 @@ import WebKit
         let preview = CommandLine.arguments.contains("--fresh-preview")
         let sessionFileExists = FileManager.default.fileExists(atPath: support.appendingPathComponent("session.json").path)
         BrowserController.restoreDefaultSearchEngine()
+        if #available(macOS 15.4, *) {
+            ExtensionManagement.dress = { BamSheetStyle.dress(window: $0, root: $1, colorIndex: BrowserSpace.flatColorCount - 1) }
+        }
         controller = BrowserController(sessionURL: support.appendingPathComponent("session.json"), ephemeral: preview)
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1260, height: 800), styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
         window.title = "Bam"; window.titleVisibility = .hidden; window.titlebarAppearsTransparent = true

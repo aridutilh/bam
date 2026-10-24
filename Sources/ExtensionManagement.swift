@@ -37,8 +37,11 @@ import UniformTypeIdentifiers
         revoke.frame = NSRect(x: 286, y: 21, width: 190, height: 32); revoke.target = self; revoke.action = #selector(revokePermissions)
         removeButton.frame = NSRect(x: 482, y: 21, width: 116, height: 32); removeButton.target = self; removeButton.action = #selector(removeExtension)
         [importButton, toggle, revoke, removeButton].forEach { root.addSubview($0) }
-        BamSheetStyle.dress(window: window, root: root, colorIndex: BrowserSpace.flatColorCount - 1)
+        Self.dress?(window, root)
     }
+    /// The app installs Bam's wash and pill styling here; this file also builds
+    /// alone in its component suite, where the styling kit is absent.
+    @MainActor static var dress: ((NSWindow?, NSView) -> Void)?
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
     func show(profileID: UUID, relativeTo parent: NSWindow?) {
         self.profileID = profileID; refresh()
