@@ -1,4 +1,4 @@
-# Ark 0.4.0 prerelease
+# Ark 0.5.0 prerelease
 
 <img src="Resources/ArkIcon.png" width="128" alt="Ark’s crayon-drawn icon">
 
@@ -6,9 +6,9 @@ An open-source macOS browser prototype built with Swift, AppKit, Core Animation,
 
 The original application code is available under the [MIT license](LICENSE). The public source includes no extracted Arc artwork, animation frames, fonts, textures, binaries, or decompiler output. The app icon is a crayon-drawn reinterpretation of Arc’s mark; [branding notes](docs/branding.md) record its source and generation prompt. Sidebar controls use macOS SF Symbols, and the Spaces button uses an original native animation.
 
-[v0.4.0 prerelease](https://github.com/aridutilh/ark/releases/tag/v0.4.0) · [Previous v0.3.4 download](https://github.com/aridutilh/ark/releases/tag/v0.3.4) · [Source repository](https://github.com/aridutilh/ark) · [Feature checklist](FEATURE-INVENTORY.md) · [Validation status](VALIDATION.md)
+[v0.5.0 prerelease](https://github.com/aridutilh/ark/releases/tag/v0.5.0) · [Previous v0.4.0 download](https://github.com/aridutilh/ark/releases/tag/v0.4.0) · [Source repository](https://github.com/aridutilh/ark) · [Feature checklist](FEATURE-INVENTORY.md) · [Validation status](VALIDATION.md)
 
-**Current prerelease: 0.4.0 (build 12).** This adds a rendering handoff for floating video, explicit Return that reveals the source window, and two-finger hover movement. Fast flicks commit to a corner in their direction. Slow releases also pull toward nearby corners sooner, while placement farther away stays free. All six component and five packaged runtime suites passed; the installed app matches the tested executable and retains all 12 existing tabs. One user physically tested build 12 and confirmed that quick corner flicks and the stronger slow-release pull now feel right. Broader device coverage, build 12 cross-app Return and transition feel remain unverified. The previous release is **0.3.4 (build 8)**.
+**Current prerelease: 0.5.0 (build 13).** This adds page-command confirmations: ⇧⌘C copies the current URL and shows “Page copied”; ⇧⌘R requests a hard refresh and shows “Hard refreshing…”. Both commands follow the key browser window and its active page. All six component and five packaged runtime suites passed. The installed app matches the tested executable, preserves all 12 existing tabs, and passed a native main-window check of both shortcuts, complete confirmation text and pill dismissal. Multi-surface routing is covered by automated fixtures; broader manual and accessibility coverage remains open. The previous public release is **0.4.0 (build 12)**, which passed its component/runtime suites and received limited user acceptance of PiP corner movement.
 
 ## Build and run
 
@@ -29,7 +29,7 @@ Run the integrated local fixtures after building:
 bash scripts/test-runtime.sh
 ```
 
-This starts a loopback fixture server and runs the packaged app's WebKit, manual PiP, native interaction, automatic PiP, and feature tests. Tests open native windows. Each run must exit successfully and emit exactly one matching terminal PASS; a subtest PASS or an early zero exit is insufficient. Fixture windows cannot trigger the normal last-window autoquit behavior. **Build 12 passed all six component and five packaged runtime suites**, including 70 positioning, 84 controller interaction, 85 automatic PiP and 51 browsing-feature checks. The strict runtime script completed successfully with each suite’s terminal PASS. The installed app passed strict signature verification and matches the tested executable; all 50 source/resource/build inputs match the final isolated copy. [VALIDATION.md](VALIDATION.md) separates these automated results from earlier assisted player checks and physical feedback. Tests do not reproduce every device’s physical input.
+This starts a loopback fixture server and runs the packaged app's WebKit, manual PiP, native interaction, automatic PiP, and feature tests. Tests open native windows. Each run must exit successfully and emit exactly one matching terminal PASS; a subtest PASS or an early zero exit is insufficient. Fixture windows cannot trigger the normal last-window autoquit behavior. **Build 13 passed all six component and five runtime suites**, including 70 positioning, 84 controller interaction, 85 automatic PiP and 137 browsing-feature checks. All 53 source/resource/test/build inputs match the isolated final copy, and the installed app passed strict signature and executable-identity checks. See [VALIDATION.md](VALIDATION.md) for the current run and its limits; these fixtures do not reproduce every device's physical input.
 
 The bundled video is a generated test pattern. To regenerate it, install FFmpeg and run `bash scripts/generate-demo.sh`; FFmpeg is not needed for an ordinary build.
 
@@ -42,7 +42,7 @@ The bundled video is a generated test pattern. To regenerate it, install FFmpeg 
 - **Little Ark:** a compact browsing window with address/navigation controls and promotion into the main browser. HTTP(S) URLs delivered by macOS open here. Ark does not automatically make itself the default browser.
 - **Split View:** two live pages, draggable divider, per-pane address/navigation controls, focused-pane commands, close-one-pane, and separate-into-tabs. Pair membership is saved.
 - **Floating video:** tab/Space departure can move a playing video's existing page into a rounded, borderless panel with native hover controls for play/pause, ±10 seconds, mute/volume, Return to Tab, and resizing. The panel follows the video's aspect ratio. Selecting the source restores it. In the 0.4.0 prerelease, explicit Return also brings Ark forward, restores a minimized source window, dismisses a covering Peek, and focuses the correct Split pane. Hovering and scrolling with two fingers moves the panel. Build 12 directs fast flicks to a corner and attracts slow releases near corners while preserving free placement farther away. Automated checks passed, and one user confirmed the final quick-flick and corner-pull feel on build 12. Build 9 received positive limited feedback on the combined movement/Return/transition check; its assisted Return check alone does not establish cross-app activation. Automatic behavior can be disabled, and manual floating video is available.
-- **Page tools:** find in page, full URL copy, system printing, file-upload selection, and WebKit media permission prompts.
+- **Page tools:** find in page, full HTTP(S) URL copy, hard refresh, system printing, file-upload selection, and WebKit media permission prompts. Copy and hard refresh show a brief native confirmation pill without taking keyboard focus.
 - **Downloads and local Library:** destination selection, progress, cancel, open/reveal, plus a durable visit list and recently closed records. History and recently closed records can be searched and cleared separately. This is not automatic tab archiving.
 
 These are implementation subsets, not a complete browser compatibility claim. See the [working inventory](FEATURE-INVENTORY.md) for explicit acceptance criteria and remaining work.
@@ -66,7 +66,9 @@ These are implementation subsets, not a complete browser compatibility claim. Se
 | Separate Split into tabs | View → Separate Split into Tabs |
 | Close entire Split group | ⌘W or its sidebar row close button |
 | Find / next / previous | ⌘F / ⌘G / ⇧⌘G |
-| Copy current URL / print | ⇧⌘C / ⌘P |
+| Copy current URL | ⇧⌘C — “Page copied” |
+| Hard refresh | ⇧⌘R — “Hard refreshing…” |
+| Print | ⌘P |
 | Downloads / history | ⌘J / ⌘Y |
 | Recently closed records | History → Recently Closed |
 | Toggle / reset sidebar width | ⌘S / ⇧⌘S; double-click its right edge to reset |
@@ -85,6 +87,11 @@ These are implementation subsets, not a complete browser compatibility claim. Se
 | Move floating video (0.4.0) | Drag its background, or hover and scroll with two fingers; fast flick toward a corner, move slowly for free placement |
 | Resize floating video | Drag its bottom-right grip; Tab to the grip and use arrow keys |
 | Zoom | ⌘+ / ⌘− / ⌘0 |
+
+
+Copy and hard refresh target the page in the key browser window: the visible Peek, focused Split pane, Little Ark page, or main tab. They do nothing while an unrelated utility window or the floating-video panel is key. URL copy preserves the current HTTP(S) address, including its query and fragment.
+
+Hard refresh asks WebKit to revalidate the page with its origin, including while a load is in progress. It does not promise an unconditional cache purge and does not clear cookies or other website data. “Hard refreshing…” confirms that a navigation request started, not that loading succeeded. The pill sits near the page's top center, lets clicks pass through, and replaces itself on repeated commands. It holds briefly before fading and respects Reduce Motion.
 
 ## Motion and visual design
 

@@ -4,6 +4,15 @@
 
 Remaining work is tracked with acceptance criteria in [FEATURE-INVENTORY.md](FEATURE-INVENTORY.md). An inventory item is complete only after its full behavior is verified.
 
+## 0.5.0 prerelease — build 13
+
+Build 13 passed all six component and five packaged runtime suites, including 137 browsing-feature checks. The installed app passed strict signature and executable-identity checks; all 53 source/resource/test/build inputs matched the final isolated copy, and all 12 existing tabs were retained. Actual shortcuts on one installed main-window page confirmed full pill text, the copied URL, refresh and later pill dismissal. Multi-surface behavior is automated coverage; broader manual/accessibility checks remain open.
+
+- Show “Page copied” after ⇧⌘C successfully copies the current full HTTP(S) URL, preserving query and fragment.
+- Add ⇧⌘R Hard Refresh. Request WebKit origin revalidation even while loading, with a “Hard refreshing…” confirmation when navigation starts. This is not an unconditional cache purge or website-data reset.
+- Route both commands to the key window's visible Peek, focused Split pane, Little Ark page, or main tab. An unrelated utility window or floating-video panel cannot act on a background page.
+- Use one brief, click-through native pill near the page's top center. Repeated commands replace its message and restart its timer; fading is cancellable, keyboard focus stays unchanged, and accessibility announcements and Reduce Motion are supported.
+
 ## 0.4.0 prerelease — build 12
 
 Build 12 passed all six component and five packaged runtime suites, installation, strict signature, executable identity and all 50 source/resource/build input comparisons; all 12 existing tab identifiers were retained. One user physically confirmed build 12’s quick corner flicks and stronger slow-release pull feel right. This is limited acceptance of the corner tuning; build 12 cross-app Return, transition feel and broader device coverage remain unverified. Build 11’s assisted YouTube check confirmed rounded rendering and native Pause, but physical feedback requested stronger corner attraction. Build 12 addresses that feedback with directed corner flicks and stronger local attraction while retaining slow free placement farther away; the user accepted the final corner strength. No Arc parity is claimed.
