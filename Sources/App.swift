@@ -33,7 +33,12 @@ import WebKit
         buildMenus(); window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
         for url in pendingExternalURLs { controller.openLittleOrbit(url: url) }; pendingExternalURLs.removeAll()
     }
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        // Fixtures deliberately minimize, replace, and close their windows.
+        // Only their explicit terminal result may finish a smoke-test process.
+        let testArguments: Set<String> = ["--web-test", "--pip-test", "--interaction-test", "--auto-pip-test", "--feature-test"]
+        return !CommandLine.arguments.contains { testArguments.contains($0) }
+    }
     func applicationWillTerminate(_ notification: Notification) { controller?.prepareToClose() }
     func application(_ application: NSApplication, open urls: [URL]) {
         for url in urls where URLInput.directURL(url.absoluteString) != nil {

@@ -17,5 +17,26 @@ SERVER_PID=$!
 for attempt in {1..50}; do [ -s "$RUN_DIR/port" ] && break; sleep 0.1; done
 export ORBIT_TEST_URL="http://127.0.0.1:$(cat "$RUN_DIR/port")/index.html"
 for test in --web-test --pip-test --interaction-test --auto-pip-test --feature-test; do
-    "$APP/Contents/MacOS/ArkBrowser" "$test"
+    case "$test" in
+        --web-test) marker='PASS: WebKit — ' ;;
+        --pip-test) marker='PASS: PiP — ' ;;
+        --interaction-test) marker='PASS: Controller interactions — ' ;;
+        --auto-pip-test) marker='PASS: Automatic PiP — ' ;;
+        --feature-test) marker='PASS: Features — ' ;;
+    esac
+    log="$RUN_DIR/${test#--}.log"
+    if ! "$APP/Contents/MacOS/ArkBrowser" "$test" 2>&1 | tee "$log"; then
+        echo "FAIL: Runtime $test exited unsuccessfully" >&2
+        exit 1
+    fi
+    # An AppKit lifecycle exit may return zero before the fixture finishes.
+    # Require this suite's terminal result, not a preceding subtest's PASS.
+    if ! awk -v marker="$marker" '
+        index($0, marker) == 1 { passed++ }
+        /^FAIL:/ { failed = 1 }
+        END { exit !(passed == 1 && !failed) }
+    ' "$log"; then
+        echo "FAIL: Runtime $test did not emit exactly one successful terminal result" >&2
+        exit 1
+    fi
 done

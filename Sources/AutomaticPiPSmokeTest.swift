@@ -6,8 +6,14 @@ import WebKit
     var controller: BrowserController!
     var window: NSWindow!
     var checks = 0
+    private var timeout: Timer?
+    private var finished = false
     enum Failure: Error { case assertion(String) }
     func start() {
+        let watchdog = Timer(timeInterval: 90, repeats: false) { [weak self] _ in
+            Task { @MainActor [weak self] in self?.finish(false, "Overall fixture timeout") }
+        }
+        timeout = watchdog; RunLoop.main.add(watchdog, forMode: .common)
         Task { @MainActor in
             do { try await run(); finish(true, "\(checks) checks: automatic departure/return, playback continuity, focus, paused/no-video, rapid switching, spaces, closure, preference, split fallback/return, queued single tabs, retirement cleanup/focus, utility close routing, and split-group cleanup") }
             catch { finish(false, String(describing: error)) }
@@ -21,6 +27,27 @@ import WebKit
         for _ in 0..<100 { if condition() { checks += 1; return }; await pause() }
         throw Failure.assertion("Timed out: \(message)")
     }
+    /// Establishes a fixture precondition only. Never call this after the
+    /// action whose activation/focus behavior a regression check is measuring.
+    func establishKeyWindow(_ target: NSWindow, label: String) async throws {
+        if NSApp.isHidden { NSApp.unhideWithoutActivation() }
+        target.orderFront(nil)
+        // Fixture setup needs deterministic activation when another app is
+        // frontmost. The SDK's cooperative activate() may decline that request.
+        // Production Return is tested separately, without this setup helper.
+        NSApp.activate(ignoringOtherApps: true)
+        do {
+            try await wait("\(label): application active") { NSApp.isActive }
+            target.makeKeyAndOrderFront(nil)
+            try await wait("\(label): target key window") {
+                NSApp.isActive && NSApp.keyWindow === target && target.isKeyWindow
+            }
+        } catch {
+            let frontmost = NSWorkspace.shared.frontmostApplication
+            throw Failure.assertion("Focus setup \(label) failed (\(error)): appActive=\(NSApp.isActive), appHidden=\(NSApp.isHidden), policy=\(NSApp.activationPolicy().rawValue), pid=\(ProcessInfo.processInfo.processIdentifier), frontmostPID=\(String(describing: frontmost?.processIdentifier)), frontmostBundle=\(frontmost?.bundleIdentifier ?? "nil"), targetNumber=\(target.windowNumber), keyNumber=\(String(describing: NSApp.keyWindow?.windowNumber)), mainNumber=\(String(describing: NSApp.mainWindow?.windowNumber)), targetKey=\(target.isKeyWindow), targetMain=\(target.isMainWindow), targetVisible=\(target.isVisible), targetMiniaturized=\(target.isMiniaturized), targetCanKey=\(target.canBecomeKey), keyClass=\(String(describing: NSApp.keyWindow.map { type(of: $0) }))")
+        }
+    }
+
     func js(_ web: WKWebView, _ source: String) async throws -> Any? {
         try await withCheckedThrowingContinuation { continuation in
             web.evaluateJavaScript(source) { value, error in
@@ -38,7 +65,9 @@ import WebKit
         let player = WKWebView(frame: .zero, configuration: config)
         controller.register(player, id: video.id)
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 700), styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
-        window.contentViewController = controller; window.setContentSize(NSSize(width: 1000, height: 700)); window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
+        window.title = "Ark — automatic PiP fixture"
+        window.contentViewController = controller; window.setContentSize(NSSize(width: 1000, height: 700))
+        try await establishKeyWindow(window, label: "initial browser")
         controller.load("orbit://video", in: player, id: video.id)
         try await wait("local demo") { !player.isLoading && player.url?.lastPathComponent == "PiPDemo.html" }
         for _ in 0..<80 {
@@ -96,6 +125,9 @@ import WebKit
 
     func runExplicitReturn(player: WKWebView, videoID: UUID, destinationID: UUID) async throws {
         controller.select(videoID)
+        try await wait("previous return and departure probe finish before explicit Return fixture") {
+            !self.controller.pictureInPicture.isRestoring(player) && !self.controller.automaticProbeInFlight
+        }
         _ = try await js(player, "__orbitTestVideo.play(); true")
         guard let fixtureURL = ProcessInfo.processInfo.environment["ORBIT_TEST_URL"].flatMap(URL.init(string:)) else {
             throw Failure.assertion("Missing local Peek URL")
@@ -106,16 +138,20 @@ import WebKit
         try await wait("explicit return fixture floats") { self.controller.pictureInPicture.activeTabID == videoID }
         guard let floating = player.window, floating !== window, let host = floating.contentView,
               let button = pipReturnButton(in: host) else { throw Failure.assertion("Missing native PiP Return button") }
+        try await wait("explicit Return panel finishes presentation") {
+            self.controller.pictureInPicture.activeTabID == videoID
+                && self.controller.pictureInPicture.presentationReady && floating.alphaValue > 0.99
+        }
         let utility = NSWindow(contentRect: NSRect(x: 40, y: 40, width: 380, height: 220),
                                styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        utility.title = "Ark — automatic PiP utility"
         utility.isReleasedWhenClosed = false
         defer { utility.close() }
-        window.makeKeyAndOrderFront(nil)
-        try await wait("source browser key before minimizing") { NSApp.keyWindow === self.window }
+        try await establishKeyWindow(window, label: "source browser before minimizing")
         window.miniaturize(nil)
         try await wait("source browser minimized") { self.window.isMiniaturized }
-        utility.makeKeyAndOrderFront(nil)
-        try await wait("utility key over minimized source") { self.window.isMiniaturized && NSApp.keyWindow === utility }
+        try await establishKeyWindow(utility, label: "utility over minimized source")
+        try require(window.isMiniaturized, "Source remains minimized before explicit Return")
         button.performClick(nil)
         try await wait("Return reveals source browser") { NSApp.isActive && NSApp.keyWindow === self.window && !self.window.isMiniaturized }
         try require(controller.session.activeID == videoID && controller.session.space == 0,
@@ -245,16 +281,14 @@ import WebKit
         let editor = NSTextField(string: "Input in the departing pane")
         editor.frame = NSRect(x: 8, y: 8, width: 240, height: 24)
         leftHost.addSubview(editor)
-        window.makeKeyAndOrderFront(nil)
-        window.makeFirstResponder(editor)
-        let canCheckFocus = window.isKeyWindow && NSApp.keyWindow === window
+        try await establishKeyWindow(window, label: "retirement focus fixture")
+        try require(window.makeFirstResponder(editor) && responderIsInside(editor),
+                    "Retirement fixture starts with its pane editor focused")
         // Mirrors a Space animation commit: model selection changes before the
         // view transaction, without a palette dismissal moving focus first.
         controller.session.select(destinationID)
         controller.showActive()
-        if canCheckFocus {
-            try require(responderIsInside(destination), "Covered retiring pane relinquishes keyboard focus to the attached destination")
-        }
+        try require(responderIsInside(destination), "Covered retiring pane relinquishes keyboard focus to the attached destination")
         try require(oldSplitView.superview === controller.webHost, "Pending split stays attached until discovery finishes")
         controller.select(left.id)
         controller.unsplit(left.id)
@@ -271,13 +305,12 @@ import WebKit
         utility.title = "Ark — utility close test"; utility.isReleasedWhenClosed = false
         let tabIDs = controller.session.tabs.map(\.id)
         let activeID = controller.session.activeID
-        utility.makeKeyAndOrderFront(nil)
-        try await wait("utility key window") { NSApp.keyWindow === utility }
+        try await establishKeyWindow(utility, label: "utility close routing")
         controller.closeTab(nil)
         try require(!utility.isVisible, "Command-W closes the key utility window")
         try require(controller.session.tabs.map(\.id) == tabIDs && controller.session.activeID == activeID,
                     "Closing a utility window preserves main browser tabs and selection")
-        window.makeKeyAndOrderFront(nil)
+        try await establishKeyWindow(window, label: "browser after utility closure")
         controller.automaticallyShowsVideo = false; controller.cancelAutomaticDepartures()
         controller.close(left.id); controller.close(right.id); controller.select(destinationID)
     }
@@ -290,6 +323,8 @@ import WebKit
     }
 
     func finish(_ success: Bool, _ detail: String) {
+        guard !finished else { return }
+        finished = true; timeout?.invalidate(); timeout = nil
         controller?.prepareToClose()
         print("\(success ? "PASS" : "FAIL"): Automatic PiP — \(detail)"); fflush(stdout); exit(success ? 0 : 1)
     }
