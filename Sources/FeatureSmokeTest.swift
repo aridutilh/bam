@@ -8,7 +8,7 @@ import WebKit
     enum Failure: Error { case assertion(String) }
     func start() {
         Task { @MainActor in
-            do { try await run(); finish(true, "\(checks) checks: per-tab Peek, same-page promotion, Little Ark, cross-window Find, preview history, split focus/navigation, persisted groups, close/reopen and unsplit") }
+            do { try await run(); finish(true, "\(checks) checks: per-tab Peek, same-page promotion, Little Ark, cross-window Find, preview history, split focus/navigation, persisted groups, close/reopen, unsplit and focused-page copy/hard refresh") }
             catch { finish(false, String(describing: error)) }
         }
     }
@@ -161,6 +161,7 @@ import WebKit
         try check((try Data(contentsOf: destination)) == Data("Orbit local download fixture".utf8), "Download delegate saves exact local payload")
         try check(controller.library.history.contains(where: { $0.address == url.absoluteString }), "Completed normal navigation enters history")
         try check(!controller.library.closedRecords.isEmpty, "Closed tabs remain in archive")
+        try await runPageCommands()
     }
     func finish(_ success: Bool, _ detail: String) {
         controller?.prepareToClose()

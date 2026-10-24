@@ -57,6 +57,8 @@ import QuartzCore
     let pagingAnimator = SpringAnimator()
     let pictureInPicture = PictureInPictureCoordinator()
     let findBar = FindBarCoordinator()
+    let pageFeedback = PageFeedbackCoordinator()
+    var pageCommandPasteboard: NSPasteboard = .general
     let downloads: DownloadCoordinator
     lazy var library = BrowserLibrary(storageURL: privateMode ? nil : sessionURL.deletingLastPathComponent().appendingPathComponent("library.json"))
     var displayedTabID: UUID?
@@ -266,6 +268,7 @@ import QuartzCore
         let arriving = visibleMemberIDs
         let outgoing = displayedMemberIDs.filter { !arriving.contains($0) }
         let switched = displayedTabID != nil && displayedTabID != tab.id
+        if switched { pageFeedback.hide() }
         // Capture actual hosts before restore callbacks or model changes can re-enter.
         let departingHosts = outgoing.compactMap { id in browsers[id].flatMap { hostedAncestor($0) } }
         let previousFocus = focusedView(in: view.window)
@@ -373,7 +376,7 @@ import QuartzCore
         retiringViews.removeAll()
     }
     func prepareToClose() {
-        isShuttingDown = true; cancelAutomaticDepartures(); findBar.hide(); downloads.cancelAll(); pictureInPicture.restore()
+        isShuttingDown = true; cancelAutomaticDepartures(); findBar.hide(); pageFeedback.hide(); downloads.cancelAll(); pictureInPicture.restore()
         for peek in Array(peeks.values) { peek.dismiss() }
         for little in Array(littleWindows.values) { little.close() }
         if let monitor = scrollMonitor { NSEvent.removeMonitor(monitor); scrollMonitor = nil }

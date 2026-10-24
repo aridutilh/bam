@@ -30,9 +30,50 @@ import WebKit
         guard let surface = findSurface else { findBar.hide(); return }
         findBar.synchronize(in: surface.host, web: surface.web)
     }
+    /// Page commands follow the focused browser surface. A Library, About, or
+    /// floating-video window must never act on an unrelated background tab.
+    private var pageCommandSurface: (web: WKWebView, host: NSView)? {
+        guard !isShuttingDown, let key = NSApp.keyWindow, key.attachedSheet == nil else { return nil }
+        let web: WKWebView?
+        if let little = littleWindows.values.first(where: { $0.window === key }) {
+            web = little.webView
+        } else if isViewLoaded, key === view.window {
+            web = peeks[session.activeID]?.webView ?? activeWebView
+        } else { return nil }
+        guard let web, web.window === key, !web.isHiddenOrHasHiddenAncestor,
+              let host = web.superview else { return nil }
+        return (web, host)
+    }
+    private func copyableURL(for web: WKWebView) -> URL? {
+        // Preserve the current page's query/fragment and history.pushState URL.
+        // A requested URL is only a fallback before the first page exists.
+        let url = web.url ?? (web as? PreviewWKWebView)?.requestedURL
+        return url.flatMap { URLInput.directURL($0.absoluteString) }
+    }
     @objc func copyCurrentURL(_ sender: Any?) {
-        guard let url = commandWebView?.url, URLInput.directURL(url.absoluteString) != nil else { return }
-        NSPasteboard.general.clearContents(); NSPasteboard.general.setString(url.absoluteString, forType: .string)
+        guard let surface = pageCommandSurface, let url = copyableURL(for: surface.web) else { return }
+        pageCommandPasteboard.clearContents()
+        guard pageCommandPasteboard.setString(url.absoluteString, forType: .string) else { return }
+        pageFeedback.show("Page copied", symbol: "link", in: surface.host)
+    }
+    @objc func hardReload(_ sender: Any?) {
+        guard let surface = pageCommandSurface else { return }
+        let web = surface.web
+        let id = browsers.first(where: { $0.value === web })?.key
+        let retryURL = id.flatMap { tabErrors[$0] == nil ? nil : requestedAddresses[$0] }
+            .flatMap(URLInput.directURL)
+        let navigation: WKNavigation?
+        if let url = retryURL ?? (web.url == nil ? (web as? PreviewWKWebView)?.requestedURL : nil),
+           URLInput.directURL(url.absoluteString) != nil {
+            navigation = web.load(URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData))
+        } else {
+            // WebKit revalidates the current navigation with the origin, keeping
+            // its method/history semantics. Unlike Reload / Stop, do this even
+            // while loading. This does not clear cookies or other website data.
+            navigation = web.reloadFromOrigin()
+        }
+        guard navigation != nil else { return }
+        pageFeedback.show("Hard refreshing…", symbol: "arrow.clockwise", in: surface.host)
     }
     @objc func toggleAutomaticVideo(_ sender: Any?) {
         automaticallyShowsVideo.toggle()
@@ -85,5 +126,17 @@ import WebKit
         if let web { little.adopt(webView: web) }
         else if let url { _ = little.open(url: url) }
         little.show(relativeTo: view.window)
+    }
+}
+
+extension BrowserController: NSMenuItemValidation {
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        switch menuItem.action {
+        case #selector(copyCurrentURL(_:)):
+            return pageCommandSurface.flatMap { copyableURL(for: $0.web) } != nil
+        case #selector(hardReload(_:)):
+            return pageCommandSurface != nil
+        default: return true
+        }
     }
 }

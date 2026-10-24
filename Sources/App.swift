@@ -93,6 +93,7 @@ import WebKit
         item(view, "Reset Sidebar Width", #selector(BrowserController.resetSidebar(_:)), "s", [.command, .shift], controller)
         item(view, "Pin / Unpin Tab", #selector(BrowserController.togglePin(_:)), "d", .command, controller)
         view.addItem(.separator()); item(view, "Reload / Stop", #selector(BrowserController.reload(_:)), "r", .command, controller)
+        item(view, "Hard Refresh", #selector(BrowserController.hardReload(_:)), "r", [.command, .shift], controller)
         item(view, "Zoom In", #selector(BrowserController.zoomIn(_:)), "+", .command, controller)
         item(view, "Zoom Out", #selector(BrowserController.zoomOut(_:)), "-", .command, controller)
         item(view, "Actual Size", #selector(BrowserController.actualSize(_:)), "0", .command, controller)
