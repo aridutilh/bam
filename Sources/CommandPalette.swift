@@ -38,7 +38,8 @@ import WebKit
         label.stringValue = engine.name
         label.font = .systemFont(ofSize: 12, weight: .semibold)
         label.textColor = engine.accentTextColor
-        label.lineBreakMode = .byClipping
+        label.lineBreakMode = .byTruncatingTail
+        label.maximumNumberOfLines = 1
         label.setAccessibilityElement(false)
         addSubview(label)
         setAccessibilityElement(true)
@@ -93,7 +94,7 @@ extension BrowserController {
         box.addSubview(field)
         let hint = NSTextField(labelWithString: "")
         hint.font = .systemFont(ofSize: 12, weight: .medium); hint.textColor = .secondaryLabelColor
-        hint.alignment = .right; hint.lineBreakMode = .byClipping
+        hint.alignment = .right; hint.lineBreakMode = .byTruncatingTail; hint.maximumNumberOfLines = 1
         hint.setAccessibilityElement(false)
         box.addSubview(hint)
         let line = NSBox(); line.boxType = .separator
@@ -127,13 +128,14 @@ extension BrowserController {
         paletteIcon?.frame = NSRect(x: 22, y: (inputHeight - 16) / 2, width: 16, height: 16)
         var fieldX: CGFloat = 50
         if let pill = paletteEnginePill {
-            let pillWidth = min(180, pill.fittingWidth)
+            let pillWidth = min(min(180, pill.fittingWidth), max(60, cw - 160))
             pill.frame = NSRect(x: 50, y: (inputHeight - 24) / 2, width: pillWidth, height: 24)
             fieldX = 50 + pillWidth + 10
         }
         var hintWidth: CGFloat = 0
         if let hint = paletteHint, !hint.stringValue.isEmpty {
-            hintWidth = min(220, hint.intrinsicContentSize.width + 8)
+            // Never let the hint squeeze the field below a usable width.
+            hintWidth = min(max(60, cw - fieldX - 140), hint.measuredTextWidth + 8)
             hint.frame = NSRect(x: cw - hintWidth - 20, y: (inputHeight - 15) / 2, width: hintWidth, height: 15)
             hint.isHidden = false
         } else { paletteHint?.isHidden = true }

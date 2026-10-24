@@ -82,6 +82,8 @@ enum TabSearchMatcher {
         emptyLabel.font = .systemFont(ofSize: 12)
         emptyLabel.textColor = .secondaryLabelColor
         emptyLabel.alignment = .center
+        emptyLabel.lineBreakMode = .byTruncatingTail
+        emptyLabel.maximumNumberOfLines = 1
         emptyLabel.setAccessibilityElement(true)
         addSubview(emptyLabel)
     }
@@ -224,7 +226,9 @@ enum TabSearchMatcher {
         super.layout()
         for (index, row) in rows.enumerated() { row.frame = rowFrame(at: index) }
         moveHighlight(animated: false)
-        emptyLabel.frame = NSRect(x: 8, y: 14, width: max(0, bounds.width - 16), height: 18)
+        // Fit the label to its text so it can never paint past the card.
+        let emptyWidth = min(emptyLabel.measuredTextWidth + 8, max(0, bounds.width - 16))
+        emptyLabel.frame = NSRect(x: (bounds.width - emptyWidth) / 2, y: 14, width: emptyWidth, height: 18)
     }
 }
 
