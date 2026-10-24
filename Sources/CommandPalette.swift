@@ -128,14 +128,14 @@ extension BrowserController {
         paletteIcon?.frame = NSRect(x: 22, y: (inputHeight - 16) / 2, width: 16, height: 16)
         var fieldX: CGFloat = 50
         if let pill = paletteEnginePill {
-            let pillWidth = min(min(180, pill.fittingWidth), max(60, cw - 160))
+            // The full engine name always renders; the field absorbs the squeeze.
+            let pillWidth = pill.fittingWidth
             pill.frame = NSRect(x: 50, y: (inputHeight - 24) / 2, width: pillWidth, height: 24)
             fieldX = 50 + pillWidth + 10
         }
         var hintWidth: CGFloat = 0
         if let hint = paletteHint, !hint.stringValue.isEmpty {
-            // Never let the hint squeeze the field below a usable width.
-            hintWidth = min(max(60, cw - fieldX - 140), hint.measuredTextWidth + 8)
+            hintWidth = hint.measuredTextWidth + 8
             hint.frame = NSRect(x: cw - hintWidth - 20, y: (inputHeight - 15) / 2, width: hintWidth, height: 15)
             hint.isHidden = false
         } else { paletteHint?.isHidden = true }

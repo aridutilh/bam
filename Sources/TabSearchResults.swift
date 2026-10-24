@@ -226,8 +226,8 @@ enum TabSearchMatcher {
         super.layout()
         for (index, row) in rows.enumerated() { row.frame = rowFrame(at: index) }
         moveHighlight(animated: false)
-        // Fit the label to its text so it can never paint past the card.
-        let emptyWidth = min(emptyLabel.measuredTextWidth + 8, max(0, bounds.width - 16))
+        // The label always shows its full text, centered.
+        let emptyWidth = emptyLabel.measuredTextWidth + 8
         emptyLabel.frame = NSRect(x: (bounds.width - emptyWidth) / 2, y: 14, width: emptyWidth, height: 18)
     }
 }
