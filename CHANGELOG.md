@@ -4,6 +4,14 @@
 
 Remaining work is tracked with acceptance criteria in [FEATURE-INVENTORY.md](FEATURE-INVENTORY.md). An inventory item is complete only after its full behavior is verified.
 
+## 0.5.3 prerelease — build 16
+
+Build 16 passed all seven component and five packaged runtime suites, including 207 feature checks (previously 137). New coverage checks top-right placement, compact-host text fit and confirmation lifecycle across replacement, cancellation and host changes. All 54 tracked source/resource/test/build inputs matched the isolated copy. Installation, strict signature and tested-executable identity passed; all 12 tabs and the original selection state were preserved. Actual copy/refresh shortcuts on one bright page showed complete, readable top-right cards, and later dismissal was confirmed. Broader themes, accessibility preferences and frame-by-frame pop timing were not visually measured. Earlier release evidence below remains historical.
+
+- Restyle page-command feedback as a translucent native card with a subtle pointed comic-burst outline and a brief pop animation.
+- Anchor the card at the top-right of the active page, including an individual Split pane, Peek or Little Ark.
+- Preserve the existing confirmation text, shortcuts, click-through behavior, focus and accessibility announcements.
+
 ## 0.5.2 prerelease — build 15
 
 Build 15 passed all seven component and five packaged runtime suites, including 162 controller interaction checks (previously 84). All 54 tracked source/resource/test/build inputs matched the isolated copy. New checks cover early warm-page attachment, cold navigation requests, retained document state, rapid requests/reversals, committed release and preview cancellation, and Split destinations. The installed app passed strict signature and tested-executable identity checks; all 12 tabs were retained and the original Space/selection was restored. Actual Space buttons reached the correct pages in two main-window Spaces, first on cold selection and then warmed. Post-fix presentation timing and physical trackpad behavior were not measured. Earlier release evidence below remains historical.
