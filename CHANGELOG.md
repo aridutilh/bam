@@ -4,9 +4,17 @@
 
 Remaining work is tracked with acceptance criteria in [FEATURE-INVENTORY.md](FEATURE-INVENTORY.md). An inventory item is complete only after its full behavior is verified.
 
+## 0.5.5 prerelease — build 18
+
+All seven component and five exact-package runtime suites passed on the first attempt, including 207 feature, 162 interaction, 85 automatic PiP and 70 positioning checks. All 54 inputs matched the tested manifest. Installation, strict signature and tested-executable/approved-icon identity passed; all 13 tabs and existing selection/sidebar/Split state were retained. Actual copy and hard-refresh shortcuts showed complete, readable bottom-right cards on one main-window page, and later dismissal was confirmed. Other surfaces have automated coverage; broader themes, preferences and frame-by-frame animation timing were not rechecked.
+
+- Move copy and hard-refresh confirmation cards to the bottom-right of the active page, including the focused Split pane, Peek and Little Bam.
+- Keep the translucent burst style, pop animation, messages, shortcuts, focus preservation and click-through behavior unchanged.
+- Revise placement regressions for page surfaces, compact hosts, flipped/unflipped coordinates and resizing. This patch adds no link-hover URL display.
+
 ## 0.5.4 prerelease — build 17
 
-All seven component suites passed. The unchanged release ZIP passed all five runtime suites on a second attempt; the first stopped at a combined PiP return playback/focus assertion whose cause remains unisolated. Installation, strict signature and exact tested executable/icon identity passed. All 13 tabs, active page/Space, sidebar and Split state were retained, and native main-window/menu/About checks confirmed Bam 0.5.4 build 17. Releases below retain their historical Ark identity and evidence.
+All seven component suites passed. The unchanged release ZIP passed all five runtime suites on a second attempt; the first stopped at a combined PiP return playback/focus assertion whose cause remains unisolated. Installation, strict signature and exact tested executable/icon identity passed. All 13 tabs, active page/Space, sidebar and Split state were retained, and native main-window/menu/About checks confirmed Bam 0.5.4 build 17. Native Dock preferences verified one Bam pin at `/Applications/Bam.app` in the same slot, with other items unchanged; Dock pixels were not captured. Releases below retain their historical Ark identity and evidence.
 
 - Rename the public application to Bam, package `Bam.app` with executable `BamBrowser`, and move the public repository to [aridutilh/bam](https://github.com/aridutilh/bam).
 - Use the approved generated red burst sticker with a peeled corner on a light matte pink tile as `Resources/BamIcon.png`.

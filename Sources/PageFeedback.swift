@@ -139,10 +139,10 @@ import QuartzCore
         let insetY = min(16, max(0, bounds.height / 8))
         let width = max(0, min(textWidth + padding, min(420, bounds.width - 2 * insetX)))
         let height = min(46, max(0, bounds.height - 2 * insetY))
-        // Flipped overlay coordinates keep the tag at the visual top-right of
-        // this page, including an individual Split pane or a preview window.
-        pill.frame = NSRect(x: max(0, bounds.width - insetX - width), y: insetY,
-                            width: width, height: height)
+        // Flipped overlay coordinates keep the tag at the visual bottom-right
+        // of this page, including an individual Split pane or a preview window.
+        pill.frame = NSRect(x: max(0, bounds.width - insetX - width),
+                            y: bounds.maxY - insetY - height, width: width, height: height)
         let iconSize = min(14, height)
         icon.isHidden = compact
         icon.frame = NSRect(x: min(22, width), y: (height - iconSize) / 2,

@@ -86,13 +86,13 @@ import QuartzCore
             let left = pillInHost.minX - host.bounds.minX
             let top = host.isFlipped ? pillInHost.minY - host.bounds.minY : host.bounds.maxY - pillInHost.maxY
             let bottom = host.isFlipped ? host.bounds.maxY - pillInHost.maxY : pillInHost.minY - host.bounds.minY
-            // Require a real inset and a position near the visual top-right.
+            // Require a real inset and a position near the visual bottom-right.
             // The margins are relational, independent of the tag's design constants.
             // A tag filling a narrow host can have equal left/right insets;
             // the corner-proximity bounds still reject a centered wide-page pill.
-            try check(right >= 4 && top >= 4 && right <= left + 0.5 && top < bottom
-                        && right < host.bounds.width * 0.15 && top < host.bounds.height * 0.15,
-                      "Feedback tag for \(message) is not anchored top-right: top=\(top), right=\(right), left=\(left), bottom=\(bottom), host=\(host.bounds)")
+            try check(right >= 4 && bottom >= 4 && right <= left + 0.5 && bottom < top
+                        && right < host.bounds.width * 0.15 && bottom < host.bounds.height * 0.15,
+                      "Feedback tag for \(message) is not anchored bottom-right: top=\(top), right=\(right), left=\(left), bottom=\(bottom), host=\(host.bounds)")
             let point = label.convert(NSPoint(x: label.bounds.midX, y: label.bounds.midY), to: host)
             try check(overlay.hitTest(point) == nil, "Feedback intercepts page clicks over \(message)")
         }
