@@ -22,6 +22,53 @@ import AppKit
         require(TabSearchMatcher.matches(tabs: many, query: "tab", activeID: UUID()).count == 6, "At most six existing tabs")
         require(TabSearchMatcher.matches(tabs: many, query: "", activeID: UUID(), limit: 0).isEmpty, "Zero limit is valid")
         require(TabSearchMatcher.matches(tabs: tabs, query: "absent", activeID: url.id).isEmpty, "Unmatched query has no fake tab results")
+        // The same index survives typing and suggestion replies. Live values,
+        // order and active identity must still win over cached normalized keys.
+        var index = TabSearchMatcher.Index()
+        require(index.matches(tabs: tabs, query: "arc", activeID: url.id).map(\.id) == [exact.id, prefix.id, substring.id, url.id],
+                "A cold index preserves the established ranking")
+        require(index.matches(tabs: tabs, query: "ARC", activeID: url.id).map(\.id) == [exact.id, prefix.id, substring.id, url.id],
+                "A reused index preserves query normalization and ranking")
+        var edited = exact
+        edited.title = "Renamed project"; edited.address = "https://changed.example/current"
+        require(index.matches(tabs: [edited], query: "arc", activeID: edited.id).isEmpty
+                    && index.matches(tabs: [edited], query: "renamed", activeID: edited.id).map(\.id) == [edited.id],
+                "A title mutation cannot reuse stale normalized text")
+        require(index.matches(tabs: [edited], query: "changed.example/current", activeID: edited.id).map(\.id) == [edited.id],
+                "Navigation refreshes the cached current URL")
+        edited.saved = SavedTabState(kind: .kept, address: "https://saved.example/original", customTitle: "Saved Heading")
+        require(index.matches(tabs: [edited], query: "saved heading", activeID: edited.id).map(\.id) == [edited.id]
+                    && index.matches(tabs: [edited], query: "saved.example/original", activeID: edited.id).map(\.id) == [edited.id],
+                "Adding saved metadata refreshes custom title and saved address keys")
+        edited.saved?.address = "https://saved.example/replacement"; edited.saved?.customTitle = "Replacement heading"
+        require(index.matches(tabs: [edited], query: "original", activeID: edited.id).isEmpty
+                    && index.matches(tabs: [edited], query: "replacement", activeID: edited.id).map(\.id) == [edited.id],
+                "Saved destination and custom-title edits invalidate reused entries")
+        edited.saved?.isUnloaded = true; edited.space = 2
+        require(index.matches(tabs: [edited], query: "replacement", activeID: edited.id).first == edited,
+                "A cached text match returns current sleeping state and Space metadata")
+        edited.saved = nil
+        require(index.matches(tabs: [edited], query: "replacement", activeID: edited.id).isEmpty,
+                "Removing saved metadata removes its search keys")
+        require(index.matches(tabs: [], query: "renamed", activeID: edited.id).isEmpty,
+                "Removed tabs cannot survive in cached results")
+        edited.title = "Reinserted record"
+        _ = index.matches(tabs: [edited], query: "", activeID: edited.id)
+        require(index.matches(tabs: [edited], query: "renamed", activeID: edited.id).isEmpty
+                    && index.matches(tabs: [edited], query: "reinserted", activeID: edited.id).map(\.id) == [edited.id],
+                "An ID reinserted after an empty search uses its current metadata")
+        let ties = (0..<3).map { BrowserTab(title: "Equal match", address: "https://same.example/\($0)", space: 0) }
+        _ = index.matches(tabs: ties, query: "equal", activeID: UUID())
+        let reordered = [ties[2], ties[0], ties[1]]
+        require(index.matches(tabs: reordered, query: "equal", activeID: ties[1].id).map(\.id) == [ties[1].id, ties[2].id, ties[0].id],
+                "Reordering and active-tab changes retain current tie-breaking order")
+        require(index.matches(tabs: reordered, query: "", activeID: ties[1].id, limit: 2).map(\.id) == [ties[1].id, ties[2].id]
+                    && index.matches(tabs: reordered, query: "equal", activeID: ties[1].id, limit: 0).isEmpty,
+                "Empty and zero-limit searches preserve limits with a reused index")
+        let wide = BrowserTab(title: "ＣＡＦＥ\tDesign", address: "HTTP://EXAMPLE.ORG/a%20b", space: 0)
+        require(index.matches(tabs: [wide], query: "cafe design", activeID: UUID()).count == 1
+                    && index.matches(tabs: [wide], query: "example.org/a b", activeID: UUID()).count == 1,
+                "Cached keys preserve width, whitespace and decoded URL-prefix matching")
         let results = TabSearchResultsView(frame: NSRect(x: 0, y: 0, width: 540, height: 320))
         var chosen: UUID?
         var submitted: String?

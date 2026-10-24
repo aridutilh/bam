@@ -3,33 +3,86 @@ import AppKit
 /// Local-only ranking. Original order breaks ties; an empty query puts the
 /// active tab first, without pretending the model contains recency timestamps.
 enum TabSearchMatcher {
-    static func matches(tabs: [BrowserTab], query: String, activeID: UUID, limit: Int = 6) -> [BrowserTab] {
-        guard limit > 0 else { return [] }
-        let query = normalized(query)
-        let tokens = query.split(separator: " ").map(String.init)
-        return tabs.enumerated().compactMap { index, tab -> (BrowserTab, Int, Int)? in
-            guard !query.isEmpty else { return (tab, tab.id == activeID ? 0 : 1, index) }
-            let title = normalized(tab.displayTitle)
-            // A kept page may navigate away from its saved destination. Both
-            // addresses remain useful local search keys without adding a duplicate result.
-            let addresses = [tab.address, tab.saved?.address].compactMap { $0 }.map {
-                normalized($0.removingPercentEncoding ?? $0)
+    /// One palette owns one index. Entries retain only search keys for current
+    /// tabs; IDs alone never authorize reuse after navigation or a saved edit.
+    struct Index {
+        private struct Entry {
+            let title: String
+            let address: String
+            let savedAddress: String?
+            let normalizedTitle: String
+            let addresses: [String]
+            let sites: [String]
+
+            init(_ tab: BrowserTab) {
+                title = tab.displayTitle; address = tab.address; savedAddress = tab.saved?.address
+                normalizedTitle = normalized(title)
+                var rawAddresses = [address]
+                if let savedAddress, savedAddress != address { rawAddresses.append(savedAddress) }
+                addresses = rawAddresses.map { normalized($0.removingPercentEncoding ?? $0) }
+                sites = addresses.map { value in
+                    if value.hasPrefix("https://") { return String(value.dropFirst(8)) }
+                    if value.hasPrefix("http://") { return String(value.dropFirst(7)) }
+                    return value
+                }
             }
-            let sites = addresses.map { $0.replacingOccurrences(of: #"^https?://"#, with: "", options: .regularExpression) }
-            let rank: Int
-            if title == query { rank = 0 }
-            else if title.hasPrefix(query) { rank = 1 }
-            else if title.contains(query) { rank = 2 }
-            else if sites.contains(where: { $0.hasPrefix(query) }) || addresses.contains(where: { $0.hasPrefix(query) }) { rank = 3 }
-            else if addresses.contains(where: { $0.contains(query) }) { rank = 4 }
-            else if tokens.allSatisfy({ token in title.contains(token) || addresses.contains(where: { $0.contains(token) }) }) { rank = 5 }
-            else { return nil }
-            return (tab, rank, index)
-        }.sorted { lhs, rhs in
-            if lhs.1 != rhs.1 { return lhs.1 < rhs.1 }
-            if (lhs.0.id == activeID) != (rhs.0.id == activeID) { return lhs.0.id == activeID }
-            return lhs.2 < rhs.2
-        }.prefix(limit).map { $0.0 }
+            func matches(_ tab: BrowserTab) -> Bool {
+                title == tab.displayTitle && address == tab.address && savedAddress == tab.saved?.address
+            }
+        }
+        private var entries: [UUID: Entry] = [:]
+
+        mutating func matches(tabs: [BrowserTab], query: String, activeID: UUID, limit: Int = 6) -> [BrowserTab] {
+            guard limit > 0 else { entries.removeAll(); return [] }
+            let query = normalized(query)
+            guard !query.isEmpty else {
+                // Opening the palette should not normalize every tab before a
+                // user types. Remove obsolete keys even during an empty search.
+                if !entries.isEmpty {
+                    let ids = Set(tabs.map(\.id))
+                    entries = entries.filter { ids.contains($0.key) }
+                }
+                var active: [BrowserTab] = [], others: [BrowserTab] = []
+                for tab in tabs {
+                    if tab.id == activeID { if active.count < limit { active.append(tab) } }
+                    else if others.count < limit { others.append(tab) }
+                }
+                return Array((active + others).prefix(limit))
+            }
+            let tokens = query.split(separator: " ").map(String.init)
+            var current: [UUID: Entry] = [:]
+            current.reserveCapacity(tabs.count)
+            var ranked: [(BrowserTab, Int, Int)] = []
+            for (index, tab) in tabs.enumerated() {
+                let entry: Entry
+                if let cached = entries[tab.id], cached.matches(tab) { entry = cached }
+                else { entry = Entry(tab) }
+                current[tab.id] = entry
+                let title = entry.normalizedTitle, addresses = entry.addresses
+                let rank: Int
+                if title == query { rank = 0 }
+                else if title.hasPrefix(query) { rank = 1 }
+                else if title.contains(query) { rank = 2 }
+                else if entry.sites.contains(where: { $0.hasPrefix(query) }) || addresses.contains(where: { $0.hasPrefix(query) }) { rank = 3 }
+                else if addresses.contains(where: { $0.contains(query) }) { rank = 4 }
+                else if tokens.allSatisfy({ token in title.contains(token) || addresses.contains(where: { $0.contains(token) }) }) { rank = 5 }
+                else { continue }
+                ranked.append((tab, rank, index))
+            }
+            entries = current
+            return ranked.sorted { lhs, rhs in
+                if lhs.1 != rhs.1 { return lhs.1 < rhs.1 }
+                if (lhs.0.id == activeID) != (rhs.0.id == activeID) { return lhs.0.id == activeID }
+                return lhs.2 < rhs.2
+            }.prefix(limit).map { $0.0 }
+        }
+    }
+
+    /// Stateless callers retain the original API; a live results view reuses
+    /// its own index across typing and asynchronous suggestion updates.
+    static func matches(tabs: [BrowserTab], query: String, activeID: UUID, limit: Int = 6) -> [BrowserTab] {
+        var index = Index()
+        return index.matches(tabs: tabs, query: query, activeID: activeID, limit: limit)
     }
 
     private static func normalized(_ value: String) -> String {
@@ -65,6 +118,7 @@ enum TabSearchMatcher {
         }
     }
     private var entries: [Entry] = []
+    private var searchIndex = TabSearchMatcher.Index()
     private var rows: [TabSearchResultRow] = []
     private var engineURL: URL?
     private var lastQuery = ""
@@ -103,13 +157,14 @@ enum TabSearchMatcher {
         engineURL = engine.flatMap { URL(string: "https://\($0.host)") }
         entries = []
         if engine != nil {
+            searchIndex = TabSearchMatcher.Index()
             // Scoped to one site: the typed text searches it, suggestions refine it.
             if !trimmed.isEmpty { entries.append(.search(trimmed)) }
             entries += suggestions.filter { $0.caseInsensitiveCompare(trimmed) != .orderedSame }
                 .prefix(5).map(Entry.search)
         } else {
             if canCreate && !trimmed.isEmpty { entries.append(.query(trimmed)) }
-            entries += TabSearchMatcher.matches(tabs: tabs, query: trimmed, activeID: activeID).map(Entry.tab)
+            entries += searchIndex.matches(tabs: tabs, query: trimmed, activeID: activeID).map(Entry.tab)
             let room = max(0, 8 - entries.count)
             entries += suggestions.filter { $0.caseInsensitiveCompare(trimmed) != .orderedSame }
                 .prefix(min(3, room)).map(Entry.search)
