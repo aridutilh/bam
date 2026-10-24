@@ -148,6 +148,7 @@ import WebKit
     private var themeExpanded = false
     private let createButton = NSButton(title: "Create Space", target: nil, action: nil)
     private let cancelButton = NSButton(title: "Cancel", target: nil, action: nil)
+    private let nameError = NSTextField(wrappingLabelWithString: "Use 1–60 characters without control characters.")
     private let profiles: [BrowserProfile]
     private(set) var selectedProfileID: UUID
     private(set) var selectedColorIndex: Int
@@ -185,7 +186,13 @@ import WebKit
                          .font: NSFont.systemFont(ofSize: 13, weight: .medium)])
         nameField.setAccessibilityLabel("Space name")
         nameField.escape = { [weak self] in self?.onCancel?() }
+        nameField.delegate = self
         nameRow.addSubview(nameField)
+        nameError.font = .systemFont(ofSize: 11)
+        nameError.textColor = NSColor(srgbRed: 1, green: 0.62, blue: 0.56, alpha: 1)
+        nameError.alignment = .center
+        nameError.isHidden = true
+        addSubview(nameError)
 
         addSubview(profileRow)
         profileIcon.image = NSImage(systemSymbolName: "person.crop.square", accessibilityDescription: nil)
@@ -298,25 +305,43 @@ import WebKit
         onCreate?(nameField.stringValue, selectedColorIndex, selectedProfileID)
     }
     @objc private func cancel() { onCancel?() }
-
-    var preferredThemeRowsHeight: CGFloat { themeExpanded ? 44 : 0 }
+    func showNameError() {
+        nameError.isHidden = false
+        window?.makeFirstResponder(nameField)
+        nameField.selectText(nil)
+        needsLayout = true
+    }
+    func controlTextDidChange(_ obj: Notification) {
+        if obj.object as AnyObject? === nameField { nameError.isHidden = true }
+    }
 
     override func layout() {
         super.layout()
         let margin: CGFloat = 20
         let cw = bounds.width - margin * 2
-        stack.frame = NSRect(x: bounds.midX - 40, y: 96, width: 80, height: 76)
-        title.frame = NSRect(x: margin, y: 186, width: cw, height: 22)
-        subtitle.frame = NSRect(x: margin + 8, y: 212, width: cw - 16, height: 34)
-        nameRow.frame = NSRect(x: margin, y: 268, width: cw, height: 42)
+        // Flow from the top; short windows drop the illustration, and the
+        // action buttons never ride up over the content.
+        let compact = bounds.height < 560
+        stack.isHidden = compact
+        var y: CGFloat = compact ? 28 : 96
+        if !compact {
+            stack.frame = NSRect(x: bounds.midX - 40, y: y, width: 80, height: 76)
+            y += 90
+        }
+        title.frame = NSRect(x: margin, y: y, width: cw, height: 22); y += 26
+        subtitle.frame = NSRect(x: margin + 8, y: y, width: cw - 16, height: 34); y += 56
+        nameRow.frame = NSRect(x: margin, y: y, width: cw, height: 42); y += 50
         nameIcon.frame = NSRect(x: 12, y: 12, width: 18, height: 18)
         nameField.frame = NSRect(x: 40, y: 12, width: nameRow.bounds.width - 52, height: 19)
-        profileRow.frame = NSRect(x: margin, y: 318, width: cw, height: 42)
+        if !nameError.isHidden {
+            nameError.frame = NSRect(x: margin, y: y - 6, width: cw, height: 15); y += 16
+        }
+        profileRow.frame = NSRect(x: margin, y: y, width: cw, height: 42); y += 50
         profileIcon.frame = NSRect(x: 12, y: 12, width: 18, height: 18)
         profileLabel.frame = NSRect(x: 40, y: 13, width: 70, height: 17)
         let chipWidth = max(54, profileChip.fittingSize.width + 14)
         profileChip.frame = NSRect(x: 40 + 70 + 6, y: 11, width: min(chipWidth, profileRow.bounds.width - 128), height: 20)
-        themeRow.frame = NSRect(x: margin, y: 368, width: cw, height: 42)
+        themeRow.frame = NSRect(x: margin, y: y, width: cw, height: 42); y += 50
         themeIcon.frame = NSRect(x: 12, y: 12, width: 18, height: 18)
         themeLabel.frame = NSRect(x: 40, y: 13, width: themeRow.bounds.width - 52, height: 17)
         if themeExpanded {
@@ -326,14 +351,18 @@ import WebKit
             let total = CGFloat(count) * size + CGFloat(count - 1) * spacing
             var x = bounds.midX - total / 2
             for swatch in swatches {
-                swatch.frame = NSRect(x: x, y: 420, width: size, height: size)
+                swatch.frame = NSRect(x: x, y: y, width: size, height: size)
                 x += size + spacing
             }
+            y += size + 12
         }
-        createButton.frame = NSRect(x: margin, y: bounds.height - 96, width: cw, height: 40)
-        cancelButton.frame = NSRect(x: margin, y: bounds.height - 48, width: cw, height: 24)
+        let buttonsTop = max(y + 12, bounds.height - 96)
+        createButton.frame = NSRect(x: margin, y: buttonsTop, width: cw, height: 40)
+        cancelButton.frame = NSRect(x: margin, y: buttonsTop + 48, width: cw, height: 24)
     }
 }
+
+extension SpaceCreationPanel: NSTextFieldDelegate {}
 
 extension BrowserController {
     func nextSpaceName() -> String {
@@ -366,6 +395,9 @@ extension BrowserController {
         guard spaceCreationPanel == nil else { return }
         guard session.spaces.count < BrowserSession.maximumSpaces else { NSSound.beep(); return }
         dismissAddress()
+        // Stop the rubber-band settle; its per-frame preview writes and
+        // completion would otherwise clobber the panel's theme preview.
+        cancelPaging()
         let initialColor = session.spaces.count % CanvasView.palettes.count
         let panel = SpaceCreationPanel(profiles: session.profiles, defaultName: nextSpaceName(), initialColorIndex: initialColor)
         panel.onCancel = { [weak self] in self?.dismissSpaceCreation() }
@@ -388,6 +420,13 @@ extension BrowserController {
             panel.animator().alphaValue = 1
         }
         view.window?.makeFirstResponder(panel.nameField)
+        // Escape cancels wherever focus sits, including the web page.
+        spaceCreationKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self, self.spaceCreationPanel != nil, event.keyCode == 53,
+                  event.window === self.view.window, self.addressOverlay == nil else { return event }
+            self.dismissSpaceCreation()
+            return nil
+        }
     }
 
     func layoutSpaceCreation() {
@@ -398,6 +437,7 @@ extension BrowserController {
 
     func dismissSpaceCreation() {
         guard let panel = spaceCreationPanel else { return }
+        if let monitor = spaceCreationKeyMonitor { NSEvent.removeMonitor(monitor); spaceCreationKeyMonitor = nil }
         spaceCreationPanel = nil
         panel.removeFromSuperview()
         sidebar.isHidden = false
@@ -410,7 +450,8 @@ extension BrowserController {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let finalName = trimmed.isEmpty ? nextSpaceName() : trimmed
         guard let id = session.createSpace(name: finalName, symbol: "sparkles", colorIndex: colorIndex, profileID: profileID) else {
-            NSSound.beep(); return
+            // The Space cap was checked before opening; a refusal here means the name.
+            spaceCreationPanel?.showNameError(); NSSound.beep(); return
         }
         dismissSpaceCreation()
         changeSpace(id)
