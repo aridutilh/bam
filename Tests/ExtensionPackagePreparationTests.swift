@@ -168,6 +168,35 @@ import CryptoKit
             try fm.createSymbolicLink(at: root.appendingPathComponent("package-alias"), withDestinationURL: $0)
         }, backup: { _ in root.appendingPathComponent("package-alias/original-manifest.json") })
 
+        // A nonexistent backup leaf and an existing package can retain different
+        // spellings of macOS's system temporary-directory alias. Both directions
+        // must reject an inside backup without changing any package contents.
+        let aliasName = "bam-preparation-alias-" + UUID().uuidString
+        let aliasRoot = URL(fileURLWithPath: "/private/tmp/" + aliasName, isDirectory: true)
+        try fm.createDirectory(at: aliasRoot, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: aliasRoot) }
+        for (index, prefixes) in [("/private/tmp/", "/tmp/"), ("/tmp/", "/private/tmp/")].enumerated() {
+            let suffix = aliasName + "/case-\(index)"
+            let packageURL = URL(fileURLWithPath: prefixes.0 + suffix, isDirectory: true)
+            try fm.createDirectory(at: packageURL, withIntermediateDirectories: true)
+            let manifestURL = packageURL.appendingPathComponent("manifest.json")
+            let bytes = try manifest()
+            try bytes.write(to: manifestURL)
+            try Data("globalThis.aliasFixture = true;".utf8).write(to: packageURL.appendingPathComponent("background.js"))
+            let entries = try fm.contentsOfDirectory(atPath: packageURL.path).sorted()
+            let inside = URL(fileURLWithPath: prefixes.1 + suffix + "/original-manifest.json")
+            var rejected = false
+            do { _ = try ExtensionPackagePreparation.prepare(package: packageURL, originalManifestURL: inside) }
+            catch { rejected = true }
+            try check(rejected, "System temporary aliases must not bypass inside-backup rejection (\(index))")
+            try check(try Data(contentsOf: manifestURL) == bytes && fm.contentsOfDirectory(atPath: packageURL.path).sorted() == entries,
+                      "Alias rejection must leave the original manifest and package entries unchanged (\(index))")
+            let outside = URL(fileURLWithPath: prefixes.1 + aliasName + "/outside-\(index).json")
+            let response = try ExtensionPackagePreparation.prepare(package: packageURL, originalManifestURL: outside)
+            try check(response != nil && Data(contentsOf: outside) == bytes,
+                      "A new external sibling backup through an alias must remain supported (\(index))")
+        }
+
         // The size limit is inclusive, not an approximate character-count limit.
         var exact = try manifest()
         exact.append(Data(repeating: 32, count: 1_048_576 - exact.count))
