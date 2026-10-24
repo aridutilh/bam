@@ -16,6 +16,10 @@ import WebKit
     private var panelTime = 0.0
     private var restoreCount = 0
     private var cycle = 0
+    private weak var returningPanel: NSWindow?
+    private var oldMarker = false
+    private var newMarker = true
+    private var renderedCoverChecks = 0
     private var explicitReturns: [UUID] = []
     private var automaticCompletions: [String: [Bool]] = [:]
     private let focusField = NSTextField(string: "Typing continues in the selected tab")
@@ -40,6 +44,7 @@ import WebKit
         window.makeKeyAndOrderFront(nil)
         coordinator.onChange = { [weak self] in self?.pictureInPictureChanged() }
         coordinator.onReturnToTab = { [weak self] id in self?.explicitReturns.append(id) }
+        coordinator.onRestorationReady = { [weak self] web in self?.checkRenderedCover(web) }
         timeout = Timer.scheduledTimer(withTimeInterval: 45, repeats: false) { [weak self] _ in
             DispatchQueue.main.async { self?.finish(false, "Timed out") }
         }
@@ -61,6 +66,15 @@ import WebKit
                 video.muted = true; video.loop = true; video.controls = false;
                 video.setAttribute('style', 'border-radius: 11px;');
                 document.body.style.padding = '7px';
+                const marker = document.createElement('div');
+                marker.id = 'orbit-render-marker';
+                marker.style.cssText = 'position:fixed;left:0;top:0;width:28px;height:28px;z-index:2147483646;';
+                for (let index = 0; index < 4; index++) {
+                    const cell = document.createElement('span');
+                    cell.style.cssText = `position:absolute;left:${index % 2 * 14}px;top:${Math.floor(index / 2) * 14}px;width:14px;height:14px;background:${index === 0 || index === 3 ? '#fff' : '#000'};`;
+                    marker.append(cell);
+                }
+                document.body.append(marker);
                 window.__orbitSmokeVideo = video;
                 window.__orbitSmokeStyles = [video.getAttribute('style'), document.body.getAttribute('style'), document.documentElement.getAttribute('style')];
                 await video.play();
@@ -81,7 +95,7 @@ import WebKit
                     let passed = message.hasPrefix("No HTML5 video found.") && self.coordinator.activeTabID == nil && !self.coordinator.owns(self.web) && self.web.superview === self.host
                     let expected = ["empty": [false], "paused": [false], "initialGuard": [false], "staleGuard": [false], "cancelled": [false], "presented": [true], "busy": [false]]
                     guard self.automaticCompletions == expected else { self.finish(false, "Automatic completion was not delivered exactly once per terminal result: \(self.automaticCompletions)"); return }
-                    self.finish(passed, "Manual and automatic PiP: live video identity/time, rounded aspect-fit panel, native pause/play/seek bounds/volume/mute/resize/Return, restored DOM before reveal, close/Escape; playing-only automatic detection, focus retention, stale-guard/pending cancellation, no replacement, and no-video handling")
+                    self.finish(passed, "Fresh page-cover pixel checks and cancellation, final-size presentation, manual and automatic PiP: live video identity/time, rounded aspect-fit panel, native pause/play/seek bounds/volume/mute/resize/Return, restored DOM before reveal, close/Escape; playing-only automatic detection, focus retention, stale-guard/pending cancellation, no replacement, and no-video handling")
                 })
             }
         default: break
@@ -128,6 +142,10 @@ import WebKit
             }
             stage = .playing
             after(0.75) {
+                guard self.coordinator.presentationReady, floating.alphaValue > 0.99,
+                      self.control("presentationCover", in: floating.contentView) == nil else {
+                    self.finish(false, "PiP was not revealed from a rendered final-size frame"); return
+                }
                 self.web.evaluateJavaScript("({same: document.querySelector('video') === window.__orbitSmokeVideo, time: window.__orbitSmokeVideo.currentTime, controls: window.__orbitSmokeVideo.controls, width: window.__orbitSmokeVideo.getBoundingClientRect().width, height: window.__orbitSmokeVideo.getBoundingClientRect().height, ratio: window.__orbitSmokeVideo.videoWidth / window.__orbitSmokeVideo.videoHeight, viewport: window.innerWidth, viewportHeight: window.innerHeight})") { [weak self] value, error in
                     guard let self else { return }
                     guard error == nil, let info = value as? [String: Any], info["same"] as? Bool == true,
@@ -143,15 +161,34 @@ import WebKit
                 }
             }
         } else if stage == .returning {
-            guard coordinator.activeTabID == nil, !coordinator.owns(web), web.superview === host, restoreCount == cycle + 1, web.alphaValue == 0 else {
-                finish(false, "Return-to-tab callback or ownership failed"); return
+            let cover = control("restorationCover", in: web) as? NSImageView
+            let still = control("panelSnapshot", in: returningPanel?.contentView) as? NSImageView
+            let checks: [(String, Bool)] = [
+                ("activeTabCleared", coordinator.activeTabID == nil),
+                ("ownershipReleased", !coordinator.owns(web)),
+                ("originalHostRestored", web.superview === host),
+                ("restoreCallbackCount", restoreCount == cycle + 1),
+                ("restorationActive", coordinator.isRestoring(web)),
+                ("oldPanelVisible", returningPanel?.isVisible == true),
+                ("pageCoverExists", cover != nil),
+                ("pageCoverOpaque", cover?.alphaValue == 1),
+                ("originalPagePixels", image(cover?.image, containsMarker: oldMarker)),
+                ("panelStillExists", still != nil),
+                ("panelStillHasImage", still?.image != nil)
+            ]
+            let failed = checks.filter { !$0.1 }.map { $0.0 }
+            guard failed.isEmpty else {
+                finish(false, "Return handoff failed [\(failed.joined(separator: ", "))]; cycle=\(cycle), callbacks=\(restoreCount), webBounds=\(web.bounds), coverFrame=\(String(describing: cover?.frame)), coverAlpha=\(String(describing: cover?.alphaValue)), panelVisible=\(String(describing: returningPanel?.isVisible)), panelAlpha=\(String(describing: returningPanel?.alphaValue)), marker=\(markerDiagnostics(cover?.image, expected: oldMarker))")
+                return
             }
             stage = .restored
-            after(0.5) {
+            afterRestoration {
                 self.web.evaluateJavaScript("({same: document.querySelector('video') === window.__orbitSmokeVideo, time: window.__orbitSmokeVideo.currentTime, controls: window.__orbitSmokeVideo.controls, actualStyles: [window.__orbitSmokeVideo.getAttribute('style'),document.body.getAttribute('style'),document.documentElement.getAttribute('style')], expectedStyles: window.__orbitSmokeStyles, styles: JSON.stringify([window.__orbitSmokeVideo.getAttribute('style'),document.body.getAttribute('style'),document.documentElement.getAttribute('style')].map(value => value || '')) === JSON.stringify(window.__orbitSmokeStyles.map(value => value || ''))})") { [weak self] value, error in
                     guard let self else { return }
                     guard error == nil, let info = value as? [String: Any], info["same"] as? Bool == true,
                           info["styles"] as? Bool == true, info["controls"] as? Bool == false, self.web.alphaValue == 1,
+                          self.renderedCoverChecks == self.cycle + 1, self.returningPanel?.isVisible != true,
+                          self.control("restorationCover", in: self.web) == nil,
                           let time = info["time"] as? Double, time > self.panelTime + 0.1 else {
                         self.finish(false, "DOM/style/control restoration or continued playback failed: \(value ?? "nil")"); return
                     }
@@ -167,7 +204,10 @@ import WebKit
     }
 
     private func finishManualCycle(in floating: NSPanel) {
-        web.evaluateJavaScript("window.__orbitSmokeVideo.currentTime") { [weak self] value, _ in
+        oldMarker = !cycle.isMultiple(of: 2)
+        newMarker = cycle.isMultiple(of: 2)
+        returningPanel = floating
+        web.evaluateJavaScript("Array.from(document.getElementById('orbit-render-marker').children).forEach((cell, index) => { cell.style.background = ((index === 0 || index === 3) !== \(newMarker ? "true" : "false")) ? '#fff' : '#000'; }); window.__orbitSmokeVideo.currentTime") { [weak self] value, _ in
             guard let self, let time = value as? Double else { return }
             self.panelTime = time
             self.stage = .returning
@@ -178,6 +218,78 @@ import WebKit
             } else if let button = self.control("return", in: floating.contentView) as? NSButton { button.performClick(nil) }
             else { self.finish(false, "Return control missing") }
         }
+    }
+
+    private func checkRenderedCover(_ returned: WKWebView) {
+        guard stage == .restored || stage == .automaticRestored else { return }
+        guard returned === web, coordinator.restorationHasRendered(web),
+              let cover = control("restorationCover", in: web) as? NSImageView,
+              cover.alphaValue == 1, image(cover.image, containsMarker: newMarker) else {
+            let cover = control("restorationCover", in: returned) as? NSImageView
+            finish(false, "Fresh destination cover failed: cycle=\(cycle), sameWeb=\(returned === web), rendered=\(coordinator.restorationHasRendered(web)), coverAlpha=\(String(describing: cover?.alphaValue)), marker=\(markerDiagnostics(cover?.image, expected: newMarker))"); return
+        }
+        renderedCoverChecks += 1
+    }
+
+    private func image(_ image: NSImage?, containsMarker inverted: Bool) -> Bool {
+        guard let image, let data = image.tiffRepresentation, let bitmap = NSBitmapImageRep(data: data),
+              image.size.width > 0, image.size.height > 0 else { return false }
+        // TIFF/colorAt may interpret RGB bytes as Generic RGB before sRGB
+        // conversion. Black/white endpoints avoid profile-dependent chromatic
+        // shifts; all four cells must match the old or newly inverted pattern.
+        return [false, true].contains { verticallyFlipped in
+            (0..<4).allSatisfy { index in
+                let pointX = CGFloat(index % 2 * 14 + 7)
+                let pointY = CGFloat(index / 2 * 14 + 7)
+                let x = min(bitmap.pixelsWide - 1, Int(pointX * CGFloat(bitmap.pixelsWide) / image.size.width))
+                let imageY = min(bitmap.pixelsHigh - 1, Int(pointY * CGFloat(bitmap.pixelsHigh) / image.size.height))
+                let y = verticallyFlipped ? bitmap.pixelsHigh - imageY - 1 : imageY
+                guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.sRGB), color.alphaComponent > 0.99 else { return false }
+                let white = (index == 0 || index == 3) != inverted
+                let channels = [color.redComponent, color.greenComponent, color.blueComponent]
+                return white ? channels.allSatisfy { $0 > 0.98 } : channels.allSatisfy { $0 < 0.02 }
+            }
+        }
+    }
+
+    private func markerDiagnostics(_ image: NSImage?, expected inverted: Bool) -> String {
+        guard let image else { return "image=nil" }
+        guard let data = image.tiffRepresentation, let bitmap = NSBitmapImageRep(data: data),
+              image.size.width > 0, image.size.height > 0 else { return "unreadable image size=\(image.size)" }
+        func components(_ color: NSColor?) -> String {
+            guard let color = color?.usingColorSpace(.sRGB) else { return "unavailable" }
+            return String(format: "(%.3f,%.3f,%.3f,%.3f)", Double(color.redComponent), Double(color.greenComponent), Double(color.blueComponent), Double(color.alphaComponent))
+        }
+        let samples = [false, true].map { flipped in
+            let cells = (0..<4).map { index -> String in
+                let x = min(bitmap.pixelsWide - 1, Int(CGFloat(index % 2 * 14 + 7) * CGFloat(bitmap.pixelsWide) / image.size.width))
+                let imageY = min(bitmap.pixelsHigh - 1, Int(CGFloat(index / 2 * 14 + 7) * CGFloat(bitmap.pixelsHigh) / image.size.height))
+                let y = flipped ? bitmap.pixelsHigh - imageY - 1 : imageY
+                return "(\(x),\(y))=" + components(bitmap.colorAt(x: x, y: y))
+            }.joined(separator: ";")
+            return "flipped=\(flipped):" + cells
+        }.joined(separator: " / ")
+        return "size=\(image.size), bitmap=\(bitmap.pixelsWide)x\(bitmap.pixelsHigh), colorSpace=\(bitmap.colorSpace), expected=\(inverted ? "BWWB" : "WBBW"), samples=\(samples)"
+    }
+
+    private func afterRestoration(_ action: @escaping () -> Void) {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                try await self.waitForRestoration()
+                try await Task.sleep(nanoseconds: 150_000_000)
+                guard self.stage != .finished else { return }
+                action()
+            } catch { self.finish(false, "Visual restoration did not finish: \(error)") }
+        }
+    }
+
+    private func waitForRestoration() async throws {
+        for _ in 0..<120 {
+            if !coordinator.isRestoring(web) { return }
+            try await Task.sleep(nanoseconds: 25_000_000)
+        }
+        throw ControlFailure(message: "Timed out waiting for the restored page cover")
     }
 
     private func control(_ name: String, in root: NSView?) -> NSView? {
@@ -250,8 +362,16 @@ import WebKit
             do {
                 self.coordinator.toggle(web: self.web, tabID: self.tabID, restore: restore, report: report)
                 try await self.waitForOwnership(true)
+                let firstPanel = self.web.window
                 self.coordinator.restore()
+                guard self.coordinator.isRestoring(self.web), self.control("restorationCover", in: self.web) != nil else {
+                    throw ControlFailure(message: "Rapid return had no protected destination surface")
+                }
                 self.coordinator.toggle(web: self.web, tabID: self.tabID, restore: restore, report: report)
+                guard !self.coordinator.isRestoring(self.web), firstPanel?.isVisible != true,
+                      self.control("restorationCover", in: self.web) == nil else {
+                    throw ControlFailure(message: "Re-float did not synchronously cancel its old cover/window")
+                }
                 try await self.waitForOwnership(true)
                 try await Task.sleep(nanoseconds: 250_000_000)
                 guard self.web.alphaValue == 1, self.web.window !== self.window else {
@@ -260,7 +380,9 @@ import WebKit
                 try await self.waitForJavaScript("document.querySelector('video') === window.__orbitSmokeVideo && !window.__orbitSmokeVideo.controls && getComputedStyle(window.__orbitSmokeVideo).position === 'fixed'")
                 self.coordinator.restore()
                 try await self.waitForJavaScript("JSON.stringify([window.__orbitSmokeVideo.getAttribute('style'), document.body.getAttribute('style'), document.documentElement.getAttribute('style')].map(value => value || '')) === JSON.stringify(window.__orbitSmokeStyles.map(value => value || ''))")
-                guard self.web.superview === self.host, self.web.alphaValue == 1 else {
+                try await self.waitForRestoration()
+                guard self.web.superview === self.host, self.web.alphaValue == 1,
+                      self.control("restorationCover", in: self.web) == nil else {
                     throw ControlFailure(message: "Re-float cycle did not restore its original host/visibility")
                 }
                 self.testAutomaticPaused()
@@ -368,7 +490,7 @@ import WebKit
     private func automaticReturned() {
         stage = .automaticRestored
         guard coordinator.referencedTabID == nil, !coordinator.references(web), web.superview === host else { finish(false, "Automatic return retained stale ownership"); return }
-        after(0.4) {
+        afterRestoration {
             self.web.evaluateJavaScript("({same: document.querySelector('video') === window.__orbitSmokeVideo, time: window.__orbitSmokeVideo.currentTime, controls: window.__orbitSmokeVideo.controls, styles: JSON.stringify([window.__orbitSmokeVideo.getAttribute('style'),document.body.getAttribute('style'),document.documentElement.getAttribute('style')].map(value => value || '')) === JSON.stringify(window.__orbitSmokeStyles.map(value => value || ''))})") { [weak self] value, error in
                 guard let self else { return }
                 guard error == nil, let info = value as? [String: Any], info["same"] as? Bool == true, info["controls"] as? Bool == false, info["styles"] as? Bool == true, let time = info["time"] as? Double, time > self.panelTime + 0.1,

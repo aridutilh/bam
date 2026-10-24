@@ -8,6 +8,8 @@ import QuartzCore
     private(set) var activeTabID: UUID?
     var referencedTabID: UUID? { activeTabID ?? pendingTabID }
     var onChange: (() -> Void)?
+    /// A fresh destination snapshot is installed, immediately before uncovering.
+    var onRestorationReady: ((WKWebView) -> Void)?
     /// Explicit user intent only; silent restore/navigation never selects a tab.
     var onReturnToTab: ((UUID) -> Void)?
     private var webView: WKWebView?
@@ -18,8 +20,15 @@ import QuartzCore
     private var chrome: PiPOverlayView?
     private var mediaTimer: Timer?
     private var pollingToken: UUID?
-    private var restorationTokens: [ObjectIdentifier: UUID] = [:]
-    private var restorationAlphas: [ObjectIdentifier: CGFloat] = [:]
+    private var restorations: [ObjectIdentifier: PiPRestoration] = [:]
+    private var pageSnapshot: NSImage?
+    private var videoSnapshot: NSImage?
+    private var sourceCover: PiPTransitionImage?
+    private var presentationCover: PiPTransitionImage?
+    private var snapshotToken: UUID?
+    private var lastSnapshotTime: TimeInterval = 0
+    private var presentationDeadline: DispatchWorkItem?
+    private(set) var presentationReady = false
     private var originalAlpha: CGFloat = 1
     private var restoreView: ((WKWebView) -> Void)?
     private var reportMessage: ((String) -> Void)?
@@ -28,6 +37,10 @@ import QuartzCore
     private var requestID = UUID()
     private var originalAutoresizing: NSView.AutoresizingMask = []
     private let world = WKContentWorld.world(name: "OrbitPictureInPicture")
+
+    /// Includes the short paint/cover handoff after synchronous ownership release.
+    func isRestoring(_ web: WKWebView) -> Bool { restorations[ObjectIdentifier(web)] != nil }
+    func restorationHasRendered(_ web: WKWebView) -> Bool { restorations[ObjectIdentifier(web)]?.ready == true }
 
     func owns(_ web: WKWebView) -> Bool { webView === web }
     func references(_ web: WKWebView) -> Bool { webView === web || pendingWebView === web }
@@ -48,9 +61,9 @@ import QuartzCore
     private func begin(web: WKWebView, tabID: UUID, automatic: Bool, shouldPresent: @escaping () -> Bool, restore: @escaping (WKWebView) -> Void, report: ((String) -> Void)?, completion: ((Bool) -> Void)? = nil) {
         guard shouldPresent() else { complete(completion, presented: false); return }
         let identity = ObjectIdentifier(web)
-        if let alpha = restorationAlphas.removeValue(forKey: identity) { web.alphaValue = alpha }
-        restorationTokens.removeValue(forKey: identity)
-        web.layer?.removeAnimation(forKey: "ArkPiPRestoreOpacity")
+        restorations.removeValue(forKey: identity)?.cancel()
+        sourceCover?.removeFromSuperview(); sourceCover = nil
+        pageSnapshot = nil; videoSnapshot = nil; presentationReady = false
         let token = UUID()
         requestID = token
         pendingWebView = web
@@ -63,39 +76,50 @@ import QuartzCore
             .replacingOccurrences(of: "__ORBIT_TOKEN__", with: token.uuidString)
             .replacingOccurrences(of: "__ORBIT_REQUIRE_PLAYING__", with: automatic ? "true" : "false")
             .replacingOccurrences(of: "__ORBIT_RESTORE_FOCUS__", with: automatic ? "false" : "true")
-        web.evaluateJavaScript(script, in: nil, in: world) { [weak self, weak web] result in
-            guard let self, let web else { return }
-            guard self.requestID == token else { self.removeIsolation(from: web, token: token); return }
-            guard shouldPresent(), self.requestID == token else { self.cancelPending(web, token: token); return }
-            guard web.url == startingURL, wasLoading || !web.isLoading else {
-                self.cancelPending(web, token: token)
-                report?("The page changed. Try Picture in Picture again.")
-                return
-            }
-            switch result {
-            case .failure:
-                self.cancelPending(web, token: token)
-                report?("Could not access a video on this page.")
-            case .success(let value):
-                guard let info = value as? [String: Any], info["found"] as? Bool == true,
-                      !automatic || info["playing"] as? Bool == true else {
+        // Capture the normal page before any isolation CSS. This is also the
+        // destination cover on return; an enlarged video still must never cover
+        // the whole browser card.
+        takeSnapshot(of: web) { [weak self, weak web] image in
+            guard let self, let web, self.requestID == token else { return }
+            guard shouldPresent() else { self.cancelPending(web, token: token); return }
+            self.pageSnapshot = image
+            let cover = PiPTransitionImage(image: image, frame: web.bounds, identifier: "pip.sourceCover")
+            web.addSubview(cover); self.sourceCover = cover
+            web.evaluateJavaScript(script, in: nil, in: self.world) { [weak self, weak web] result in
+                guard let self, let web else { return }
+                guard self.requestID == token else { self.removeIsolation(from: web, token: token); return }
+                guard shouldPresent(), self.requestID == token else { self.cancelPending(web, token: token); return }
+                guard web.url == startingURL, wasLoading || !web.isLoading else {
                     self.cancelPending(web, token: token)
-                    report?("No HTML5 video found. Videos inside other sites’ embedded frames may be inaccessible.")
+                    report?("The page changed. Try Picture in Picture again.")
                     return
                 }
-                self.pendingWebView = nil
-                self.pendingTabID = nil
-                let completion = self.pendingCompletion
-                self.pendingCompletion = nil
-                self.present(web: web, tabID: tabID, automatic: automatic,
-                             width: (info["width"] as? NSNumber)?.doubleValue ?? 16,
-                             height: (info["height"] as? NSNumber)?.doubleValue ?? 9,
-                             restore: restore, report: report)
-                // The same media element remains alive. Only resume playback
-                // that was active when isolation began, if reparenting paused it.
-                let resume = "if (globalThis.__orbitPiPState?.token === '\(token.uuidString)') globalThis.__orbitPiPState.resumeIfNeeded(); undefined"
-                web.evaluateJavaScript(resume, in: nil, in: self.world) { _ in }
-                self.complete(completion, presented: true)
+                switch result {
+                case .failure:
+                    self.cancelPending(web, token: token)
+                    report?("Could not access a video on this page.")
+                case .success(let value):
+                    guard let info = value as? [String: Any], info["found"] as? Bool == true,
+                          !automatic || info["playing"] as? Bool == true else {
+                        self.cancelPending(web, token: token)
+                        report?("No HTML5 video found. Videos inside other sites’ embedded frames may be inaccessible.")
+                        return
+                    }
+                    self.videoSnapshot = PiPVideoGeometry(info["geometry"])?.crop(from: image)
+                    self.pendingWebView = nil
+                    self.pendingTabID = nil
+                    let completion = self.pendingCompletion
+                    self.pendingCompletion = nil
+                    self.present(web: web, tabID: tabID, automatic: automatic,
+                                 width: (info["width"] as? NSNumber)?.doubleValue ?? 16,
+                                 height: (info["height"] as? NSNumber)?.doubleValue ?? 9,
+                                 restore: restore, report: report)
+                    // The same media element remains alive. Only resume playback
+                    // that was active when isolation began, if reparenting paused it.
+                    let resume = "if (globalThis.__orbitPiPState?.token === '\(token.uuidString)') globalThis.__orbitPiPState.resumeIfNeeded(); undefined"
+                    web.evaluateJavaScript(resume, in: nil, in: self.world) { _ in }
+                    self.complete(completion, presented: true)
+                }
             }
         }
     }
@@ -117,6 +141,8 @@ import QuartzCore
             pendingCompletion = nil
             urlObservation = nil
             loadingObservation = nil
+            sourceCover?.removeFromSuperview(); sourceCover = nil
+            pageSnapshot = nil; videoSnapshot = nil
         }
         removeIsolation(from: web, token: token)
         complete(completion, presented: false)
@@ -136,51 +162,138 @@ import QuartzCore
         urlObservation = nil
         loadingObservation = nil
         pendingTabID = nil
-        mediaTimer?.invalidate(); mediaTimer = nil; pollingToken = nil
+        mediaTimer?.invalidate(); mediaTimer = nil; pollingToken = nil; snapshotToken = nil
+        presentationDeadline?.cancel(); presentationDeadline = nil
         if let pending = pendingWebView {
             pendingWebView = nil
             removeIsolation(from: pending, token: oldToken)
         }
+        sourceCover?.removeFromSuperview(); sourceCover = nil
         guard let web = webView else { complete(completion, presented: false); return }
         let callback = restoreView
         let oldPanel = panel
         let identity = ObjectIdentifier(web)
-        let alpha = originalAlpha
-        webView = nil
-        activeTabID = nil
-        panel = nil
-        chrome?.stop(); chrome = nil
-        restoreView = nil
-        reportMessage = nil
-        // Ownership transfers synchronously. Hide only this view until its
-        // isolated DOM has been restored, so a fullscreen video cannot flash
-        // across the destination page during the asynchronous JavaScript reply.
-        restorationTokens[identity] = oldToken
-        restorationAlphas[identity] = alpha
-        web.alphaValue = 0
+        let transfer = PiPRestoration(token: oldToken, web: web, alpha: originalAlpha, panel: oldPanel, image: pageSnapshot)
+        restorations[identity]?.cancel()
+        restorations[identity] = transfer
+        webView = nil; activeTabID = nil; panel = nil
+        chrome?.stop(); chrome = nil; presentationCover = nil; presentationReady = false
+        restoreView = nil; reportMessage = nil
+        // The old window holds only a still while the SAME web view transfers
+        // synchronously. Neither its DOM nor its viewport is animated.
+        oldPanel?.cancelPositioning()
+        oldPanel?.delegate = nil; oldPanel?.onEscape = nil; oldPanel?.overlay = nil
+        oldPanel?.ignoresMouseEvents = true
+        if let host = oldPanel?.contentView {
+            let still = PiPTransitionImage(image: videoSnapshot, frame: host.bounds, identifier: "pip.panelSnapshot")
+            host.subviews.filter { $0 !== web }.forEach { $0.removeFromSuperview() }
+            host.addSubview(still)
+        }
         web.removeFromSuperview()
         web.autoresizingMask = originalAutoresizing
-        oldPanel?.delegate = nil
-        oldPanel?.onEscape = nil
-        oldPanel?.overlay = nil
-        oldPanel?.orderOut(nil)
-        oldPanel?.close()
+        web.alphaValue = originalAlpha
+        web.addSubview(transfer.cover)
         callback?(web)
         onChange?()
-        removeIsolation(from: web, token: oldToken) { [weak self, weak web] in
-            guard let self, let web, self.restorationTokens[identity] == oldToken else { return }
-            self.restorationTokens.removeValue(forKey: identity)
-            self.restorationAlphas.removeValue(forKey: identity)
-            guard !self.references(web) else { return }
-            web.alphaValue = alpha
-            if !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion, let layer = web.layer {
-                let fade = CABasicAnimation(keyPath: "opacity")
-                fade.fromValue = 0; fade.toValue = alpha; fade.duration = 0.18
-                fade.timingFunction = CAMediaTimingFunction(name: .easeOut)
-                layer.add(fade, forKey: "ArkPiPRestoreOpacity")
+        transfer.cover.frame = web.bounds
+        // A failed/crashed WebContent process must not leave an inert cover or
+        // orphan panel indefinitely. Normal completion requires a fresh render.
+        let deadline = DispatchWorkItem { [weak self, weak transfer] in
+            guard let self, let transfer else { return }
+            self.finishRestoration(transfer, geometry: nil, rendered: false)
+        }
+        transfer.deadline = deadline
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2, execute: deadline)
+        restoreLayout(transfer)
+        complete(completion, presented: false)
+    }
+
+    private func restoreLayout(_ transfer: PiPRestoration) {
+        guard restorations[transfer.identity] === transfer else { return }
+        guard let web = transfer.web else {
+            restorations.removeValue(forKey: transfer.identity); transfer.cancel(); return
+        }
+        // A style mutation's JS reply precedes rendering. Two animation frames
+        // allow layout/resize work to settle. A short timer permits occluded
+        // windows (whose RAF is suspended) to proceed to the same viewport check
+        // and fresh WK snapshot; the timer alone never authorizes reveal.
+        web.callAsyncJavaScript("""
+            const state = globalThis.__orbitPiPState;
+            if (state?.token === token) {
+                state.restore();
+                globalThis.__orbitPiPRestoredState = {token, geometry: state.geometry};
+                delete globalThis.__orbitPiPState;
+            }
+            if (visible) await Promise.race([
+                new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))),
+                new Promise(resolve => setTimeout(resolve, 120))
+            ]);
+            if (globalThis.__orbitPiPState) return {ready: false};
+            const restored = globalThis.__orbitPiPRestoredState;
+            const ready = Math.abs(innerWidth - expectedWidth) < 2 && Math.abs(innerHeight - expectedHeight) < 2;
+            return {ready, geometry: restored?.token === token ? restored.geometry() : null};
+            """, arguments: ["token": transfer.token.uuidString, "visible": web.window != nil,
+                              "expectedWidth": web.bounds.width / web.pageZoom,
+                              "expectedHeight": web.bounds.height / web.pageZoom], in: nil, in: world) { [weak self, weak transfer] result in
+                guard let self, let transfer, let web = transfer.web,
+                      self.restorations[ObjectIdentifier(web)] === transfer, !transfer.finishing else { return }
+                if web.window == nil {
+                    self.finishRestoration(transfer, geometry: nil, rendered: false)
+                    return
+                }
+                guard case .success(let value) = result, let info = value as? [String: Any], info["ready"] as? Bool == true else {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.04) { [weak self, weak transfer] in
+                        if let transfer { self?.restoreLayout(transfer) }
+                    }
+                    return
+                }
+                let geometry = PiPVideoGeometry(info["geometry"])
+                let size = web.bounds.size
+                self.takeSnapshot(of: web) { [weak self, weak transfer] image in
+                    guard let self, let transfer, let web = transfer.web,
+                          self.restorations[ObjectIdentifier(web)] === transfer, !transfer.finishing else { return }
+                    guard size == web.bounds.size, let image else {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.04) { [weak self, weak transfer] in
+                            if let transfer { self?.restoreLayout(transfer) }
+                        }
+                        return
+                    }
+                    // This snapshot is the restored page at its final bounds.
+                    // Replace the older normal-page cover without an empty frame.
+                    transfer.cover.image = image
+                    self.finishRestoration(transfer, geometry: geometry, rendered: true)
+                }
+        }
+    }
+
+    private func finishRestoration(_ transfer: PiPRestoration, geometry: PiPVideoGeometry?, rendered: Bool) {
+        guard restorations[transfer.identity] === transfer, !transfer.finishing else { return }
+        guard let web = transfer.web else {
+            restorations.removeValue(forKey: transfer.identity); transfer.cancel(); return
+        }
+        transfer.finishing = true; transfer.ready = rendered
+        transfer.deadline?.cancel(); transfer.deadline = nil
+        web.alphaValue = transfer.alpha
+        if rendered { onRestorationReady?(web) }
+        guard restorations[transfer.identity] === transfer else { return }
+        let target = rendered ? geometry?.screenRect(in: web) : nil
+        let reduce = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = reduce ? 0 : 0.20
+            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            transfer.cover.animator().alphaValue = 0
+            // Only the inert snapshot window changes size, never live WebKit.
+            if let target, let panel = transfer.panel, panel.isVisible, panel.alphaValue > 0 {
+                panel.animator().setFrame(target, display: true)
+            }
+            transfer.panel?.animator().alphaValue = 0
+        } completionHandler: { [weak self, weak transfer] in
+            Task { @MainActor [weak self, weak transfer] in
+                guard let self, let transfer, self.restorations[transfer.identity] === transfer else { return }
+                self.restorations.removeValue(forKey: transfer.identity)
+                transfer.cancel()
             }
         }
-        complete(completion, presented: false)
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool { restore(); return false }
@@ -251,19 +364,21 @@ import QuartzCore
         web.frame = host.bounds
         web.autoresizingMask = [.width, .height]
         host.addSubview(controls)
-        videoPanel.alphaValue = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 1 : 0
+        sourceCover?.removeFromSuperview(); sourceCover = nil
+        let entry = PiPTransitionImage(image: videoSnapshot, frame: host.bounds, identifier: "pip.presentationCover")
+        host.addSubview(entry, positioned: .below, relativeTo: controls)
+        presentationCover = entry
+        videoPanel.alphaValue = 0
         if automatic { videoPanel.orderFront(nil) }
         else { videoPanel.makeKeyAndOrderFront(nil); videoPanel.makeFirstResponder(controls) }
-        if !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
-            let inset = target.size.width * 0.015
-            videoPanel.setFrame(target.insetBy(dx: inset, dy: inset / ratio), display: true)
-            NSAnimationContext.runAnimationGroup { context in
-                context.duration = 0.18
-                context.timingFunction = CAMediaTimingFunction(name: .easeOut)
-                videoPanel.animator().setFrame(target, display: true)
-                videoPanel.animator().alphaValue = 1
-            }
+        let token = requestID
+        let deadline = DispatchWorkItem { [weak self] in
+            guard let self, self.requestID == token, !self.presentationReady else { return }
+            self.restore()
         }
+        presentationDeadline = deadline
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2, execute: deadline)
+        preparePresentation(web: web, token: token)
         controls.revealControls()
         updateMediaState()
         let timer = Timer(timeInterval: 0.35, repeats: true) { [weak self] _ in
@@ -271,6 +386,71 @@ import QuartzCore
         }
         mediaTimer = timer; RunLoop.main.add(timer, forMode: .common)
         onChange?()
+    }
+
+    private func preparePresentation(web: WKWebView, token: UUID, attempt: Int = 0) {
+        guard requestID == token, webView === web else { return }
+        web.callAsyncJavaScript("""
+            await Promise.race([
+                new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))),
+                new Promise(resolve => setTimeout(resolve, 120))
+            ]);
+            const state = globalThis.__orbitPiPState;
+            if (state?.token !== token) return false;
+            const rect = state.video.getBoundingClientRect();
+            const win = state.video.ownerDocument.defaultView;
+            return Math.abs(rect.width - win.innerWidth) < 2 && Math.abs(rect.height - win.innerHeight) < 2
+                && Math.abs(innerWidth - expectedWidth) < 2 && Math.abs(innerHeight - expectedHeight) < 2;
+            """, arguments: ["token": token.uuidString,
+                              "expectedWidth": web.bounds.width / web.pageZoom,
+                              "expectedHeight": web.bounds.height / web.pageZoom], in: nil, in: world) { [weak self, weak web] result in
+                guard let self, let web, self.requestID == token, self.webView === web else { return }
+                let size = web.bounds.size
+                guard case .success(let value) = result, value as? Bool == true else {
+                    if attempt < 8 {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.04) { [weak self, weak web] in
+                            if let web { self?.preparePresentation(web: web, token: token, attempt: attempt + 1) }
+                        }
+                    } else { self.restore() }
+                    return
+                }
+                self.takeSnapshot(of: web) { [weak self, weak web] image in
+                    guard let self, let web, self.requestID == token, self.webView === web else { return }
+                    guard let image, size == web.bounds.size else {
+                        if attempt < 8 { self.preparePresentation(web: web, token: token, attempt: attempt + 1) }
+                        else { self.restore() }
+                        return
+                    }
+                    self.videoSnapshot = image; self.presentationCover?.image = image
+                    self.presentationReady = true
+                    self.presentationDeadline?.cancel(); self.presentationDeadline = nil
+                    self.lastSnapshotTime = ProcessInfo.processInfo.systemUptime
+                    NSAnimationContext.runAnimationGroup { context in
+                        context.duration = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 0 : 0.16
+                        context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                        self.panel?.animator().alphaValue = 1
+                    } completionHandler: { [weak self] in
+                        Task { @MainActor [weak self] in
+                            guard let self, self.requestID == token else { return }
+                            self.presentationCover?.removeFromSuperview(); self.presentationCover = nil
+                        }
+                    }
+                }
+        }
+    }
+
+    private func takeSnapshot(of web: WKWebView, completion: @escaping (NSImage?) -> Void) {
+        let configuration = WKSnapshotConfiguration()
+        configuration.rect = web.bounds
+        configuration.afterScreenUpdates = true
+        var completed = false
+        // Snapshot callbacks can stall after a WebContent process failure.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            guard !completed else { return }; completed = true; completion(nil)
+        }
+        web.takeSnapshot(with: configuration) { image, _ in
+            guard !completed else { return }; completed = true; completion(image)
+        }
     }
 
     private func mediaCommand(_ command: String, value: Double = 0) {
@@ -297,6 +477,16 @@ import QuartzCore
     private func updateMediaState() {
         guard let web = webView, pollingToken == nil else { return }
         let token = requestID
+        if presentationReady, snapshotToken == nil,
+           ProcessInfo.processInfo.systemUptime - lastSnapshotTime > 0.65 {
+            snapshotToken = token
+            takeSnapshot(of: web) { [weak self] image in
+                guard let self, self.requestID == token else { return }
+                self.snapshotToken = nil
+                if let image { self.videoSnapshot = image }
+                self.lastSnapshotTime = ProcessInfo.processInfo.systemUptime
+            }
+        }
         pollingToken = token
         web.evaluateJavaScript("globalThis.__orbitPiPState?.snapshot() ?? null", in: nil, in: world) { [weak self] result in
             guard let self, self.requestID == token else { return }
@@ -338,6 +528,21 @@ import QuartzCore
       candidates.sort((a, b) => b.score - a.score);
       if (!candidates.length) return {found: false};
       const {video, framePath} = candidates[0];
+      delete globalThis.__orbitPiPRestoredState;
+      function geometry() {
+        const bounds = video.getBoundingClientRect();
+        let x = bounds.x, y = bounds.y, width = bounds.width, height = bounds.height;
+        for (const frame of [...framePath].reverse()) {
+          const rect = frame.getBoundingClientRect();
+          const scaleX = rect.width / (frame.offsetWidth || rect.width || 1);
+          const scaleY = rect.height / (frame.offsetHeight || rect.height || 1);
+          x = rect.x + (x + frame.clientLeft) * scaleX;
+          y = rect.y + (y + frame.clientTop) * scaleY;
+          width *= scaleX; height *= scaleY;
+        }
+        return {rect: {x, y, width, height}, viewportWidth: innerWidth, viewportHeight: innerHeight};
+      }
+      const originalGeometry = geometry();
       const saved = new Map();
       const styles = [];
       const scrolls = [];
@@ -381,7 +586,7 @@ import QuartzCore
         isolate(video);
         video.controls = false;
         globalThis.__orbitPiPState = {
-          token: '__ORBIT_TOKEN__', video, restore,
+          token: '__ORBIT_TOKEN__', video, restore, geometry,
           snapshot() {
             return {paused: video.paused || video.ended, muted: video.muted, volume: video.volume,
                     time: Number.isFinite(video.currentTime) ? video.currentTime : 0,
@@ -397,7 +602,7 @@ import QuartzCore
           },
           resumeIfNeeded() { if (wasPlaying && video.paused && !video.ended) video.play().catch(() => {}); }
         };
-        return {found: true, width: video.videoWidth, height: video.videoHeight, playing: wasPlaying};
+        return {found: true, width: video.videoWidth, height: video.videoHeight, playing: wasPlaying, geometry: originalGeometry};
       } catch (_) { restore(); return {found: false}; }
     })()
     """#

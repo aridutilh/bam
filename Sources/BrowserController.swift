@@ -276,6 +276,9 @@ import QuartzCore
         let focusWasWindow = view.window?.firstResponder === view.window
         displayedTabID = tab.id; displayedMemberIDs = arriving
         if switched, let source = pictureInPicture.referencedTabID, arriving.contains(source) { pictureInPicture.restore() }
+        if arriving.contains(where: { id in browsers[id].map { pictureInPicture.isRestoring($0) } ?? false }) {
+            clearSpaceContentTransition()
+        }
         // Every queued page keeps its original window attachment until discovery
         // completes, including single tabs queued behind another pending probe.
         if automaticallyShowsVideo {
@@ -687,6 +690,9 @@ import QuartzCore
     }
     private func revealSpaceContent(over image: NSImage?) {
         clearSpaceContentTransition()
+        // PiP owns the visible handoff until the restored page has rendered.
+        // A second fade of the previous Space would obscure that destination.
+        guard !visibleMemberIDs.contains(where: { id in browsers[id].map { pictureInPicture.isRestoring($0) } ?? false }) else { return }
         guard let image, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { return }
         let overlay = SpaceTransitionImage(frame: webHost.bounds)
         overlay.image = image; overlay.imageScaling = .scaleAxesIndependently
