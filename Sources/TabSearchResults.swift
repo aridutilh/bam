@@ -41,6 +41,9 @@ enum TabSearchMatcher {
 /// Embed below the command palette's text field. The parent keeps first responder
 /// in that field and forwards arrow keys, Return and Tab to this view.
 @MainActor final class TabSearchResultsView: NSView {
+    var faviconProvider: ((UUID) -> NSImage?)? { didSet { refreshFavicons() } }
+    /// Unsubmitted URL text may consult the cache, but must not start a fetch.
+    var siteFaviconProvider: ((URL, Bool) -> NSImage?)? { didSet { refreshFavicons() } }
     var onSelect: ((UUID) -> Void)?
     var onSubmitQuery: ((String) -> Void)?
     /// A chosen remote suggestion or scoped search; the parent routes it to the
@@ -67,6 +70,7 @@ enum TabSearchMatcher {
     }
     private var entries: [Entry] = []
     private var rows: [TabSearchResultRow] = []
+    private var engineURL: URL?
     private var lastQuery = ""
     private var accent: NSColor = .controlAccentColor
     private var accentText: NSColor = .white
@@ -101,6 +105,7 @@ enum TabSearchMatcher {
         let previousIdentity = entries.indices.contains(selectedIndex) ? entries[selectedIndex].identity : nil
         accent = engine?.color ?? .controlAccentColor
         accentText = engine?.accentTextColor ?? .white
+        engineURL = engine.flatMap { URL(string: "https://\($0.host)") }
         entries = []
         if engine != nil {
             // Scoped to one site: the typed text searches it, suggestions refine it.
@@ -146,6 +151,7 @@ enum TabSearchMatcher {
                 row.configure(title: command.title, detail: command.detail,
                               badge: command.shortcut ?? "Command", symbol: command.symbol)
             }
+            row.setFavicon(favicon(for: entry))
             row.isSelected = index == selectedIndex
             row.onActivate = { [weak self] in
                 guard let self else { return }
@@ -170,6 +176,27 @@ enum TabSearchMatcher {
         }
         needsLayout = true
         invalidateIntrinsicContentSize()
+    }
+
+    /// Images can arrive while the palette is open without replacing rows,
+    /// changing keyboard selection or disturbing the shared highlight.
+    func refreshFavicons() {
+        for (entry, row) in zip(entries, rows) { row.setFavicon(favicon(for: entry)) }
+    }
+    private func favicon(for entry: Entry) -> NSImage? {
+        switch entry {
+        case .tab(let tab): return faviconProvider?(tab.id)
+        case .command: return nil
+        case .search: return engineURL.flatMap { siteFaviconProvider?($0, true) }
+        case .query(let text):
+            let url: URL?
+            if let direct = URLInput.directURL(text) { url = direct }
+            else if !text.contains(where: { $0.isWhitespace }) &&
+                        (text.contains(".") || text.hasPrefix("localhost") || text.hasPrefix("[::1]")) {
+                url = URLInput.resolve(text).flatMap(URLInput.directURL)
+            } else { url = nil }
+            return url.flatMap { siteFaviconProvider?($0, false) }
+        }
     }
 
     func moveSelection(delta: Int) {
@@ -265,6 +292,8 @@ extension NSTextField {
     var selectedTextColor: NSColor = .white
     var isSelected = false { didSet { applySelection(); setAccessibilitySelected(isSelected) } }
     private let icon = NSImageView()
+    private var favicon: NSImage?
+    private var symbol = "magnifyingglass"
     private let title = NSTextField(labelWithString: "")
     private let detail = NSTextField(labelWithString: "")
     private let badge = NSTextField(labelWithString: "")
@@ -283,7 +312,7 @@ extension NSTextField {
         badge.font = .systemFont(ofSize: 11, weight: .medium)
         badge.alignment = .right
         for label in [title, detail, badge] { label.lineBreakMode = .byTruncatingTail; label.maximumNumberOfLines = 1 }
-        icon.imageScaling = .scaleProportionallyDown
+        icon.imageScaling = .scaleProportionallyUpOrDown
         arrow.imageScaling = .scaleProportionallyDown
         arrow.image = NSImage(systemSymbolName: "arrow.right", accessibilityDescription: nil)
         applySelection()
@@ -293,11 +322,21 @@ extension NSTextField {
         self.title.stringValue = title
         self.detail.stringValue = detail
         self.badge.stringValue = badge
+        self.symbol = symbol
+        favicon = nil
         icon.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+        icon.identifier = nil
         setAccessibilityLabel([title, detail, badge].filter { !$0.isEmpty }.joined(separator: ", "))
         toolTip = detail.isEmpty ? title : detail
         applySelection()
         needsLayout = true
+    }
+    func setFavicon(_ image: NSImage?) {
+        guard favicon !== image else { return }
+        favicon = image
+        icon.image = image ?? NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+        icon.identifier = image == nil ? nil : NSUserInterfaceItemIdentifier("website-favicon")
+        applySelection()
     }
     private func applySelection() {
         // The parent's shared highlight view paints the selection background.
@@ -306,7 +345,7 @@ extension NSTextField {
         title.textColor = primary
         detail.textColor = secondary
         badge.textColor = secondary
-        icon.contentTintColor = isSelected ? selectedTextColor : .secondaryLabelColor
+        icon.contentTintColor = favicon == nil ? (isSelected ? selectedTextColor : .secondaryLabelColor) : nil
         arrow.contentTintColor = selectedTextColor
         arrow.isHidden = !isSelected
         needsLayout = true

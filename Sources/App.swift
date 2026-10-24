@@ -10,6 +10,7 @@ import WebKit
     var resourceSmoke: TabResourceSmokeTest?
     var featureSmoke: FeatureSmokeTest?
     var smoke: WebSmokeTest?
+    var faviconSmoke: WebsiteFaviconSmokeTest?
     var pipSmoke: PictureInPictureSmokeTest?
     var interactionSmoke: InteractionSmokeTest?
     var autoPiPSmoke: AutomaticPiPSmokeTest?
@@ -21,6 +22,7 @@ import WebKit
     private let quitCoordinator = QuitCoordinator()
     private var mainWindowWasClosed = false
     func applicationDidFinishLaunching(_ notification: Notification) {
+        if CommandLine.arguments.contains("--favicon-test") { faviconSmoke = WebsiteFaviconSmokeTest(); faviconSmoke?.start(); return }
         if CommandLine.arguments.contains("--vendor-extension-probe") { vendorProbe = VendorExtensionProbe(); vendorProbe?.start(); return }
         if CommandLine.arguments.contains("--extension-test") { extensionSmoke = ExtensionRuntimeSmokeTest(); extensionSmoke?.start(); return }
         if CommandLine.arguments.contains("--profile-test") { profileSmoke = ProfileSmokeTest(); profileSmoke?.start(); return }

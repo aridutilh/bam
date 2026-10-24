@@ -1,12 +1,25 @@
 # Changelog
 
-## 0.14.0 prerelease — build 29
+## 0.15.0 prerelease — build 31
 
 - Add a Bam-styled Settings window (Bam ▸ Settings…, ⌘,): a Space-tinted stage with a section rail and translucent cards, built from the onboarding ink, pills and washes instead of Aqua controls. General holds playback and memory toggles plus a keyboard card; Search picks the default engine; Spaces edits each Space’s name, color and icon in place and links to Manage Spaces; Extensions lists the current profile’s extensions; About replaces the system About panel with version, welcome replay and links.
 - Add a default search engine (DuckDuckGo, Google or Perplexity). Plain typed text goes to the chosen engine with the same single encoding; palette suggestions follow it. Persisted outside fresh previews.
 - Let the command palette run browser commands by name: Settings, Manage Spaces, History, Downloads, Recently Closed, Extensions, New Little Bam Window, Toggle Sidebar, Find in Page, Picture in Picture, Print and Welcome. A typed command name (three or more characters) leads the results; looser matches trail the tabs so “se” or “hi” never hijacks a web search. Commands run through the responder chain once the palette closes.
 - Dress Manage Spaces and the Extensions manager in the same wash, serif headings, ink labels and pill buttons; controls, names and fixtures are unchanged. ⌘W and Escape close the Settings window instead of a tab.
-- Shipped as the v0.14.0 prerelease. See [VALIDATION.md](VALIDATION.md).
+- Merged on top of the 0.14.0 favicon release and shipped as the v0.15.0 prerelease. See [VALIDATION.md](VALIDATION.md).
+
+## 0.14.0 — Website favicons
+
+- Display full-color website favicons in sidebar tab rows, Favorite tiles, existing-tab search results and site-scoped searches. Cached typed URLs show their icon without contacting an unsubmitted address.
+- Discover declared page icons, including CDN-hosted images, with an origin `/favicon.ico` fallback. Load and decode asynchronously, cap concurrent requests and memory/disk storage, and isolate caches by login profile. Private previews use memory only; icon requests send no browser cookies or credentials.
+- Refresh existing native rows in place, preserving search selection, custom saved symbols, Split glyphs and sidebar virtualization. Missing or unsupported images retain the native fallback.
+- Include the separately committed Default-profile startup correction developed as local 0.13.2.
+
+
+## 0.13.2 local startup fix, build 29 — included in 0.14.0
+
+- Use WebKit’s default persistent extension configuration for Bam’s Default login profile. The existing internal Default ID is a reserved WebKit UUID value and crashes the identifier-based configuration initializer during ordinary startup. Preserve saved profile IDs, website data stores, cookies and tab sessions. Private and named-profile configurations retain their existing behavior.
+- Add regression coverage for persistent Default configuration, alongside named and private profiles. This correction was verified as a local build; it is included in 0.14.0 rather than published under a separate tag.
 
 ## 0.13.1 — build 28
 

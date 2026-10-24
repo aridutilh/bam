@@ -106,6 +106,8 @@ extension BrowserController {
         let line = NSBox(); line.boxType = .separator
         box.addSubview(line)
         let results = TabSearchResultsView(frame: .zero)
+        results.faviconProvider = { [weak self] in self?.favicon(forTabID: $0) }
+        results.siteFaviconProvider = { [weak self] url, allowFetch in self?.favicon(forSiteURL: url, allowFetch: allowFetch) }
         results.onSelect = { [weak self] id in self?.selectSearchResult(id) }
         results.onSubmitQuery = { [weak self] query in self?.submitAddressQuery(query) }
         results.onSearch = { [weak self] text in self?.submitPaletteSearch(text) }

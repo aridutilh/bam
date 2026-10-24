@@ -147,6 +147,7 @@ import WebKit
         return alert.runModal()
     }
     func retireProfilePage(_ id: UUID) {
+        invalidateFaviconDocument(id)
         peeks[id]?.dismiss()
         if let group = session.split(for: id), let split = splitCoordinators.removeValue(forKey: group.primaryID) {
             split.detach(); split.view.removeFromSuperview()
