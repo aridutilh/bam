@@ -115,6 +115,62 @@ import AppKit
             times.append((ProcessInfo.processInfo.systemUptime - start) * 1000)
         }
         print("Sidebar 1000-tab selection median: \(times.sorted()[times.count / 2]) ms; native views: \(descendants(sidebar).count)")
+        @MainActor func icon(_ row: NSView) -> NSImageView { descendants(row).compactMap { $0 as? NSImageView }.first! }
+        let red = NSImage(size: NSSize(width: 32, height: 16), flipped: false) { rect in
+            NSColor.red.setFill(); rect.fill(); return true
+        }
+        let blue = NSImage(size: NSSize(width: 32, height: 32), flipped: false) { rect in
+            NSColor.blue.setFill(); rect.fill(); return true
+        }
+        tabs[0] = item(0, active: 0); tabs[1] = item(1, active: 0); update()
+        let current = row(list, 0)
+        var cache = [ids[0]: red, ids[1]: blue, alternate[0].id: red]
+        var lookups: [UUID] = []
+        sidebar.faviconProvider = { id in lookups.append(id); return cache[id] }
+        require(!lookups.isEmpty && lookups.count < 100 && !lookups.contains(ids[500]),
+                "Installing a provider looks up only the viewport, not one thousand tab models")
+        require(icon(current).image === red && icon(current).contentTintColor == nil &&
+                    (current.accessibilityValue() as? String)?.contains("Selected") == true,
+                "A visible selected row displays its full-color favicon")
+        require(icon(current).imageScaling == .scaleProportionallyUpOrDown && icon(current).frame.size == NSSize(width: 16, height: 16),
+                "Sidebar favicons retain proportional scaling in their existing 16-point slot")
+        let currentCell = list.view(atColumn: 0, row: 0, makeIfNecessary: false)
+        let accessibleName = current.accessibilityLabel()
+        cache[ids[0]] = blue; lookups = []
+        sidebar.refreshFavicons()
+        require(list.view(atColumn: 0, row: 0, makeIfNecessary: false) === currentCell && icon(current).image === blue,
+                "A cache arrival refreshes the same native table cell")
+        require(current.accessibilityLabel() == accessibleName && lookups.count < 100 && !lookups.contains(alternate[0].id),
+                "Refresh keeps accessible identity and ignores cached detached Space pages")
+        cache[ids[0]] = nil
+        tabs[0] = SidebarTabItem(id: ids[0], title: "New destination", subtitle: "https://different.invalid", symbol: "book", isPinned: true, isActive: true)
+        update()
+        require(icon(current).image !== blue && icon(current).identifier == nil && icon(current).contentTintColor != nil,
+                "A URL change with no cached icon clears the previous favicon and restores the symbol tint")
+        let recycled = row(list, 1001)
+        require(icon(recycled).image !== red && icon(recycled).image !== blue && icon(recycled).identifier == nil,
+                "A reused far-end row cannot retain another tab's image")
+        _ = row(list, 0)
+        tabs[0] = SidebarTabItem(id: ids[0], title: "Split", subtitle: "", symbol: "rectangle.split.2x1", isPinned: true, isActive: true, isSplit: true)
+        cache[ids[0]] = red; lookups = []; update(); sidebar.refreshFavicons()
+        require(!lookups.contains(ids[0]) && icon(row(list, 0)).identifier == nil,
+                "A split composite keeps its split symbol without requesting either tab's favicon")
+        tabs[0] = SidebarTabItem(id: ids[0], title: "Favorite", subtitle: "https://favorite.invalid", symbol: "star", isPinned: true, isActive: true, isFavorite: true)
+        update(); prepare(list)
+        let tile = descendants(sidebar).first { $0.identifier?.rawValue == "favorite-\(ids[0].uuidString)" } as! NSButton
+        require(tile.image === red && tile.accessibilityLabel() == "Favorite", "Favorites use the full-color cached image without changing their accessible name")
+        cache[ids[0]] = blue; sidebar.refreshFavicons()
+        require(tile.image === blue && tile.superview != nil, "Favorite cache arrival updates the existing fixed tile")
+        sidebar.beginPaging(tabs: alternate, space: 1, direction: 1); sidebar.setPagingOffset(-70)
+        let incomingList = table(in: 1), incomingRow = row(table(in: 1), 1)
+        cache[alternate[0].id] = blue; lookups = []
+        sidebar.refreshFavicons()
+        require(lookups.contains(alternate[0].id) && icon(incomingRow).image === blue && table(in: 1) === incomingList,
+                "An attached incoming Space refreshes its existing rows during paging")
+        sidebar.endPaging()
+        sidebar.faviconProvider = nil
+        require(tile.image == nil && icon(row(list, 0)).identifier == nil && icon(row(list, 0)).contentTintColor != nil,
+                "Removing the provider clears Favorite and row images immediately")
         print("PASS: \(checks) sidebar virtualization, identity, scrolling, paging and sleep checks")
         window.contentView = nil
     }

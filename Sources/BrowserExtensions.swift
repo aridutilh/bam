@@ -384,7 +384,12 @@ struct BrowserExtensionPermissionReview {
 
     init(owner: BrowserExtensions, profileID: UUID, dataStore: WKWebsiteDataStore) {
         self.owner = owner; self.profileID = profileID; self.dataStore = dataStore
-        let configuration = owner.isPrivate ? WKWebExtensionController.Configuration.nonPersistent() : WKWebExtensionController.Configuration(identifier: profileID)
+        let configuration: WKWebExtensionController.Configuration
+        if owner.isPrivate { configuration = .nonPersistent() }
+        // The legacy Default profile ID is WebKit's reserved UUID value 1.
+        // Keep that session identity, but use WebKit's default persistent store.
+        else if profileID == BrowserProfile.defaultID { configuration = .default() }
+        else { configuration = WKWebExtensionController.Configuration(identifier: profileID) }
         configuration.defaultWebsiteDataStore = dataStore
         let webConfiguration = WKWebViewConfiguration()
         webConfiguration.websiteDataStore = dataStore

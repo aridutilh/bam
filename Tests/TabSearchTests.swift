@@ -90,6 +90,65 @@ import AppKit
         results.moveSelection(delta: 1)
         require(results.activateSelection() && chosen == favorite.id,
                 "Opening a sleeping search result passes the existing saved-tab identity to the controller")
+        @MainActor func resultRows() -> [NSView] {
+            results.subviews.filter { $0.accessibilityRole() == .button }
+        }
+        @MainActor func icon(_ row: NSView) -> NSImageView { row.subviews.compactMap { $0 as? NSImageView }.first! }
+        let red = NSImage(size: NSSize(width: 32, height: 16), flipped: false) { rect in
+            NSColor.red.setFill(); rect.fill(); return true
+        }
+        let blue = NSImage(size: NSSize(width: 32, height: 32), flipped: false) { rect in
+            NSColor.blue.setFill(); rect.fill(); return true
+        }
+        var cached = [kept.id: red, favorite.id: blue]
+        var lookups: [UUID] = []
+        results.faviconProvider = { id in lookups.append(id); return cached[id] }
+        let originalRows = resultRows(), selectedBefore = results.selectedIndex
+        let labelsBefore = originalRows.map { $0.accessibilityLabel() }
+        require(icon(originalRows[0]).image === red && icon(originalRows[1]).image === blue,
+                "Existing tab results obtain their own cached favicon")
+        require(originalRows.allSatisfy { icon($0).contentTintColor == nil },
+                "Selected and unselected favicons retain full color")
+        originalRows.forEach { $0.layoutSubtreeIfNeeded() }
+        require(icon(originalRows[0]).imageScaling == .scaleProportionallyUpOrDown && icon(originalRows[0]).frame.size == NSSize(width: 16, height: 16),
+                "Non-square and retina images fit the existing 16-point slot proportionally")
+        cached[kept.id] = blue; cached[favorite.id] = nil
+        results.refreshFavicons()
+        require(zip(originalRows, resultRows()).allSatisfy { $0 === $1 } && results.selectedIndex == selectedBefore,
+                "An arriving icon refreshes the same panel rows without changing selection")
+        require(icon(originalRows[0]).image === blue && icon(originalRows[1]).image !== blue && icon(originalRows[1]).contentTintColor != nil,
+                "A missing provider result clears stale favicon pixels and restores the selected symbol tint")
+        require(resultRows().map { $0.accessibilityLabel() } == labelsBefore && results.activateSelection() && chosen == favorite.id,
+                "Favicon refresh preserves accessible names and the selected action")
+        results.faviconProvider = nil
+        require(resultRows().allSatisfy { icon($0).identifier == nil && icon($0).contentTintColor != nil },
+                "Removing the provider resets every tab result to its own symbol")
+
+        var siteCalls: [(URL, Bool)] = []
+        results.siteFaviconProvider = { url, allowFetch in siteCalls.append((url, allowFetch)); return red }
+        results.update(tabs: [], query: "example.org/path", activeID: UUID(), canCreate: true)
+        require(siteCalls.count == 1 && siteCalls[0].0.absoluteString == "https://example.org/path" && !siteCalls[0].1,
+                "An unsubmitted schemeless URL only asks for a cached icon")
+        require(icon(resultRows()[0]).image === red && icon(resultRows()[0]).contentTintColor == nil,
+                "A typed URL may display its cached full-color icon")
+        siteCalls = []
+        results.update(tabs: [], query: "https://example.org/another", activeID: UUID(), canCreate: true)
+        require(siteCalls.count == 1 && !siteCalls[0].1, "An explicit typed URL never permits an icon fetch")
+        siteCalls = []
+        results.update(tabs: [], query: "find a website", activeID: UUID(), canCreate: true, suggestions: ["find a website guide"])
+        require(siteCalls.isEmpty && resultRows().allSatisfy { icon($0).identifier == nil && icon($0).contentTintColor != nil },
+                "Text queries and ordinary suggestions keep their magnifier without site lookup")
+        let engine = SiteSearchCatalog.engines[0]
+        results.update(tabs: [], query: "fixture", activeID: UUID(), canCreate: true, engine: engine, suggestions: ["fixture video"])
+        require(siteCalls.count == 2 && siteCalls.allSatisfy { $0.0.absoluteString == "https://\(engine.host)" && $0.1 },
+                "Scoped search rows may fetch only the chosen engine's HTTPS icon")
+        let engineRows = resultRows()
+        results.moveSelection(delta: 1)
+        let engineSelection = results.selectedIndex
+        results.siteFaviconProvider = { _, _ in nil }
+        require(zip(engineRows, resultRows()).allSatisfy { $0 === $1 } && results.selectedIndex == engineSelection &&
+                    engineRows.allSatisfy { icon($0).identifier == nil && icon($0).contentTintColor != nil },
+                "Engine-icon replacement clears old images without rebuilding or losing keyboard selection")
         print("PASS: \(checks) tab search ranking and selection checks")
     }
 }

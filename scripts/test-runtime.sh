@@ -24,7 +24,7 @@ for attempt in {1..50}; do [ -s "$RUN_DIR/port" ] && break; sleep 0.1; done
 export BAM_TEST_URL="http://127.0.0.1:$(cat "$RUN_DIR/port")/index.html"
 export ARK_TEST_URL="$BAM_TEST_URL"
 export ORBIT_TEST_URL="$BAM_TEST_URL"
-for test in --web-test --pip-test --interaction-test --auto-pip-test --feature-test --resource-test --profile-test --extension-test; do
+for test in --web-test --pip-test --interaction-test --auto-pip-test --feature-test --resource-test --profile-test --extension-test --favicon-test; do
     case "$test" in
         --web-test) marker='PASS: WebKit — ' ;;
         --pip-test) marker='PASS: PiP — ' ;;
@@ -39,6 +39,7 @@ for test in --web-test --pip-test --interaction-test --auto-pip-test --feature-t
                 marker='SKIP: Extensions — macOS 15.4 or later is required'
             fi ;;
 
+        --favicon-test) marker='PASS: Favicons — ' ;;
         --feature-test) marker='PASS: Features — ' ;;
     esac
     log="$RUN_DIR/${test#--}.log"

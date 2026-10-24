@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.14.0 — Website favicons
+
+- Display full-color website favicons in sidebar tab rows, Favorite tiles, existing-tab search results and site-scoped searches. Cached typed URLs show their icon without contacting an unsubmitted address.
+- Discover declared page icons, including CDN-hosted images, with an origin `/favicon.ico` fallback. Load and decode asynchronously, cap concurrent requests and memory/disk storage, and isolate caches by login profile. Private previews use memory only; icon requests send no browser cookies or credentials.
+- Refresh existing native rows in place, preserving search selection, custom saved symbols, Split glyphs and sidebar virtualization. Missing or unsupported images retain the native fallback.
+- Include the separately committed Default-profile startup correction developed as local 0.13.2.
+
+
+## 0.13.2 local startup fix, build 29 — included in 0.14.0
+
+- Use WebKit’s default persistent extension configuration for Bam’s Default login profile. The existing internal Default ID is a reserved WebKit UUID value and crashes the identifier-based configuration initializer during ordinary startup. Preserve saved profile IDs, website data stores, cookies and tab sessions. Private and named-profile configurations retain their existing behavior.
+- Add regression coverage for persistent Default configuration, alongside named and private profiles. This correction was verified as a local build; it is included in 0.14.0 rather than published under a separate tag.
+
 ## 0.13.1 — build 28
 
 - Replace repeated extension surface-list reconstruction with one fresh list per window enumeration. Preserve ordering, active selection and live profile/controller/data-store ownership checks; direct tab actions resolve current state.
