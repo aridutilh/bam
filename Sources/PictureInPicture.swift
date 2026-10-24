@@ -76,51 +76,67 @@ import QuartzCore
             .replacingOccurrences(of: "__ORBIT_TOKEN__", with: token.uuidString)
             .replacingOccurrences(of: "__ORBIT_REQUIRE_PLAYING__", with: automatic ? "true" : "false")
             .replacingOccurrences(of: "__ORBIT_RESTORE_FOCUS__", with: automatic ? "false" : "true")
-        // Capture the normal page before any isolation CSS. This is also the
-        // destination cover on return; an enlarged video still must never cover
-        // the whole browser card.
-        takeSnapshot(of: web) { [weak self, weak web] image in
+        let captureAndIsolate: () -> Void = { [weak self, weak web] in
             guard let self, let web, self.requestID == token else { return }
             guard shouldPresent() else { self.cancelPending(web, token: token); return }
-            self.pageSnapshot = image
-            let cover = PiPTransitionImage(image: image, frame: web.bounds, identifier: "pip.sourceCover")
-            web.addSubview(cover); self.sourceCover = cover
-            web.evaluateJavaScript(script, in: nil, in: self.world) { [weak self, weak web] result in
-                guard let self, let web else { return }
-                guard self.requestID == token else { self.removeIsolation(from: web, token: token); return }
-                guard shouldPresent(), self.requestID == token else { self.cancelPending(web, token: token); return }
-                guard web.url == startingURL, wasLoading || !web.isLoading else {
-                    self.cancelPending(web, token: token)
-                    report?("The page changed. Try Picture in Picture again.")
-                    return
-                }
-                switch result {
-                case .failure:
-                    self.cancelPending(web, token: token)
-                    report?("Could not access a video on this page.")
-                case .success(let value):
-                    guard let info = value as? [String: Any], info["found"] as? Bool == true,
-                          !automatic || info["playing"] as? Bool == true else {
+            // Capture the normal page before any isolation CSS. This is also the
+            // destination cover on return; an enlarged video still must never cover
+            // the whole browser card.
+            self.takeSnapshot(of: web) { [weak self, weak web] image in
+                guard let self, let web, self.requestID == token else { return }
+                guard shouldPresent() else { self.cancelPending(web, token: token); return }
+                self.pageSnapshot = image
+                let cover = PiPTransitionImage(image: image, frame: web.bounds, identifier: "pip.sourceCover")
+                web.addSubview(cover); self.sourceCover = cover
+                web.evaluateJavaScript(script, in: nil, in: self.world) { [weak self, weak web] result in
+                    guard let self, let web else { return }
+                    guard self.requestID == token else { self.removeIsolation(from: web, token: token); return }
+                    guard shouldPresent(), self.requestID == token else { self.cancelPending(web, token: token); return }
+                    guard web.url == startingURL, wasLoading || !web.isLoading else {
                         self.cancelPending(web, token: token)
-                        report?("No HTML5 video found. Videos inside other sites’ embedded frames may be inaccessible.")
+                        report?("The page changed. Try Picture in Picture again.")
                         return
                     }
-                    self.videoSnapshot = PiPVideoGeometry(info["geometry"])?.crop(from: image)
-                    self.pendingWebView = nil
-                    self.pendingTabID = nil
-                    let completion = self.pendingCompletion
-                    self.pendingCompletion = nil
-                    self.present(web: web, tabID: tabID, automatic: automatic,
-                                 width: (info["width"] as? NSNumber)?.doubleValue ?? 16,
-                                 height: (info["height"] as? NSNumber)?.doubleValue ?? 9,
-                                 restore: restore, report: report)
-                    // The same media element remains alive. Only resume playback
-                    // that was active when isolation began, if reparenting paused it.
-                    let resume = "if (globalThis.__orbitPiPState?.token === '\(token.uuidString)') globalThis.__orbitPiPState.resumeIfNeeded(); undefined"
-                    web.evaluateJavaScript(resume, in: nil, in: self.world) { _ in }
-                    self.complete(completion, presented: true)
+                    switch result {
+                    case .failure:
+                        self.cancelPending(web, token: token)
+                        report?("Could not access a video on this page.")
+                    case .success(let value):
+                        guard let info = value as? [String: Any], info["found"] as? Bool == true,
+                              !automatic || info["playing"] as? Bool == true else {
+                            self.cancelPending(web, token: token)
+                            report?("No HTML5 video found. Videos inside other sites’ embedded frames may be inaccessible.")
+                            return
+                        }
+                        self.videoSnapshot = PiPVideoGeometry(info["geometry"])?.crop(from: image)
+                        self.pendingWebView = nil
+                        self.pendingTabID = nil
+                        let completion = self.pendingCompletion
+                        self.pendingCompletion = nil
+                        self.present(web: web, tabID: tabID, automatic: automatic,
+                                     width: (info["width"] as? NSNumber)?.doubleValue ?? 16,
+                                     height: (info["height"] as? NSNumber)?.doubleValue ?? 9,
+                                     restore: restore, report: report)
+                        // The same media element remains alive. Only resume playback
+                        // that was active when isolation began, if reparenting paused it.
+                        let resume = "if (globalThis.__orbitPiPState?.token === '\(token.uuidString)') globalThis.__orbitPiPState.resumeIfNeeded(); undefined"
+                        web.evaluateJavaScript(resume, in: nil, in: self.world) { _ in }
+                        self.complete(completion, presented: true)
+                    }
                 }
             }
+        }
+        guard automatic else { captureAndIsolate(); return }
+        // A video-free departure needs no compositor snapshot or page cover.
+        // This read-only admission check shares final discovery's frame/video
+        // rules; final isolation still rechecks playing state after capture.
+        web.evaluateJavaScript(Self.playingVideoPreflightScript, in: nil, in: world) { [weak self, weak web] result in
+            guard let self, let web, self.requestID == token else { return }
+            guard shouldPresent(), web.url == startingURL, wasLoading || !web.isLoading,
+                  case .success(let value) = result, value as? Bool == true else {
+                self.cancelPending(web, token: token); return
+            }
+            captureAndIsolate()
         }
     }
 
@@ -502,22 +518,20 @@ import QuartzCore
 
     // Isolated JavaScript state cannot collide with a site's own JS globals.
     // Same-origin iframe documents are searched; cross-origin access is caught.
-    // No source extraction, video cloning, navigation, or player replacement.
-    private static let isolationScript = #"""
-    (() => {
-      const previous = globalThis.__orbitPiPState;
-      if (previous) { previous.restore(); delete globalThis.__orbitPiPState; }
-      const requirePlaying = __ORBIT_REQUIRE_PLAYING__;
-      const restoreFocus = __ORBIT_RESTORE_FOCUS__;
+    /// Both admission and final isolation inspect the same accessible frames.
+    /// Admission only reads playback state; geometry/ranking is deferred until
+    /// a real candidate is needed, avoiding layout for pages without video.
+    private static let videoDiscoveryScript = #"""
+    function collectVideoCandidates(requirePlaying, measureGeometry) {
       const candidates = [];
       const visited = new Set();
       function visit(doc, framePath) {
         if (!doc || visited.has(doc)) return;
         visited.add(doc);
         for (const video of doc.querySelectorAll('video')) {
-          const rect = video.getBoundingClientRect();
           const playing = !video.paused && !video.ended && video.readyState >= 2;
           if (requirePlaying && !playing) continue;
+          const rect = measureGeometry ? video.getBoundingClientRect() : {width: 0, height: 0};
           candidates.push({video, framePath, score: (playing ? 1e12 : 0) + (video.readyState > 0 ? 1e9 : 0) + rect.width * rect.height});
         }
         for (const frame of doc.querySelectorAll('iframe, frame')) {
@@ -525,7 +539,22 @@ import QuartzCore
         }
       }
       visit(document, []);
-      candidates.sort((a, b) => b.score - a.score);
+      if (measureGeometry) candidates.sort((a, b) => b.score - a.score);
+      return candidates;
+    }
+    """#
+    private static let playingVideoPreflightScript = "(() => {\n" + videoDiscoveryScript
+        + "\nreturn collectVideoCandidates(true, false).length > 0; })()"
+
+    // No source extraction, video cloning, navigation, or player replacement.
+    private static let isolationScript = #"""
+    (() => {
+      const previous = globalThis.__orbitPiPState;
+      if (previous) { previous.restore(); delete globalThis.__orbitPiPState; }
+      const requirePlaying = __ORBIT_REQUIRE_PLAYING__;
+      const restoreFocus = __ORBIT_RESTORE_FOCUS__;
+      __ORBIT_VIDEO_DISCOVERY__
+      const candidates = collectVideoCandidates(requirePlaying, true);
       if (!candidates.length) return {found: false};
       const {video, framePath} = candidates[0];
       delete globalThis.__orbitPiPRestoredState;
@@ -605,5 +634,5 @@ import QuartzCore
         return {found: true, width: video.videoWidth, height: video.videoHeight, playing: wasPlaying, geometry: originalGeometry};
       } catch (_) { restore(); return {found: false}; }
     })()
-    """#
+    """#.replacingOccurrences(of: "__ORBIT_VIDEO_DISCOVERY__", with: videoDiscoveryScript)
 }
