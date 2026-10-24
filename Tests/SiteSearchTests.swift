@@ -16,10 +16,17 @@ import AppKit
         require(SiteSearchCatalog.match("how to cook") == nil, "Sentences never hijack Tab")
         require(SiteSearchCatalog.match("y") == nil, "A single character is too ambiguous to offer")
         require(SiteSearchCatalog.match("") == nil, "Empty text never matches")
+        require(SiteSearchCatalog.match("ww") == nil && SiteSearchCatalog.match("www") == nil && SiteSearchCatalog.match("www.") == nil,
+                "A bare www prefix mid-URL never offers an engine")
+        require(SiteSearchCatalog.match("google")?.name == "Google", "Google outranks its sibling properties")
+        require(SiteSearchCatalog.match("maps")?.name == "Google Maps", "The maps alias scopes Google Maps")
+        require(SiteSearchCatalog.match("hn")?.name == "Hacker News", "The hn alias scopes Hacker News")
 
         let youtube = SiteSearchCatalog.match("youtube")!
         require(youtube.searchURL(for: "sam & victor seattle") == "https://www.youtube.com/results?search_query=sam%20%26%20victor%20seattle",
                 "Queries are fully percent-escaped into the search template")
+        require(youtube.searchURL(for: "café") == "https://www.youtube.com/results?search_query=caf%C3%A9",
+                "Non-ASCII characters are percent-escaped, not passed through raw")
 
         let payload = #"["q",["one","two"]]"#.data(using: .utf8)
         require(SearchSuggestionFetcher.parse(data: payload) == ["one", "two"], "OpenSearch suggestion payloads parse")

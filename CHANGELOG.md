@@ -3,7 +3,8 @@
 ## Unreleased — 0.10.0 local draft, build 24
 
 - Redesign the command palette as a single translucent card in the system appearance: icon-led input row, separator, and Arc-style single-line results with a full-width accent selection, inline dimmed addresses and trailing Space labels. The forced-light card, heading and shortcut footer are removed.
-- Offer Tab-to-search for known sites (YouTube, Google, Wikipedia, Amazon, Reddit, GitHub, X, DuckDuckGo). Typing a site name, domain or alias shows a trailing “Search <Site> ⇥” hint; Tab scopes the palette with a colored site pill, Return searches the site, and Backspace in an empty field removes the pill. Pasted URLs with paths and multi-word text never trigger the hint.
+- Offer Tab-to-search for nineteen sites (YouTube, Google, Google Maps, Gmail, Google Drive, Wikipedia, Amazon, Reddit, GitHub, X, Spotify, Netflix, IMDb, Hacker News, Stack Overflow, ChatGPT, Claude, Perplexity, DuckDuckGo). Typing a site name, domain or alias shows a trailing “Search <Site> ⇥” hint; Tab scopes the palette with a pill, bloom and interior wash in the site’s color, Return searches the site, and Backspace in an empty field removes the pill. Pasted URLs with paths, bare “www” prefixes and multi-word text never trigger the hint.
+- Keep typed addresses out of remote autocomplete: URL-shaped text (a scheme, or a dotted single word, including the ⌘L-prefilled current address) never reaches a suggestion endpoint, and a generation counter drops in-flight responses once the query, scope or palette changes.
 - Fetch debounced autocomplete suggestions while typing: site-scoped suggestions for engines with a suggestion endpoint, and DuckDuckGo suggestions after tab results otherwise. Suggestions are best-effort over the network and never block typing or submission.
 - Local only; publication and installation remain on hold. See [VALIDATION.md](VALIDATION.md).
 

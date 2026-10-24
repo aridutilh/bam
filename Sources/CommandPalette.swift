@@ -29,12 +29,7 @@ import WebKit
 /// Arc-style site pill shown once Tab scopes the palette to one engine.
 @MainActor final class PaletteEnginePill: NSView {
     private let label = NSTextField(labelWithString: "")
-    // A truncating label can under-report intrinsicContentSize; measure the text.
-    private var textWidth: CGFloat {
-        let font = label.font ?? .systemFont(ofSize: 12, weight: .semibold)
-        return ceil((label.stringValue as NSString).size(withAttributes: [.font: font]).width)
-    }
-    var fittingWidth: CGFloat { textWidth + 24 }
+    var fittingWidth: CGFloat { label.measuredTextWidth + 24 }
     init(engine: SiteSearchEngine) {
         super.init(frame: .zero)
         wantsLayer = true
@@ -42,7 +37,7 @@ import WebKit
         layer?.cornerRadius = 12
         label.stringValue = engine.name
         label.font = .systemFont(ofSize: 12, weight: .semibold)
-        label.textColor = .white
+        label.textColor = engine.accentTextColor
         label.lineBreakMode = .byClipping
         label.setAccessibilityElement(false)
         addSubview(label)
@@ -53,7 +48,7 @@ import WebKit
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
     override func layout() {
         super.layout()
-        let width = textWidth
+        let width = label.measuredTextWidth
         let height = label.intrinsicContentSize.height
         label.frame = NSRect(x: (bounds.width - width) / 2, y: (bounds.height - height) / 2, width: width, height: height)
     }
@@ -142,7 +137,9 @@ extension BrowserController {
             hint.frame = NSRect(x: cw - hintWidth - 20, y: (inputHeight - 15) / 2, width: hintWidth, height: 15)
             hint.isHidden = false
         } else { paletteHint?.isHidden = true }
-        addressField?.frame = NSRect(x: fieldX, y: (inputHeight - 26) / 2, width: max(40, cw - fieldX - hintWidth - 34), height: 26)
+        // Field and pill share one midline; the field hugs its line height so
+        // the text does not sit below the pill's center.
+        addressField?.frame = NSRect(x: fieldX, y: (inputHeight - 24) / 2 + 1, width: max(40, cw - fieldX - hintWidth - 34), height: 24)
         paletteSeparator?.frame = NSRect(x: 14, y: inputHeight, width: cw - 28, height: 1)
         tabSearchResults?.frame = NSRect(x: 10, y: inputHeight + 7, width: cw - 20, height: rowsHeight)
     }
@@ -178,13 +175,19 @@ extension BrowserController {
             paletteHintEngine = nil
             paletteHint?.stringValue = ""
         }
-        if trimmed.isEmpty { paletteSuggestions = []; suggestionFetcher.cancel() }
-        else if let engine = paletteEngine ?? defaultSuggestionEngine {
-            suggestionFetcher.fetch(url: engine.suggestURL(for: trimmed), query: trimmed) { [weak self] suggestions in
+        // Address-like text never feeds remote autocomplete: ⌘L prefills the
+        // current page URL, which must not leave the app just for opening the bar.
+        let urlLike = trimmed.contains("://") || (!trimmed.contains(" ") && trimmed.contains("."))
+        let suggestURL = (paletteEngine ?? defaultSuggestionEngine)?.suggestURL(for: trimmed)
+        if let suggestURL, !trimmed.isEmpty, !urlLike {
+            suggestionFetcher.fetch(url: suggestURL) { [weak self] suggestions in
                 guard let self, self.addressField != nil else { return }
                 self.paletteSuggestions = suggestions
                 self.applyPaletteResults()
             }
+        } else {
+            paletteSuggestions = []
+            suggestionFetcher.cancel()
         }
         applyPaletteResults()
     }
