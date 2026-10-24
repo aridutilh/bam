@@ -25,6 +25,8 @@ import WebKit
     init(resourcesURL: URL? = nil) { self.resourcesURL = resourcesURL; super.init() }
 
     func start() {
+        do { print("PASS: PiP positioning — \(try PiPPositioningSmokeTest.run()) checks") }
+        catch { finish(false, "\(error)"); return }
         let config = WKWebViewConfiguration()
         config.websiteDataStore = .nonPersistent()
         config.mediaTypesRequiringUserActionForPlayback = []
