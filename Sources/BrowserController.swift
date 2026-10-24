@@ -94,9 +94,16 @@ import QuartzCore
     var observations: [UUID: [NSKeyValueObservation]] = [:]
     var addressOverlay: DismissView?
     var addressField: PaletteField?
-    var addressCard: FlippedContainer?
+    var addressCard: NSView?
     var tabSearchResults: TabSearchResultsView?
-    var paletteShortcuts: NSTextField?
+    var paletteIcon: NSImageView?
+    var paletteHint: NSTextField?
+    var paletteSeparator: NSBox?
+    var paletteEnginePill: PaletteEnginePill?
+    var paletteEngine: SiteSearchEngine?
+    var paletteHintEngine: SiteSearchEngine?
+    var paletteSuggestions: [String] = []
+    let suggestionFetcher = SearchSuggestionFetcher()
     var newTabOnSubmit = false
     var privateMode: Bool
     var spaceManager: SpaceManagementController?
@@ -243,15 +250,7 @@ import QuartzCore
         progress.frame = NSRect(x: 0, y: toolbarHeight, width: card.bounds.width * CGFloat(activeWebView?.estimatedProgress ?? 0), height: 2)
         handle.frame = NSRect(x: max(0, width - 5), y: 44, width: 10, height: max(0, h - 60))
         handle.currentWidth = targetWidth; handle.isHidden = !session.sidebarVisible || width < 100
-        if let overlay = addressOverlay, let content = addressCard {
-            overlay.frame = root.bounds
-            let cw = min(590, w - 60)
-            let rowsHeight = tabSearchResults?.preferredHeight ?? 44
-            content.frame = NSRect(x: (w - cw) / 2, y: min(100, h * 0.10), width: cw, height: 145 + rowsHeight)
-            addressField?.frame = NSRect(x: 24, y: 50, width: cw - 48, height: 40)
-            tabSearchResults?.frame = NSRect(x: 14, y: 116, width: cw - 28, height: rowsHeight)
-            paletteShortcuts?.frame = NSRect(x: 26, y: 124 + rowsHeight, width: cw - 52, height: 18)
-        }
+        if addressOverlay != nil { layoutPalette(width: w, height: h) }
     }
 
     func webView(for tab: BrowserTab) -> WKWebView {
@@ -879,71 +878,8 @@ import QuartzCore
         return false
     }
 
-    func openAddress(newTab: Bool, empty: Bool) {
-        cancelPaging(); dismissAddress(); view.window?.makeKeyAndOrderFront(nil); newTabOnSubmit = newTab
-        let overlay = DismissView(); overlay.wantsLayer = true
-        overlay.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.12).cgColor
-        overlay.dismiss = { [weak self] in self?.dismissAddress() }
-        let box = FlippedContainer(); box.wantsLayer = true
-        box.appearance = NSAppearance(named: .aqua)
-        box.layer?.backgroundColor = NSColor(srgbRed: 0.985, green: 0.98, blue: 0.97, alpha: 1).cgColor
-        box.layer?.cornerRadius = 18; box.layer?.shadowOpacity = 0.20; box.layer?.shadowRadius = 30; box.layer?.shadowOffset = CGSize(width: 0, height: -8)
-        let heading = NSTextField(labelWithString: "Where would you like to go?")
-        heading.font = .systemFont(ofSize: 12, weight: .medium); heading.textColor = .secondaryLabelColor
-        heading.frame = NSRect(x: 26, y: 23, width: 400, height: 18); box.addSubview(heading)
-        let field = PaletteField(); field.font = .systemFont(ofSize: 23, weight: .regular)
-        field.isBordered = false; field.drawsBackground = false; field.focusRingType = .none
-        field.placeholderString = "Search or enter a URL"; field.stringValue = empty ? "" : session.active?.address ?? ""
-        field.target = self; field.action = #selector(submitAddress); field.delegate = self
-        field.escape = { [weak self] in self?.dismissAddress() }; field.setAccessibilityLabel("Search or enter URL")
-        box.addSubview(field)
-        let line = NSBox(); line.boxType = .separator; line.frame = NSRect(x: 24, y: 108, width: 530, height: 1); line.autoresizingMask = [.width]; box.addSubview(line)
-        let shortcuts = NSTextField(labelWithString: "↑↓ Choose     ↵ Open or switch     Esc Cancel")
-        shortcuts.font = .systemFont(ofSize: 11); shortcuts.textColor = .tertiaryLabelColor; shortcuts.frame = NSRect(x: 26, y: 183, width: 500, height: 18); box.addSubview(shortcuts)
-        let results = TabSearchResultsView(frame: .zero)
-        results.onSelect = { [weak self] id in self?.selectSearchResult(id) }
-        results.onSubmitQuery = { [weak self] query in self?.submitAddressQuery(query) }
-        box.addSubview(results)
-        overlay.addSubview(box); root.addSubview(overlay)
-        addressOverlay = overlay; addressField = field; addressCard = box; tabSearchResults = results; paletteShortcuts = shortcuts
-        refreshPaletteResults(); layoutBrowser()
-        box.alphaValue = 0
-        NSAnimationContext.runAnimationGroup { context in context.duration = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 0 : 0.12; box.animator().alphaValue = 1 }
-        view.window?.makeFirstResponder(field); field.selectText(nil)
-    }
-    @objc func submitAddress(_ sender: Any?) {
-        if tabSearchResults?.activateSelection() == true { return }
-        submitAddressQuery(addressField?.stringValue ?? "")
-    }
-    func submitAddressQuery(_ query: String) {
-        guard let address = URLInput.resolve(query) else { NSSound.beep(); return }
-        if newTabOnSubmit { session.add(address: address); dismissAddress(); showActive(); save() }
-        else { navigate(address) }
-    }
-    func refreshPaletteResults() {
-        guard let field = addressField else { return }
-        tabSearchResults?.update(tabs: session.tabs, query: field.stringValue, activeID: focusedTabID, canCreate: true, spaces: session.spaces)
-        layoutBrowser()
-    }
-    func selectSearchResult(_ id: UUID) {
-        select(id)
-        if let group = session.split(for: id), let split = splitCoordinators[group.primaryID] {
-            split.setFocusedSide(id == group.secondaryID ? .right : .left)
-        }
-        view.window?.makeFirstResponder(commandWebView)
-    }
-    func controlTextDidChange(_ obj: Notification) { if obj.object as AnyObject? === addressField { refreshPaletteResults() } }
-    func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
-        if commandSelector == #selector(NSResponder.cancelOperation(_:)) { dismissAddress(); return true }
-        if commandSelector == #selector(NSResponder.moveDown(_:)) { tabSearchResults?.moveSelection(delta: 1); return true }
-        if commandSelector == #selector(NSResponder.moveUp(_:)) { tabSearchResults?.moveSelection(delta: -1); return true }
-        if commandSelector == #selector(NSResponder.insertNewline(_:)) { submitAddress(control); return true }
-        return false
-    }
-    func dismissAddress() {
-        addressOverlay?.removeFromSuperview(); addressOverlay = nil; addressField = nil; addressCard = nil; tabSearchResults = nil; paletteShortcuts = nil
-        view.window?.makeFirstResponder(commandWebView)
-    }
+    // The command palette (open, search, site-scoped search, layout, dismissal)
+    // lives in CommandPalette.swift.
 
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
         tabActivityProbe.invalidate(webView)

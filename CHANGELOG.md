@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased — 0.10.0 local draft, build 24
+
+- Redesign the command palette as a single translucent card in the system appearance: icon-led input row, separator, and Arc-style single-line results with a full-width accent selection, inline dimmed addresses and trailing Space labels. The forced-light card, heading and shortcut footer are removed.
+- Offer Tab-to-search for known sites (YouTube, Google, Wikipedia, Amazon, Reddit, GitHub, X, DuckDuckGo). Typing a site name, domain or alias shows a trailing “Search <Site> ⇥” hint; Tab scopes the palette with a colored site pill, Return searches the site, and Backspace in an empty field removes the pill. Pasted URLs with paths and multi-word text never trigger the hint.
+- Fetch debounced autocomplete suggestions while typing: site-scoped suggestions for engines with a suggestion endpoint, and DuckDuckGo suggestions after tab results otherwise. Suggestions are best-effort over the network and never block typing or submission.
+- Local only; publication and installation remain on hold. See [VALIDATION.md](VALIDATION.md).
+
 ## Unreleased — 0.9.0 local draft, build 23
 
 - Ask “Are you sure you want to quit Bam?” for application quit requests, including fresh previews. Cancel/Escape keeps the live session; Quit Bam proceeds through the existing asynchronous save barrier. Repeated requests share one pending decision.
