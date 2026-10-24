@@ -75,6 +75,43 @@ import AppKit
         try check(right.contains(crossFlick.frame), "projected release could not cross to the adjacent display")
         try check(PiPPositioning.releasePlan(free, velocity: CGPoint(x: 2000, y: 2000), screens: []).frame == free,
                   "a flick moved the window without usable display bounds")
+        let leftInterior = CGRect(x: 40, y: 200, width: 320, height: 180)
+        let moderateRight = PiPPositioning.releasePlan(leftInterior, velocity: CGPoint(x: 500, y: 0), screens: [display])
+        try check(moderateRight.frame.origin == CGPoint(x: 872, y: 32),
+                  "moderate rightward flick stopped short or chose the closer left corner")
+        let moderateDiagonal = PiPPositioning.releasePlan(leftInterior, velocity: CGPoint(x: 340, y: 340), screens: [display])
+        try check(moderateDiagonal.frame.origin == CGPoint(x: 872, y: 612),
+                  "diagonal flick did not commit to both directed edges")
+        let upperLeft = CGRect(x: 40, y: 500, width: 320, height: 180)
+        let almostHorizontal = PiPPositioning.releasePlan(upperLeft, velocity: CGPoint(x: 500, y: -50), screens: [display])
+        try check(almostHorizontal.frame.origin == CGPoint(x: 872, y: 612),
+                  "small vertical drift sent a horizontal flick to the far vertical edge")
+        let downDiagonal = PiPPositioning.releasePlan(upperLeft, velocity: CGPoint(x: 500, y: -200), screens: [display])
+        try check(downDiagonal.frame.origin == CGPoint(x: 872, y: 32),
+                  "a dominant downward component failed to choose the bottom corner")
+        let almostVertical = PiPPositioning.releasePlan(leftInterior, velocity: CGPoint(x: 50, y: 500), screens: [display])
+        try check(almostVertical.frame.origin == CGPoint(x: 8, y: 612),
+                  "small horizontal drift overrode the nearer edge of a vertical flick")
+        let upperRight = CGRect(x: 800, y: 500, width: 320, height: 180)
+        let opposite = PiPPositioning.releasePlan(upperRight, velocity: CGPoint(x: -500, y: 0), screens: [display])
+        try check(opposite.frame.origin == CGPoint(x: 8, y: 612),
+                  "leftward flick chose the nearby right corner instead of its direction")
+        try check(PiPPositioning.releasePlan(free, velocity: CGPoint(x: 449, y: 0), screens: [display]).frame == free,
+                  "subthreshold movement lost free placement after directional corner changes")
+        try check(crossFlick.frame.origin == CGPoint(x: 2072, y: 8),
+                  "flick corner was chosen on the departure display instead of the projected destination")
+        let negativeFlick = PiPPositioning.releasePlan(free, velocity: CGPoint(x: -3700, y: 0), screens: [display, left])
+        try check(negativeFlick.frame.origin == CGPoint(x: -992, y: 412),
+                  "directional corner placement mishandled a negative-coordinate destination display")
+        let largeFlick = PiPPositioning.releasePlan(oversized, velocity: CGPoint(x: 600, y: 600), screens: [display])
+        try check(display.contains(largeFlick.frame) && abs(largeFlick.frame.width / largeFlick.frame.height - 16.0 / 9.0) < 0.001,
+                  "large-panel corner commitment produced invalid insets or lost aspect ratio")
+        let nearRight = CGRect(x: 800, y: 80, width: 320, height: 180)
+        let shortTravel = PiPPositioning.releasePlan(nearRight, velocity: CGPoint(x: 500, y: 0), screens: [display])
+        try check(moderateRight.duration > shortTravel.duration && (0.35...0.55).contains(moderateRight.duration)
+                    && (0.35...0.55).contains(shortTravel.duration),
+                  "far corner travel did not receive a longer bounded settling duration")
+
         var velocity = PiPPhysicalVelocity()
         velocity.begin(at: 1)
         velocity.record(.zero, at: 1)
@@ -245,6 +282,17 @@ import AppKit
         panel.sendEvent(event(phase: .ended))
         try check(!panel.isPositionSnapRunning && panel.frame == gentleFrame,
                   "slow native release lost free interior placement")
+        panel.cancelPositioning(); panel.setFrame(leftInterior, display: false)
+        panel.sendEvent(event(phase: .began))
+        for _ in 0..<3 { panel.sendEvent(event(14, 0, phase: .changed)) }
+        let moderateFingerUp = panel.frame
+        panel.sendEvent(event(phase: .ended))
+        try check(animatesFlick ? panel.isPositionSnapRunning && panel.frame == moderateFingerUp
+                    : near(panel.frame.origin, CGPoint(x: 872, y: 32)),
+                  "moderate native flick failed to start its directed corner commitment")
+        spin(until: { !panel.isPositionSnapRunning }, timeout: 0.8)
+        try check(near(panel.frame.origin, CGPoint(x: 872, y: 32)),
+                  "moderate native flick stopped at its short projection instead of the far corner")
         startFlick()
         let staleFrame = panel.frame
         time += 0.2

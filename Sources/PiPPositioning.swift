@@ -10,6 +10,7 @@ enum PiPPositioning {
     static let minimumFlickSpeed: CGFloat = 450
     static let projectionTime: CGFloat = 0.24
     static let maximumFlickSpeed: CGFloat = 6000
+    static let directionalAxisFraction: CGFloat = 0.35
 
     struct ReleasePlan {
         let frame: CGRect
@@ -27,9 +28,29 @@ enum PiPPositioning {
             return ReleasePlan(frame: releaseFrame(frame, screens: screens), duration: 0.22, isFlick: false)
         }
         let projected = frame.offsetBy(dx: velocity.x * projectionTime, dy: velocity.y * projectionTime)
-        let target = releaseFrame(projected, screens: screens)
-        let duration = 0.35 + 0.20 * Double(min(1, (speed - minimumFlickSpeed) / 2550))
+        let target = directionalCorner(projected, velocity: velocity, speed: speed, screens: screens)
+        let travel = hypot(target.minX - frame.minX, target.minY - frame.minY)
+        let duration = 0.35 + 0.20 * Double(min(1, travel / 800))
         return ReleasePlan(frame: target, duration: duration, isFlick: true)
+    }
+
+    private static func directionalCorner(_ projected: CGRect, velocity: CGPoint, speed: CGFloat,
+                                          screens: [CGRect]) -> CGRect {
+        guard let screen = destinationScreen(for: projected, screens: screens) else { return projected }
+        let fitted = fit(projected, inside: screen)
+        guard fitted.width + 2 * cornerInset <= screen.width,
+              fitted.height + 2 * cornerInset <= screen.height else { return fitted }
+        let left = screen.minX + cornerInset, right = screen.maxX - fitted.width - cornerInset
+        let bottom = screen.minY + cornerInset, top = screen.maxY - fitted.height - cornerInset
+        // A deliberate flick commits to its direction, even if its short
+        // projection is still nearer the opposite corner. Small orthogonal
+        // motion chooses the nearest edge instead of changing that intention.
+        let rightward = abs(velocity.x) >= directionalAxisFraction * speed
+            ? velocity.x > 0 : abs(projected.minX - right) < abs(projected.minX - left)
+        let upward = abs(velocity.y) >= directionalAxisFraction * speed
+            ? velocity.y > 0 : abs(projected.minY - top) < abs(projected.minY - bottom)
+        return CGRect(x: rightward ? right : left, y: upward ? top : bottom,
+                      width: fitted.width, height: fitted.height)
     }
 
     static func boundedVelocity(_ velocity: CGPoint) -> CGPoint {
