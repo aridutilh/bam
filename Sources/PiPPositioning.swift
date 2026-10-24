@@ -3,8 +3,42 @@ import Foundation
 /// Independent window-placement geometry. Screens are AppKit global visible
 /// frames (including negative coordinates), not full frames behind the Dock.
 enum PiPPositioning {
-    static let cornerInset: CGFloat = 16
+    static let cornerInset: CGFloat = 8
     static let magneticRadius: CGFloat = 140
+    // Original Ark tuning, guided by the reference's long decelerating sweeps.
+    // These are not recovered Arc constants.
+    static let minimumFlickSpeed: CGFloat = 450
+    static let projectionTime: CGFloat = 0.24
+    static let maximumFlickSpeed: CGFloat = 6000
+
+    struct ReleasePlan {
+        let frame: CGRect
+        let duration: TimeInterval
+        let isFlick: Bool
+    }
+
+    static func releasePlan(_ frame: CGRect, velocity: CGPoint, screens: [CGRect]) -> ReleasePlan {
+        guard valid(frame), destinationScreen(for: frame, screens: screens) != nil else {
+            return ReleasePlan(frame: frame, duration: 0.22, isFlick: false)
+        }
+        let velocity = boundedVelocity(velocity)
+        let speed = hypot(velocity.x, velocity.y)
+        guard speed >= minimumFlickSpeed else {
+            return ReleasePlan(frame: releaseFrame(frame, screens: screens), duration: 0.22, isFlick: false)
+        }
+        let projected = frame.offsetBy(dx: velocity.x * projectionTime, dy: velocity.y * projectionTime)
+        let target = releaseFrame(projected, screens: screens)
+        let duration = 0.35 + 0.20 * Double(min(1, (speed - minimumFlickSpeed) / 2550))
+        return ReleasePlan(frame: target, duration: duration, isFlick: true)
+    }
+
+    static func boundedVelocity(_ velocity: CGPoint) -> CGPoint {
+        guard velocity.x.isFinite, velocity.y.isFinite else { return .zero }
+        let speed = hypot(velocity.x, velocity.y)
+        guard speed > maximumFlickSpeed else { return velocity }
+        let scale = maximumFlickSpeed / speed
+        return CGPoint(x: velocity.x * scale, y: velocity.y * scale)
+    }
 
     static func fingerDelta(x: CGFloat, y: CGFloat, invertedFromDevice: Bool) -> CGPoint {
         // Normalize the scrolling preference, then convert scroll Y into
@@ -71,5 +105,72 @@ enum PiPPositioning {
     private static func distanceSquared(_ a: CGPoint, _ b: CGPoint) -> CGFloat {
         let dx = a.x - b.x, dy = a.y - b.y
         return dx * dx + dy * dy
+    }
+}
+
+/// Tracks only physical packets, never OS momentum. Position samples make the
+/// estimate independent of packet frequency; equal timestamps are coalesced.
+struct PiPPhysicalVelocity {
+    private struct Sample { let time: TimeInterval; let position: CGPoint }
+    private var samples: [Sample] = []
+    private var position = CGPoint.zero
+    private var lastDirection = CGPoint.zero
+    private var lastMotionTime: TimeInterval?
+    private static let window: TimeInterval = 0.08
+    private static let stale: TimeInterval = 0.12
+
+    mutating func reset() { self = Self() }
+
+    mutating func begin(at time: TimeInterval) {
+        reset()
+        guard time.isFinite else { return }
+        samples = [Sample(time: time, position: .zero)]
+    }
+
+    mutating func pause(at time: TimeInterval) {
+        // Stationary fingers must not launch an earlier fast movement.
+        begin(at: time)
+    }
+
+    mutating func record(_ delta: CGPoint, at time: TimeInterval) {
+        guard time.isFinite, delta.x.isFinite, delta.y.isFinite else { reset(); return }
+        guard let previous = samples.last else { begin(at: time); return }
+        guard time >= previous.time else { begin(at: time); return }
+        if delta.x * lastDirection.x + delta.y * lastDirection.y < 0 {
+            // Even a small intentional reversal cancels the old launch. The new
+            // direction must build its own velocity instead of averaging with it.
+            samples = [previous]
+        }
+        position.x += delta.x; position.y += delta.y
+        if delta.x != 0 || delta.y != 0 {
+            lastDirection = delta; lastMotionTime = time
+        }
+        let sample = Sample(time: time, position: position)
+        if time == samples.last?.time { samples[samples.count - 1] = sample }
+        else { samples.append(sample) }
+        while samples.count > 2 && samples[1].time < time - Self.window { samples.removeFirst() }
+        if samples.count > 64 { samples.removeFirst(samples.count - 64) }
+    }
+
+    func velocity(at time: TimeInterval) -> CGPoint {
+        guard time.isFinite, let last = samples.last, let motionTime = lastMotionTime,
+              time >= last.time, time - motionTime <= Self.stale, samples.count >= 2 else { return .zero }
+        let startTime = max(samples[0].time, time - Self.window)
+        let duration = time - startTime
+        guard duration >= 1.0 / 240, startTime < last.time else { return .zero }
+        var start = samples[0].position
+        for index in 1..<samples.count {
+            let before = samples[index - 1], after = samples[index]
+            if startTime <= after.time {
+                let fraction = CGFloat((startTime - before.time) / (after.time - before.time))
+                start = CGPoint(x: before.position.x + (after.position.x - before.position.x) * fraction,
+                                y: before.position.y + (after.position.y - before.position.y) * fraction)
+                break
+            }
+        }
+        // Including the quiet interval between the final packet and finger-up
+        // naturally decays the estimate, reaching zero after the sample window.
+        return PiPPositioning.boundedVelocity(CGPoint(x: (position.x - start.x) / duration,
+                                                      y: (position.y - start.y) / duration))
     }
 }

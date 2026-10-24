@@ -20,21 +20,21 @@ import AppKit
         try check(PiPPositioning.releaseFrame(edge, screens: [display]) == edge,
                   "middle-of-edge placement was attracted to a corner")
         let nearTopRight = CGRect(origin: CGPoint(x: 850, y: 600), size: size)
-        try check(PiPPositioning.releaseFrame(nearTopRight, screens: [display]).origin == CGPoint(x: 864, y: 604),
+        try check(PiPPositioning.releaseFrame(nearTopRight, screens: [display]).origin == CGPoint(x: 872, y: 612),
                   "top-right corner did not respect visible bounds and inset")
         // A 60-by-80 offset is 100 points from the corner: inside the wider
         // release radius, while a 100-by-100 offset is just outside 140 points.
-        let gentleApproach = CGRect(origin: CGPoint(x: 804, y: 524), size: size)
-        try check(PiPPositioning.releaseFrame(gentleApproach, screens: [display]).origin == CGPoint(x: 864, y: 604),
+        let gentleApproach = CGRect(origin: CGPoint(x: 812, y: 532), size: size)
+        try check(PiPPositioning.releaseFrame(gentleApproach, screens: [display]).origin == CGPoint(x: 872, y: 612),
                   "a release 100 points from the corner did not use the wider magnet")
-        let outsideRadius = CGRect(origin: CGPoint(x: 764, y: 504), size: size)
+        let outsideRadius = CGRect(origin: CGPoint(x: 772, y: 512), size: size)
         try check(PiPPositioning.releaseFrame(outsideRadius, screens: [display]) == outsideRadius,
                   "corner capture ignored combined-axis distance or exceeded its radius")
         try check(PiPPositioning.dragFrame(gentleApproach, delta: .zero, screens: [display]) == gentleApproach,
                   "corner attraction pulled the panel while fingers were still down")
         let left = CGRect(x: -1000, y: -120, width: 1000, height: 720)
         let nearLeft = CGRect(origin: CGPoint(x: -979, y: -98), size: size)
-        try check(PiPPositioning.releaseFrame(nearLeft, screens: [display, left]).origin == CGPoint(x: -984, y: -104),
+        try check(PiPPositioning.releaseFrame(nearLeft, screens: [display, left]).origin == CGPoint(x: -992, y: -112),
                   "negative-coordinate display corner was incorrect")
         let outside = CGRect(origin: CGPoint(x: 1100, y: 700), size: size)
         try check(PiPPositioning.releaseFrame(outside, screens: [display], magnet: false) == CGRect(x: 880, y: 620, width: 320, height: 180),
@@ -59,6 +59,53 @@ import AppKit
                   "window movement changed direction with the scrolling preference")
         try check(PiPPositioning.fingerDelta(x: .nan, y: .infinity, invertedFromDevice: true) == .zero,
                   "invalid deltas escaped into window geometry")
+
+        let flick = PiPPositioning.releasePlan(free, velocity: CGPoint(x: 1900, y: 1400), screens: [display])
+        try check(flick.isFlick && flick.frame.origin == CGPoint(x: 872, y: 612),
+                  "a fast diagonal release from the interior did not project into corner capture")
+        try check((0.35...0.55).contains(flick.duration), "flick continuation duration escaped its bounds")
+        let slow = PiPPositioning.releasePlan(free, velocity: CGPoint(x: 300, y: 200), screens: [display])
+        try check(!slow.isFlick && slow.frame == free && slow.duration == 0.22,
+                  "slow release coasted away from deliberate free placement")
+        let extreme = PiPPositioning.releasePlan(free, velocity: CGPoint(x: 300_000, y: 400_000), screens: [display])
+        let capped = PiPPositioning.boundedVelocity(CGPoint(x: 300_000, y: 400_000))
+        try check(abs(hypot(capped.x, capped.y) - 6000) < 0.01 && display.contains(extreme.frame),
+                  "extreme velocity exceeded the speed limit or visible display")
+        let crossFlick = PiPPositioning.releasePlan(crossing, velocity: CGPoint(x: 2200, y: 0), screens: [display, right])
+        try check(right.contains(crossFlick.frame), "projected release could not cross to the adjacent display")
+        try check(PiPPositioning.releasePlan(free, velocity: CGPoint(x: 2000, y: 2000), screens: []).frame == free,
+                  "a flick moved the window without usable display bounds")
+        var velocity = PiPPhysicalVelocity()
+        velocity.begin(at: 1)
+        velocity.record(.zero, at: 1)
+        velocity.record(CGPoint(x: 20, y: 10), at: 1.02)
+        velocity.record(CGPoint(x: 20, y: 10), at: 1.04)
+        velocity.record(CGPoint(x: 20, y: 10), at: 1.06)
+        try check(near(velocity.velocity(at: 1.06), CGPoint(x: 1000, y: 500)),
+                  "recent physical velocity had incorrect time or axis units")
+        var coalesced = PiPPhysicalVelocity()
+        coalesced.begin(at: 1)
+        coalesced.record(CGPoint(x: 10, y: 5), at: 1.02)
+        coalesced.record(CGPoint(x: 10, y: 5), at: 1.02)
+        coalesced.record(CGPoint(x: 40, y: 20), at: 1.06)
+        try check(near(coalesced.velocity(at: 1.06), velocity.velocity(at: 1.06)),
+                  "coalesced timestamps changed the physical velocity")
+        let quietVelocity = velocity.velocity(at: 1.15)
+        try check(quietVelocity == .zero && velocity.velocity(at: 1.30) == .zero,
+                  "a quiet or stale release resurrected old velocity")
+        velocity.record(CGPoint(x: -2, y: -1), at: 1.07)
+        let reversed = velocity.velocity(at: 1.08)
+        try check(reversed.x < 0 && reversed.y < 0 && hypot(reversed.x, reversed.y) < 450,
+                  "small reversal launched the preceding fast direction")
+        velocity.pause(at: 1.09)
+        try check(velocity.velocity(at: 1.10) == .zero, "stationary fingers retained launch velocity")
+        coalesced.begin(at: 2)
+        coalesced.record(CGPoint(x: 100, y: 100), at: 2)
+        coalesced.record(CGPoint(x: 100, y: 100), at: 2)
+        try check(coalesced.velocity(at: 2.01) == .zero,
+                  "same-time packets invented a duration or inherited an earlier gesture")
+        coalesced.record(CGPoint(x: 100, y: 100), at: 1.9)
+        try check(coalesced.velocity(at: 2.02) == .zero, "out-of-order time produced a spurious flick")
 
         let visible = NSScreen.main?.visibleFrame ?? CGRect(x: 0, y: 0, width: 1280, height: 800)
         let start = CGRect(x: visible.midX - 160, y: visible.midY - 90, width: 320, height: 180)
@@ -111,7 +158,7 @@ import AppKit
         let closeCorner = CGRect(x: visible.minX + 25, y: visible.minY + 22, width: 320, height: 180)
         panel.setFrame(closeCorner, display: false)
         panel.finishPointerDrag(animated: false)
-        try check(panel.frame.origin == CGPoint(x: visible.minX + 16, y: visible.minY + 16),
+        try check(panel.frame.origin == CGPoint(x: visible.minX + 8, y: visible.minY + 8),
                   "native drag release did not use corner placement")
         panel.setFrame(closeCorner, display: false)
         panel.finishPointerDrag()
@@ -133,8 +180,105 @@ import AppKit
         try check(panel.isScrollDragging, "precise unphased input did not start a drag")
         spin(until: { !panel.isScrollDragging && !panel.isPositionSnapRunning }, timeout: 0.7)
         try check(!panel.isScrollDragging && !panel.isPositionSnapRunning
-                    && near(panel.frame.origin, CGPoint(x: visible.minX + 16, y: visible.minY + 16)),
+                    && near(panel.frame.origin, CGPoint(x: visible.minX + 8, y: visible.minY + 8)),
                   "precise unphased input did not finish and snap after a quiet period")
+        // Deterministic in-process physical packets exercise the actual panel
+        // event adapter. These never enter the system event queue or take focus.
+        panel.positionScreenFrames = { [display] }
+        panel.positionReduceMotion = { false }
+        let animatesFlick = !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        func startFlick() {
+            panel.cancelPositioning()
+            panel.setFrame(free, display: false)
+            panel.sendEvent(event(phase: .began))
+            for _ in 0..<3 { panel.sendEvent(event(70, -55, phase: .changed)) }
+        }
+        let corner = CGPoint(x: 872, y: 612)
+        startFlick()
+        let fingerUpFrame = panel.frame
+        panel.sendEvent(event(phase: .ended, momentum: .began))
+        try check(!panel.isScrollDragging && (animatesFlick
+                    ? panel.isPositionSnapRunning && panel.frame == fingerUpFrame
+                    : !panel.isPositionSnapRunning && near(panel.frame.origin, corner)),
+                  "fast release did not continue from the displayed frame or honor Reduce Motion")
+        let immediatelyReleased = panel.frame
+        panel.sendEvent(event(1000, -1000, phase: [], momentum: .changed))
+        try check(panel.frame == immediatelyReleased && panel.isPositionSnapRunning == animatesFlick,
+                  "OS momentum added a second movement driver")
+        spin(for: 0.16)
+        try check(animatesFlick
+                    ? panel.frame.minX > fingerUpFrame.minX && panel.frame.minX < corner.x
+                        && panel.frame.minY > fingerUpFrame.minY && panel.frame.minY < corner.y
+                    : near(panel.frame.origin, corner),
+                  "flick continuation did not visibly travel toward its landing point")
+        spin(until: { !panel.isPositionSnapRunning }, timeout: 0.8)
+        try check(!panel.isPositionSnapRunning && near(panel.frame.origin, corner),
+                  "native flick did not finish at the projected corner")
+        panel.sendEvent(event(-1000, 1000, phase: [], momentum: .changed))
+        try check(near(panel.frame.origin, corner) && !panel.isPositionSnapRunning,
+                  "late inertia restarted or reversed a completed continuation")
+
+        startFlick()
+        panel.sendEvent(event(900, -900, phase: [], momentum: .began))
+        try check(!panel.isScrollDragging && (animatesFlick
+                    ? panel.isPositionSnapRunning : near(panel.frame.origin, corner)),
+                  "momentum-first release failed to finish the physical gesture")
+        let midContinuation = panel.frame.origin
+        panel.sendEvent(event(-8, 5, phase: .began, momentum: .ended))
+        let takeover = CGPoint(x: midContinuation.x - 8, y: midContinuation.y - 5)
+        spin(for: 0.6)
+        try check(panel.isScrollDragging && !panel.isPositionSnapRunning && near(panel.frame.origin, takeover),
+                  "new physical input failed to interrupt a flick at its displayed frame")
+        panel.sendEvent(event(phase: .cancelled))
+        startFlick()
+        panel.sendEvent(event(phase: .ended))
+        panel.sendEvent(event(phase: .mayBegin))
+        let held = panel.frame
+        spin(for: 0.6)
+        try check(!panel.isScrollDragging && !panel.isPositionSnapRunning && panel.frame == held,
+                  "mayBegin did not cancel an old continuation")
+
+        panel.cancelPositioning(); panel.setFrame(free, display: false)
+        panel.sendEvent(event(phase: .began))
+        for _ in 0..<3 { panel.sendEvent(event(2, -1, phase: .changed)) }
+        let gentleFrame = panel.frame
+        panel.sendEvent(event(phase: .ended))
+        try check(!panel.isPositionSnapRunning && panel.frame == gentleFrame,
+                  "slow native release lost free interior placement")
+        startFlick()
+        let staleFrame = panel.frame
+        time += 0.2
+        panel.sendEvent(event(phase: .ended))
+        try check(!panel.isPositionSnapRunning && panel.frame == staleFrame,
+                  "delayed native finger-up reused stale velocity")
+        startFlick()
+        panel.sendEvent(event(-2, 2, phase: .changed))
+        let reversalFrame = panel.frame
+        panel.sendEvent(event(phase: .ended))
+        try check(!panel.isPositionSnapRunning && panel.frame == reversalFrame,
+                  "native direction reversal launched the earlier flick")
+        startFlick()
+        panel.sendEvent(event(phase: .stationary))
+        let stationaryFrame = panel.frame
+        panel.sendEvent(event(phase: .ended))
+        try check(!panel.isPositionSnapRunning && panel.frame == stationaryFrame,
+                  "native stationary pause reused preceding fast movement")
+        panel.cancelPositioning(); panel.setFrame(free, display: false)
+        for _ in 0..<3 { panel.sendEvent(event(70, -55, phase: [])) }
+        let unphasedFrame = panel.frame
+        spin(until: { !panel.isScrollDragging && !panel.isPositionSnapRunning }, timeout: 0.8)
+        try check(!panel.isScrollDragging && !panel.isPositionSnapRunning && panel.frame == unphasedFrame,
+                  "quiet fallback launched old unphased velocity")
+        startFlick()
+        panel.positionReduceMotion = { true }
+        panel.sendEvent(event(phase: .ended))
+        try check(!panel.isPositionSnapRunning && near(panel.frame.origin, corner),
+                  "Reduce Motion did not place the flick destination without animation")
+        panel.positionReduceMotion = { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }
+        try check(NSApp.keyWindow === previousKey && previousKey?.firstResponder === previousResponder,
+                  "flick continuation or interruption changed keyboard focus")
+        panel.positionScreenFrames = { [visible] }
+
         let smallDisplay = CGRect(x: visible.minX, y: visible.minY, width: 200, height: 120)
         panel.positionScreenFrames = { [smallDisplay] }
         panel.setFrame(closeCorner, display: false)

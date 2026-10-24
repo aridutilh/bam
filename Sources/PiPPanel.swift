@@ -5,7 +5,9 @@ import QuartzCore
     var onEscape: (() -> Void)?
     weak var overlay: PiPOverlayView?
     var positionScreenFrames: () -> [NSRect] = { NSScreen.screens.map(\.visibleFrame) }
+    var positionReduceMotion: () -> Bool = { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }
     private let positionAnimator = CubicAnimator()
+    private var physicalVelocity = PiPPhysicalVelocity()
     private var scrollEndWork: DispatchWorkItem?
     private(set) var isScrollDragging = false
     private(set) var isPositionSnapRunning = false
@@ -36,15 +38,15 @@ import QuartzCore
             setFrame(PiPPositioning.releaseFrame(frame, screens: positionScreenFrames(), magnet: false), display: true)
             return true
         }
-        // A latched inertial tail must never move the window, even if the last
+        // A latched inertial tail must never add movement, even if the last
         // physical end and the first momentum packet arrive together. A new
         // physical begin takes precedence over the previous stream's tail.
         if !event.momentumPhase.isEmpty && !phase.contains(.began) && !phase.contains(.mayBegin) {
-            if isScrollDragging { finishScrollDrag() }
+            if isScrollDragging { finishScrollDrag(at: event.timestamp) }
             return true
         }
         if phase.contains(.ended) {
-            if isScrollDragging { finishScrollDrag() }
+            if isScrollDragging { finishScrollDrag(at: event.timestamp) }
             return true
         }
         if phase.contains(.mayBegin) {
@@ -52,6 +54,7 @@ import QuartzCore
         }
         if phase.contains(.began) || (!isScrollDragging && !phase.contains(.stationary)) {
             cancelPositioning(); isScrollDragging = true
+            physicalVelocity.begin(at: event.timestamp)
         }
         guard isScrollDragging else { return true }
         scrollEndWork?.cancel(); scrollEndWork = nil
@@ -59,13 +62,16 @@ import QuartzCore
         if !phase.contains(.stationary) {
             let delta = PiPPositioning.fingerDelta(x: event.scrollingDeltaX, y: event.scrollingDeltaY,
                                                  invertedFromDevice: event.isDirectionInvertedFromDevice)
+            physicalVelocity.record(delta, at: event.timestamp)
             let target = PiPPositioning.dragFrame(frame, delta: delta, screens: positionScreenFrames())
             setFrameOrigin(target.origin)
+        } else {
+            physicalVelocity.pause(at: event.timestamp)
         }
         if phase.isEmpty {
             // Precise devices without physical phases finish after a quiet
             // interval; momentum is handled above and cannot extend movement.
-            let work = DispatchWorkItem { [weak self] in self?.finishScrollDrag() }
+            let work = DispatchWorkItem { [weak self] in self?.finishScrollDrag(at: nil) }
             scrollEndWork = work
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: work)
         }
@@ -75,28 +81,35 @@ import QuartzCore
     func cancelPositioning() {
         scrollEndWork?.cancel(); scrollEndWork = nil
         isScrollDragging = false
+        physicalVelocity.reset()
         positionGeneration &+= 1
         isPositionSnapRunning = false
         positionAnimator.stop()
     }
-    private func finishScrollDrag() {
-        scrollEndWork?.cancel(); scrollEndWork = nil
-        isScrollDragging = false
-        finishPointerDrag()
+    private func finishScrollDrag(at timestamp: TimeInterval?) {
+        // A quiet-time fallback has no recent finger-up packet: fit/snap locally
+        // without resurrecting stale velocity. Momentum packets only end the
+        // physical stream; their deltas never feed this continuation.
+        let velocity = timestamp.map { physicalVelocity.velocity(at: $0) } ?? .zero
+        finishPositioning(velocity: velocity, animated: true)
     }
     /// Called after AppKit's native click-drag loop returns on mouse-up too.
     func finishPointerDrag(animated: Bool = true) {
+        finishPositioning(velocity: .zero, animated: animated)
+    }
+    private func finishPositioning(velocity: CGPoint, animated: Bool) {
         cancelPositioning()
         let start = frame
-        let target = PiPPositioning.releaseFrame(start, screens: positionScreenFrames())
+        let plan = PiPPositioning.releasePlan(start, velocity: velocity, screens: positionScreenFrames())
+        let target = plan.frame
         guard target != start else { return }
-        guard animated, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
+        guard animated, !positionReduceMotion() else {
             setFrame(target, display: true); return
         }
         let generation = positionGeneration
         isPositionSnapRunning = true
         positionAnimator.animationView = contentView
-        positionAnimator.animate(from: 0, to: 1, duration: 0.18, controlPoints: (0.22, 0.61, 0.36, 1), update: { [weak self] progress in
+        positionAnimator.animate(from: 0, to: 1, duration: plan.duration, controlPoints: (0.22, 0.61, 0.36, 1), update: { [weak self] progress in
             guard let self, self.positionGeneration == generation else { return }
             self.setFrame(NSRect(x: start.minX + (target.minX - start.minX) * progress,
                                  y: start.minY + (target.minY - start.minY) * progress,
@@ -151,7 +164,7 @@ import QuartzCore
         time.font = .monospacedDigitSystemFont(ofSize: 11, weight: .medium)
         time.textColor = .white; time.alignment = .right
         time.setAccessibilityElement(false)
-        setAccessibilityLabel("Floating video. Drag or scroll with two fingers to move; release near a corner to snap. Tab to navigate controls.")
+        setAccessibilityLabel("Floating video. Drag or scroll with two fingers to move; flick to glide, or release near a corner to snap. Tab to navigate controls.")
         returnButton.nextKeyView = closeButton; closeButton.nextKeyView = backward
         backward.nextKeyView = play; play.nextKeyView = forward; forward.nextKeyView = mute
         mute.nextKeyView = volume; volume.nextKeyView = resizeGrip; resizeGrip.nextKeyView = returnButton
