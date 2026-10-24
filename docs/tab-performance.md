@@ -1,6 +1,6 @@
 # Local tab performance work
 
-## Measured 0.10.2 candidate; shipped in 0.12.1: extension and PiP overhead
+## Measured 0.10.2 candidate; shipped in 0.13.1: extension and PiP overhead
 
 An optimized method-level harness reproduced repeated full-list reconstruction in the extension host with many listed tabs. Five measured repetitions after a warmup used the actual BrowserSession model, extracted production adapter methods, one profile, unloaded tabs and the active tab at the end. No WebViews or third-party extension processes were created for these timings.
 

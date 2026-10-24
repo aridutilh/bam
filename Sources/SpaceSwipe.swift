@@ -17,6 +17,11 @@ struct SpaceSwipeStateMachine {
         var finished = false
         /// Points per second in displayed coordinates, for the settling spring.
         var releaseVelocity: CGFloat = 0
+        /// 0…1 pull toward creating a new Space while overscrolling past the
+        /// last page; nil in every other direction or position.
+        var createProgress: CGFloat?
+        /// True on the finishing event of a completed create pull.
+        var committedCreate = false
     }
 
     struct DiagnosticSnapshot {
@@ -121,7 +126,17 @@ struct SpaceSwipeStateMachine {
             return finish(commitAllowed: true, timestamp: timestamp, didLock: didLock)
         }
         guard axis == .horizontal else { return Result() }
-        return Result(shouldConsume: true, didLock: didLock, previewOffset: displayedOffset)
+        return Result(shouldConsume: true, didLock: didLock, previewOffset: displayedOffset,
+                      createProgress: createProgress)
+    }
+
+    /// The raw travel that fills the new-Space circle; past the rubber band's
+    /// visual cap, so completing it is a deliberate continued pull.
+    private var createTravel: CGFloat { max(120, pageWidth * 0.8) }
+    private var createProgress: CGFloat? {
+        let raw = rawOffset
+        guard raw < 0, originSpace == spaceCount - 1 else { return nil }
+        return min(1, -raw / createTravel)
     }
 
     mutating func reset() {
@@ -257,10 +272,13 @@ struct SpaceSwipeStateMachine {
         } else if abs(raw) >= pageWidth && matchingDirection {
             releaseSpeed = 0
         }
+        let pull = createProgress
+        let committedCreate = commitAllowed && (pull ?? 0) >= 1
         reset()
         suppressMomentum = true
         return Result(shouldConsume: true, didLock: didLock, previewOffset: offset,
                       committedSpace: target, finished: true,
-                      releaseVelocity: commitAllowed ? releaseSpeed : 0)
+                      releaseVelocity: commitAllowed && !committedCreate ? releaseSpeed : 0,
+                      createProgress: pull, committedCreate: committedCreate)
     }
 }

@@ -28,7 +28,8 @@ struct SpaceSwipeTests {
             try deliberateReversalUsesRecentDirection()
             try variableSpaceCountsHonorOrderedBoundaries()
             try collectionChangesBeforeAndAfterLockAreSafe()
-            print("PASS: swipe intent/axis lock, live animation handoff, release velocity, distance/flick commits, variable-count boundaries, real trackpad phases, cancellation, and momentum")
+            try overscrollPastLastSpaceReportsAndCommitsCreation()
+            print("PASS: swipe intent/axis lock, live animation handoff, release velocity, distance/flick commits, variable-count boundaries, real trackpad phases, cancellation, momentum, and new-Space overscroll")
         } catch {
             FileHandle.standardError.write(Data("FAIL: \(error)\n".utf8))
             exit(1)
@@ -353,6 +354,43 @@ struct SpaceSwipeTests {
             try check(end.finished && end.committedSpace == nil,
                       "An empty or invalid Space count invented a destination")
         }
+    }
+
+    private static func overscrollPastLastSpaceReportsAndCommitsCreation() throws {
+        // A full pull past the last Space fills the circle and commits creation.
+        var machine = SpaceSwipeStateMachine()
+        _ = send(&machine, .began, 0, space: 2)
+        let partial = send(&machine, -20, 0, .changed, 0.05, space: 2)
+        try check(abs((partial.createProgress ?? -1) - 20 / 182.4) < 0.01,
+                  "Overscroll at the last Space must report fill progress")
+        let full = send(&machine, -170, 0, .changed, 0.4, space: 2)
+        try check(full.createProgress == 1, "A full pull reports complete progress")
+        let release = send(&machine, .ended, 0.6, space: 2)
+        try check(release.committedCreate && release.committedSpace == nil && release.releaseVelocity == 0,
+                  "Releasing a full pull commits creation, not a page change")
+
+        // A partial pull springs back without creating.
+        _ = send(&machine, .began, 1, space: 2)
+        _ = send(&machine, -100, 0, .changed, 1.3, space: 2)
+        let early = send(&machine, .ended, 1.5, space: 2)
+        try check(!early.committedCreate && (early.createProgress ?? 0) < 1 && early.committedSpace == nil,
+                  "A partial pull must not create a Space")
+
+        // Only the last Space in the next direction offers creation.
+        _ = send(&machine, .began, 2, space: 1)
+        let middle = send(&machine, -150, 0, .changed, 2.2, space: 1)
+        try check(middle.createProgress == nil, "A middle Space never offers creation")
+        _ = send(&machine, .ended, 2.3, space: 1)
+        _ = send(&machine, .began, 3, space: 0, spaceCount: 1)
+        let backwards = send(&machine, 150, 0, .changed, 3.2, space: 0, spaceCount: 1)
+        try check(backwards.createProgress == nil, "The leading edge never offers creation")
+        _ = send(&machine, .ended, 3.3, space: 0, spaceCount: 1)
+
+        // Cancellation abandons even a completed pull.
+        _ = send(&machine, .began, 4, space: 2)
+        _ = send(&machine, -200, 0, .changed, 4.3, space: 2)
+        let cancelled = send(&machine, .cancelled, 4.4, space: 2)
+        try check(!cancelled.committedCreate, "A cancelled gesture must not create a Space")
     }
 
     private static func collectionChangesBeforeAndAfterLockAreSafe() throws {
