@@ -28,7 +28,8 @@ That builds for your machine, locally signs the app, and runs the component test
 - **Login profiles** — assign the same profile to Spaces that should share logins, or separate profiles to keep website data, Favorites, history, and extensions apart. Existing Spaces keep the Default profile. Moving loaded pages between profiles asks before reloading them.
 - **Local extensions** — Extensions → Manage Extensions imports unpacked extension folders with permission review. Runtime support needs macOS 15.4+. This is an experimental WebKit host: [extension notes](docs/extensions.md) describe what works and what does not.
 - **A lighter browser** — sidebar rows are reused and chrome updates are coalesced; session files save on a background writer. Under critical memory pressure, ordinary static pages idle for ten minutes can sleep while the three most recently used loaded pages stay warm. Saved tabs, Splits, video, forms, scripts, and uncertain activity stay protected. See the [tab performance notes](docs/tab-performance.md) for the policy and its limits.
-- **Tab search** — ⌘T opens a palette *before* making a tab. Type a URL or search, or jump to a tab you already have open in any Space. Fewer duplicate tabs, more smugness.
+- **Tab search** — ⌘T opens a palette *before* making a tab. Type a URL or search, jump to a tab you already have open in any Space, or type a command — “settings”, “history”, “downloads” — and press Return. Fewer duplicate tabs, more smugness.
+- **Settings, Bam-style** — ⌘, opens a Space-tinted settings window: default search engine, playback and memory toggles, per-Space names, colors and icons, extensions and About. No Aqua in sight.
 - **Peek** 👀 — shift-click a link to open it in an overlay without leaving your page. Like it? Promote it to a tab, a Split pane, or Little Bam. Done? Escape and it's gone.
 - **Split View** — two live pages side by side with a draggable divider and per-pane controls. The pair sticks together in the sidebar and survives restarts.
 - **Little Bam** — a compact companion window with its own address bar. When macOS hands Bam a link to open, it lands here instead of blowing up your main window; promote one with ⌘O when it earns the big screen. (Bam never makes itself your default browser behind your back.)
@@ -78,7 +79,8 @@ Every one of those is a working subset, not a finished browser feature — the [
 | Sleep idle pages / keep this site awake | View menu |
 | Back / forward / reload or stop | ⌘[ / ⌘] / ⌘R |
 | Next / previous tab | Control-Tab / Control-Shift-Tab (sidebar order) |
-| Edit Spaces | Tabs → Manage Spaces, or the sidebar Space heading |
+| Settings | ⌘, or type “settings” into the palette |
+| Edit Spaces | Tabs → Manage Spaces, the sidebar Space heading, or Settings → Spaces |
 | Move tab or Split pair to a Space | Tab-row context menu → Move to Space |
 | Automatic floating video on/off | View → Automatically Show Playing Videos |
 | Return to the video's tab | PiP Return button, R, or double-click the panel |
@@ -96,7 +98,7 @@ Bam is a prototype, and it says so with its chest:
 
 - **Profiles share deliberately.** Spaces assigned to the same profile share website data; use separate profiles for separate sign-ins.
 - **Extension compatibility is limited.** Dashlane Firefox reaches its welcome screen; login and autofill remain unverified. 1Password is unsupported because required APIs are missing, and notification support is excluded. There is no Chrome Web Store integration or universal extension compatibility.
-- **No** built-in content blocking, password manager, sync, general settings UI, browser import, user-facing private-browsing mode, or auto-updater.
+- **No** built-in content blocking, password manager, sync, browser import, user-facing private-browsing mode, or auto-updater. Settings cover search, playback, memory, Spaces and extensions — not site permissions.
 - Relaunching restores your tabs and layout, but not scroll positions, form contents, or back/forward stacks. Sleeping a page during a session retains its URL and scroll position; waking reloads the page.
 - Session migration is forward-only; older builds do not understand all of the saved-tab and profile metadata.
 - Downloads don't resume after relaunch, and "recently closed" restores metadata, not a frozen live page.

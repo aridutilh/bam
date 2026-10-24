@@ -221,6 +221,7 @@ struct SpaceEditPlan {
         cancel.frame = NSRect(x: 398, y: 481, width: 100, height: 30); cancel.keyEquivalent = "\u{1b}"; root.addSubview(cancel)
         saveButton.frame = NSRect(x: 501, y: 481, width: 126, height: 30); saveButton.target = self; saveButton.action = #selector(saveChanges); saveButton.keyEquivalent = "\r"; root.addSubview(saveButton)
         for button in [saveButton, addButton, removeButton, upButton, downButton, newProfileButton, cancel] { button.bezelStyle = .rounded }
+        BamSheetStyle.dress(window: window, root: root, colorIndex: plan.spaces.first { $0.id == selectedID }?.colorIndex ?? 0)
     }
     func present(on parent: NSWindow) {
         guard let window else { return }

@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased — 0.13.0 local draft, build 27
+
+- Add a Bam-styled Settings window (Bam ▸ Settings…, ⌘,): a Space-tinted stage with a section rail and translucent cards, built from the onboarding ink, pills and washes instead of Aqua controls. General holds playback and memory toggles plus a keyboard card; Search picks the default engine; Spaces edits each Space’s name, color and icon in place and links to Manage Spaces; Extensions lists the current profile’s extensions; About replaces the system About panel with version, welcome replay and links.
+- Add a default search engine (DuckDuckGo, Google or Perplexity). Plain typed text goes to the chosen engine with the same single encoding; palette suggestions follow it. Persisted outside fresh previews.
+- Let the command palette run browser commands by name: Settings, Manage Spaces, History, Downloads, Recently Closed, Extensions, New Little Bam Window, Toggle Sidebar, Find in Page, Picture in Picture, Print and Welcome. A typed command name (three or more characters) leads the results; looser matches trail the tabs so “se” or “hi” never hijacks a web search. Commands run through the responder chain once the palette closes.
+- Dress Manage Spaces and the Extensions manager in the same wash, serif headings, ink labels and pill buttons; controls, names and fixtures are unchanged. ⌘W and Escape close the Settings window instead of a tab.
+- Local only; publication and installation remain on hold. See [VALIDATION.md](VALIDATION.md).
+
 ## 0.12.0 prerelease — build 26
 
 Two parallel draft lines each used the 0.10–0.11 numbers; this merge renumbers them as one release. Both lines' entries follow.

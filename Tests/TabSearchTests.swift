@@ -90,6 +90,29 @@ import AppKit
         results.moveSelection(delta: 1)
         require(results.activateSelection() && chosen == favorite.id,
                 "Opening a sleeping search result passes the existing saved-tab identity to the controller")
-        print("PASS: \(checks) tab search ranking and selection checks")
+        // Browser commands: typed names lead, loose matches trail the tabs.
+        let settingsHit = PaletteCommandCatalog.matches("setting")
+        require(settingsHit.first?.command.id == "settings" && settingsHit.first?.leading == true, "A typed command name leads")
+        require(PaletteCommandCatalog.matches("preferences").first?.command.id == "settings", "Keywords find Settings")
+        require(PaletteCommandCatalog.matches("se").first?.leading == false, "Two characters never lead, so Return still searches")
+        require(PaletteCommandCatalog.matches("spaces").first?.command.id == "manage-spaces", "A keyword names Manage Spaces outright")
+        let page = PaletteCommandCatalog.matches("page")
+        require(page.map(\.command.id).contains("find") && page.count == 3 && page.allSatisfy { !$0.leading }, "A later title word matches but trails the tabs")
+        require(PaletteCommandCatalog.matches("bam about").first?.command.id == "about", "Every token can start a different word")
+        require(PaletteCommandCatalog.matches("zzz").isEmpty && PaletteCommandCatalog.matches("s").isEmpty, "No fake command hits")
+        require(PaletteCommandCatalog.matches("s", limit: 0).isEmpty && PaletteCommandCatalog.matches("settings", limit: 1).count == 1, "Limit applies")
+        let settingsTab = BrowserTab(title: "Settings guide", address: "https://example.com/settings", space: 0)
+        var ran: PaletteCommand?
+        results.onCommand = { ran = $0 }
+        results.update(tabs: [settingsTab], query: "settings", activeID: settingsTab.id, canCreate: true,
+                       commands: PaletteCommandCatalog.matches("settings"))
+        require(results.activateSelection() && ran?.id == "settings", "A leading command is the first, selected row")
+        results.update(tabs: [settingsTab], query: "page", activeID: settingsTab.id, canCreate: true,
+                       commands: PaletteCommandCatalog.matches("page"))
+        submitted = nil; ran = nil
+        require(results.activateSelection() && submitted == "page" && ran == nil, "A trailing command leaves Open or Search first")
+        results.moveSelection(delta: 1)
+        require(results.activateSelection() && ran?.id == page.first?.command.id, "A trailing command follows the query row when no tab matches")
+        print("PASS: \(checks) tab search ranking, command and selection checks")
     }
 }

@@ -633,7 +633,37 @@ struct BrowserSession: Codable {
     }
 }
 
+/// Where plain typed text goes. Each option builds its results URL with
+/// URLComponents so the query is encoded exactly once, whatever the engine.
+enum DefaultSearchEngine: String, CaseIterable {
+    case duckDuckGo = "duckduckgo.com"
+    case google = "google.com"
+    case perplexity = "perplexity.ai"
+    static let defaultsKey = "DefaultSearchEngine"
+    var name: String {
+        switch self {
+        case .duckDuckGo: return "DuckDuckGo"
+        case .google: return "Google"
+        case .perplexity: return "Perplexity"
+        }
+    }
+    var endpoint: String {
+        switch self {
+        case .duckDuckGo: return "https://duckduckgo.com/"
+        case .google: return "https://www.google.com/search"
+        case .perplexity: return "https://www.perplexity.ai/search"
+        }
+    }
+    func searchURL(for query: String) -> String? {
+        var components = URLComponents(string: endpoint)!
+        components.queryItems = [URLQueryItem(name: "q", value: query)]
+        return components.url?.absoluteString
+    }
+}
+
 enum URLInput {
+    /// Settings swap this; the app restores the saved choice at launch.
+    nonisolated(unsafe) static var searchEngine: DefaultSearchEngine = .duckDuckGo
     /// Extension-page restoration is validated separately from user input and
     /// HTTP navigation. The controller must still authorize the live context.
     static func extensionURL(_ text: String) -> URL? {
@@ -657,9 +687,7 @@ enum URLInput {
             let scheme = (text.hasPrefix("localhost") || text.hasPrefix("127.") || text.hasPrefix("[::1]")) ? "http://" : "https://"
             if let url = directURL(scheme + text) { return url.absoluteString }
         }
-        var components = URLComponents(string: "https://duckduckgo.com/")!
-        components.queryItems = [URLQueryItem(name: "q", value: text)]
-        return components.url?.absoluteString
+        return searchEngine.searchURL(for: text)
     }
 }
 

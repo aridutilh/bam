@@ -46,6 +46,8 @@ enum TabSearchMatcher {
     /// A chosen remote suggestion or scoped search; the parent routes it to the
     /// active site engine, or to the default engine when none is scoped.
     var onSearch: ((String) -> Void)?
+    /// A chosen browser command (Settings, History…); the parent runs it.
+    var onCommand: ((PaletteCommand) -> Void)?
     var preferredHeight: CGFloat { max(44, CGFloat(rows.count) * Self.rowHeight + 8) }
     private(set) var selectedIndex = 0
     private static let rowHeight: CGFloat = 40
@@ -53,11 +55,13 @@ enum TabSearchMatcher {
         case query(String)
         case search(String)
         case tab(BrowserTab)
+        case command(PaletteCommand)
         var identity: String {
             switch self {
             case .query: return "query"
             case .search(let text): return "search:\(text)"
             case .tab(let tab): return tab.id.uuidString
+            case .command(let command): return "command:\(command.id)"
             }
         }
     }
@@ -91,7 +95,8 @@ enum TabSearchMatcher {
 
     func update(tabs: [BrowserTab], query: String, activeID: UUID, canCreate: Bool,
                 spaces: [BrowserSpace] = BrowserSpace.legacyDefaults, profiles: [BrowserProfile] = BrowserProfile.defaults,
-                engine: SiteSearchEngine? = nil, suggestions: [String] = []) {
+                engine: SiteSearchEngine? = nil, suggestions: [String] = [],
+                commands: [PaletteCommandMatch] = []) {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         let previousIdentity = entries.indices.contains(selectedIndex) ? entries[selectedIndex].identity : nil
         accent = engine?.color ?? .controlAccentColor
@@ -103,8 +108,12 @@ enum TabSearchMatcher {
             entries += suggestions.filter { $0.caseInsensitiveCompare(trimmed) != .orderedSame }
                 .prefix(5).map(Entry.search)
         } else {
+            // A command the text names outright leads; looser command matches
+            // follow the tabs so an open page keeps winning its own name.
+            entries += commands.filter(\.leading).map { Entry.command($0.command) }
             if canCreate && !trimmed.isEmpty { entries.append(.query(trimmed)) }
             entries += TabSearchMatcher.matches(tabs: tabs, query: trimmed, activeID: activeID).map(Entry.tab)
+            entries += commands.filter { !$0.leading }.map { Entry.command($0.command) }
             let room = max(0, 8 - entries.count)
             entries += suggestions.filter { $0.caseInsensitiveCompare(trimmed) != .orderedSame }
                 .prefix(min(3, room)).map(Entry.search)
@@ -133,6 +142,9 @@ enum TabSearchMatcher {
                 let detail = tab.isUnloaded ? "Sleeping · \(address)" : address
                 row.configure(title: tab.displayTitle.isEmpty ? address : tab.displayTitle, detail: detail,
                               badge: context, symbol: tab.symbol)
+            case .command(let command):
+                row.configure(title: command.title, detail: command.detail,
+                              badge: command.shortcut ?? "Command", symbol: command.symbol)
             }
             row.isSelected = index == selectedIndex
             row.onActivate = { [weak self] in
@@ -179,6 +191,9 @@ enum TabSearchMatcher {
         case .tab(let tab):
             guard let onSelect else { return false }
             onSelect(tab.id)
+        case .command(let command):
+            guard let onCommand else { return false }
+            onCommand(command)
         }
         return true
     }

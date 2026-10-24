@@ -16,6 +16,7 @@ import WebKit
     var pendingExternalURLs: [URL] = []
     var spacesMenu: NSMenu?
     var onboarding: OnboardingController?
+    var settings: SettingsController?
     var extensionsMenu: NSMenu?
     private let quitCoordinator = QuitCoordinator()
     private var mainWindowWasClosed = false
@@ -34,6 +35,7 @@ import WebKit
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("OrbitPrototype", isDirectory: true)
         let preview = CommandLine.arguments.contains("--fresh-preview")
         let sessionFileExists = FileManager.default.fileExists(atPath: support.appendingPathComponent("session.json").path)
+        BrowserController.restoreDefaultSearchEngine()
         controller = BrowserController(sessionURL: support.appendingPathComponent("session.json"), ephemeral: preview)
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1260, height: 800), styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
         window.title = "Bam"; window.titleVisibility = .hidden; window.titlebarAppearsTransparent = true
@@ -46,7 +48,10 @@ import WebKit
         window.center()
         if !preview { window.setFrameAutosaveName("OrbitPrototypeWindow") }
         window.appearance = NSAppearance(named: .darkAqua)
-        controller.onSpacesChanged = { [weak self] in self?.rebuildSpacesMenu() }
+        controller.onSpacesChanged = { [weak self] in
+            self?.rebuildSpacesMenu()
+            if self?.settings?.window.isVisible == true { self?.settings?.refresh() }
+        }
         buildMenus(); window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
         for url in pendingExternalURLs { controller.openLittleOrbit(url: url) }; pendingExternalURLs.removeAll()
         let completed = UserDefaults.standard.bool(forKey: OnboardingGate.completedKey)
@@ -61,6 +66,17 @@ import WebKit
         }
     }
     @objc func showWelcome(_ sender: Any?) { presentOnboarding() }
+    @objc func showSettings(_ sender: Any?) { presentSettings(section: settings?.window.isVisible == true ? settings!.section : .general) }
+    func presentSettings(section: SettingsSection) {
+        guard let controller, onboarding == nil else { return }
+        if settings == nil {
+            settings = SettingsController(snapshot: { [weak self] in self?.controller?.settingsSnapshot() ?? SettingsSnapshot() },
+                                          actions: controller.settingsActions(showWelcome: { [weak self] in
+                                              self?.settings?.window.orderOut(nil); self?.presentOnboarding()
+                                          }))
+        }
+        settings?.show(section: section, relativeTo: window)
+    }
     func presentOnboarding() {
         guard onboarding == nil, let controller, let window, window.attachedSheet == nil else { return }
         controller.setOnboardingActive(true)
@@ -188,11 +204,12 @@ import WebKit
         if menuItem.action == #selector(showWelcome(_:)) {
             return onboarding == nil && controller != nil && window?.attachedSheet == nil && window?.isVisible == true
         }
+        if menuItem.action == #selector(showSettings(_:)) || menuItem.action == #selector(showAbout(_:)) {
+            return onboarding == nil && controller != nil
+        }
         return true
     }
-    @objc func showAbout(_ sender: Any?) {
-        NSApp.orderFrontStandardAboutPanel(options: [.applicationName: "Bam", .applicationVersion: (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "Development") + " — Native browser prototype", .credits: NSAttributedString(string: "An independent AppKit + WebKit prototype informed by recovered sidebar behavior.\nNot affiliated with The Browser Company.")])
-    }
+    @objc func showAbout(_ sender: Any?) { presentSettings(section: .about) }
     func buildMenus() {
         let main = NSMenu(); NSApp.mainMenu = main
         func menu(_ title: String) -> NSMenu { let item = NSMenuItem(title: title, action: nil, keyEquivalent: ""); main.addItem(item); let sub = NSMenu(title: title); item.submenu = sub; return sub }
@@ -202,6 +219,7 @@ import WebKit
         let app = menu("Bam")
         item(app, "About Bam", #selector(showAbout), "", .command, self)
         item(app, "Welcome to Bam…", #selector(showWelcome), "", .command, self)
+        app.addItem(.separator()); item(app, "Settings…", #selector(showSettings), ",", .command, self)
         app.addItem(.separator()); item(app, "Hide Bam", #selector(NSApplication.hide(_:)), "h")
         item(app, "Hide Others", #selector(NSApplication.hideOtherApplications(_:)), "h", [.command, .option])
         item(app, "Show All", #selector(NSApplication.unhideAllApplications(_:)))
