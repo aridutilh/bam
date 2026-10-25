@@ -298,7 +298,9 @@ enum ArcImport {
             if removedSpaces > 0 { lines.append("\(plural(removedSpaces, "Space")) you removed after an earlier import will stay removed. A removed Space comes back only if Arc has new items for it, holding just those items.") }
             if excludedFavorites > 0 { lines.append("\(plural(excludedFavorites, "Favorite")) of Spaces left out of this import won’t be imported.") }
             if easelReferences > 0 {
-                lines.append("\(plural(easelReferences, "Easel")) will be kept as references in their places, with their names. Their canvases aren’t imported and stay in Arc.")
+                lines.append(easelReferences == 1
+                    ? "1 Easel will be kept as a reference in its place, with its name. Its canvas isn’t imported and stays in Arc."
+                    : "\(easelReferences) Easels will be kept as references in their places, with their names. Their canvases aren’t imported and stay in Arc.")
             }
             if easels > 0 { lines.append("\(plural(easels, "Easel")) outside a Space’s sidebar can’t be kept; Bam has no Easels.") }
             if liveFolders > 0 { lines.append("\(plural(liveFolders, "live folder")) will be imported as ordinary folders; live updates aren’t supported.") }
