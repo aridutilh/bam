@@ -149,6 +149,10 @@ import WebKit
     private var measuredTab: (any WKWebExtensionTab)?
     private var tabID: UUID?
     private var pageResults: [String: Any] = [:]
+    /// Diagnostic: the page's transient activation as the host itself can read it (public evaluateJavaScript in a
+    /// probe-owned content world, not the extension's world), at each arrival and later. Read-only; grants nothing.
+    private let hostWorld = WKContentWorld.world(name: "bam-gesture-probe-host")
+    private var activationChecks: [(badge: String, due: TimeInterval, key: String)] = []
 
     /// Bam's prompt answers deny, which WebKit remembers as an explicit denial; a remembered denial could answer the
     /// next phase's request without consulting the gesture. Back to unknown (never to granted), recorded per phase.
@@ -196,6 +200,9 @@ import WebKit
             if !badge.isEmpty {
                 arrivals.append(["badge": badge, "t_ms": ms(), "gesture_at_detection": gesture])
                 delayed.append((badge, ProcessInfo.processInfo.systemUptime + 1))
+                let now = ProcessInfo.processInfo.systemUptime
+                activationChecks += [(badge, now, "host_world_activation_at_detection"), (badge, now + 1, "host_world_activation_after_1s"),
+                                     (badge, now + 3, "host_world_activation_after_3s")]
             }
         }
         let now = ProcessInfo.processInfo.systemUptime
@@ -203,6 +210,28 @@ import WebKit
             if let index = arrivals.lastIndex(where: { $0["badge"] as? String == item.badge }) { arrivals[index]["gesture_after_1s"] = gesture }
         }
         delayed.removeAll { $0.due <= now }
+    }
+    /// `navigator.userActivation` of the tab's main frame, read from the probe's own content world.
+    private func hostWorldActivation() async -> Any {
+        guard let id = tabID, let web = controller?.browsers[id] else { return "no tab" }
+        let started = ProcessInfo.processInfo.systemUptime
+        do {
+            let value = try await web.evaluateJavaScript(
+                "navigator.userActivation ? {isActive: navigator.userActivation.isActive, hasBeenActive: navigator.userActivation.hasBeenActive} : null",
+                in: nil, contentWorld: hostWorld)
+            var result: [String: Any] = (value as? [String: Any]) ?? ["unavailable": true]
+            result["read_ms"] = Int(((ProcessInfo.processInfo.systemUptime - started) * 1000).rounded())
+            return result
+        } catch { return "error: \(String(describing: error).prefix(200))" }
+    }
+    private func runActivationChecks() async {
+        let now = ProcessInfo.processInfo.systemUptime
+        let due = activationChecks.filter { $0.due <= now }
+        activationChecks.removeAll { $0.due <= now }
+        for check in due {
+            let value = await hostWorldActivation()
+            if let index = arrivals.lastIndex(where: { $0["badge"] as? String == check.badge }) { arrivals[index][check.key] = value }
+        }
     }
     private func readPage() async {
         guard let id = tabID, let web = controller?.browsers[id],
@@ -227,6 +256,7 @@ import WebKit
         while ProcessInfo.processInfo.systemUptime < deadline {
             try Task.checkCancellation()
             sample()
+            if !activationChecks.isEmpty { await runActivationChecks() }
             if tick % 10 == 0 { await readPage() }
             tick += 1
             if done() { return true }
@@ -328,6 +358,8 @@ import WebKit
         resetOptionalPermission(context, before: "page_click")
         main.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
         browser.select(opened)
+        // Host-world reading before any click: the comparison point for the arrival readings.
+        observations["host_world_activation_at_ready"] = await hostWorldActivation()
         // Arm the button only now: clicks before READY are counted, never relayed, so phase order holds.
         _ = try? await controller?.browsers[opened]?.evaluateJavaScript("document.documentElement.dataset.bamGestureArmed = '1'; true")
         print("EXTENSION_GESTURE_READY click \"Bam gesture probe\" in window \"\(main.title)\" within \(Int(clickSeconds)) s"); fflush(stdout)
