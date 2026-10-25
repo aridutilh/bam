@@ -41,18 +41,24 @@ enum BookmarkVendorSeed {
         return URL(string: "http://\(literal)\(components.port.map { ":\($0)" } ?? "")/")
     }
 
+    /// Original pages under Tests/Fixtures (the probe's loopback fixture server root), one per seeded item.
+    static let fixturePaths = ["alpha": "bookmarks/alpha.html", "beta": "bookmarks/beta.html", "today": "bookmarks/today.html"]
+
     struct Seeded: Equatable {
         /// Role → ID, for the report (no other values).
         var ids: [String: UUID]
+        /// Exactly the two bookmark pages' addresses (Favorite alpha, kept beta). The probe allows an extension to
+        /// open these, and only these, besides its own pages, while the seed is on. The Today control isn't included.
+        var destinations: [String]
         /// Saved items an extension's bookmarks should list (Favorite + kept page).
-        var bookmarkPages: Int { 2 }
+        var bookmarkPages: Int { destinations.count }
         var itemCount: Int { ids.count }
     }
 
     /// Adds, in `space` of `profileID`: a Favorite (alpha), a kept folder holding a nested folder that holds a
     /// kept page (beta), and one ordinary Today tab (control, not saved). All dormant; the selection is kept.
     @discardableResult static func seed(into session: inout BrowserSession, profileID: UUID, space: Int, origin: URL) -> Seeded {
-        func address(_ path: String) -> String { origin.appendingPathComponent("bam-bookmark/\(path)").absoluteString }
+        func address(_ role: String) -> String { destination(role, origin: origin) }
         let alpha = BrowserTab(title: alphaTitle, address: address("alpha"), space: space,
                                saved: SavedTabState(kind: .favorite, address: address("alpha"), isUnloaded: true, profileID: profileID))
         let folder = BrowserFolder(name: folderTitle, space: space)
@@ -64,6 +70,19 @@ enum BookmarkVendorSeed {
         session.tabs += [alpha, beta, today]
         session.folders += [folder, nested]
         session.activeID = selection
-        return Seeded(ids: ["favorite_alpha": alpha.id, "folder": folder.id, "nested_folder": nested.id, "kept_beta": beta.id, "today_control": today.id])
+        return Seeded(ids: ["favorite_alpha": alpha.id, "folder": folder.id, "nested_folder": nested.id, "kept_beta": beta.id, "today_control": today.id],
+                      destinations: [alpha.address, beta.address])
+    }
+
+    /// The fixture page for a seeded role on the run's origin.
+    static func destination(_ role: String, origin: URL) -> String {
+        origin.appendingPathComponent(fixturePaths[role] ?? "bookmarks/\(role).html").absoluteString
+    }
+
+    /// The probe's extra navigation allowance while the seed is on: exactly one of the seeded bookmark pages,
+    /// compared as the full address string (scheme, host, port, path; no query or fragment). Anything else,
+    /// including the Today control, other paths on the same origin and other hosts, stays blocked.
+    static func allowsSeededNavigation(_ url: URL, destinations: Set<String>) -> Bool {
+        !destinations.isEmpty && destinations.contains(url.absoluteString)
     }
 }

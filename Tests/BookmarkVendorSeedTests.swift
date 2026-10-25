@@ -48,8 +48,42 @@ import Foundation
                 "Beta is a kept item inside a nested folder")
         require(today.saved == nil && !session.keptChildren(of: .root(0)).contains(today.id), "The Today control is an ordinary unsaved tab")
         require(alpha.isUnloaded && beta.isUnloaded, "Seeded saved items are dormant")
-        require([alpha, beta, today].allSatisfy { tab in tab.address.hasPrefix("http://127.0.0.1:8123/bam-bookmark/") && (tab.saved.map { $0.address == tab.address } ?? true) },
+        require([alpha, beta, today].allSatisfy { tab in tab.address.hasPrefix("http://127.0.0.1:8123/bookmarks/") && (tab.saved.map { $0.address == tab.address } ?? true) },
                 "Every URL is on this run's local fixture origin")
+
+        // Destinations are distinct, existing original pages under the fixture server root (Tests/Fixtures).
+        require(alpha.address == "http://127.0.0.1:8123/bookmarks/alpha.html" && beta.address == "http://127.0.0.1:8123/bookmarks/beta.html"
+                && today.address == "http://127.0.0.1:8123/bookmarks/today.html", "Each seeded item has its own fixture page")
+        require(seeded.destinations == [alpha.address, beta.address], "Only the two bookmark pages are destinations; the Today control isn't")
+        let fixtures = URL(fileURLWithPath: #filePath).deletingLastPathComponent().appendingPathComponent("Fixtures", isDirectory: true)
+        for (role, path) in Seed.fixturePaths {
+            let page = (try? String(contentsOf: fixtures.appendingPathComponent(path), encoding: .utf8)) ?? ""
+            require(page.contains("data-bam-bookmark-fixture=\"\(role)\"") && !page.contains("<script") && !page.contains("http"),
+                    "Fixture page \(path) exists, is ours and loads nothing else")
+        }
+        let ipv6 = Seed.seed(into: &session, profileID: runProfile, space: 0, origin: URL(string: "http://[::1]:9/")!)
+        require(ipv6.destinations == ["http://[::1]:9/bookmarks/alpha.html", "http://[::1]:9/bookmarks/beta.html"], "IPv6 loopback destinations")
+        session.tabs.removeAll { ipv6.ids.values.contains($0.id) }; session.folders.removeAll { ipv6.ids.values.contains($0.id) }
+
+        // The probe's extra allowance: exactly the seeded pages, only while seeded.
+        let allowed = Set(seeded.destinations)
+        func allows(_ raw: String, _ set: Set<String> = allowed) -> Bool { Seed.allowsSeededNavigation(URL(string: raw)!, destinations: set) }
+        require(allows("http://127.0.0.1:8123/bookmarks/beta.html") && allows("http://127.0.0.1:8123/bookmarks/alpha.html"), "Seeded alpha and beta are allowed")
+        require(!allows("http://127.0.0.1:8123/bookmarks/beta.html", []), "Nothing is allowed when the seed is off")
+        for blocked in ["http://127.0.0.1:8123/bookmarks/today.html",          // the control
+                        "http://127.0.0.1:8123/passwords/plain.html",          // same origin, other page
+                        "http://127.0.0.1:8123/bookmarks/",                    // directory listing
+                        "http://127.0.0.1:8124/bookmarks/beta.html",           // other port
+                        "http://localhost:8123/bookmarks/beta.html",           // name, not literal
+                        "https://127.0.0.1:8123/bookmarks/beta.html",          // other scheme
+                        "http://127.0.0.1:8123/bookmarks/beta.html?x=1",       // query
+                        "http://127.0.0.1:8123/bookmarks/beta.html#x",         // fragment
+                        "http://user@127.0.0.1:8123/bookmarks/beta.html",      // user info
+                        "http://127.0.0.1:8123/bookmarks/../bookmarks/beta.html", // unnormalized path
+                        "http://127.0.0.1:8123/bam-bookmark/beta",             // the old placeholder
+                        "https://example.com/bookmarks/beta.html"] {
+            require(!allows(blocked), "Still blocked: \(blocked)")
+        }
 
         // Cross-check: the snapshot an extension's bookmarks.getTree gets lists alpha and beta, never the control.
         let input = BookmarkSessionSnapshot.input(from: session, profileID: runProfile)!
