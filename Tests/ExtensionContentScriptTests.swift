@@ -83,6 +83,16 @@ import JavaScriptCore
         try check(try ExtensionContentScriptPreparation.refreshBamAdapters(package: typicalURL) == 1, "A shared legacy adapter is migrated once")
         try check(try Data(contentsOf: adapterURL) == Data(ExtensionContentScriptPreparation.adapterSource.utf8), "Migration installs the known current adapter")
         try check(try ExtensionContentScriptPreparation.refreshBamAdapters(package: typicalURL) == 0, "Current adapters are not rewritten")
+        // The previous generation (select-picker + messaging, before idle callbacks) upgrades too.
+        let previousGeneration = Data((ExtensionSelectPickerCompatibility.source + "\n" + ExtensionContentScriptPreparation.legacyAdapterSource).utf8)
+        try previousGeneration.write(to: adapterURL)
+        try check(try ExtensionContentScriptPreparation.refreshBamAdapters(package: typicalURL) == 1 && Data(contentsOf: adapterURL) == Data(ExtensionContentScriptPreparation.adapterSource.utf8),
+                  "The previous select-picker adapter was not upgraded to the current adapter")
+        var editedPrevious = previousGeneration; editedPrevious.append(contentsOf: Array("/* edit */".utf8))
+        try editedPrevious.write(to: adapterURL)
+        try check(try ExtensionContentScriptPreparation.refreshBamAdapters(package: typicalURL) == 0 && Data(contentsOf: adapterURL) == editedPrevious,
+                  "An edited previous-generation adapter was rewritten")
+        try Data(ExtensionContentScriptPreparation.adapterSource.utf8).write(to: adapterURL)
         try check(try Data(contentsOf: typicalURL.appendingPathComponent("manifest.json")) == preparedManifest && Data(contentsOf: backup) == typical && Data(contentsOf: typicalURL.appendingPathComponent("content.js")) == scriptBytes, "Migration preserves manifest, original backup and vendor source")
         let modifiedAdapter = Data((ExtensionContentScriptPreparation.legacyAdapterSource + "/* user edit */").utf8)
         try modifiedAdapter.write(to: adapterURL)

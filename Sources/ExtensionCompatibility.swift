@@ -56,6 +56,7 @@ enum ExtensionCompatibility {
         return source
             .replacingOccurrences(of: "__ORIGIN__", with: javaScriptString(origin))
             .replacingOccurrences(of: "__WORKER__", with: "false")
+            .replacingOccurrences(of: "__PAGE_ENVIRONMENT__", with: ExtensionIdleCallbackCompatibility.source)
             .replacingOccurrences(of: "__WASM_ADAPTER__", with: ExtensionWasmCompatibility.source)
             .replacingOccurrences(of: "__BRIDGE__", with: javaScriptString(bridge))
             .replacingOccurrences(of: "__PROVIDED__", with: provided)
@@ -108,6 +109,7 @@ enum ExtensionCompatibility {
         return source
             .replacingOccurrences(of: "__ORIGIN__", with: "api.runtime.getURL('/').replace(/\\/$/, '')")
             .replacingOccurrences(of: "__WORKER__", with: "true")
+            .replacingOccurrences(of: "__PAGE_ENVIRONMENT__", with: "")
             .replacingOccurrences(of: "__WASM_ADAPTER__", with: ExtensionWasmCompatibility.source)
             .replacingOccurrences(of: "__BRIDGE__", with: javaScriptString(nativeApplicationIdentifier))
             .replacingOccurrences(of: "__PROVIDED__", with: provided)
@@ -127,6 +129,7 @@ enum ExtensionCompatibility {
       const api = globalThis.browser || globalThis.chrome;
       if (!api || typeof api !== "object" || api.__bamCompatibility) return;
       if (location.origin !== __ORIGIN__) return;
+      __PAGE_ENVIRONMENT__
       __WASM_ADAPTER__
       // Explicit resource management: TypeScript `using` helpers throw, and wasm-bindgen
       // classes omit their dispose methods, when the engine lacks these well-known symbols

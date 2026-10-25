@@ -336,6 +336,21 @@ import Darwin
         let idleContent = (try? await controller.browsers[id]?.evaluateJavaScript("document.documentElement.dataset.bamContentIdle || 'unreported'")) as? String ?? "unknown"
         let idleExtension = (try? await popup.evaluateJavaScript("typeof requestIdleCallback + ',' + typeof cancelIdleCallback")) as? String ?? "unknown"
         print("EXTENSION_ENVIRONMENT requestIdleCallback,cancelIdleCallback page=\(idlePage) content=\(idleContent) extensionPage=\(idleExtension) macOS=\(ProcessInfo.processInfo.operatingSystemVersionString)"); fflush(stdout)
+        // Bam supplies them to the extension's own worlds when WebKit lacks them; the website's world is untouched.
+        try check(idleContent == "function,function" && idleExtension == "function,function",
+                  "Idle callbacks were missing in the extension's content-script world or page: content=\(idleContent) extensionPage=\(idleExtension)")
+        if idlePage == "function,function" { print("EXTENSION_ENVIRONMENT note: the engine provides idle callbacks in website pages") }
+        else { try check(idlePage == "undefined,undefined", "A website's page world gained idle callbacks from Bam: \(idlePage)") }
+        let idleRun = try? await popup.callAsyncJavaScript("""
+            return await new Promise(resolve => {
+              const order = [];
+              const cancelled = requestIdleCallback(() => order.push('cancelled'));
+              requestIdleCallback(deadline => order.push(['first', deadline.didTimeout, deadline.timeRemaining() <= 50]));
+              requestIdleCallback(() => { order.push('second'); resolve(JSON.stringify(order)); });
+              cancelIdleCallback(cancelled);
+            });
+            """, arguments: [:], contentWorld: .page) as? String
+        try check(idleRun == #"[["first",false,true],"second"]"#, "Idle callbacks did not run in order with a bounded deadline and cancellation in an extension page: \(idleRun ?? "nil")")
         // tabs.detectLanguage (Dashlane): page text first, then the declaration, in callback and promise forms.
         guard let languageWeb = controller.browsers[id] else { throw ExtensionSmokeTest.Failure(description: "Missing tabs.detectLanguage page") }
         _ = try await languageWeb.evaluateJavaScript("""

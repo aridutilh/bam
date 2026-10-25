@@ -151,6 +151,21 @@ import JavaScriptCore
         foreignWorld.evaluateScript(iconBinding)
         try check(foreignWorld.evaluateScript("browser.action.setIcon === original && typeof __bamNativeActionIconBindings === 'undefined'")!.toBool(), "Action binding ran outside its exact extension origin")
 
+        // Idle callbacks: never in the worker adapter; in the page adapter only for its own origin.
+        try check(!worker.contains("requestIdleCallback"), "The worker adapter defines idle callbacks, which Chrome workers lack")
+        func idlePage(origin: String) -> Bool {
+            let page = JSContext()!
+            page.evaluateScript("""
+                var location = {origin: '\(origin)', href: '\(origin)/page.html'}, console = {error: function() {}};
+                var performance = {now: function() { return 0; }}, setTimeout = function() { return 1; }, clearTimeout = function() {};
+                var browser = {runtime: {getURL: function(path) { return 'webkit-extension://fixture' + path; }, getManifest: function() { return {}; }}};
+                """)
+            page.evaluateScript(ExtensionCompatibility.script(baseURL: URL(string: "webkit-extension://fixture/")!, bridge: "bridge", plan: ExtensionCompatibility.plan(manifest: [:]), browserVersion: "test"))
+            return page.evaluateScript("typeof requestIdleCallback === 'function' && typeof cancelIdleCallback === 'function'")!.toBool()
+        }
+        try check(idlePage(origin: "webkit-extension://fixture") && !idlePage(origin: "https://example.invalid"),
+                  "The page adapter did not define idle callbacks for its extension origin only")
+
         // Required namespaces are distinct from optional declarations.
         let optional = ExtensionCompatibility.plan(manifest: ["optional_permissions": ["notifications", "idle"]])
         try check(!optional.provided.contains("notifications") && !optional.provided.contains("idle"), "Optional capabilities were silently exposed")
