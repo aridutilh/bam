@@ -490,7 +490,7 @@ struct BrowserExtensionPermissionReview {
         guard let before = records.first(where: { $0.id == id }), let runtime = runtimes[before.profileID],
               !loading.contains(id), !updating.contains(id) else { throw Self.failure("This extension is not ready to update.") }
         guard (before.safariBundle == nil) == (safariBundle == nil) else { throw Self.failure("An update must use the installed extension's original package type.") }
-        updating.insert(id); defer { updating.remove(id) }
+        updating.insert(id); defer { updating.remove(id); armExpiryTimer(id); resumeWithdrawalRestart(id) }
         let initialRevision = mutationRevisions[id, default: 0]
         let initialPermissionRevision = permissionRevisions[id, default: 0]
         let oldContext = runtime.contexts[id]
@@ -708,6 +708,7 @@ struct BrowserExtensionPermissionReview {
             await runtime.controller.removeData(ofTypes: WKWebExtensionController.allExtensionDataTypes, from: matching)
         }
         records.removeAll { $0.id == id }; errors.removeValue(forKey: id)
+        pendingWithdrawals.removeValue(forKey: id); expiryChecks.removeValue(forKey: id); unsavedWithdrawals.removeValue(forKey: id)
         try persist()
         try FileManager.default.removeItem(at: storageURL.appendingPathComponent(record.id.uuidString, isDirectory: true))
         changed()
@@ -1107,7 +1108,7 @@ struct BrowserExtensionPermissionReview {
         // A context WebKit still runs after a failed restart must stop before a new one can load.
         try stopQuarantined(id: id, name: stored.name)
         let token = UUID(); loadGeneration[id] = token
-        loading.insert(id); defer { loading.remove(id); if loadGeneration[id] == token { loadGeneration.removeValue(forKey: id) } }
+        loading.insert(id); defer { loading.remove(id); if loadGeneration[id] == token { loadGeneration.removeValue(forKey: id) }; armExpiryTimer(id); resumeWithdrawalRestart(id) }
         // Older disabled worker installs gain the adapter only when explicitly
         // re-enabled and reviewed. Do not silently rewrite a running extension.
         if review, parsed == nil, record.safariBundle == nil {
@@ -1272,6 +1273,78 @@ struct BrowserExtensionPermissionReview {
               runtimes[records[index].profileID]?.contexts[id] === context else { return nil }
         return index
     }
+    // MARK: Native host withdrawal → restart (work/native-host-withdrawal-restart-contract.md)
+
+    // `restartGeneration` (declared with the restart helper, UI owner) advances once per restart. A pending native
+    // withdrawal is covered by any restart that began after it was detected, whatever triggered it.
+    /// A withdrawal waiting for its restart: the generation at detection, and whether a task is already queued.
+    private struct PendingWithdrawal { let generation: UInt64; var queued: Bool }
+    private var pendingWithdrawals: [UUID: PendingWithdrawal] = [:]
+    /// A withdrawal whose reduced choice couldn't be saved: its explanation stays shown until a save succeeds.
+    private var unsavedWithdrawals: [UUID: String] = [:]
+    /// The armed expiry check per extension; re-arming or cleanup replaces the token, so an older check does nothing.
+    private var expiryChecks: [UUID: UUID] = [:]
+    /// Test seam: called each time this path restarts an extension for a native withdrawal. nil in production.
+    static var nativeWithdrawalRestartHook: ((UUID) -> Void)?
+
+    /// A host grant WebKit withdrew (and the reduced choice was stored, or couldn't be). The extension must restart so
+    /// its pages and process stop using the withdrawn host (retained CORS access, content). Deferred to its own task,
+    /// never inside a WebKit callback or prompt handler, and coalesced per extension.
+    private func noteNativeWithdrawal(id: UUID, withdrawn: Set<String>, saveError: Error?) {
+        if pendingWithdrawals[id] == nil { pendingWithdrawals[id] = PendingWithdrawal(generation: restartGeneration[id, default: 0], queued: false) }
+        if let saveError, let index = records.firstIndex(where: { $0.id == id }) {
+            // Fail closed: the restart below still removes the live access now; the stored record may still list it.
+            let message = "\(records[index].name) lost access to \(withdrawn.sorted().joined(separator: ", ")), and Bam restarted it without that access, " +
+                "but couldn’t save the change (\(saveError.localizedDescription)). It may have that access again the next time Bam opens; change its site access in Manage Extensions to save it."
+            unsavedWithdrawals[id] = message
+            setError(Self.failure(message), for: id)
+        }
+        queueWithdrawalRestart(id)
+    }
+    private func queueWithdrawalRestart(_ id: UUID) {
+        guard var pending = pendingWithdrawals[id], !pending.queued else { return }
+        pending.queued = true; pendingWithdrawals[id] = pending
+        Task { @MainActor [weak self] in self?.runWithdrawalRestart(id) }
+    }
+    /// Restarts for a pending withdrawal, checked against the current state. Dropped only when the extension is gone,
+    /// shutdown began, or a restart that began after detection already covered it. While loading, updating or disabled
+    /// it stays pending and resumes when that finishes (a new context alone doesn't retire the old pages).
+    private func runWithdrawalRestart(_ id: UUID) {
+        guard var pending = pendingWithdrawals[id] else { return }
+        pending.queued = false; pendingWithdrawals[id] = pending
+        guard !stopped, let index = records.firstIndex(where: { $0.id == id }),
+              restartGeneration[id, default: 0] == pending.generation else { pendingWithdrawals.removeValue(forKey: id); return }
+        guard !loading.contains(id), !updating.contains(id), records[index].enabled,
+              let runtime = runtimes[records[index].profileID], let context = runtime.contexts[id] else { return }
+        pendingWithdrawals.removeValue(forKey: id)
+        Self.nativeWithdrawalRestartHook?(id)
+        _ = restartForSiteAccess(id: id, context: context)
+    }
+    /// Re-queues a withdrawal that waited for a load, update or Enable to finish.
+    private func resumeWithdrawalRestart(_ id: UUID) {
+        guard pendingWithdrawals[id] != nil else { return }
+        queueWithdrawalRestart(id)
+    }
+    /// One check per extension for its earliest finite host grant (+1 s). WebKit drops lapsed grants only when the map is
+    /// read, so on fire Bam reads it and persists, which detects the withdrawal like any other. Expiry is never extended.
+    private func armExpiryTimer(_ id: UUID) {
+        expiryChecks.removeValue(forKey: id)
+        guard !stopped, let record = records.first(where: { $0.id == id }), record.enabled,
+              let next = record.patterns.values.filter({ !ExtensionSiteAccessEngine.isPermanent($0) }).min() else { return }
+        let token = UUID()
+        expiryChecks[id] = token
+        DispatchQueue.main.asyncAfter(deadline: .now() + max(0, next.timeIntervalSinceNow) + 1) { [weak self] in
+            MainActor.assumeIsolated { self?.expiryDue(id, token: token) }
+        }
+    }
+    private func expiryDue(_ id: UUID, token: UUID) {
+        guard expiryChecks[id] == token else { return }
+        expiryChecks.removeValue(forKey: id)
+        guard !stopped, let record = records.first(where: { $0.id == id }), record.enabled,
+              let context = runtimes[record.profileID]?.contexts[id] else { return }
+        persistPermissions(context)
+    }
+
     func persistPermissions(_ context: WKWebExtensionContext) {
         guard let i = ownedRecordIndex(for: context) else { return }
         let id = records[i].id
@@ -1284,6 +1357,7 @@ struct BrowserExtensionPermissionReview {
         // (the extension's permissions.remove, or a lapse) leaves the choice, and a declared grant with a finite expiry
         // is kept as time-limited with its own date (never extended).
         if let state = try? ExtensionSiteAccessEngine.decode(records[i].siteAccess) {
+            // Reading the map also makes WebKit drop lapsed grants (it removes them lazily, on read).
             let live = Dictionary(uniqueKeysWithValues: context.grantedPermissionMatchPatterns.map { ($0.key.string, $0.value) })
             let reconciled = ExtensionSiteAccessEngine.reconcile(state, timed: Self.timed(records[i]), applied: records[i].patterns,
                                                                   live: live, declarations: ExtensionSiteAccess.Declarations(context.webExtension))
@@ -1293,7 +1367,18 @@ struct BrowserExtensionPermissionReview {
         }
         if before.permissions != records[i].permissions || before.patterns != records[i].patterns || before.siteAccess != records[i].siteAccess || before.timedSiteGrants != records[i].timedSiteGrants || before.timedOptionalSiteGrants != records[i].timedOptionalSiteGrants || before.deniedPermissions != records[i].deniedPermissions || before.deniedPatterns != records[i].deniedPatterns || before.nativeHost != records[i].nativeHost { noteMutation(id, permissions: true) }
         if let runtime = runtimes[records[i].profileID], runtime.approvedNativeHost(context) == nil { runtime.disconnectNative(context) }
-        do { try persist() } catch { setError(error, for: id) }
+        // Host grants WebKit itself withdrew (the extension's permissions.remove, a lapse, a denial). Bam's own setters
+        // (apply, revoke, load, the restart's reload) store their target first, so their echoes withdraw nothing here.
+        let withdrawn = Set(before.patterns.keys).subtracting(records[i].patterns.keys)
+        var saveError: Error?
+        do {
+            try persist()
+            // The reduced choice is saved now: the unsaved-withdrawal warning no longer applies.
+            if let message = unsavedWithdrawals.removeValue(forKey: id), errors[id] == message { errors.removeValue(forKey: id); changed() }
+        }
+        catch { saveError = error; setError(unsavedWithdrawals[id].map { Self.failure($0) } ?? error, for: id) }
+        if !withdrawn.isEmpty { noteNativeWithdrawal(id: id, withdrawn: withdrawn, saveError: saveError) }
+        armExpiryTimer(id)
     }
     private func persist() throws {
         if ownsTemporaryStorage { return }
@@ -1351,6 +1436,7 @@ struct BrowserExtensionPermissionReview {
     func changed() { manager?.refresh(); library?.refreshInstalledState(); onChange?() }
     func shutdown() {
         stopped = true; manager?.close(); manager = nil; library?.close(); library = nil
+        expiryChecks.removeAll(); pendingWithdrawals.removeAll()
         for task in preparation.values { task.cancel() }; preparation.removeAll()
         for (_, quarantined) in quarantinedContexts {
             for runtime in runtimes.values where runtime.controller.extensionContexts.contains(quarantined) { try? runtime.controller.unload(quarantined) }
