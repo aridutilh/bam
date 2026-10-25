@@ -49,6 +49,10 @@ import WebKit
     /// Latest incognito answers per extension document (from VendorProbeIsolation.measurementScript).
     private var modeMeasurements: [Int: [String: Any]] = [:]
     private var controllerConfigurationPersistent: Bool?
+    /// The action popup's page, so its release can be confirmed before the owned store is removed.
+    private weak var lastPopupWebView: WKWebView?
+    /// A weak handle on an owned page; nil once WebKit has released it.
+    private final class WeakView { weak var view: WKWebView?; init(_ view: WKWebView) { self.view = view } }
     private static var reservedIdentifiers: Set<UUID> { [BrowserProfile.defaultID, PreviewProfile.defaultStoreIdentifier] }
 
     /// Normal semantics with only task-owned storage: a non-private controller on a new random profile whose
@@ -367,7 +371,7 @@ import WebKit
                 if let action = invokedAction ?? context.action(for: nil) {
                     observations["action_has_popup"] = action.presentsPopup
                     observations["action_popup_is_shown"] = action.popupPopover?.isShown == true
-                    if let popup = action.popupWebView { samplePage(popup, key: "action_popup", context: context) }
+                    if let popup = action.popupWebView { lastPopupWebView = popup; samplePage(popup, key: "action_popup", context: context) }
                 }
                 for (tabID, web) in browser.browsers where web.url.map({ BrowserExtensions.isExtensionURL($0, ownedBy: context) }) == true {
                     samplePage(web, key: "tab_\(tabID.uuidString)", context: context)
@@ -487,23 +491,35 @@ import WebKit
     }
 
     /// Keeps the latest result per extension document; each evaluation returns one JSON string per live document.
+    /// A document whose result isn't a parsable object is kept as an unfinished sample, never skipped.
     private func recordModeMeasurements(_ results: [String]) {
         for (index, text) in results.enumerated() {
-            guard let data = text.data(using: .utf8),
-                  let object = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) as? [String: Any] else { continue }
-            modeMeasurements[index] = object
+            if let data = text.data(using: .utf8),
+               let object = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) as? [String: Any] {
+                modeMeasurements[index] = object
+            } else {
+                modeMeasurements[index] = ["state": "unparsed", "raw": String(text.prefix(200))]
+            }
         }
     }
     /// After the views are released: remove only the run's own website store (bounded, confirmed by the
     /// store list), then the run directory. Never lists-and-deletes anything else.
-    private func cleanUpNormalRun(_ run: NormalRun, released: @escaping () -> Bool) async -> (clean: Bool, report: [String: Any]) {
+    private func cleanUpNormalRun(_ run: NormalRun, controllerReleased: @escaping () -> Bool,
+                                  livePages: @escaping () -> Int) async -> (clean: Bool, report: [String: Any]) {
         var report: [String: Any] = [:]
+        // WebKit requires every WKWebView using a store to be released before that store is removed.
         var releasedInTime = false
-        for _ in 0..<50 { if released() { releasedInTime = true; break }; try? await Task.sleep(nanoseconds: 100_000_000) }
-        report["controller_released_before_removal"] = releasedInTime
+        for _ in 0..<100 {
+            if controllerReleased() && livePages() == 0 { releasedInTime = true; break }
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        report["controller_released"] = controllerReleased()
+        report["owned_pages_still_alive"] = livePages()
         run.stores.releaseStores()
         var storeRemoved = false
-        if run.stores.allowedStoreIdentifiers == [run.ids.store] {
+        if !releasedInTime {
+            report["store_removal"] = ["not_attempted": "the controller or an owned page was still alive after 10 s; store \(run.ids.store.uuidString) left for manual removal"]
+        } else if run.stores.allowedStoreIdentifiers == [run.ids.store] {
             let result = await VendorProbeIsolation.removeOwnedStore(
                 run.ids.store, reserved: Self.reservedIdentifiers,
                 remove: { id, done in
@@ -523,7 +539,9 @@ import WebKit
         let directoryClean = !fm.fileExists(atPath: run.directory.path)
         report["run_directory_remaining"] = !directoryClean
         report["extension_controller_storage"] = "non-persistent; nothing on disk to remove"
-        return (storeRemoved && directoryClean, report)
+        // Clean only when the controller and every owned page were released first, the owned store
+        // was removed and confirmed absent, and the run directory is gone.
+        return (releasedInTime && storeRemoved && directoryClean, report)
     }
 
     private func finish(_ requested: Bool, reason raw: String) {
@@ -549,7 +567,9 @@ import WebKit
         if let run = normalRun {
             observations["opened_persistent_store_ids"] = run.stores.openedPersistentIdentifiers.map(\.uuidString)
             observations["unlisted_profile_requests"] = run.stores.unlistedProfileRequests.map(\.uuidString)
-            let verdict = VendorProbeIsolation.verdict(samples.compactMap(VendorProbeIsolation.measurement(from:)),
+            // One sample per measured document; nothing is dropped (an unreadable one counts as unfinished).
+            let measured = samples.map { VendorProbeIsolation.measurement(from: $0) ?? VendorProbeIsolation.IncognitoMeasurement(finished: false) }
+            let verdict = VendorProbeIsolation.verdict(measured,
                                                        controllerConfigurationPersistent: controllerConfigurationPersistent,
                                                        openedStores: run.stores.openedPersistentIdentifiers, expectedStore: run.ids.store,
                                                        refusedProfiles: run.stores.unlistedProfileRequests)
@@ -560,6 +580,16 @@ import WebKit
             }
         }
         weak let releasedController = controller
+        // Every owned page the probe can reach, captured before teardown: tab pages, Little Bam and
+        // Peek pages, and the action popup. All must be released before the owned store is removed.
+        var ownedViews: [WeakView] = []
+        if let browser = controller {
+            ownedViews += browser.browsers.values.map(WeakView.init)
+            ownedViews += browser.littleWindows.values.compactMap(\.webView).map(WeakView.init)
+            ownedViews += browser.peeks.values.compactMap(\.webView).map(WeakView.init)
+        }
+        if let popup = lastPopupWebView { ownedViews.append(WeakView(popup)) }
+        observations["tracked_owned_pages"] = ownedViews.count
         var temporaryStorage: URL?
         if #available(macOS 15.4, *), let browser = controller {
             let host = browser.browserExtensions
@@ -605,7 +635,8 @@ import WebKit
         let base = requested && observationCompleted && hostStorageClean && scratchClean
         guard let run = normalRun else { emit(base, reasonText); return }
         Task { @MainActor in
-            let cleanup = await self.cleanUpNormalRun(run, released: { releasedController == nil })
+            let cleanup = await self.cleanUpNormalRun(run, controllerReleased: { releasedController == nil },
+                                                      livePages: { ownedViews.filter { $0.view != nil }.count })
             self.observations["normal_cleanup"] = cleanup.report
             var text = reasonText
             if !modeValid { text += "; normal-profile mode not established (\(self.observations["normal_mode_verdict"] ?? "unknown"))" }

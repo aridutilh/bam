@@ -88,7 +88,38 @@ import Foundation
         check(I.measurement(from: ["state": "done", "inIncognitoContext": false, "allowedIncognitoAccess": false,
                                    "windowIncognito": [false], "tabIncognito": [false]]) == clean.with(tabs: [false]),
               "the script's result object parses")
-        check(I.measurement(from: ["state": "started"]) == nil && I.measurement(from: "x") == nil, "an unfinished or foreign result is not a measurement")
+        check(I.measurement(from: "x") == nil, "a non-object result is not a measurement")
+        check(I.measurement(from: ["state": "started", "inIncognitoContext": false])?.complete == false,
+              "an unfinished document is an incomplete sample, not dropped")
+
+        // Strict booleans, as the probe receives them (JSON text from the extension document).
+        func parsed(_ json: String) -> I.IncognitoMeasurement? {
+            I.measurement(from: try? JSONSerialization.jsonObject(with: Data(json.utf8)))
+        }
+        let explicit = parsed(#"{"state":"done","inIncognitoContext":false,"allowedIncognitoAccess":false,"windowIncognito":[false,false],"tabIncognito":[false]}"#)
+        check(explicit?.complete == true && explicit?.saysIncognito == false, "explicit JSON booleans make a complete, non-incognito sample")
+        check(parsed(#"{"state":"done","inIncognitoContext":false,"allowedIncognitoAccess":false,"windowIncognito":[null],"tabIncognito":[false]}"#)?.complete == false,
+              "a window without an explicit incognito boolean is incomplete, not false")
+        check(parsed(#"{"state":"done","inIncognitoContext":false,"allowedIncognitoAccess":false,"windowIncognito":[false,null],"tabIncognito":[false]}"#)?.windowIncognito == nil,
+              "one missing element voids the whole window list")
+        check(parsed(#"{"state":"done","inIncognitoContext":0,"allowedIncognitoAccess":false,"windowIncognito":[false],"tabIncognito":[1]}"#).map { $0.inIncognitoContext == nil && $0.tabIncognito == nil } == true,
+              "0 and 1 are not booleans")
+        check(I.strictBool(true) == true && I.strictBool(false) == false && I.strictBool(1) == nil && I.strictBool("true") == nil && I.strictBool(nil) == nil,
+              "strictBool accepts only booleans")
+        let incomplete = parsed(#"{"state":"done","inIncognitoContext":false,"allowedIncognitoAccess":false,"windowIncognito":[null],"tabIncognito":[false]}"#)!
+        if case .unmeasured = I.verdict([clean, incomplete], controllerConfigurationPersistent: false, openedStores: [store], expectedStore: store, refusedProfiles: []) {} else {
+            check(false, "one complete document beside an incomplete one is unmeasured, never normal")
+        }
+        checks += 1
+        if case .unmeasured = I.verdict([clean, I.IncognitoMeasurement(finished: false)], controllerConfigurationPersistent: false, openedStores: [store], expectedStore: store, refusedProfiles: []) {} else {
+            check(false, "an unfinished document beside a complete one is unmeasured")
+        }
+        checks += 1
+        var marked = incomplete; marked.inIncognitoContext = true
+        if case .notNormal = I.verdict([clean, marked], controllerConfigurationPersistent: false, openedStores: [store], expectedStore: store, refusedProfiles: []) {} else {
+            check(false, "explicit incognito evidence is not normal even in an incomplete sample")
+        }
+        checks += 1
 
         // Cleanup.
         let owned = UUID(), other = UUID()

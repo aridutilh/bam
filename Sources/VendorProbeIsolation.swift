@@ -35,25 +35,42 @@ enum VendorProbeIsolation {
 
     // MARK: Mode validity
 
-    /// One extension document's answers to the incognito questions.
+    /// One extension document's answers to the incognito questions. A field is nil unless the
+    /// document returned an explicit boolean for it (for a list: for every element).
     struct IncognitoMeasurement: Equatable {
+        var finished = true
         var inIncognitoContext: Bool?
         var allowedIncognitoAccess: Bool?
         var windowIncognito: [Bool]?
         var tabIncognito: [Bool]?
-        var complete: Bool { inIncognitoContext != nil && allowedIncognitoAccess != nil && windowIncognito?.isEmpty == false && tabIncognito?.isEmpty == false }
+        var complete: Bool {
+            finished && inIncognitoContext != nil && allowedIncognitoAccess != nil
+                && windowIncognito?.isEmpty == false && tabIncognito?.isEmpty == false
+        }
         var saysIncognito: Bool {
             inIncognitoContext == true || allowedIncognitoAccess == true
                 || windowIncognito?.contains(true) == true || tabIncognito?.contains(true) == true
         }
     }
-    /// Reads the measurement script's result object (see `measurementScript`).
+    /// A JSON boolean only. NSNumber 0/1 and strings are not booleans (`as? Bool` would accept 0/1).
+    static func strictBool(_ value: Any?) -> Bool? {
+        guard let value, CFGetTypeID(value as CFTypeRef) == CFBooleanGetTypeID() else { return nil }
+        return (value as? Bool)
+    }
+    /// A list of JSON booleans, or nil if it isn't a list or any element is not a boolean.
+    static func strictBools(_ value: Any?) -> [Bool]? {
+        guard let list = value as? [Any] else { return nil }
+        let flags = list.compactMap(strictBool)
+        return flags.count == list.count ? flags : nil
+    }
+    /// Reads one document's result object (see `measurementScript`). An unfinished document is an
+    /// incomplete sample, never omitted; only a non-object gives nil.
     static func measurement(from value: Any?) -> IncognitoMeasurement? {
-        guard let object = value as? [String: Any], object["state"] as? String == "done" else { return nil }
-        func flags(_ key: String) -> [Bool]? { (object[key] as? [Any])?.compactMap { $0 as? Bool } }
-        return IncognitoMeasurement(inIncognitoContext: object["inIncognitoContext"] as? Bool,
-                                    allowedIncognitoAccess: object["allowedIncognitoAccess"] as? Bool,
-                                    windowIncognito: flags("windowIncognito"), tabIncognito: flags("tabIncognito"))
+        guard let object = value as? [String: Any] else { return nil }
+        return IncognitoMeasurement(finished: object["state"] as? String == "done",
+                                    inIncognitoContext: strictBool(object["inIncognitoContext"]),
+                                    allowedIncognitoAccess: strictBool(object["allowedIncognitoAccess"]),
+                                    windowIncognito: strictBools(object["windowIncognito"]), tabIncognito: strictBools(object["tabIncognito"]))
     }
     enum Verdict: Equatable {
         /// Every measured surface says not incognito and the controller writes nothing to disk.
@@ -72,7 +89,11 @@ enum VendorProbeIsolation {
         if let marked = samples.first(where: \.saysIncognito) {
             return .notNormal("an extension document reports private browsing (inIncognitoContext \(String(describing: marked.inIncognitoContext)), allowedIncognitoAccess \(String(describing: marked.allowedIncognitoAccess)), windows \(marked.windowIncognito ?? []), tabs \(marked.tabIncognito ?? []))")
         }
-        guard samples.contains(where: \.complete) else { return .unmeasured("no extension document completed the incognito measurement") }
+        guard !samples.isEmpty else { return .unmeasured("no extension document was measured") }
+        // Every measured document must have answered every question with explicit booleans.
+        if let index = samples.firstIndex(where: { !$0.complete }) {
+            return .unmeasured("extension document \(index + 1) of \(samples.count) did not give explicit boolean answers for every question")
+        }
         return .normal
     }
     /// Evaluated in each live extension document; the first call starts the asynchronous checks and
@@ -84,11 +105,13 @@ enum VendorProbeIsolation {
       const r = g.__bamModeProbe = { state: "started" };
       const api = (typeof chrome === "object" && chrome) ? chrome : undefined;
       const note = (key, error) => { r[key] = String((error && error.message) || error).slice(0, 200); };
-      try { r.inIncognitoContext = api && api.extension ? api.extension.inIncognitoContext : undefined; } catch (e) { note("contextError", e); }
+      // Only explicit booleans are recorded; anything missing or of another type is null.
+      const flag = (value) => (typeof value === "boolean" ? value : null);
+      try { r.inIncognitoContext = flag(api && api.extension ? api.extension.inIncognitoContext : undefined); } catch (e) { note("contextError", e); }
       (async () => {
-        try { r.allowedIncognitoAccess = await api.extension.isAllowedIncognitoAccess(); } catch (e) { note("accessError", e); }
-        try { r.windowIncognito = (await api.windows.getAll()).map((w) => w.incognito === true); } catch (e) { note("windowsError", e); }
-        try { r.tabIncognito = (await api.tabs.query({})).map((t) => t.incognito === true); } catch (e) { note("tabsError", e); }
+        try { r.allowedIncognitoAccess = flag(await api.extension.isAllowedIncognitoAccess()); } catch (e) { note("accessError", e); }
+        try { r.windowIncognito = (await api.windows.getAll()).map((w) => flag(w.incognito)); } catch (e) { note("windowsError", e); }
+        try { r.tabIncognito = (await api.tabs.query({})).map((t) => flag(t.incognito)); } catch (e) { note("tabsError", e); }
         r.state = "done";
       })();
       return r;
