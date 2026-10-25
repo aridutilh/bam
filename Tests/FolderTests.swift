@@ -215,6 +215,49 @@ import Foundation
         dormant.select(dormant.tabs[1].id)
         expect(dormant.activeID == dormant.tabs[0].id && !dormant.tabs[0].isUnloaded && !dormant.tabs[1].isUnloaded, "Opening a dormant Split loads both panes")
 
+        // Drag and drop within a Space.
+        let p = kept("P"), q = kept("Q"), r = kept("R"), t1 = BrowserTab(title: "T1", address: "https://t1.example", space: 0),
+            t2 = BrowserTab(title: "T2", address: "https://t2.example", space: 0)
+        var dnd = BrowserSession(tabs: [p, q, r, t1, t2], activeID: t1.id); dnd.sanitize()
+        let box = dnd.createFolder(name: "Box", space: 0)!
+        let innerBox = dnd.createFolder(name: "Inner", space: 0, parent: box)!
+        expect(rows(dnd) == ["P", "Q", "R", "[Box]", "  [Inner]"], "Drop fixture")
+        expect(dnd.drop(r.id, at: .before(p.id), space: 0) && rows(dnd).prefix(3) == ["R", "P", "Q"], "Drop before a root row reorders")
+        expect(dnd.drop(p.id, at: .into(box), space: 0) && rows(dnd) == ["R", "Q", "[Box]", "  [Inner]", "  P"], "Drop on a folder appends inside it")
+        expect(dnd.drop(q.id, at: .before(innerBox), space: 0) && rows(dnd) == ["R", "[Box]", "  Q", "  [Inner]", "  P"], "Drop before a folder child lands in that folder")
+        expect(dnd.drop(q.id, at: .keptEnd, space: 0) && rows(dnd).last == "Q" && dnd.tabs.first { $0.id == q.id }?.folderID == nil, "Drop at kept end leaves folders")
+        expect(dnd.drop(t2.id, at: .before(r.id), space: 0) && dnd.tabs.first { $0.id == t2.id }?.saved?.kind == .kept && rows(dnd).first == "T2",
+               "Dropping a Today tab in the kept section keeps it")
+        expect(dnd.drop(r.id, at: .today(before: t1.id), space: 0) && dnd.tabs.first { $0.id == r.id }?.saved == nil
+               && dnd.visibleTabs.filter { !$0.isSaved }.map(\.title) == ["R", "T1"], "Dropping a kept tab into Today unkeeps it at that position")
+        expect(dnd.drop(r.id, at: .today(before: nil), space: 0) && dnd.visibleTabs.filter { !$0.isSaved }.map(\.title) == ["T1", "R"], "Today reorders")
+        // Refusals leave the session untouched.
+        let frozen = dnd
+        func unchanged() -> Bool { dnd.tabs == frozen.tabs && dnd.folders == frozen.folders && dnd.rootOrder == frozen.rootOrder }
+        expect(!dnd.drop(box, at: .into(innerBox), space: 0) && unchanged(), "A folder cannot drop into its descendant")
+        expect(!dnd.drop(box, at: .before(p.id), space: 0) && unchanged(), "Nor before its own child")
+        expect(!dnd.drop(box, at: .today(before: nil), space: 0) && unchanged(), "Folders cannot go to Today")
+        expect(!dnd.drop(p.id, at: .keptEnd, space: 1) && unchanged(), "Rows from another Space are refused (cross-Space moves use moveTab)")
+        expect(!dnd.drop(p.id, at: .before(UUID()), space: 0) && unchanged(), "Unknown targets are refused")
+        expect(dnd.canDrop(p.id, at: .keptEnd, space: 0) && unchanged(), "canDrop never mutates")
+        // Depth limit applies to drops.
+        var deepDrop = BrowserSession(tabs: [kept("Leaf2")], activeID: UUID()); deepDrop.sanitize()
+        var chain: UUID? = nil
+        for level in 0..<BrowserSession.maximumFolderDepth { chain = deepDrop.createFolder(name: "D\(level)", space: 0, parent: chain) ?? chain }
+        let loose = deepDrop.createFolder(name: "Loose", space: 0)!
+        _ = deepDrop.createFolder(name: "Child", space: 0, parent: loose)
+        expect(!deepDrop.canDrop(loose, at: .into(chain!), space: 0), "Drops that exceed the depth limit are refused")
+        // Splits move together, including a mixed kept/Today pair.
+        var splitDrop = BrowserSession(tabs: [kept("SL"), BrowserTab(title: "SR", address: "https://sr.example", space: 0), kept("Anchor")], activeID: UUID())
+        splitDrop.sanitize()
+        let sl = splitDrop.tabs[0].id, sr = splitDrop.tabs[1].id
+        _ = splitDrop.makeSplit(primary: sl, secondary: sr)
+        let splitBox = splitDrop.createFolder(name: "SplitBox", space: 0)!
+        expect(splitDrop.drop(sr, at: .into(splitBox), space: 0) && Set(splitDrop.tabIDs(inFolder: splitBox)) == [sl, sr]
+               && splitDrop.split(for: sl) != nil, "Dragging either pane moves the whole Split")
+        expect(splitDrop.drop(sl, at: .today(before: nil), space: 0) && splitDrop.split(for: sl) != nil
+               && splitDrop.tabIDs(inFolder: splitBox).isEmpty, "A Split dropped in Today stays a Split and leaves the folder")
+
         // Space emoji is validated and survives edits.
         var emoji = BrowserSession.fresh()
         expect(emoji.setSpaceEmoji(id: 0, emoji: "🚀") && emoji.spaceDefinition(0)?.emoji == "🚀", "Emoji icon set")
