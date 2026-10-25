@@ -25,6 +25,7 @@ browser.contextMenus.onClicked.addListener((info, tab) => {
 browser.runtime.onMessage.addListener((message) => {
   if (message?.kind === "ping") return Promise.resolve({pong: message.via});
   if (message?.kind === "updates") return browser.storage.local.get("bamTabUpdates").then(value => ({updates: value.bamTabUpdates || []}));
+  if (message?.kind === "execution-world") return executionWorldCheck();
   if (!message || !["fixture", "popup"].includes(message.kind)) return;
   return (async () => {
     await menusReady;
@@ -56,3 +57,13 @@ browser.runtime.onConnect.addListener((port) => {
     });
   });
 });
+
+// Bitwarden's injection shape: the ExecutionWorld enum, files, frameIds and injectImmediately.
+async function executionWorldCheck() {
+  try {
+    const world = chrome.scripting.ExecutionWorld;
+    const tab = (await browser.tabs.query({})).find(tab => tab.url?.includes("profile=browser-adapter"));
+    const results = await chrome.scripting.executeScript({target: {tabId: tab.id, frameIds: [0]}, files: ["inject.js"], injectImmediately: true, world: world.ISOLATED});
+    return {type: typeof world, isolated: world.ISOLATED, main: world.MAIN, frozen: Object.isFrozen(world), result: results?.[0]?.result ?? null, frameId: results?.[0]?.frameId ?? null};
+  } catch (error) { return {error: String(error?.message || error)}; }
+}

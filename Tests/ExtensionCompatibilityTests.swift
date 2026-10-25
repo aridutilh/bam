@@ -151,6 +151,29 @@ import JavaScriptCore
         foreignWorld.evaluateScript(iconBinding)
         try check(foreignWorld.evaluateScript("browser.action.setIcon === original && typeof __bamNativeActionIconBindings === 'undefined'")!.toBool(), "Action binding ran outside its exact extension origin")
 
+        // scripting.ExecutionWorld: the enum WebKit lacks, on the native namespace and its shared
+        // prototype (so a distinct chrome.scripting wrapper sees it); never replacing a native enum.
+        func executionWorld(_ setup: String) -> JSContext {
+            let js = JSContext()!
+            js.evaluateScript("""
+                var location = {origin: 'webkit-extension://fixture', href: 'webkit-extension://fixture/worker.js'}, console = {error: function() {}}, performance = {now: function() { return 0; }};
+                function Scripting() {} Scripting.prototype.executeScript = function () {};
+                var browser = {runtime: {getURL: function(path) { return 'webkit-extension://fixture' + path; }, getManifest: function() { return {}; }}};
+                \(setup)
+                """)
+            js.evaluateScript(ExtensionCompatibility.workerScript(manifest: [:], browserVersion: "test"))
+            return js
+        }
+        let world = executionWorld("browser.scripting = new Scripting(); var chrome = {scripting: new Scripting(), runtime: browser.runtime};")
+        try check(world.evaluateScript("""
+            browser.scripting.ExecutionWorld.ISOLATED === 'ISOLATED' && browser.scripting.ExecutionWorld.MAIN === 'MAIN' && Object.isFrozen(browser.scripting.ExecutionWorld)
+            && chrome.scripting.ExecutionWorld === browser.scripting.ExecutionWorld && Object.keys(browser.scripting.ExecutionWorld).join() === 'ISOLATED,MAIN'
+            """)!.toBool(), "scripting.ExecutionWorld was missing, mutable, or absent from a distinct chrome.scripting wrapper")
+        let nativeWorld = executionWorld("var engineWorld = {ISOLATED: 'ISOLATED', MAIN: 'MAIN', USER_SCRIPT: 'USER_SCRIPT'}; browser.scripting = new Scripting(); browser.scripting.ExecutionWorld = engineWorld;")
+        try check(nativeWorld.evaluateScript("browser.scripting.ExecutionWorld === engineWorld")!.toBool(), "An engine-provided ExecutionWorld was replaced")
+        let noScripting = executionWorld("")
+        try check(noScripting.evaluateScript("browser.scripting === undefined")!.toBool(), "A scripting namespace appeared for an extension without one")
+
         // Idle callbacks: never in the worker adapter; in the page adapter only for its own origin.
         try check(!worker.contains("requestIdleCallback"), "The worker adapter defines idle callbacks, which Chrome workers lack")
         func idlePage(origin: String) -> Bool {

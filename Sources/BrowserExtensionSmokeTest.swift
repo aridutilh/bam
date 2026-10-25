@@ -389,6 +389,30 @@ import Darwin
         try check(undetermined["promised"] as? String == "und", "tabs.detectLanguage did not report und for an undeclared page without text: \(undetermined)")
         _ = try await languageWeb.evaluateJavaScript("for (const node of document.body.children) node.hidden = false; true")
 
+        // scripting.ExecutionWorld (Bitwarden): the enum exists in the prepared worker and in an extension
+        // page, and executeScript with files/frameIds/injectImmediately/world: ExecutionWorld.ISOLATED injects.
+        func executionWorldResult(_ text: Any?) -> [String: Any] {
+            (text as? String).flatMap { $0.data(using: .utf8) }.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? ["error": "no result: \(String(describing: text))"]
+        }
+        let fromWorker = executionWorldResult(try await popup.callAsyncJavaScript("return JSON.stringify(await browser.runtime.sendMessage({kind: 'execution-world'}));", arguments: [:], contentWorld: .page))
+        let fromPage = executionWorldResult(try await popup.callAsyncJavaScript("""
+            const world = chrome.scripting.ExecutionWorld;
+            try {
+              const tab = (await browser.tabs.query({})).find(tab => tab.url?.includes('profile=browser-adapter'));
+              const results = await chrome.scripting.executeScript({target: {tabId: tab.id, frameIds: [0]}, files: ['inject.js'], injectImmediately: true, world: world.ISOLATED});
+              return JSON.stringify({type: typeof world, isolated: world.ISOLATED, main: world.MAIN, frozen: Object.isFrozen(world), result: results?.[0]?.result ?? null, frameId: results?.[0]?.frameId ?? null});
+            } catch (error) { return JSON.stringify({type: typeof world, error: String(error?.message || error)}); }
+            """, arguments: [:], contentWorld: .page))
+        for (label, report) in [("worker", fromWorker), ("extension page", fromPage)] {
+            let injected = report["result"] as? [String: Any]
+            try check(report["type"] as? String == "object" && report["isolated"] as? String == "ISOLATED" && report["main"] as? String == "MAIN" && report["frozen"] as? Bool == true,
+                      "scripting.ExecutionWorld was missing or wrong in the \(label): \(report)")
+            try check(injected?["injected"] as? Bool == true && injected?["title"] as? String == "Bam extension page" && report["frameId"] as? Int == 0,
+                      "Bitwarden-shaped executeScript did not inject into the tab from the \(label): \(report)")
+        }
+        let injections = (try? await controller.browsers[id]?.evaluateJavaScript("document.documentElement.dataset.bamInjected || '0'")) as? String
+        try check(injections == "2", "The two injections did not both run in the page: \(injections ?? "nil")")
+
         // activeTab only: no access to any tab before the user's action gesture, then only to
         // that tab, until the gesture is cleared or the tab navigates.
         let activeFixture = FileManager.default.temporaryDirectory.appendingPathComponent("bam-active-tab-\(UUID().uuidString)")

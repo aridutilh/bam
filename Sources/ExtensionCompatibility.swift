@@ -30,7 +30,8 @@ enum ExtensionCompatibility {
     static let bridgedPermissions: [String] = ["notifications", "idle", "privacy", "management", "downloads", "offscreen", "fontSettings"]
     /// Members the layer always offers when the host namespace exists but the member does not.
     static let runtimeExtras: [String] = ["runtime.getBrowserInfo", "runtime.onSuspend", "runtime.requestUpdateCheck", "runtime.getContexts",
-                                          "webNavigation.onCreatedNavigationTarget", "storage.managed", "commands", "action.getUserSettings"]
+                                          "webNavigation.onCreatedNavigationTarget", "storage.managed", "commands", "action.getUserSettings",
+                                          "scripting.ExecutionWorld"]
 
     /// Computes what the layer will define for a parsed extension, from its manifest.
     static func plan(manifest: [String: Any]) -> Plan {
@@ -483,6 +484,10 @@ enum ExtensionCompatibility {
       if (provided.has("webNavigation.onCreatedNavigationTarget")) {
         for (const name of ["onCreatedNavigationTarget", "onHistoryStateUpdated", "onReferenceFragmentUpdated", "onTabReplaced"]) extend("webNavigation", name, extensionEvent("webNavigation", name));
       }
+      // WebKit's scripting accepts world: "ISOLATED"/"MAIN" strings but has no enum; Bitwarden
+      // reads chrome.scripting.ExecutionWorld.ISOLATED before every injection. Only the
+      // constants are supplied; what each world does stays WebKit's own executeScript.
+      if (provided.has("scripting.ExecutionWorld")) extend("scripting", "ExecutionWorld", () => Object.freeze({ ISOLATED: "ISOLATED", MAIN: "MAIN" }));
       if (provided.has("action.getUserSettings")) {
         for (const ns of ["action", "browserAction"]) extend(ns, "getUserSettings", () => call(async () => ({ isOnToolbar: false })));
       }
