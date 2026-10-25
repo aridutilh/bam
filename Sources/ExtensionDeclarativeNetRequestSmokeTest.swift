@@ -27,13 +27,18 @@ import WebKit
         let manifest: [String: Any] = ["manifest_version": 3, "name": "Bam declarativeNetRequest fixture", "version": "1.0",
             "description": "Original fixture for Bam declarativeNetRequest runtime tests",
             "permissions": ["declarativeNetRequest"], "host_permissions": ["http://127.0.0.1/*"],
-            "declarative_net_request": ["rule_resources": [["id": "bam_static", "enabled": true, "path": "rules.json"]]],
+            "declarative_net_request": ["rule_resources": [["id": "bam_static", "enabled": true, "path": "rules.json"],
+                                                          ["id": "bam_methods", "enabled": false, "path": "method-rules.json"]]],
             "action": ["default_popup": "popup.html"]]
         let rules: [[String: Any]] = [
             ["id": 1, "priority": 1, "action": ["type": "block"], "condition": ["urlFilter": "/bam-dnr/static-blocked", "resourceTypes": ["xmlhttprequest"]]],
             ["id": 2, "priority": 2, "action": ["type": "allow"], "condition": ["urlFilter": "/bam-dnr/static-blocked?allowed", "resourceTypes": ["xmlhttprequest"]]]]
         try JSONSerialization.data(withJSONObject: manifest, options: [.sortedKeys]).write(to: package.appendingPathComponent("manifest.json"))
         try JSONSerialization.data(withJSONObject: rules).write(to: package.appendingPathComponent("rules.json"))
+        // Off by default (it never filters here): a method-conditioned static rule Bam must disclose, not change.
+        let methodRules = try JSONSerialization.data(withJSONObject: [["id": 1, "priority": 1, "action": ["type": "block"],
+            "condition": ["urlFilter": "/bam-dnr/method-static", "requestMethods": ["post"], "resourceTypes": ["xmlhttprequest"]]]])
+        try methodRules.write(to: package.appendingPathComponent("method-rules.json"))
         try Data("<!doctype html><meta charset='utf-8'><title>DNR fixture</title>".utf8).write(to: package.appendingPathComponent("popup.html"))
 
         let host = BrowserExtensions(storageURL: root.appendingPathComponent("registry", isDirectory: true))
@@ -53,6 +58,14 @@ import WebKit
         let id = try await host.importPackage(at: package, profileID: profileA)
         guard let context = host.context(for: id), let popup = context.action(for: nil)?.popupWebView else { throw Failure(description: "DNR fixture did not load: \(host.errors)") }
         popup.frame = frame
+        // Static-rule disclosure: counted per declared ruleset (with its default state), no rule text; vendor bytes kept.
+        let installedRecord = host.records.first { $0.id == id }
+        let installedRules = host.storageURL.appendingPathComponent(id.uuidString, isDirectory: true).appendingPathComponent("package/method-rules.json")
+        try check(installedRecord?.staticRuleAudit == ExtensionStaticRuleAudit(format: ExtensionStaticRuleAudit.currentFormat, extensionVersion: "1.0",
+                    rulesets: [.init(id: "bam_methods", enabledByDefault: false, methodRules: 1, excludesAllTypesRules: 0)], unreadable: []) &&
+                  installedRecord?.disclosedNote?.contains("bam_methods (off by default)") == true && installedRecord?.disclosedNote?.contains("/bam-dnr/") == false &&
+                  (try? Data(contentsOf: installedRules)) == methodRules,
+                  "The static-rule audit was missing, wrong, exposed rule text, or changed vendor bytes: \(String(describing: installedRecord?.staticRuleAudit)) \(installedRecord?.disclosedNote ?? "nil")")
         try await wait("The DNR fixture's extension page did not load") { (try? await popup.evaluateJavaScript("document.readyState")) as? String == "complete" }
         webA.load(URLRequest(url: pageURL)); webB.load(URLRequest(url: pageURL))
         try await wait("The loopback pages did not load") { webA.url != nil && !webA.isLoading && webB.url != nil && !webB.isLoading }
@@ -180,6 +193,27 @@ import WebKit
         // Disabling the extension removes its rules.
         try await host.setEnabled(false, id: id)
         try await wait("Disabling the extension left its static rule blocking") { await outcome(webA, "/bam-dnr/static-blocked").hasPrefix("reached") }
+
+        // An install from an earlier Bam (no audit in its registry) is audited on its next launch: the note appears
+        // once, as its own field, and is persisted, so later launches do not re-scan.
+        host.shutdown()
+        let registry = host.storageURL.appendingPathComponent("registry.json")
+        guard var stored = try JSONSerialization.jsonObject(with: Data(contentsOf: registry)) as? [[String: Any]],
+              let index = stored.firstIndex(where: { $0["id"] as? String == id.uuidString }) else { throw Failure(description: "The DNR fixture registry is unreadable") }
+        stored[index].removeValue(forKey: "staticRuleAudit"); stored[index]["enabled"] = true
+        try JSONSerialization.data(withJSONObject: stored).write(to: registry, options: .atomic)
+        let relaunched = BrowserExtensions(storageURL: host.storageURL)
+        relaunched.permissionPrompt = { _ in false }
+        defer { relaunched.shutdown() }
+        let relaunchConfig = WKWebViewConfiguration(); relaunchConfig.websiteDataStore = .nonPersistent()
+        relaunched.configure(relaunchConfig, profileID: profileA)
+        await relaunched.ready(profileID: profileA)
+        try await wait("The relaunched install was not audited") { relaunched.records.first { $0.id == id }?.staticRuleAudit != nil }
+        let refreshed = relaunched.records.first { $0.id == id }
+        let persisted = (try? JSONSerialization.jsonObject(with: Data(contentsOf: registry)) as? [[String: Any]])?.first { $0["id"] as? String == id.uuidString }
+        try check(refreshed?.staticRuleAudit?.rulesets.map(\.id) == ["bam_methods"] && refreshed?.compatibilityNote?.contains("Static network rules") != true &&
+                  refreshed?.disclosedNote?.components(separatedBy: "Static network rules").count == 2 && persisted?["staticRuleAudit"] != nil,
+                  "An earlier install's audit was missed, duplicated or not persisted: \(refreshed?.disclosedNote ?? "nil")")
         return checks
     }
 }

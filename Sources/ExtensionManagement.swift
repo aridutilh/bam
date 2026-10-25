@@ -95,7 +95,7 @@ import UniformTypeIdentifiers
             : updatable ? "Ask \(selected?.catalog?.sourceLabel ?? "the store") for a newer version of this build. Updates keep the extension’s identity and storage and never switch stores." : "Only store-installed extensions can check for updates."
         let guidance = "Reload already open pages after enabling, disabling, or revoking access. Code injected into a page cannot be removed until that page reloads. Extension storage stays local to this profile."
         status.stringValue = pendingStatus ?? selected.flatMap { host?.errors[$0.id] } ?? (selected == nil ? host?.lastError : nil)
-            ?? selected?.compatibilityNote.map { $0 + " Reload open pages after changing access." } ?? guidance
+            ?? selected?.disclosedNote.map { $0 + " Reload open pages after changing access." } ?? guidance
         pendingStatus = nil
         status.toolTip = guidance
     }
