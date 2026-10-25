@@ -3,7 +3,8 @@ import CryptoKit
 import ImageIO
 
 /// Profile-scoped icons fetched directly from a page's declared URLs or origin.
-/// Disk access, decoding and network work never run on the main thread.
+/// Bounded asynchronous loading keeps icon work separate from page navigation.
+/// SVG drawing runs in a separate WebKit process and returns a 64-pixel raster.
 @MainActor final class WebsiteFaviconStore {
     struct Policy: Sendable {
         var maximumBytes = 512 * 1024
@@ -176,21 +177,29 @@ import ImageIO
         return Result(record: .init(origin: key.origin, expires: date.addingTimeInterval(policy.missTTL), png: nil), write: true)
     }
     nonisolated private static func acceptsDataIcon(_ url: URL, maximumBytes: Int) -> Bool {
-        let maximumBytes = min(maximumBytes, 64 * 1024), string = url.absoluteString
-        guard string.utf8.count <= maximumBytes * 2, let comma = string.firstIndex(of: ",") else { return false }
-        let header = string[..<comma].lowercased()
-        return ["data:image/png;base64", "data:image/x-icon;base64", "data:image/vnd.microsoft.icon;base64", "data:image/jpeg;base64", "data:image/gif;base64", "data:image/webp;base64"].contains(header)
+        dataIcon(url, maximumBytes: maximumBytes) != nil
     }
     nonisolated private static func dataIcon(_ url: URL, maximumBytes: Int) -> Data? {
-        guard acceptsDataIcon(url, maximumBytes: maximumBytes), let comma = url.absoluteString.firstIndex(of: ",") else { return nil }
-        let string = url.absoluteString
-        guard let data = Data(base64Encoded: String(string[string.index(after: comma)...])), data.count <= min(maximumBytes, 64 * 1024) else { return nil }
+        // An actual URL fragment is not part of a data URL's image bytes.
+        // Encoded %23 stays in the payload, and query characters are retained.
+        let limit = min(maximumBytes, 64 * 1024), string = String(url.absoluteString.prefix { $0 != "#" })
+        guard string.utf8.count <= limit * 3 + 128, let comma = string.firstIndex(of: ",") else { return nil }
+        let fields = string[..<comma].lowercased().split(separator: ";", omittingEmptySubsequences: false).map(String.init)
+        guard let type = fields.first else { return nil }
+        let raster = ["data:image/png", "data:image/x-icon", "data:image/vnd.microsoft.icon", "data:image/jpeg", "data:image/gif", "data:image/webp"]
+        let svg = type == "data:image/svg+xml"
+        guard svg || raster.contains(type),
+              fields.dropFirst().allSatisfy({ ["base64", "charset=utf-8", "utf8"].contains($0) }),
+              svg || fields.contains("base64"),
+              let payload = String(string[string.index(after: comma)...]).removingPercentEncoding else { return nil }
+        let data = fields.contains("base64") ? Data(base64Encoded: payload) : payload.data(using: .utf8)
+        guard let data, data.count <= limit else { return nil }
         return data
     }
     nonisolated private static func decode(_ data: Data, policy: Policy) async -> CGImage? {
-        await Task.detached(priority: .utility) {
-            guard data.count <= policy.maximumBytes,
-                  let source = CGImageSourceCreateWithData(data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary),
+        guard data.count <= policy.maximumBytes, !Task.isCancelled else { return nil }
+        let raster: CGImage? = await Task.detached(priority: .utility) {
+            guard let source = CGImageSourceCreateWithData(data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary),
                   let type = CGImageSourceGetType(source) as String?,
                   ["public.png", "com.microsoft.ico", "public.jpeg", "com.compuserve.gif", "org.webmproject.webp", "public.tiff", "com.microsoft.bmp"].contains(type),
                   CGImageSourceGetCount(source) <= 32 else { return nil }
@@ -208,6 +217,10 @@ import ImageIO
                 kCGImageSourceThumbnailMaxPixelSize: 64, kCGImageSourceCreateThumbnailWithTransform: true,
                 kCGImageSourceShouldCacheImmediately: true] as CFDictionary)
         }.value
+        if let raster { return raster }
+        guard !Task.isCancelled,
+              await Task.detached(priority: .utility, operation: { FaviconSVGRenderer.accepts(data) }).value else { return nil }
+        return await FaviconSVGRenderer.render(data, maximumDimension: policy.maximumDimension)
     }
     nonisolated private static func pngData(_ image: CGImage) async -> Data? {
         await Task.detached(priority: .utility) {

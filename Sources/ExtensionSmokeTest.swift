@@ -89,20 +89,34 @@ import WebKit
         try check(little.webView == nil && deferredWeb.navigationDelegate == nil, "Readiness fixture retained its transient host before extension imports")
         var reviewed: [BrowserExtensionPermissionReview] = []
         host.permissionPrompt = { reviewed.append($0); return false }
-        let extensionA = try await host.importPackage(at: fixtureURL, profileID: profileA)
+        let catalogCandidate = ExtensionBuildCandidate(source: .amo, upstreamID: "bam-fixture@example.test", name: "Bam fixture", publisher: "Bam tests", version: "1", downloadURL: URL(string: "https://fixture.invalid/original.xpi"))
+        let catalogRecord = ExtensionCatalogRecord(source: .amo, upstreamID: catalogCandidate.upstreamID, publisher: "Bam tests", version: "1", sha256: "fixture", provenance: "Original local test fixture", installedAt: Date())
+        let extensionA = try await host.importPackage(at: fixtureURL, profileID: profileA, catalog: catalogRecord)
         try check(host.context(for: extensionA) == nil && host.items(profileID: profileA).first?.enabled == false, "Cancelled permission review still enabled the extension")
         try check(reviewed.count == 1 && reviewed[0].websites.contains("http://127.0.0.1/*") && reviewed[0].unsupported.contains("nativeMessaging"), "Permission review omitted required websites or unsupported native messaging")
+        let installer = host.installer
+        let canceledRetry = try await installer.install(catalogCandidate, profileID: profileA)
+        try check(canceledRetry == extensionA && host.items(profileID: profileA).count == 1 && host.context(for: extensionA) == nil, "Retrying canceled activation duplicated or enabled the extension")
+        try check(installer.installedRecord(for: catalogCandidate, profileID: profileB) == nil, "Installed state leaked into another profile")
+        var otherSource = catalogCandidate; otherSource.source = .chromeWebStore
+        try check(installer.installedRecord(for: otherSource, profileID: profileA) == nil, "Installed state silently treated a different store as the same build")
         host.permissionPrompt = { reviewed.append($0); return true }
-        try await host.setEnabled(true, id: extensionA)
+        let enabledRetry = try await installer.install(catalogCandidate, profileID: profileA)
+        try check(enabledRetry == extensionA && host.items(profileID: profileA).count == 1, "Enabling an existing install duplicated its record")
+        let reviewCount = reviewed.count
+        let repeatedInstall = try await installer.install(catalogCandidate, profileID: profileA)
+        try check(repeatedInstall == extensionA && host.items(profileID: profileA).count == 1 && reviewed.count == reviewCount, "Adding an enabled extension repeated its download or permission review")
         guard let contextA = host.context(for: extensionA) else { throw Failure(description: "Extension A did not load: \(host.lastError ?? "unknown")") }
-        try check(contextA.hasPermission(.storage) && !contextA.hasPermission(.nativeMessaging), "Unsupported permission was granted or approved storage was omitted")
+        try check(contextA.hasPermission(.storage) && contextA.hasPermission(.nativeMessaging) &&
+            ExtensionServiceWorkerPreparation.isPrepared(manifest: contextA.webExtension.manifest), "Approved storage or the prepared worker's internal transport was omitted")
         webA.load(URLRequest(url: urlA)); webB.load(URLRequest(url: urlB))
         try await wait("Content script/background/storage did not run in profile A") { await result(webA)?["token"] as? String == "profile-A" }
         try await wait("MV3 runtime.connect handshake did not return profile A storage") { await javascript(webA, "document.documentElement.dataset.bamExtensionPort") as? String == "profile-A" }
         try await wait("Profile B page did not finish loading") { await javascript(webB, "document.body.dataset.bamFixtureToken") as? String == "profile-B" }
         try check(await result(webB) == nil, "Extension enabled only in A injected into B")
         let resultA = await result(webA)
-        try check(resultA?["nativeMessagingExposed"] as? Bool == false, "Unsupported native messaging appeared available")
+        try check(resultA?["nativeMessagingExposed"] as? Bool == true && resultA?["externalNativeDenied"] as? Bool == true,
+                  "The worker's internal transport was missing or allowed an external native application")
         let urlsA = resultA?["urls"] as? [String] ?? []
         try check(urlsA == [urlA.absoluteString], "Extension A enumerated a page from another profile: \(urlsA)")
         guard let runtimeA = configA.webExtensionController?.delegate as? BrowserExtensionRuntime,
@@ -141,20 +155,41 @@ import WebKit
         guard var mv2Manifest = try JSONSerialization.jsonObject(with: Data(contentsOf: mv2ManifestURL)) as? [String: Any] else { throw Failure(description: "Original fixture manifest is not an object") }
         mv2Manifest["manifest_version"] = 2
         let mv2Hosts = mv2Manifest.removeValue(forKey: "host_permissions") as? [String] ?? []
-        mv2Manifest["permissions"] = (mv2Manifest["permissions"] as? [String] ?? []).filter { $0 != "scripting" } + mv2Hosts
+        // Firefox-style builds request APIs WebKit lacks; Bam's compatibility layer stands in.
+        mv2Manifest["permissions"] = (mv2Manifest["permissions"] as? [String] ?? []).filter { $0 != "scripting" } + ["notifications", "idle"] + mv2Hosts
         mv2Manifest["optional_permissions"] = mv2Manifest.removeValue(forKey: "optional_host_permissions")
         mv2Manifest["browser_action"] = mv2Manifest.removeValue(forKey: "action")
-        mv2Manifest["background"] = ["scripts": ["nonascii.js", "background.js"], "persistent": false]
+        mv2Manifest["background"] = ["scripts": ["nonascii.js", "compat.js", "background.js"], "persistent": false]
+        try ExtensionFrameMessagingSmokeTest.prepare(package: mv2Fixture, manifest: &mv2Manifest)
         let originalManifest = try JSONSerialization.data(withJSONObject: mv2Manifest, options: [.sortedKeys, .prettyPrinted])
         try originalManifest.write(to: mv2ManifestURL)
         let nonASCII = Data("globalThis.bamCafé = \"naïve ☕\";\n".utf8)
         try nonASCII.write(to: mv2Fixture.appendingPathComponent("nonascii.js"))
+        // Exercises callback and promise styles of the shimmed namespaces from a real background page.
+        let compatProbe = """
+        globalThis.bamCompatProbe = (async () => {
+          const api = globalThis.browser || globalThis.chrome;
+          const out = { notifications: typeof api.notifications?.create, idle: typeof api.idle?.queryState,
+            navigationTarget: typeof api.webNavigation?.onCreatedNavigationTarget?.addListener, downloads: typeof api.downloads, management: typeof api.management };
+          try {
+            out.idleState = await new Promise(resolve => api.idle.queryState(60, resolve));
+            out.level = await api.notifications.getPermissionLevel();
+            out.browser = (await api.runtime.getBrowserInfo()).name;
+            out.updateCheck = (await api.runtime.requestUpdateCheck())[0];
+            out.self = (await api.management.getSelf()).name;
+            api.notifications.onClicked.addListener(() => {});
+          } catch (error) { out.error = String(error); }
+          return out;
+        })();
+        """
+        try Data(compatProbe.utf8).write(to: mv2Fixture.appendingPathComponent("compat.js"))
         let extensionB = try await host.importPackage(at: mv2Fixture, profileID: profileB)
         let importedFolder = host.storageURL.appendingPathComponent(extensionB.uuidString)
         try check(host.items(profileID: profileB).first?.compatibilityNote != nil && reviewed.last?.compatibilityNote != nil, "MV2 compatibility preparation was not disclosed")
         try check(try Data(contentsOf: importedFolder.appendingPathComponent("original-manifest.json")) == originalManifest, "MV2 import did not preserve the byte-exact original manifest")
         try check(try Data(contentsOf: importedFolder.appendingPathComponent("package/nonascii.js")) == nonASCII && Data(contentsOf: mv2ManifestURL) == originalManifest, "MV2 preparation changed script bytes or the selected source package")
         guard let contextB = host.context(for: extensionB) else { throw Failure(description: "Extension B did not load") }
+        try check(contextB.hasPermission(.init(rawValue: "webRequest")), "Isolated iframe fixture was not granted webRequest")
         guard let runtimeB = configB.webExtensionController?.delegate as? BrowserExtensionRuntime,
               let backgroundTab = runtimeB.tabs[tabB], let backgroundWindow = backgroundTab.window(for: contextB) as? BrowserExtensionWindow else { throw Failure(description: "Missing background-profile native adapter") }
         try check(backgroundWindow.activeTab(for: contextB) as? BrowserExtensionTab === backgroundTab && backgroundTab.isSelected(for: contextB), "Inactive profile window did not retain a valid selected tab")
@@ -195,7 +230,26 @@ import WebKit
             throw error
         }
         try check(await result(webB)?["encoding"] as? String == "naïve ☕", "MV2 background did not execute its original non-ASCII JavaScript correctly")
+        let compat = await result(webB)?["compat"] as? [String: Any] ?? [:]
+        // webNavigation is not requested, so the layer must not conjure that namespace either.
+        try check(compat["notifications"] as? String == "function" && compat["idle"] as? String == "function" && compat["navigationTarget"] as? String == "undefined" && compat["downloads"] as? String == "undefined" && compat["management"] as? String == "undefined",
+                  "Compatibility layer did not provide exactly the requested namespaces: \(compat)")
+        try check(["active", "idle", "locked"].contains(compat["idleState"] as? String ?? "") && compat["browser"] as? String == "Bam" && compat["updateCheck"] as? String == "no_update" && compat["self"] == nil && compat["error"] != nil,
+                  "Compatibility layer answered unexpectedly: \(compat)")
+        try check(Set(reviewed.last?.bridged ?? []) == ["notifications", "idle"] && reviewed.last?.unsupported == ["nativeMessaging"] && host.items(profileID: profileB).first?.compatibility.map(Set.init) == ["notifications", "idle"],
+                  "Permission review did not disclose the compatibility layer: \(reviewed.last?.bridged ?? []) \(reviewed.last?.unsupported ?? [])")
+        try check(await result(webA)?["compat"] as? String == "absent" && (host.items(profileID: profileA).first?.compatibility ?? []).isEmpty, "MV3 fixture without bridged permissions received the compatibility layer")
         try await wait("MV2 runtime.connect handshake did not return profile B storage") { await javascript(webB, "document.documentElement.dataset.bamExtensionPort") as? String == "profile-B" }
+        // WebKit never answers callback-style sendMessage from content scripts on its own; the prepared
+        // messaging adapter must, for both the (message, callback) and (extensionId, message, callback) forms.
+        try await wait("Callback-style sendMessage from a content script was not answered") {
+            let withID = await javascript(webA, "document.documentElement.dataset.bamExtensionCallbackID") as? String
+            let plain = await javascript(webA, "document.documentElement.dataset.bamExtensionCallback") as? String
+            return withID == "callback-id" && plain == "callback"
+        }
+        try await wait("Callback-style sendMessage from an MV2 content script was not answered") { await javascript(webB, "document.documentElement.dataset.bamExtensionCallbackID") as? String == "callback-id" }
+        checks += try await ExtensionFrameMessagingSmokeTest.verify(web: webB, pageURL: urlB, label: "isolated MV2")
+        try check(host.items(profileID: profileA).first?.compatibilityNote?.contains("messaging adapter") == true, "The content-script adaptation is not disclosed for the MV3 fixture")
         try check(await result(webA)?["token"] as? String == "profile-A", "Profile B overwrote profile A extension storage")
         try check(await result(webB)?["urls"] as? [String] == [urlB.absoluteString], "Extension B enumerated another profile")
         guard let popup = contextA.action(for: nil)?.popupWebView else { throw Failure(description: "Native WebKit action did not provide a real popup web view") }

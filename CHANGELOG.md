@@ -1,5 +1,68 @@
 # Changelog
 
+## 0.21.2 — build 43
+
+- Hide the window's close, minimize and zoom buttons together with the sidebar, as Arc does: they fade out over the last 80 points of the collapse, so a collapsed sidebar leaves the page alone in the window, and they return as the sidebar slides back in.
+- Retire the “A little space” start page. An empty tab is now a plain dark surface titled “New tab” (the address bar still reads “Search or enter URL”), and the History ▸ Home command (⇧⌘H) that navigated to it is gone. Existing tabs on that page keep working and simply show the blank surface.
+
+- Preserve the native namespace receiver for detached `action.setIcon` / `browserAction.setIcon` calls inside an extension's own documents. Dashlane extracts this method; WebKit silently ignored that call and left the loading icon in place. Bam now lets the extension supply its orange/teal state without reading or guessing vault state.
+- Verify the real vendor icon is orange in a signed-out probe and teal in the authenticated persistent preview; the optimized preview also fills both dummy values correctly.
+- Keep prepared worker adapter bytes unchanged. Add focused API-shape and rendered toolbar-state checks; 26 component checks and 310 supported-path native checks pass. Missing iframe request events are reported separately and excluded from passed counts.
+
+The earlier draft sections below are also included in 0.21.2; they were not separate published releases.
+
+## 0.21.1 draft — build 42
+
+- Add pointing-hand cursors to enabled sidebar buttons and selectable tab rows, including cursor invalidation when a control becomes disabled. Webpage cursor behavior remains under investigation.
+
+- Normalize unavailable select-picker overlay styles only inside isolated extension content-script worlds, using native `select:open` state. This addresses Dashlane mistaking a closed page dropdown for an open overlay and dismissing its inline panel; genuinely open pickers remain detectable.
+- Refresh only Bam’s recognized, byte-exact legacy content-script adapter in existing private packages. Vendor scripts, MAIN-world scripts and signed Safari resources remain unchanged.
+- Record signed-in Dashlane popup search, manual creation of an invented login and inline filling on a control page without the dropdown. Picker compatibility passes 38 checks and content preparation/migration passes 51. Signed-in recreated standard/dynamic forms fill both dummy values exactly; full-page vault copy/paste also passes. Fresh-load classification and iframe injection remain open issues.
+
+## 0.21.0 draft — build 41
+
+- Add a separate, profile-scoped desktop connection review for the verified Chrome Web Store build of 1Password. Authenticate the official installed BrowserSupport helper and app, pin the reviewed host, bound message/connection queues, and close helpers on revoke, disable, update or shutdown. This transport is fixture-tested; real 1Password pairing and Touch ID remain unverified and require an Apple-signed Bam build plus vendor trust.
+- Offer same-version publisher reverification for older 1Password installations while preserving their identity and storage. This does not automatically grant desktop access.
+- Add **Refresh from Installed App** for Safari extensions, expose interrupted loads as needing recovery, and preserve identity/storage through refresh, cancellation and rollback.
+- Clear compatibility diagnostics on unload/shutdown, bound individual messages, and add repeated real popup/bridge-release checks plus app memory phase observations.
+- Add dummy login forms for the separate signed-in password/autofill pass. User account unlock and real vendor Safari testing remain pending.
+
+## 0.20.1 draft — build 40
+
+- Display SVG website favicons, including percent-escaped and base64 data URLs and public SVG files. Preserve existing URL escapes when bridging page declarations into native code. This fixes the missing disco-ball favicon on aridutilh.com.
+- Rasterize SVG through a disposable WebKit image context with scripts and external resources disabled, bounded input/output, cancellation and timeout. Keep profile-scoped PNG caching and immediate replacement of cached misses.
+- Add component and native sidebar/palette regression coverage using the actual inline emoji shape, plus malformed input, dimension limits and script isolation.
+
+## 0.20.0 draft — build 39
+
+- Fix empty extension popups on reopening: track the displayed popover and preserve the new web view when WebKit reuses an action. Add repeated dismissal/reopen checks with rendered HTML and background messaging.
+- Extend Bam’s disclosed compatibility layer to classic and module service workers, including native requests and notification/idle events. Preserve classic worker URLs, module import URLs and original source bytes; check current profile, context and permission grants on every native operation. External native apps remain unavailable.
+- Add Safari WebExtension import from an installed, verified Mac App Store containing app. Review permissions in Bam, keep the signed bundle intact, revalidate it on load and refresh it after app updates. New acquisitions still open Apple’s App Store; legacy Safari extension formats and native companion features remain unsupported.
+- Adapt packaged WebAssembly streaming when WebKit supplies the wrong MIME type, retaining native compilation and CSP checks. Retain the managed-storage namespace wrapper so worker initialization does not lose its added members.
+- Add original native worker and Safari fixtures plus component coverage for preparation, signature/snapshot checks, grants, events, Wasm and lifecycle behavior. Vendor account workflows still require separate validation.
+
+## 0.19.1 draft — build 38
+
+- Give the extension store selector and its opened choices Bam’s card surfaces, type, red selection and focus styling. Support keyboard selection, with Escape and outside-click dismissal leaving the current choice unchanged.
+- Add more space around extension icons and store badges, with wider row insets and taller results.
+
+## 0.19.0 draft — build 37
+
+- Search Chrome Web Store, Firefox Add-ons and Safari Mac App Store sources inside one Bam extension library, with product icons, store marks, publisher, recommended source and permissions/details on demand. Exact known-product store identities combine Dashlane, 1Password, vidIQ and Bitwarden; unrelated products are kept separate. Individual source failures are shown without discarding successful results. Safari apps are App Store handoffs, and known-blocked Chrome Dashlane/1Password builds direct users to Firefox.
+- Show enabled extensions below the main address bar with their own icons, labels and badges. Clicking opens the real WebKit action popup; the Extensions menu retains overflow and access with the sidebar collapsed. Actions follow the current tab/profile and close on context changes.
+- Repeated Add/Enable reuses the installed build in that profile. Search is debounced and cancelable; closing the library cancels uncommitted installation work. Canceling an update review preserves the old running package, permissions and identity.
+- Prepare a separate persistent Bam Extension Preview with its own bundle ID, preferences, session and WebKit stores, so development installs and sign-ins survive relaunch. Existing fresh previews remain disposable; no profile or vault data are migrated.
+
+## 0.18.0 draft — build 36
+
+- Add an extension library (Manage Extensions ▸ Add from Store or Link): paste a Chrome Web Store, Firefox Add-ons or direct package link, or search Firefox Add-ons by name. Each product is listed once with every build Bam knows about, its publisher, source, permissions and the reason Bam recommends a build; a different build can be picked. Packages are verified before unpacking (Mozilla’s published SHA-256 for Firefox Add-ons files; every RSA publisher proof and the derived ID for Chrome Web Store CRX3 files; direct links are marked unverified), then go through the existing permission review. The manager shows source, publisher and verification per extension.
+- Add Check for Update: asks the installed build’s own source for a newer version and replaces the package in place after confirmation, keeping the extension’s identifier, storage and grants. Bam never switches an extension between stores.
+- Add a compatibility layer for extension pages (HTML background, popup and options): `notifications` (macOS User Notifications with click/button/dismiss events), `idle`, read-only `privacy`, self-only `management`, `downloads` through Bam’s download coordinator, `commands`, empty `storage.managed`, and missing members of `runtime`, `webNavigation` and `action`. Installed only for extensions whose manifest requires those permissions (optional ones stay undefined until granted) and disclosed in the review as “Provided by Bam’s compatibility layer (limited)”. WebKit’s namespace wrappers are weakly cached, so the layer holds them; this made 1Password’s startup deterministic.
+- Prepend a disclosed messaging adapter to isolated-world content scripts in the private package copy: WebKit never answers callback-style `runtime.sendMessage` from content scripts, which vidIQ, Dashlane and 1Password all use; the adapter routes those calls through the promise form. Extension JavaScript is unchanged and the original manifest is preserved.
+- Implement `windows.create`/`remove`/`update` (as Little Bam windows), `tabs.detectLanguage`, `tabs.captureVisibleTab`, tab zoom and history navigation for extensions, and send the Safari user-agent suffix from extension pages so background fetches of sites match tabs (vidIQ now renders its YouTube overlay).
+- Report page loads to extensions: `tabs.onUpdated` now fires with `status: "complete"` when a tab finishes loading (and `"loading"` when a navigation starts, including stops and failures), not only when its URL changes. Dashlane’s sign-in security check waited for that event, never asked the page for its Turnstile token, and showed “Something went wrong”.
+- Vendor probes on fresh private profiles without sign-in: Dashlane injects into a loopback login form, vidIQ renders on a YouTube watch page, 1Password initializes and opens its welcome page. Sign-in, unlock and autofill remain untested; see [extension notes](docs/extensions.md).
+
 ## 0.17.0 prerelease — build 35
 
 - Make the Keyboard section of Settings ▸ General editable: each keycap is a recorder. Click it, press a chord, and the menu item takes that key equivalent at once (New Tab, Open Location, Toggle Sidebar, Next and Previous Space, Keep/Unkeep Tab, Settings). Escape keeps the old chord, Delete restores the default, a chord another command already owns is refused with a red flash, and a “Reset all” pill returns every command to its default. Custom chords persist in UserDefaults; fresh previews never save them.

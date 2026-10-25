@@ -35,8 +35,11 @@ import WebKit
         if CommandLine.arguments.contains("--web-test") {
             smoke = WebSmokeTest(); smoke?.start(); return
         }
-        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("OrbitPrototype", isDirectory: true)
-        let preview = CommandLine.arguments.contains("--fresh-preview")
+        let launch: PreviewProfile
+        do { launch = try PreviewProfile(arguments: CommandLine.arguments, bundleIdentifier: Bundle.main.bundleIdentifier) }
+        catch { fputs("\(error.localizedDescription)\n", stderr); NSApp.terminate(nil); return }
+        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent(launch.supportDirectoryName, isDirectory: true)
+        let preview = launch.isEphemeral
         let sessionFileExists = FileManager.default.fileExists(atPath: support.appendingPathComponent("session.json").path)
         if !preview { BrowserController.restoreDefaultSearchEngine() }
         ShortcutStore.shared.configure(persists: !preview)
@@ -49,7 +52,7 @@ import WebKit
         BrowserLibrary.rowView = { BamTableRowView() }
         controller = BrowserController(sessionURL: support.appendingPathComponent("session.json"), ephemeral: preview)
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1260, height: 800), styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
-        window.title = "Bam"; window.titleVisibility = .hidden; window.titlebarAppearsTransparent = true
+        window.title = launch.windowTitle; window.titleVisibility = .hidden; window.titlebarAppearsTransparent = true
         window.isReleasedWhenClosed = false; window.delegate = self
         window.isMovableByWindowBackground = false; window.minSize = NSSize(width: 760, height: 540)
         window.backgroundColor = NSColor(white: 0.10, alpha: 1)
@@ -57,7 +60,7 @@ import WebKit
         let available = NSScreen.main?.visibleFrame.size ?? NSSize(width: 1440, height: 900)
         window.setContentSize(NSSize(width: min(1260, available.width - 60), height: min(800, available.height - 60)))
         window.center()
-        if !preview { window.setFrameAutosaveName("OrbitPrototypeWindow") }
+        if !preview { window.setFrameAutosaveName(launch.windowAutosaveName) }
         window.appearance = NSAppearance(named: .darkAqua)
         controller.onSpacesChanged = { [weak self] in
             self?.rebuildSpacesMenu()
@@ -69,6 +72,10 @@ import WebKit
         }
         ShortcutStore.shared.reservedOwner = { [weak self] combo in self?.fixedMenuItem(wearing: combo)?.title }
         for url in pendingExternalURLs { controller.openLittleOrbit(url: url) }; pendingExternalURLs.removeAll()
+        // Development extension tests start at the browser without importing
+        // favorites or changing the default browser through first-run setup.
+        // The welcome remains available explicitly from the menu or flag.
+        guard !launch.isPersistentPreview || CommandLine.arguments.contains("--onboarding") else { return }
         let completed = UserDefaults.standard.bool(forKey: OnboardingGate.completedKey)
         let started = UserDefaults.standard.bool(forKey: OnboardingGate.startedKey)
         if OnboardingGate.shouldGrandfather(arguments: CommandLine.arguments, sessionFileExists: sessionFileExists,
@@ -222,14 +229,12 @@ import WebKit
             spacesMenu.addItem(item)
         }
     }
-    @objc func goHome(_ sender: Any?) { controller.showHome(sender) }
     @objc func recordSpaceSwipes(_ sender: Any?) { SpaceSwipeDiagnostics.shared.start() }
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         if menuItem.action == #selector(selectSpace(_:)) {
             menuItem.state = controller?.session.space == menuItem.tag ? .on : .off
             return controller?.session.spaceDefinition(menuItem.tag) != nil && window?.attachedSheet == nil
         }
-        if menuItem.action == #selector(goHome(_:)) { return window?.attachedSheet == nil && controller?.littleWindows.values.contains(where: { $0.window?.isKeyWindow == true }) != true }
         if menuItem.action == #selector(recordSpaceSwipes(_:)) {
             return !SpaceSwipeDiagnostics.shared.isRecording && !SpaceSwipeDiagnostics.shared.isStarting
         }
@@ -305,7 +310,6 @@ import WebKit
         let history = menu("History")
         item(history, "Back", #selector(BrowserController.goBack(_:)), "[", .command, controller)
         item(history, "Forward", #selector(BrowserController.goForward(_:)), "]", .command, controller)
-        item(history, "Home", #selector(goHome(_:)), "h", [.command, .shift], self)
         history.addItem(.separator())
         item(history, "Show History…", #selector(BrowserController.showHistory(_:)), "y", .command, controller)
         item(history, "Recently Closed…", #selector(BrowserController.showArchive(_:)), "", .command, controller)

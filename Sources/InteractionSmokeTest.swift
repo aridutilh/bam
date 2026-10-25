@@ -63,7 +63,7 @@ import WebKit
             guard self.check(self.controller.session.activeID == self.selectedSpaceOneTab && self.controller.activeWebView !== self.initialWeb && self.controller.activeWebView?.superview === self.controller.webHost && self.pagingIsClear, "Space change did not display the target tab") else { return }
             self.controller.activeWebView?.evaluateJavaScript("document.title") { [weak self] value, error in
                 guard let self else { return }
-                guard self.check(error == nil && value as? String == "A little space", "Visible target page did not render bundled Home") else { return }
+                guard self.check(error == nil && value as? String == "New tab", "Visible target page did not render the bundled empty tab") else { return }
                 self.testAddressInterrupt()
             }
         }
@@ -118,7 +118,7 @@ import WebKit
                 }
                 let tracked = attachedPages[0]
                 self.controller.select(attachmentTabs[0].id)
-                try await wait("attachment fixture") { !tracked.isLoading && tracked.title == "A little space" }
+                try await wait("attachment fixture") { !tracked.isLoading && tracked.title == "New tab" }
                 _ = try await js(tracked, "window.__attachmentOrigin=performance.timeOrigin; var f=document.createElement('input'); f.id='attachment-state'; f.value='kept'; document.body.appendChild(f); f.focus(); true")
                 self.window.makeFirstResponder(tracked)
                 let responder = self.window.firstResponder
@@ -146,12 +146,12 @@ import WebKit
                                 && self.controller.webHost.subviews.last === replacement,
                             "A renderer replacement under the same tab ID kept the stale surface")
                 self.controller.load("orbit://newtab", in: replacement, id: attachmentTabs[0].id)
-                try await wait("replacement fixture") { !replacement.isLoading && replacement.title == "A little space" }
+                try await wait("replacement fixture") { !replacement.isLoading && replacement.title == "New tab" }
                 try require(self.controller.session.makeSplit(primary: attachmentTabs[0].id, secondary: attachmentTabs[1].id),
                             "Could not create attachment Split")
                 self.controller.showActive()
                 let second = attachedPages[1]
-                try await wait("attachment right pane") { !second.isLoading && second.title == "A little space" }
+                try await wait("attachment right pane") { !second.isLoading && second.title == "New tab" }
                 replacement.windowMoves = 0; second.windowMoves = 0
                 for _ in 0..<10 { self.controller.showActive() }
                 try require(replacement.windowMoves == 0 && second.windowMoves == 0
@@ -168,7 +168,7 @@ import WebKit
                 for space in 0...2 {
                     self.selectSpaceImmediately(space)
                     guard let web = self.controller.activeWebView else { throw ContentFailure(description: "No warm page in Space \(space)") }
-                    try await wait("warm Space \(space)") { !web.isLoading && web.title == "A little space" }
+                    try await wait("warm Space \(space)") { !web.isLoading && web.title == "New tab" }
                     let token = UUID().uuidString
                     _ = try await js(web, "window.__arkSpaceToken='\(token)'; window.__arkSpaceOrigin=performance.timeOrigin; var f=document.createElement('input'); f.id='ark-space-state'; f.value='kept-\(space)'; document.body.appendChild(f); true")
                     pages[space] = web; ids[space] = self.controller.session.activeID; tokens[space] = token
@@ -284,7 +284,7 @@ import WebKit
                                 && self.controller.requestedAddresses[self.alternateSpaceOneTab] == "orbit://newtab",
                             "Cold Space navigation was not requested before sidebar completion")
                 try stillSettling("Cold Space navigation")
-                try await wait("cold destination renders") { !cold.isLoading && cold.title == "A little space" }
+                try await wait("cold destination renders") { !cold.isLoading && cold.title == "New tab" }
                 self.controller.select(self.selectedSpaceOneTab)
                 try displayed(1, "Selecting warm tab after cold destination")
                 try await retained(1)
@@ -300,7 +300,7 @@ import WebKit
                 guard let split = self.controller.splitCoordinators[splitID], let right = self.controller.browsers[rightTab.id] else {
                     throw ContentFailure(description: "Split fixture did not attach its two pages")
                 }
-                try await wait("warm split right") { !right.isLoading && right.title == "A little space" }
+                try await wait("warm split right") { !right.isLoading && right.title == "New tab" }
                 _ = try await js(right, "window.__arkSplitToken='kept'; true")
                 self.selectSpaceImmediately(0)
                 self.controller.changeSpace(2)
@@ -459,7 +459,11 @@ import WebKit
         guard check(abs(page.minX) < 0.001 && abs(page.minY) < 0.001 && abs(page.width - window.width) < 0.001 && abs(page.height - window.height) < 0.001
                     && controller.webHost.frame == controller.card.bounds && (controller.card.layer?.cornerRadius ?? 1) == 0,
                     "Fully collapsed sidebar did not give the page the whole window: card \(page) in \(window)") else { return }
+        guard check(controller.view.window == nil || controller.windowButtonsHidden,
+                    "Fully collapsed sidebar left the window's traffic lights showing") else { return }
         controller.displayedWidth = savedWidth; controller.layoutBrowser()
+        guard check(savedWidth < 80 || !controller.windowButtonsHidden,
+                    "Restoring the sidebar did not bring the traffic lights back") else { return }
         testIgnoredScrollRoutes()
     }
     private func testIgnoredScrollRoutes() {

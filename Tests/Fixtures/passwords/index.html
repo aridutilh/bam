@@ -1,0 +1,35 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bam dummy password test</title>
+<style>
+body{font:17px system-ui;background:#fcf5e5;color:#203b2d;max-width:780px;margin:50px auto;padding:24px}h1{font-size:32px}form,iframe{box-sizing:border-box;background:white;border:1px solid #c6cdbf;border-radius:16px;padding:24px;width:100%;margin:20px 0}label{display:block;margin:12px 0}input,button,select{font:inherit;padding:10px;border:1px solid #909b8b;border-radius:8px}input{display:block;width:90%;margin-top:6px}button{background:#e7eeb8;cursor:pointer}output{display:block;padding:12px 0}iframe{height:320px}small{display:block;line-height:1.5}
+</style>
+<h1>Bam dummy password test</h1>
+<p>Use a new test login named <strong>Bam test</strong>, with username <strong>bam-test@example.invalid</strong>. Use an invented password that you never use elsewhere.</p>
+<small>This page does not send or store form values. Submission shows only whether each field was filled. Never enter a real password here. Some password managers restrict autofill on local HTTP pages; use an HTTPS test site for a separate cross-check.</small>
+<label>Form variant <select id="variant"><option value="login">Standard login</option><option value="register">Create dummy login</option><option value="update">Update dummy password</option><option value="dynamic">Dynamically inserted login</option><option value="frame">Same-origin iframe</option></select></label>
+<main id="forms"></main><output id="result" aria-live="polite"></output>
+<script>
+const main=document.querySelector('main'), result=document.querySelector('output');
+function form(mode){
+ const f=document.createElement('form'); f.action='#';
+ f.innerHTML='<label>Username<input name="username" type="email" autocomplete="username"></label>'+
+ (mode==='update'?'<label>Current password<input name="current-password" type="password" autocomplete="current-password"></label>':'')+
+ '<label>'+(['register','update'].includes(mode)?'New password':'Password')+'<input name="password" type="password" autocomplete="'+(['register','update'].includes(mode)?'new-password':'current-password')+'"></label><button type="submit">Submit dummy form</button>';
+ f.addEventListener('submit',e=>{e.preventDefault(); const inputs=Array.from(f.querySelectorAll('input')); result.textContent=inputs.map(i=>i.name+': '+(i.value?'filled':'empty')+'; matches dummy: '+(i.value===(i.name==='username'?'bam-test@example.invalid':'Bam-Dummy-Only-2026!'))).join(' · ')+'. No values sent or stored.';});
+ main.append(f);
+}
+function render(){main.replaceChildren();result.textContent='';const mode=document.querySelector('select').value;if(mode==='frame'){const frame=document.createElement('iframe');frame.title='Dummy login inside an iframe';frame.src='frame.html';main.append(frame);}else if(mode==='dynamic'){const b=document.createElement('button');b.textContent='Insert login form';b.onclick=()=>{b.remove();form('login')};main.append(b);}else form(mode)}
+document.querySelector('select').onchange=render;render();
+</script>
+
+<pre id="picker-probe" aria-label="Select compatibility diagnostics"></pre>
+<script>
+const probeSelect=document.querySelector('select');
+function updatePickerProbe(){
+let nativeOpen;try{nativeOpen=probeSelect.matches('select:open')}catch{nativeOpen='unsupported'}
+document.querySelector('#picker-probe').textContent=JSON.stringify({selectOpenSupported:CSS.supports('selector(select:open)'),pickerSupported:CSS.supports('selector(::picker(select))'),overlaySupported:CSS.supports('overlay','auto'),selectOpen:nativeOpen,pickerOverlay:getComputedStyle(probeSelect,'::picker(select)').getPropertyValue('overlay')});
+}
+updatePickerProbe();setInterval(updatePickerProbe,100);
+</script>

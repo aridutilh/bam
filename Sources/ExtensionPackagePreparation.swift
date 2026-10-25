@@ -4,7 +4,7 @@ import Foundation
 /// WebKit's generated MV2 background page omits a charset; an explicit UTF-8 page
 /// preserves non-ASCII JavaScript identifiers in scripts loaded from that page.
 enum ExtensionPackagePreparation {
-    private static let maximumManifestBytes = 1_048_576
+    static let maximumManifestBytes = 1_048_576
 
     @discardableResult
     static func prepare(package: URL, originalManifestURL: URL) throws -> String? {
@@ -89,7 +89,8 @@ enum ExtensionPackagePreparation {
         return "Prepared an explicit UTF-8 background page for Manifest V2. Extension scripts are unchanged; the original manifest is preserved."
     }
 
-    private static func validateScript(_ path: String, in package: URL) throws {
+    /// Shared by the content-script preparation: local, regular, non-escaping script files only.
+    static func validateScript(_ path: String, in package: URL, kind: String = "background") throws {
         func isSafe(_ value: String) -> Bool {
             !value.isEmpty && value.utf8.count <= 4_096 &&
             !value.hasPrefix("/") && !value.contains("\\") &&
@@ -99,7 +100,7 @@ enum ExtensionPackagePreparation {
         }
         guard isSafe(path), let decoded = path.removingPercentEncoding, isSafe(decoded),
               !path.lowercased().contains("%2f"), !path.lowercased().contains("%5c") else {
-            throw failure("A background script has an unsafe or non-local path.")
+            throw failure("A \(kind) script has an unsafe or non-local path.")
         }
         var location = package
         let components = decoded.split(separator: "/")
@@ -108,12 +109,12 @@ enum ExtensionPackagePreparation {
             let values = try location.resourceValues(forKeys: [.isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey])
             guard values.isSymbolicLink != true,
                   index == components.count - 1 ? values.isRegularFile == true : values.isDirectory == true else {
-                throw failure("Background scripts must be regular files inside the extension package.")
+                throw failure("\(kind.prefix(1).uppercased() + kind.dropFirst()) scripts must be regular files inside the extension package.")
             }
         }
         let root = package.resolvingSymlinksInPath().standardizedFileURL.path
         guard location.resolvingSymlinksInPath().standardizedFileURL.path.hasPrefix(root + "/") else {
-            throw failure("A background script escapes the extension package.")
+            throw failure("A \(kind) script escapes the extension package.")
         }
     }
 
@@ -125,7 +126,7 @@ enum ExtensionPackagePreparation {
             .replacingOccurrences(of: ">", with: "&gt;")
     }
 
-    private static func failure(_ message: String) -> NSError {
+    static func failure(_ message: String) -> NSError {
         NSError(domain: "Bam.ExtensionPackagePreparation", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
     }
 }

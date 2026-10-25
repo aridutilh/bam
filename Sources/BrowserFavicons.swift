@@ -105,7 +105,13 @@ import WebKit
         const sizes = (link.getAttribute('sizes') || '').toLowerCase().split(/\s+/);
         const square = sizes.map(s => /^(\d+)x\1$/.exec(s)).filter(Boolean).map(m => Number(m[1]));
         const fit = sizes.includes('any') ? 0 : square.length ? Math.min(...square.map(s => s >= 32 ? s - 32 : 128 + 32 - s)) : 64;
-        icons.push({ url: url.href, rank: (regular ? 0 : 1024) + fit });
+        // WHATWG data URLs can retain literal markup/Unicode alongside %22.
+        // Foundation repairs such mixed URLs by escaping the % again. Encode
+        // the unsafe characters here while preserving existing escape bytes;
+        // the image payload is still decoded exactly once in the native store.
+        const address = url.protocol === 'data:'
+          ? encodeURI(url.href).replace(/%25([0-9a-f]{2})/gi, '%$1') : url.href;
+        icons.push({ url: address, rank: (regular ? 0 : 1024) + fit });
       }
       icons.sort((a, b) => a.rank - b.rank);
       return { page: location.href, icons: Array.from(new Set(icons.map(i => i.url))).slice(0, 12) };

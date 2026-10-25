@@ -22,7 +22,7 @@ import WebKit
         runner = Task { @MainActor in
             do {
                 try await run()
-                finish(true, "\(checks) checks: real document discovery and PNG loading, native sidebar/Favorite/palette images, profile separation, custom-icon fallback, missing-icon fallback and stale-navigation rejection")
+                finish(true, "\(checks) checks: real PNG and inline/network SVG discovery, native sidebar/Favorite/palette images, profile separation, custom-icon fallback, cached-miss replacement and stale-navigation rejection")
             } catch { finish(false, String(describing: error)) }
         }
     }
@@ -66,6 +66,20 @@ import WebKit
         return color.alphaComponent > 0.9 && (red
             ? color.redComponent > 0.75 && color.blueComponent < 0.25
             : color.blueComponent > 0.75 && color.redComponent < 0.25)
+    }
+    /// Emoji artwork need not cover the center pixel. Sample the complete small
+    /// decoded image instead of relying on a particular installed glyph design.
+    private func hasVisibleArtwork(_ image: NSImage?) -> Bool {
+        guard let image, let data = image.tiffRepresentation, let bitmap = NSBitmapImageRep(data: data),
+              bitmap.pixelsWide > 0, bitmap.pixelsHigh > 0 else { return false }
+        var visible = 0
+        for y in 0..<bitmap.pixelsHigh {
+            for x in 0..<bitmap.pixelsWide {
+                guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB), color.alphaComponent > 0.25 else { continue }
+                visible += 1
+            }
+        }
+        return visible > bitmap.pixelsWide * bitmap.pixelsHigh / 100
     }
     private func cached(_ page: URL, profile: UUID) -> NSImage? {
         controller.favicons.image(for: page, profileID: profile, allowFetch: false)
@@ -224,6 +238,61 @@ import WebKit
         try check(row(missing.id).map { descendants($0).compactMap { $0 as? NSImageView }.contains { $0.image != nil } } == true,
                   "Missing-icon row rendered no fallback symbol")
         try check(try await js(missingWeb, "window.faviconFixtureSentinel") as? String == "missing-document", "Failed icon loading interfered with page readiness")
+
+        // This profile/origin has a confirmed negative cache entry. A real SVG
+        // declaration must replace that miss without waiting for its TTL. The
+        // fixture has no raster icon and /favicon.ico remains absent.
+        var previousSVG: NSImage?
+        for format in ["percent", "percent-literals", "base64", "network"] {
+            let svgURL = folder.appendingPathComponent("svg.html").appending(queryItems: [URLQueryItem(name: "format", value: format)])
+            controller.load(svgURL.absoluteString, in: missingWeb, id: missing.id)
+            try await ready(missingWeb, at: svgURL, title: "Bam Favicon SVG")
+            guard let discovery = try await js(missingWeb, BrowserController.faviconDiscoveryScript) as? [String: Any],
+                  let candidates = discovery["icons"] as? [String], candidates.count == 1 else {
+                throw Failure.assertion("SVG-only document did not expose exactly one declared icon")
+            }
+            let expectedPrefix = format == "network" ? folder.appendingPathComponent("emoji.svg").absoluteString
+                : (format == "base64" ? "data:image/svg+xml;base64," : "data:image/svg+xml,")
+            try check(candidates[0].hasPrefix(expectedPrefix), "Discovery lost the \(format) SVG declaration")
+            if format.hasPrefix("percent") {
+                let expectedSVG = format == "percent-literals"
+                    ? #"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text y=".9em" font-size="16">100% / %25</text></svg>"#
+                    : #"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text y=".9em" font-size="90">🪩</text></svg>"#
+                try check(candidates[0].contains("%22") && !candidates[0].contains("%2522"),
+                          "DOM discovery double-encoded existing SVG quote escapes")
+                try check(URL(string: candidates[0])?.absoluteString == candidates[0],
+                          "Discovered SVG URL was not stable across Swift URL parsing")
+                try check(String(candidates[0].dropFirst(expectedPrefix.count)).removingPercentEncoding == expectedSVG,
+                          "One SVG data-URL decode did not preserve its markup and literal percent text")
+            }
+            try await wait("decoded \(format) SVG replacing the previous cache entry") {
+                guard let current = cached(svgURL, profile: missingProfile), current !== previousSVG else { return false }
+                return hasVisibleArtwork(current)
+            }
+            previousSVG = cached(svgURL, profile: missingProfile)
+            try check(previousSVG?.isTemplate == false, "SVG artwork became a template image")
+            try await wait("rendered \(format) SVG sidebar icon") {
+                icon(in: row(missing.id))?.image === previousSVG && hasVisibleArtwork(icon(in: row(missing.id))?.image)
+            }
+            try check(icon(in: row(missing.id))?.contentTintColor == nil, "Sidebar tinted the SVG artwork")
+            try check(try await js(missingWeb, "window.faviconFixtureSentinel") as? String == "svg-document-\(format)",
+                      "SVG icon decoding changed the source document")
+            try check(try await js(missingWeb, "performance.getEntriesByType('resource').every(entry => { const url = new URL(entry.name); return url.protocol === 'data:' || (url.origin === location.origin && [new URL('emoji.svg', location.href).pathname, '/favicon.ico'].includes(url.pathname)); })") as? Bool == true,
+                      "SVG fixture loaded an unrelated network resource")
+        }
+        try capture(controller.sidebar, named: "svg-sidebar")
+        controller.openAddress(newTab: false, empty: true)
+        guard let svgResults = controller.tabSearchResults else { throw Failure.assertion("SVG palette did not create results") }
+        controller.view.layoutSubtreeIfNeeded()
+        let svgResult = descendants(svgResults).first { $0.accessibilityLabel()?.hasPrefix("Bam Favicon SVG,") == true }
+        try check(icon(in: svgResult)?.image === previousSVG && hasVisibleArtwork(icon(in: svgResult)?.image),
+                  "Palette lost the decoded SVG artwork")
+        let svgSelection = svgResults.selectedIndex, svgRows = svgResults.subviews.map(ObjectIdentifier.init)
+        svgResults.refreshFavicons()
+        try check(svgResults.selectedIndex == svgSelection && svgResults.subviews.map(ObjectIdentifier.init) == svgRows &&
+                  icon(in: svgResult)?.image === previousSVG, "Refreshing SVG artwork disturbed the palette or its image")
+        if let palette = controller.addressCard { try capture(palette, named: "svg-palette") }
+        controller.dismissAddress()
 
         // Site-scoped presentation is a separate boundary: return a genuinely
         // loaded image through a recording provider rather than starting HTTPS

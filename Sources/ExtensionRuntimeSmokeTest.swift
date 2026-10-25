@@ -39,9 +39,12 @@ import WebKit
                     throw ExtensionSmokeTest.Failure(description: "Could not construct the local extension test page URL")
                 }
                 let isolatedChecks = try await ExtensionSmokeTest.run(fixtureURL: fixture, pageURL: page)
+                let frameChecks = try await ExtensionFrameMessagingSmokeTest.runIntegrated(fixtureURL: fixture, pageURL: page)
                 let integratedChecks = try await BrowserExtensionSmokeTest.run(fixtureURL: fixture, pageURL: page)
+                let workerChecks = try await ExtensionWorkerSmokeTest.run(pageURL: page)
+                let safariChecks = try await SafariExtensionSmokeTest.run(pageURL: page)
                 let bridgeChecks = try await ExtensionBridgeCapabilityProbe.run()
-                let checks = isolatedChecks + integratedChecks + bridgeChecks
+                let checks = isolatedChecks + frameChecks + integratedChecks + workerChecks + safariChecks + bridgeChecks
                 self.finish(true, "\(checks)")
             } catch { self.finish(false, String(describing: error)) }
         }

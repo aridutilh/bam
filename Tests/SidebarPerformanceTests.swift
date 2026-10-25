@@ -171,7 +171,34 @@ import AppKit
         sidebar.faviconProvider = nil
         require(tile.image == nil && icon(row(list, 0)).identifier == nil && icon(row(list, 0)).contentTintColor != nil,
                 "Removing the provider clears Favorite and row images immediately")
-        print("PASS: \(checks) sidebar virtualization, identity, scrolling, paging and sleep checks")
+        // Installed extensions stay fixed above the scrolling tab list. Updating
+        // badges preserves the native button used as WebKit's popover anchor.
+        let extensionIDs = (0..<9).map { _ in UUID() }
+        func extensionItems(badge: String = "") -> [SidebarExtensionItem] {
+            extensionIDs.enumerated().map { SidebarExtensionItem(id: $0.element, name: "Extension \($0.offset)", label: "Open vault", icon: red, badge: $0.offset == 0 ? badge : "", isEnabled: $0.offset != 1) }
+        }
+        var invoked: UUID?, invokedAnchor: NSView?
+        sidebar.onExtensionAction = { invoked = $0; invokedAnchor = $1 }
+        sidebar.updateExtensions(extensionItems()); sidebar.layoutSubtreeIfNeeded()
+        let firstAction = descendants(sidebar).first { $0.identifier?.rawValue == "extension-action-\(extensionIDs[0].uuidString)" } as! NSButton
+        firstAction.performClick(nil)
+        require(invoked == extensionIDs[0] && invokedAnchor === firstAction, "Vendor button dispatches its own identity and native popover anchor")
+        require(firstAction.accessibilityLabel() == "Extension 0" && firstAction.toolTip?.contains("Open vault") == true, "Extension action exposes its vendor and current action label")
+        sidebar.updateExtensions(extensionItems(badge: "12")); sidebar.layoutSubtreeIfNeeded()
+        require(descendants(sidebar).first { $0.identifier == firstAction.identifier } === firstAction && firstAction.accessibilityValue() as? String == "12", "Badge update preserves popup anchor and exposes badge to accessibility")
+        for width: CGFloat in [164, 228, 500] {
+            sidebar.setFrameSize(NSSize(width: width, height: 720)); sidebar.layoutSubtreeIfNeeded()
+            let actions = descendants(sidebar).filter { $0.identifier?.rawValue.hasPrefix("extension-action-") == true }
+            require(actions.filter { !$0.isHidden }.allSatisfy { $0.frame.maxX <= width && $0.frame.minX >= 40 }, "Action icons fit without overlap at \(width)")
+            let menu = descendants(sidebar).first { $0.identifier?.rawValue == "extensions-menu" }!
+            require(!menu.isHidden && (menu.accessibilityLabel()?.contains("more") == true) == actions.contains(where: \.isHidden), "Overflow stays reachable at \(width)")
+        }
+        let disabled = descendants(sidebar).first { $0.identifier?.rawValue == "extension-action-\(extensionIDs[1].uuidString)" } as! NSButton
+        require(!disabled.isEnabled, "Tab-disabled extension action remains visibly disabled")
+        sidebar.updateExtensions([]); sidebar.layoutSubtreeIfNeeded()
+        require(descendants(sidebar).allSatisfy { $0.identifier?.rawValue.hasPrefix("extension-action-") != true }, "Removing or switching profiles clears old actions")
+        require(descendants(sidebar).first { $0.identifier?.rawValue == "extension-library" }?.isHidden == false, "Empty profiles offer Add extensions directly")
+        print("PASS: \(checks) sidebar virtualization, identity, scrolling, paging and extension action checks")
         window.contentView = nil
     }
 }

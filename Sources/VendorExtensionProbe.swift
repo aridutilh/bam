@@ -21,7 +21,7 @@ import WebKit
             finish(false, reason: "WKWebExtension requires macOS 15.4 or later")
             return
         }
-        let timer = Timer(timeInterval: 24, repeats: false) { [weak self] _ in
+        let timer = Timer(timeInterval: Self.observationSeconds + 5, repeats: false) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.finish(self.initialized, reason: "Overall observation deadline reached")
@@ -33,6 +33,43 @@ import WebKit
             do { try await self.run() }
             catch { self.finish(false, reason: error.localizedDescription) }
         }
+    }
+
+    /// BAM_VENDOR_SECONDS bounds the observation (default 19, at most 120).
+    static var observationSeconds: TimeInterval {
+        min(120, max(5, Double(ProcessInfo.processInfo.environment["BAM_VENDOR_SECONDS"] ?? "") ?? 19))
+    }
+    /// BAM_VENDOR_SITE opens one ordinary HTTP(S) page in the profile so content
+    /// scripts can run; BAM_VENDOR_SITE_PROBE is an optional JavaScript expression
+    /// evaluated there. BAM_VENDOR_MARKER selects the actual DOM marker; the default
+    /// uses the full display name and is only a heuristic, especially for localized names.
+    private static func siteURL(_ env: [String: String]) -> URL? {
+        guard let raw = env["BAM_VENDOR_SITE"], let url = URL(string: raw), ["http", "https"].contains(url.scheme?.lowercased() ?? "") else { return nil }
+        return url
+    }
+    private static func siteProbeScript(_ env: [String: String], extensionName: String) -> String {
+        if let custom = env["BAM_VENDOR_SITE_PROBE"], !custom.isEmpty { return custom }
+        let needle = (env["BAM_VENDOR_MARKER"] ?? extensionName).lowercased().replacingOccurrences(of: #"[^a-z0-9]"#, with: "", options: .regularExpression)
+        func encoded(_ value: String) -> String { String((try? String(data: JSONSerialization.data(withJSONObject: [value]), encoding: .utf8)).flatMap { $0.dropFirst().dropLast() } ?? "\"\"") }
+        return """
+        (() => {
+          const needle = \(encoded(needle));
+          const alt = needle === "1password" ? "onepassword" : needle;
+          let named = 0, shadows = 0, extensionFrames = 0, total = 0;
+          const visit = (root) => {
+            for (const el of root.querySelectorAll("*")) {
+              total++;
+              const sig = (el.tagName + " " + el.id + " " + (typeof el.className === "string" ? el.className : "") + " " + Array.from(el.attributes).map(a => a.name + "=" + a.value).join(" ")).toLowerCase();
+              if (needle && (sig.includes(needle) || sig.includes(alt))) named++;
+              if (el.tagName === "IFRAME" && (el.src || "").startsWith("webkit-extension://")) extensionFrames++;
+              if (el.shadowRoot) { shadows++; visit(el.shadowRoot); }
+            }
+          };
+          visit(document);
+          return { marker: needle, readyState: document.readyState, title: document.title.slice(0, 120), total, named, shadows, extensionFrames,
+                   inputs: document.querySelectorAll("input").length };
+        })()
+        """
     }
 
     @available(macOS 15.4, *)
@@ -66,7 +103,12 @@ import WebKit
         main.isReleasedWhenClosed = false
         main.title = "Bam vendor observation \(UUID().uuidString.prefix(8))"
         main.contentViewController = browser
-        window = main; main.orderFront(nil)
+        // AppKit may adopt the controller's initially empty root size. Match the
+        // app launch path so this probe exercises real, visible browser chrome.
+        main.setContentSize(NSSize(width: 920, height: 680))
+        browser.view.frame = NSRect(x: 0, y: 0, width: 920, height: 680)
+        window = main; main.makeKeyAndOrderFront(nil)
+        browser.layoutBrowser(); browser.view.layoutSubtreeIfNeeded()
 
         let host = browser.browserExtensions
         host.onReloadNeeded = nil
@@ -107,7 +149,12 @@ import WebKit
         observations["extension_name"] = context.webExtension.displayName ?? ""
         observations["has_background"] = context.webExtension.hasBackgroundContent
         observations["granted_permissions"] = context.grantedPermissions.keys.map(\.rawValue).sorted()
-        observations["unsupported_api_policy"] = BrowserExtensions.unsupportedAPIs.sorted()
+        observations["unsupported_api_policy"] = context.unsupportedAPIs.sorted()
+        observations["compatibility_layer"] = host.items(profileID: profile).first(where: { $0.id == id })?.compatibility ?? []
+        let siteURL = Self.siteURL(env)
+        var siteTabID: UUID?
+        let siteProbe = Self.siteProbeScript(env, extensionName: context.webExtension.displayShortName ?? context.webExtension.displayName ?? "")
+        if let siteURL { observations["site"] = sanitizedURL(siteURL) }
         context.loadBackgroundContent { [weak self] error in
             Task { @MainActor [weak self] in
                 guard let self, !self.finished else { return }
@@ -116,13 +163,45 @@ import WebKit
         }
         let started = ProcessInfo.processInfo.systemUptime
         var actionInvoked = false, fallbackOpened = false, lastSample = -1
-        while !finished && ProcessInfo.processInfo.systemUptime - started < 19 {
+        var invokedAction: WKWebExtension.Action?
+        observations["action_invoked"] = false
+        observations["action_popup_presented"] = false
+        func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
+        let budget = Self.observationSeconds
+        while !finished && ProcessInfo.processInfo.systemUptime - started < budget {
             let elapsed = ProcessInfo.processInfo.systemUptime - started
-            if !actionInvoked && elapsed >= 2 {
-                actionInvoked = true
-                observations["action_invoked"] = true
-                host.performAction(extensionID: id, tabID: nil, anchor: browser.sidebar)
+            if siteTabID == nil, let siteURL, elapsed >= 1 {
+                siteTabID = browser.openProfileTab(siteURL, profileID: profile, active: true)
+                observations["site_tab_opened"] = siteTabID != nil
             }
+            if !actionInvoked && elapsed >= 2 {
+                let target = siteTabID ?? home.id
+                browser.select(target); browser.refresh()
+                host.reconcile(); browser.refreshExtensionActions()
+                browser.layoutBrowser(); browser.view.layoutSubtreeIfNeeded()
+                let buttons = descendants(browser.sidebar).compactMap { $0 as? NSButton }.filter {
+                    $0.identifier?.rawValue.hasPrefix("extension-action-") == true && !$0.isHiddenOrHasHiddenAncestor &&
+                        $0.bounds.width > 0 && $0.bounds.height > 0
+                }
+                let button = buttons.first { $0.identifier?.rawValue == "extension-action-\(id.uuidString)" }
+                let item = host.actionItems(profileID: profile, tabID: target).first { $0.id == id }
+                let runtime = context.webExtensionController?.delegate as? BrowserExtensionRuntime
+                let active = runtime?.currentSurface(target)?.isActive == true
+                observations["sidebar_action_count"] = buttons.count
+                observations["sidebar_action_visible"] = button != nil
+                observations["sidebar_action_has_icon"] = item?.icon != nil
+                observations["sidebar_action_enabled"] = button?.isEnabled == true
+                observations["action_tab_active"] = active
+                if let button, button.isEnabled, active, let tab = runtime?.tabs[target] {
+                    invokedAction = context.action(for: tab)
+                    actionInvoked = true
+                    observations["action_invoked"] = true
+                    // Exercise the actual vendor-logo button and its controller
+                    // callback, including current-tab/profile resolution.
+                    button.performClick(nil)
+                }
+            }
+            if invokedAction?.popupPopover?.isShown == true { observations["action_popup_presented"] = true }
             if !fallbackOpened && elapsed >= 5 {
                 fallbackOpened = true
                 let options = manifest["options_ui"] as? [String: Any]
@@ -137,14 +216,27 @@ import WebKit
                 lastSample = sample
                 observations["context_errors"] = context.errors.prefix(20).map(errorDescription)
                 observations["host_error"] = host.errors[id].map { String($0.prefix(800)) }
+                if let runtime = context.webExtensionController?.delegate as? BrowserExtensionRuntime {
+                    observations["compatibility_diagnostics"] = runtime.compatibility.diagnostics(for: context)
+                    if let script = env["BAM_VENDOR_BG_PROBE"], !script.isEmpty, sample >= 4 {
+                        observations["background_eval"] = await runtime.compatibility.evaluate(script, for: context)
+                    }
+                }
                 observations["manifest_errors"] = context.webExtension.errors.prefix(20).map(errorDescription)
                 observations["context_error_count"] = context.errors.count
-                if let action = context.action(for: nil) {
+                if let action = invokedAction ?? context.action(for: nil) {
                     observations["action_has_popup"] = action.presentsPopup
+                    observations["action_popup_is_shown"] = action.popupPopover?.isShown == true
                     if let popup = action.popupWebView { samplePage(popup, key: "action_popup", context: context) }
                 }
                 for (tabID, web) in browser.browsers where web.url.map({ BrowserExtensions.isExtensionURL($0, ownedBy: context) }) == true {
                     samplePage(web, key: "tab_\(tabID.uuidString)", context: context)
+                }
+                if let siteTabID, let web = browser.browsers[siteTabID], let current = web.url, ["http", "https"].contains(current.scheme?.lowercased() ?? "") {
+                    observations["site_has_access"] = context.hasAccess(to: current)
+                    observations["site_has_injected_content"] = context.hasInjectedContent(for: current)
+                    observations["site_tab_uses_profile_controller"] = web.configuration.webExtensionController === context.webExtensionController
+                    sampleSite(web, script: siteProbe, elapsed: elapsed)
                 }
             }
             try await Task.sleep(nanoseconds: 100_000_000)
@@ -190,6 +282,22 @@ import WebKit
                 self.pages[key]?["is_loading"] = web.isLoading
                 if let result = result as? [String: Any] { self.pages[key]?["document"] = result }
                 if let error { self.pages[key]?["javascript_error"] = self.errorDescription(error) }
+            }
+        }
+    }
+
+    /// Samples the ordinary page in the page world: content-script DOM additions are
+    /// visible there, but no form values, storage or cookies are read.
+    private func sampleSite(_ web: WKWebView, script: String, elapsed: TimeInterval) {
+        web.evaluateJavaScript(script) { [weak self] result, error in
+            Task { @MainActor [weak self] in
+                guard let self, !self.finished, let current = web.url else { return }
+                var entry: [String: Any] = ["url": self.sanitizedURL(current), "elapsed": Int(elapsed), "is_loading": web.isLoading]
+                if let result { entry["result"] = JSONSerialization.isValidJSONObject([result]) ? result : String(describing: result) }
+                if let error { entry["javascript_error"] = self.errorDescription(error) }
+                var samples = self.observations["site_samples"] as? [[String: Any]] ?? []
+                samples.append(entry); if samples.count > 12 { samples.removeFirst(samples.count - 12) }
+                self.observations["site_samples"] = samples
             }
         }
     }

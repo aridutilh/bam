@@ -29,6 +29,16 @@ struct SidebarTabItem: Equatable {
     var canFavorite: Bool = true
 }
 
+/// Display state only: the controller resolves the current profile/tab again on click.
+struct SidebarExtensionItem {
+    let id: UUID
+    let name: String
+    let label: String
+    let icon: NSImage?
+    let badge: String
+    let isEnabled: Bool
+}
+
 /// Shared Favorites and chrome stay fixed while each Space's heading and rows page.
 @MainActor final class SidebarView: NSView {
     /// Fast cache lookup; the owner may schedule a fetch for this current tab.
@@ -50,6 +60,9 @@ struct SidebarTabItem: Equatable {
     var onManageSpaces: (() -> Void)?
     var onMoveTab: ((UUID, Int) -> Void)?
     var onPictureInPicture: (() -> Void)?
+    var onExtensionAction: ((UUID, NSView) -> Void)?
+    var onExtensionsMenu: ((NSView) -> Void)?
+    var onExtensionLibrary: (() -> Void)?
     var onSpaceScroll: ((NSEvent, SpaceScrollSource) -> Bool)?
     override var isFlipped: Bool { true }
     private let back = ArkIconButton(symbol: "arrow.left", label: "Go back")
@@ -57,6 +70,9 @@ struct SidebarTabItem: Equatable {
     private let reload = ArkIconButton(symbol: "arrow.clockwise", label: "Reload page")
     private let toggle = ArkIconButton(symbol: "sidebar.left", label: "Hide sidebar")
     private let search = ArkSearchButton()
+    private let extensionMenu = ArkIconButton(symbol: "puzzlepiece.extension", label: "Extensions")
+    private let extensionLibrary = ArkExtensionLibraryButton()
+    private var extensionButtons: [ArkExtensionButton] = []
     private let pip = ArkIconButton(symbol: "pip", label: "Picture in Picture (⌥⌘P)")
     private let library = ArkSpacesButton()
     private let plus = ArkIconButton(symbol: "plus", label: "New tab")
@@ -87,7 +103,7 @@ struct SidebarTabItem: Equatable {
         clip.wantsLayer = true; clip.layer?.masksToBounds = true
         favoritesHost.setAccessibilityLabel("Favorites")
         favoritesHost.setAccessibilityRole(.group)
-        [toggle, back, forward, reload, search, favoritesHost, clip, library, plus, pip, spaceOverflow].forEach(addSubview)
+        [toggle, back, forward, reload, search, extensionMenu, extensionLibrary, favoritesHost, clip, library, plus, pip, spaceOverflow].forEach(addSubview)
         clip.addSubview(page); connect(page); cachedPages[0] = page
         back.handler = { [weak self] in self?.onBack?() }
         forward.handler = { [weak self] in self?.onForward?() }
@@ -98,6 +114,12 @@ struct SidebarTabItem: Equatable {
         pip.handler = { [weak self] in self?.onPictureInPicture?() }
         library.handler = { [weak self] in self?.onManageSpaces?() }
         spaceOverflow.handler = { [weak self] in self?.showSpaceMenu() }
+        extensionMenu.identifier = NSUserInterfaceItemIdentifier("extensions-menu")
+        extensionLibrary.identifier = NSUserInterfaceItemIdentifier("extension-library")
+        extensionMenu.handler = { [weak self] in
+            guard let self else { return }; self.onExtensionsMenu?(self.extensionMenu)
+        }
+        extensionLibrary.handler = { [weak self] in self?.onExtensionLibrary?() }
         configureSpaces([
             BrowserSpace(id: 0, name: "Studio", symbol: "sparkles", colorIndex: 0),
             BrowserSpace(id: 1, name: "Life", symbol: "sun.max", colorIndex: 1),
@@ -253,6 +275,22 @@ struct SidebarTabItem: Equatable {
         for button in spaces { button.selected = button.index == space }
         needsLayout = true
     }
+    func updateExtensions(_ items: [SidebarExtensionItem]) {
+        let previous = Dictionary(uniqueKeysWithValues: extensionButtons.map { ($0.item.id, $0) })
+        let ids = Set(items.map(\.id))
+        extensionButtons.filter { !ids.contains($0.item.id) }.forEach { $0.removeFromSuperview() }
+        extensionButtons = items.map { item in
+            let button = previous[item.id] ?? ArkExtensionButton(item: item)
+            button.configure(item)
+            button.handler = { [weak self, weak button] in
+                guard let self, let button else { return }; self.onExtensionAction?(button.item.id, button)
+            }
+            if button.superview == nil { addSubview(button) }
+            return button
+        }
+        needsLayout = true
+    }
+
     private func pageForSpace(_ space: Int) -> SidebarPage {
         if let cached = cachedPages[space] { return cached }
         let created = SidebarPage(); connect(created); cachedPages[space] = created
@@ -331,6 +369,17 @@ struct SidebarTabItem: Equatable {
         let compact = w < 218
         forward.isHidden = compact; back.isHidden = compact
         search.frame = NSRect(x: 8, y: 46, width: max(0, w - 16), height: 36)
+        extensionMenu.frame = NSRect(x: 8, y: 87, width: 30, height: 30)
+        let actionCapacity = max(0, Int((w - 52) / 34))
+        for (index, button) in extensionButtons.enumerated() {
+            button.isHidden = index >= actionCapacity
+            if !button.isHidden { button.frame = NSRect(x: 45 + CGFloat(index) * 34, y: 86, width: 32, height: 32) }
+        }
+        let hiddenCount = max(0, extensionButtons.count - actionCapacity)
+        extensionMenu.setSymbol(hiddenCount > 0 ? "ellipsis.circle" : "puzzlepiece.extension",
+            label: hiddenCount > 0 ? "All extensions, including \(hiddenCount) more" : "Extensions")
+        extensionLibrary.isHidden = !extensionButtons.isEmpty
+        extensionLibrary.frame = NSRect(x: 43, y: 87, width: max(0, w - 51), height: 30)
         // Four 47-point tiles fit the normal 228-point sidebar. Keep three
         // columns at narrow widths (44-point tiles at the 164-point minimum)
         // so twelve Favorites still leave room for the scrolling tab list.
@@ -338,13 +387,13 @@ struct SidebarTabItem: Equatable {
         let favoriteRows = (favorites.count + columns - 1) / columns
         let favoriteHeight = favoriteRows == 0 ? CGFloat.zero : CGFloat(favoriteRows) * 47 + CGFloat(favoriteRows - 1) * 8
         favoritesHost.isHidden = favorites.isEmpty
-        favoritesHost.frame = NSRect(x: 0, y: 92, width: w, height: favoriteHeight)
+        favoritesHost.frame = NSRect(x: 0, y: 124, width: w, height: favoriteHeight)
         let tileWidth = max(0, (w - 16 - CGFloat(columns - 1) * 8) / CGFloat(columns))
         for (index, button) in favorites.enumerated() {
             button.frame = NSRect(x: 8 + CGFloat(index % columns) * (tileWidth + 8),
                                   y: CGFloat(index / columns) * 55, width: tileWidth, height: 47)
         }
-        let pageTop: CGFloat = 92 + favoriteHeight + (favorites.isEmpty ? 0 : 8)
+        let pageTop: CGFloat = 124 + favoriteHeight + (favorites.isEmpty ? 0 : 8)
         clip.frame = NSRect(x: 0, y: pageTop, width: w, height: max(0, bounds.height - pageTop - 45))
         setPagingOffset(offset)
         let y = bounds.height-36
@@ -606,6 +655,13 @@ private class ArkFlippedView: NSView { override var isFlipped: Bool { true } }
 
 @MainActor
 private class ArkHoverButton: NSButton {
+    override var isEnabled: Bool {
+        didSet { if oldValue != isEnabled { window?.invalidateCursorRects(for: self) } }
+    }
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        if isEnabled { addCursorRect(bounds, cursor: .pointingHand) }
+    }
     var handler: (() -> Void)?
     var hovered = false
     private var area: NSTrackingArea?
@@ -668,6 +724,48 @@ private final class ArkIconButton: ArkHoverButton {
     override func draw(_ dirtyRect: NSRect) {
         if (hovered || isHighlighted) && isEnabled { fill(NSColor.white.withAlphaComponent(isHighlighted ? 0.20 : 0.10), radius: 7) }
         symbol(symbolName, rect: NSRect(x: (bounds.width - glyphSize) / 2, y: (bounds.height - glyphSize) / 2, width: glyphSize, height: glyphSize), color: ArkPalette.ink, size: glyphSize)
+    }
+}
+
+@MainActor private final class ArkExtensionLibraryButton: ArkHoverButton {
+    init() {
+        super.init(frame: .zero)
+        toolTip = "Find and install extensions"; setAccessibilityLabel("Add extensions")
+    }
+    required init?(coder: NSCoder) { fatalError() }
+    override func draw(_ dirtyRect: NSRect) {
+        if hovered || isHighlighted { fill(NSColor.white.withAlphaComponent(isHighlighted ? 0.20 : 0.10), radius: 7) }
+        text("Add extensions", rect: NSRect(x: 4, y: 7, width: bounds.width - 8, height: 20), size: 12, color: ArkPalette.secondary)
+    }
+}
+
+@MainActor private final class ArkExtensionButton: ArkHoverButton {
+    private(set) var item: SidebarExtensionItem
+    init(item: SidebarExtensionItem) { self.item = item; super.init(frame: .zero); configure(item) }
+    required init?(coder: NSCoder) { fatalError() }
+    func configure(_ item: SidebarExtensionItem) {
+        self.item = item; isEnabled = item.isEnabled
+        identifier = NSUserInterfaceItemIdentifier("extension-action-\(item.id.uuidString)")
+        toolTip = item.label.isEmpty || item.label == item.name ? item.name : "\(item.name) — \(item.label)"
+        setAccessibilityLabel(item.name)
+        setAccessibilityHelp(item.label.isEmpty ? "Open extension" : item.label)
+        setAccessibilityValue(item.badge.isEmpty ? nil : item.badge)
+        needsDisplay = true
+    }
+    override func draw(_ dirtyRect: NSRect) {
+        if (hovered || isHighlighted) && isEnabled { fill(NSColor.white.withAlphaComponent(isHighlighted ? 0.20 : 0.10), radius: 7) }
+        let rect = bounds.insetBy(dx: 6, dy: 6)
+        if let icon = item.icon {
+            icon.draw(in: SidebarSymbol.fittedRect(imageSize: icon.size, in: rect), from: .zero,
+                operation: .sourceOver, fraction: isEnabled ? 1 : 0.32, respectFlipped: true, hints: nil)
+        } else { symbol("puzzlepiece.extension.fill", rect: rect, color: ArkPalette.ink, size: 20) }
+        if !item.badge.isEmpty {
+            let badge = String(item.badge.prefix(3))
+            let width: CGFloat = badge.count > 1 ? 20 : 13
+            let badgeRect = NSRect(x: bounds.maxX - width, y: 0, width: width, height: 13)
+            NSColor.systemRed.setFill(); NSBezierPath(roundedRect: badgeRect, xRadius: 5, yRadius: 5).fill()
+            text(badge, rect: badgeRect.offsetBy(dx: 0, dy: -0.5), size: 9, weight: .semibold, color: .white, alignment: .center)
+        }
     }
 }
 
@@ -834,6 +932,10 @@ private final class ArkSpaceHeading: ArkHoverButton {
 
 @MainActor
 private final class ArkTabRow: ArkFlippedView {
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        addCursorRect(bounds, cursor: .pointingHand)
+    }
     private(set) var item: SidebarTabItem
     var select: (() -> Void)?
     var close: (() -> Void)?
