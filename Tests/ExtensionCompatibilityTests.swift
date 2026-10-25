@@ -58,6 +58,27 @@ import JavaScriptCore
         try check(js.evaluateScript("subscriptions[2].kind === 'unsubscribe' && disconnected === 0")!.toBool(), "Removing one listener disconnected other subscriptions")
         js.evaluateScript(worker)
         try check(jsErrors.isEmpty && js.evaluateScript("requests.length === 1")!.toBool(), "Worker adapter was not idempotent")
+        // Bitwarden's SDK: a TypeScript `using` site and a class whose dispose key is computed at load.
+        try check(js.evaluateScript("""
+            (function () {
+              if (typeof Symbol.dispose !== 'symbol' || typeof Symbol.asyncDispose !== 'symbol' || Symbol.dispose === Symbol.asyncDispose) return false;
+              var released = [];
+              class Client { [Symbol.dispose]() { released.push('client'); } }
+              function usingHelper(value) { if (!Symbol.dispose) throw new TypeError('Symbol.dispose is not defined.'); var dispose = value[Symbol.dispose]; if (typeof dispose !== 'function') throw new TypeError('Object not disposable.'); dispose.call(value); }
+              usingHelper(new Client());
+              var descriptor = Object.getOwnPropertyDescriptor(Symbol, 'dispose');
+              return released.join() === 'client' && !descriptor.writable && !descriptor.enumerable && !Object.prototype.hasOwnProperty.call(Client.prototype, 'undefined');
+            })()
+            """)!.toBool(), "Worker adapter did not supply usable explicit-resource-management symbols")
+        let nativeSymbols = JSContext()!
+        nativeSymbols.evaluateScript("""
+            var location = {origin: 'webkit-extension://fixture', href: 'webkit-extension://fixture/worker.js'}, console = {error: function() {}}, performance = {now: function() { return 0; }};
+            var nativeDispose = Symbol('engine dispose');
+            Object.defineProperty(Symbol, 'dispose', {value: nativeDispose, configurable: true});
+            var browser = {runtime: {getURL: function(path) { return 'webkit-extension://fixture' + path; }, getManifest: function() { return {}; }}};
+            """)
+        nativeSymbols.evaluateScript(worker)
+        try check(nativeSymbols.evaluateScript("Symbol.dispose === nativeDispose && typeof Symbol.asyncDispose === 'symbol'")!.toBool(), "Worker adapter replaced an engine-provided Symbol.dispose")
 
         // Model WebKit's native receiver check without replacing any API semantics.
         let binding = JSContext()!

@@ -128,6 +128,12 @@ enum ExtensionCompatibility {
       if (!api || typeof api !== "object" || api.__bamCompatibility) return;
       if (location.origin !== __ORIGIN__) return;
       __WASM_ADAPTER__
+      // Explicit resource management: TypeScript `using` helpers throw, and wasm-bindgen
+      // classes omit their dispose methods, when the engine lacks these well-known symbols
+      // (Bitwarden's SDK client relies on both). Native symbols are never replaced.
+      for (const name of ["dispose", "asyncDispose"]) {
+        try { if (typeof Symbol[name] !== "symbol") Object.defineProperty(Symbol, name, { value: Symbol("Symbol." + name) }); } catch (error) {}
+      }
       const isWorker = __WORKER__;
       const nativeSend = isWorker && api.runtime && typeof api.runtime.sendNativeMessage === "function" ? api.runtime.sendNativeMessage.bind(api.runtime) : null;
       const nativeConnect = isWorker && api.runtime && typeof api.runtime.connectNative === "function" ? api.runtime.connectNative.bind(api.runtime) : null;

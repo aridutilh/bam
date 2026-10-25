@@ -58,6 +58,10 @@ Chrome-store and folder imports with a service worker receive an adapter in Bam�
 
 The worker adapter shares the document layer’s capabilities and calls a restricted native transport. Every call and event is bound to the loaded extension, controller, profile, declared capability and current reviewed grant. Revocation and disable stop this internal native access; the independently reviewed 1Password transport above has a separate gate. Notifications and idle changes use an event port, without timer-based worker keepalive. This is limited API support, not Chrome parity: runtime context enumeration, optional shim permissions, download lifecycle events and general external native handlers remain gaps.
 
+### Explicit resource management symbols
+
+JavaScriptCore on the macOS versions tested so far has no `Symbol.dispose` or `Symbol.asyncDispose`. TypeScript's `using` helper then throws “Symbol.dispose is not defined.”, and wasm-bindgen classes skip their dispose methods; Bitwarden's background and popup use both for its SDK client. Bam defines the two symbols, non-writable and only when absent, at the start of extension pages and prepared service workers, before any extension script. Engine-provided symbols are never replaced. Content scripts and websites are unchanged. A worker gets this adapter when it is prepared, so it applies to new installs and updates; an existing install keeps its earlier adapter until it is updated or reinstalled.
+
 ### Packaged WebAssembly
 
 WebKit currently serves packaged `.wasm` resources with `application/octet-stream`, which breaks native streaming compilation. Bam adapts `compileStreaming` and `instantiateStreaming` only for a successful, readable response from the exact extension scheme and host with the wrong MIME. It passes those bytes to native compilation; imports, compile options, validation and CSP enforcement remain native. Foreign URLs, failed responses and normal WASM responses retain native streaming behavior. Bam does not weaken an extension’s CSP.

@@ -45,6 +45,10 @@ import WebKit
             let worker = importLine + #"""
             globalThis.fixtureOrder.push('original');
             const api = globalThis.browser || globalThis.chrome;
+            // A class whose dispose key is computed at load, as wasm-bindgen and TypeScript `using` emit.
+            class FixtureResource { [Symbol.dispose]() { return 'released'; } }
+            const disposal = typeof Symbol.dispose === 'symbol' && typeof Symbol.asyncDispose === 'symbol' &&
+              new FixtureResource()[Symbol.dispose]() === 'released' ? 'available' : 'missing:' + typeof Symbol.dispose;
             const events = [];
             const wasmResult = (async () => {
               const url = api.runtime.getURL('answer.wasm');
@@ -77,7 +81,7 @@ import WebKit
                 requestDenied: await refusal('com.ari.bam.compatibility', 'idle.queryState'), events: events.slice()
               };
               return {order:globalThis.fixtureOrder, hasDocument:typeof document !== 'undefined', originalURL:globalThis.fixtureOriginalURL,
-                workerURL:location.href, starts:await started, events:events.slice(), wasm:await wasmResult,
+                workerURL:location.href, starts:await started, events:events.slice(), wasm:await wasmResult, disposal,
                 idle:await api.idle.queryState(15), permission:await api.notifications.getPermissionLevel()};
             });
             """#
@@ -151,10 +155,14 @@ import WebKit
         let wasmA = firstA?["wasm"] as? [String: Any] ?? [:], wasmB = firstB?["wasm"] as? [String: Any] ?? [:]
         try check(wasmA["compiled"] as? Int == 42 && wasmA["instantiated"] as? Int == 42, "Classic worker packaged Wasm streaming failed: \(wasmA)")
         try check(wasmB["compiled"] as? Int == 42 && wasmB["instantiated"] as? Int == 42, "Module worker packaged Wasm streaming failed: \(wasmB)")
+        try check(firstA?["disposal"] as? String == "available" && firstB?["disposal"] as? String == "available",
+                  "Worker lacked usable Symbol.dispose/asyncDispose: classic=\(firstA?["disposal"] ?? "nil"), module=\(firstB?["disposal"] ?? "nil")")
         print("Worker Wasm response MIME: classic=\(wasmA["mime"] as? String ?? "missing"), module=\(wasmB["mime"] as? String ?? "missing")")
         guard let popupA = contextA.action(for: nil)?.popupWebView, let popupB = contextB.action(for: nil)?.popupWebView else { throw Failure(description: "Workers have no native action popups") }
         popupA.frame = frame; popupB.frame = frame
         try await wait("Classic worker did not answer its real action popup") { await result(popupA)?["starts"] as? Int == 1 }
+        try check((try? await popupA.evaluateJavaScript("typeof Symbol.dispose + ',' + typeof Symbol.asyncDispose")) as? String == "symbol,symbol",
+                  "Extension page lacked Symbol.dispose/asyncDispose")
         try await wait("Module worker did not answer its real action popup") { await result(popupB)?["starts"] as? Int == 1 }
         let denied = await request(popupA, kind: "denials")
         try check(denied?["external"] is String && denied?["undeclared"] is String && denied?["unknown"] is String,
