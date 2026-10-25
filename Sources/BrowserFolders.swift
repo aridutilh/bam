@@ -9,6 +9,18 @@ import AppKit
         sidebar.onUngroupFolder = { [weak self] id in self?.ungroupFolder(id) }
         sidebar.onMoveToFolder = { [weak self] id, folder in self?.moveToFolder(id, folder: folder) }
         sidebar.folderTargets = { [weak self] id in self?.folderTargets(for: id) ?? [] }
+        sidebar.canDrop = { [weak self] id, target, space in self?.session.canDrop(id, at: target, space: space) ?? false }
+        sidebar.onDrop = { [weak self] id, target, space in self?.dropSidebarRow(id, at: target, space: space) ?? false }
+        // Another Space may use another login profile: moveTab asks before reloading pages.
+        sidebar.onDropOnSpace = { [weak self] id, space in self?.moveTab(id, toSpace: space) ?? false }
+    }
+    /// Commits a sidebar drag within the shown Space. A refused drop changes nothing.
+    func dropSidebarRow(_ id: UUID, at target: BrowserSession.SidebarDropTarget, space: Int) -> Bool {
+        cancelPaging()
+        guard session.drop(id, at: target, space: space) else { return false }
+        if case .into(let folder) = target { session.setFolderCollapsed(id: folder, collapsed: false) }
+        refresh(); refreshPaletteResults(); save()
+        return true
     }
     @objc func newFolder(_ sender: Any?) { newFolder(around: nil) }
 

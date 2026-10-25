@@ -895,6 +895,66 @@ struct BrowserSession: Codable {
         order.swapAt(current, target)
         setOrder(order, for: container); return true
     }
+
+    /// Where a dragged sidebar row lands within one Space.
+    enum SidebarDropTarget: Equatable {
+        /// Just before this kept row (tab or folder), in that row's folder.
+        case before(UUID)
+        /// At the end of this folder.
+        case into(UUID)
+        /// At the end of the Space's kept section, outside any folder.
+        case keptEnd
+        /// Into Today (unkept), before this ordinary tab or at the end.
+        case today(before: UUID?)
+    }
+    /// Drops a tab, Split or folder in `space`. Kept destinations reuse
+    /// `moveKeptItem` (cycle/depth rules; Today tabs become kept); Today
+    /// unkeeps a tab. Folders, Favorites and rows from another Space are
+    /// refused here; moving between Spaces goes through `moveTab`/`moveFolder`.
+    @discardableResult mutating func drop(_ rawID: UUID, at target: SidebarDropTarget, space: Int) -> Bool {
+        var draft = self
+        guard draft.applyDrop(rawID, at: target, space: space) else { return false }
+        self = draft; return true
+    }
+    private mutating func applyDrop(_ rawID: UUID, at target: SidebarDropTarget, space: Int) -> Bool {
+        let id = split(for: rawID)?.primaryID ?? rawID
+        let isFolder = folder(id) != nil
+        if isFolder { guard folder(id)?.space == space else { return false } }
+        else { guard let tab = tabs.first(where: { $0.id == id }), !tab.isFavorite, tab.space == space else { return false } }
+        switch target {
+        case .before(let rawTarget):
+            let target = split(for: rawTarget)?.primaryID ?? rawTarget
+            guard target != id else { return true }
+            let targetSpace = folder(target)?.space ?? tabs.first(where: { $0.id == target })?.space
+            guard targetSpace == space, let container = container(ofKeptItem: target),
+                  let index = keptChildren(of: container).firstIndex(of: target) else { return false }
+            if case .folder(let parent) = container { return moveKeptItem(id, into: parent, at: index) }
+            return moveKeptItem(id, into: nil, at: index)
+        case .into(let destination):
+            guard destination != id, folder(destination)?.space == space else { return false }
+            return moveKeptItem(id, into: destination)
+        case .keptEnd:
+            return moveKeptItem(id, into: nil)
+        case .today(let before):
+            guard !isFolder, let tab = tabs.first(where: { $0.id == id }) else { return false }
+            let anchor = before.map { split(for: $0)?.primaryID ?? $0 }
+            if let anchor {
+                guard anchor != id else { return tab.saved == nil ? true : setRetention(id: id, kind: nil) }
+                guard let other = tabs.first(where: { $0.id == anchor }), other.space == space, !other.isSaved else { return false }
+            }
+            if tab.saved != nil { guard setRetention(id: id, kind: nil) else { return false } }
+            // Today's order is tab order; a Split's companion is hidden, so only the primary moves.
+            guard let from = tabs.firstIndex(where: { $0.id == id }) else { return false }
+            let moving = tabs.remove(at: from)
+            let to = anchor.flatMap { a in tabs.firstIndex { $0.id == a } } ?? tabs.endIndex
+            tabs.insert(moving, at: to)
+            return true
+        }
+    }
+    func canDrop(_ id: UUID, at target: SidebarDropTarget, space: Int) -> Bool {
+        var draft = self
+        return draft.applyDrop(id, at: target, space: space)
+    }
     /// Removes the folder and puts its contents where it was, in order.
     @discardableResult mutating func ungroupFolder(id: UUID) -> Bool {
         guard let definition = folder(id) else { return false }

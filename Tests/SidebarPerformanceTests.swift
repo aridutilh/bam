@@ -1,6 +1,28 @@
 import AppKit
 
 /// Offscreen AppKit coverage: no window is ordered front and no system input is posted.
+/// Just enough NSDraggingInfo to call the table's drop methods directly; no drag session runs.
+@MainActor final class FakeDraggingInfo: NSObject, @preconcurrency NSDraggingInfo {
+    let draggingPasteboard: NSPasteboard
+    init(pasteboard: NSPasteboard) { draggingPasteboard = pasteboard }
+    var draggingDestinationWindow: NSWindow? { nil }
+    var draggingSourceOperationMask: NSDragOperation { .move }
+    var draggingLocation: NSPoint { .zero }
+    var draggedImageLocation: NSPoint { .zero }
+    var draggedImage: NSImage? { nil }
+    var draggingSource: Any? { nil }
+    var draggingSequenceNumber: Int { 1 }
+    func slideDraggedImage(to screenPoint: NSPoint) {}
+    var draggingFormation: NSDraggingFormation = .none
+    var animatesToDestination = false
+    var numberOfValidItemsForDrop = 1
+    func enumerateDraggingItems(options enumOpts: NSDraggingItemEnumerationOptions = [], for view: NSView?, classes classArray: [AnyClass],
+                                searchOptions: [NSPasteboard.ReadingOptionKey: Any] = [:],
+                                using block: (NSDraggingItem, Int, UnsafeMutablePointer<ObjCBool>) -> Void) {}
+    var springLoadingHighlight: NSSpringLoadingHighlight { .none }
+    func resetSpringLoading() {}
+}
+
 @main enum SidebarPerformanceTests {
     @MainActor static func main() {
         _ = NSApplication.shared
@@ -290,13 +312,107 @@ import AppKit
         }
         update(0, tree)
         let projects = row(table(in: 0), 0)
-        projects.mouseDown(with: NSEvent.mouseEvent(with: .leftMouseDown, location: .zero, modifierFlags: [], timestamp: 0,
-                                                     windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!)
+        @MainActor func mouse(_ type: NSEvent.EventType) -> NSEvent {
+            NSEvent.mouseEvent(with: type, location: .zero, modifierFlags: [], timestamp: 0,
+                               windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
+        }
+        projects.mouseDown(with: mouse(.leftMouseDown))
+        require(tree.count == 2, "A folder doesn't toggle on mouse-down, so it can be dragged")
+        projects.mouseUp(with: mouse(.leftMouseUp))
         require(tree.count == 3 && (window.firstResponder as? NSView)?.identifier?.rawValue == "tab-row-\(folderIDs[0].uuidString)",
                 "Clicking a folder expands it and keeps focus on it after the reload")
         key(123, to: window.firstResponder as! NSView)
         require(tree.count == 2 && (window.firstResponder as? NSView)?.identifier?.rawValue == "tab-row-\(folderIDs[0].uuidString)",
                 "Left then collapses it and focus stays on the folder")
+
+        // Drag and drop: the table's own drop methods map rows to model targets,
+        // only accept what the model accepts, and change nothing when refused.
+        let k1 = UUID(), box = UUID(), boxChild = UUID(), k2 = UUID(), t1 = UUID(), t2 = UUID()
+        let dndItems = [
+            SidebarTabItem(id: k1, title: "Kept one", subtitle: "", symbol: "globe", isPinned: true, isActive: false),
+            SidebarTabItem(id: box, title: "Box", subtitle: "", symbol: "folder", isPinned: true, isActive: false, isFolder: true, isExpanded: true),
+            SidebarTabItem(id: boxChild, title: "In box", subtitle: "", symbol: "globe", isPinned: true, isActive: false, depth: 1, parentFolderID: box),
+            SidebarTabItem(id: k2, title: "Kept two", subtitle: "", symbol: "globe", isPinned: true, isActive: false),
+            SidebarTabItem(id: t1, title: "Today one", subtitle: "", symbol: "globe", isPinned: false, isActive: true),
+            SidebarTabItem(id: t2, title: "Today two", subtitle: "", symbol: "globe", isPinned: false, isActive: false)
+        ]
+        update(0, dndItems)
+        let dndTable = table(in: 0)   // rows: k1, box, child, k2, divider, New Tab, t1, t2
+        var asked: [BrowserSession.SidebarDropTarget] = [], dropped: [BrowserSession.SidebarDropTarget] = []
+        var accept = true
+        sidebar.canDrop = { _, target, space in asked.append(target); return accept && space == 0 }
+        sidebar.onDrop = { _, target, _ in dropped.append(target); return true }
+        let board = NSPasteboard(name: NSPasteboard.Name("bam-sidebar-dnd-test-\(UUID().uuidString)"))
+        defer { board.releaseGlobally() }
+        board.clearContents(); board.setString(k2.uuidString, forType: .bamSidebarRow)
+        let info = FakeDraggingInfo(pasteboard: board)
+        @MainActor func validate(_ row: Int, _ operation: NSTableView.DropOperation) -> (NSDragOperation, BrowserSession.SidebarDropTarget?) {
+            asked.removeAll()
+            let result = dndTable.dataSource!.tableView!(dndTable, validateDrop: info, proposedRow: row, proposedDropOperation: operation)
+            return (result, asked.last)
+        }
+        require(validate(1, .on) == (.move, .into(box)), "Dropping on a folder files the row inside it")
+        require(validate(2, .on) == (.move, .before(boxChild)), "Dropping on a tab means just before it")
+        require(validate(0, .above) == (.move, .before(k1)), "Between rows means before that row")
+        require(validate(4, .above).1 == .keptEnd && validate(5, .above).1 == .keptEnd, "The divider/New Tab gap is the end of the kept section")
+        require(validate(6, .above).1 == .today(before: t1) && validate(8, .above).1 == .today(before: nil), "Today rows and the list end unkeep into Today")
+        accept = false
+        require(validate(1, .on).0 == [], "No drop indicator where the model refuses (cycle, depth, folder into Today)")
+        accept = true
+        require(dndTable.dataSource!.tableView!(dndTable, acceptDrop: info, row: 1, dropOperation: .on) && dropped == [.into(box)],
+                "Dropping commits exactly the validated target")
+        board.clearContents(); board.setString("not a row", forType: .string)
+        require(validate(1, .on).0 == [] && asked.isEmpty, "Foreign drags are ignored")
+
+        // Regression: mouse-down selects, selection reloads the list (a revealed
+        // child under a collapsed folder disappears), and the pressed view may be
+        // reused for another row. A following drag must never carry another ID.
+        let folder = UUID(), revealed = UUID(), pressed = UUID(), today = UUID()
+        func layout(active: UUID) -> [SidebarTabItem] {
+            var items = [SidebarTabItem(id: folder, title: "Closed", subtitle: "", symbol: "folder", isPinned: true, isActive: false,
+                                        isFolder: true, isExpanded: false)]
+            if active == revealed {
+                items.append(SidebarTabItem(id: revealed, title: "Revealed", subtitle: "", symbol: "globe", isPinned: true, isActive: true,
+                                            depth: 1, parentFolderID: folder))
+            }
+            items.append(SidebarTabItem(id: pressed, title: "Pressed", subtitle: "", symbol: "globe", isPinned: true, isActive: active == pressed))
+            items.append(SidebarTabItem(id: today, title: "Today", subtitle: "", symbol: "globe", isPinned: false, isActive: false))
+            return items
+        }
+        update(0, layout(active: revealed))
+        var started: [UUID] = []
+        sidebar.onRowDragWillBegin = { started.append($0); return false }   // Observe; never start a real session offscreen.
+        sidebar.onSelectTab = { id in update(0, layout(active: id)) }       // Selection reloads synchronously.
+        let pressTable = table(in: 0)
+        let pressedView = row(pressTable, 2)
+        require(pressedView.identifier?.rawValue == "tab-row-\(pressed.uuidString)", "Fixture: row 2 is the pressed tab")
+        pressedView.mouseDown(with: mouse(.leftMouseDown))
+        let drag = NSEvent.mouseEvent(with: .leftMouseDragged, location: NSPoint(x: 40, y: 40), modifierFlags: [], timestamp: 0,
+                                      windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
+        pressedView.mouseDragged(with: drag)
+        require(started.allSatisfy { $0 == pressed }, "A drag only ever carries the pressed row's ID: \(started)")
+        // Force reuse mid-press: in a long list, the pressed view is recycled for
+        // a far row once that row scrolls in (as a reload/scroll during a press can).
+        started.removeAll()
+        let crowd = (0..<600).map { SidebarTabItem(id: UUID(), title: "Crowd \($0)", subtitle: "", symbol: "globe", isPinned: false, isActive: $0 == 0) }
+        sidebar.onSelectTab = { _ in }
+        update(0, crowd)
+        let crowdTable = table(in: 0)
+        let reusedView = row(crowdTable, 2)   // rows 0/1 are the divider-less New Tab and first item
+        let pressedCrowdID = reusedView.identifier?.rawValue
+        reusedView.mouseDown(with: mouse(.leftMouseDown))
+        _ = row(crowdTable, crowdTable.numberOfRows - 1)
+        require(reusedView.identifier?.rawValue != pressedCrowdID, "Fixture: the pressed view now shows another row")
+        reusedView.mouseDragged(with: drag)
+        require(started.isEmpty, "A recycled view abandons the press instead of dragging the row it now shows: \(started)")
+        reusedView.mouseUp(with: mouse(.leftMouseUp))
+        // A plain press-and-drag with no reload drags the pressed row.
+        started.removeAll(); sidebar.onSelectTab = { _ in }
+        let stable = row(table(in: 0), 1)
+        let stableID = stable.identifier?.rawValue
+        stable.mouseDown(with: mouse(.leftMouseDown)); stable.mouseDragged(with: drag)
+        require(started.count == 1 && "tab-row-\(started[0].uuidString)" == stableID, "Without a reload the pressed row is dragged")
+        sidebar.onRowDragWillBegin = nil
         print("PASS: \(checks) sidebar virtualization, identity, scrolling, paging and extension action checks")
         window.contentView = nil
     }

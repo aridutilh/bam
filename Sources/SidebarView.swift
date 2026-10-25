@@ -87,6 +87,13 @@ struct SidebarExtensionItem {
     var onExtensionsMenu: ((NSView) -> Void)?
     var onExtensionLibrary: (() -> Void)?
     var onSpaceScroll: ((NSEvent, SpaceScrollSource) -> Bool)?
+    /// Drag and drop of sidebar rows within the shown Space (target, Space ID).
+    var onDrop: ((UUID, BrowserSession.SidebarDropTarget, Int) -> Bool)?
+    var canDrop: ((UUID, BrowserSession.SidebarDropTarget, Int) -> Bool)?
+    /// Observes (or, returning false, cancels) a row drag just before it starts.
+    var onRowDragWillBegin: ((UUID) -> Bool)?
+    /// A row dropped on a footer Space icon moves there (profile-aware in the controller).
+    var onDropOnSpace: ((UUID, Int) -> Bool)?
     var onToggleFolder: ((UUID) -> Void)?
     var onRenameFolder: ((UUID) -> Void)?
     /// Creates a folder; the item is a tab to put inside it or a parent folder.
@@ -191,6 +198,10 @@ struct SidebarExtensionItem {
                 guard let button else { return }; self?.onSpaceChange?(button.index)
             }
             button.manage = { [weak self] in self?.onManageSpaces?() }
+            button.acceptDrop = { [weak self, weak button] id in
+                guard let self, let button, button.index != self.selectedSpace else { return false }
+                return self.onDropOnSpace?(id, button.index) ?? false
+            }
             if button.superview == nil { addSubview(button) }
             return button
         }
@@ -254,6 +265,9 @@ struct SidebarExtensionItem {
         page.ungroupFolder = { [weak self] in self?.onUngroupFolder?($0) }
         page.moveToFolder = { [weak self] in self?.onMoveToFolder?($0, $1) }
         page.folderTargets = { [weak self] in self?.folderTargets?($0) ?? [] }
+        page.drop = { [weak self] in self?.onDrop?($0, $1, $2) ?? false }
+        page.canDrop = { [weak self] in self?.canDrop?($0, $1, $2) ?? false }
+        page.rowDragWillBegin = { [weak self] in self?.onRowDragWillBegin?($0) ?? true }
     }
     private func configureFavorites(_ allItems: [SidebarTabItem]) {
         var seen = Set<UUID>()
@@ -491,6 +505,9 @@ struct SidebarExtensionItem {
     var ungroupFolder: ((UUID) -> Void)?
     var moveToFolder: ((UUID, UUID?) -> Void)?
     var folderTargets: ((UUID) -> [SidebarFolderTarget])?
+    var drop: ((UUID, BrowserSession.SidebarDropTarget, Int) -> Bool)?
+    var canDrop: ((UUID, BrowserSession.SidebarDropTarget, Int) -> Bool)?
+    var rowDragWillBegin: ((UUID) -> Bool)?
     let heading = ArkSpaceHeading()
     let scroll = SidebarScrollView()
     private let table = SidebarTableView()
@@ -516,6 +533,8 @@ struct SidebarExtensionItem {
         table.rowSizeStyle = .custom; table.rowHeight = 36
         table.usesAutomaticRowHeights = false; table.selectionHighlightStyle = .none
         table.focusRingType = .none; table.allowsEmptySelection = true
+        table.registerForDraggedTypes([.bamSidebarRow])
+        table.draggingDestinationFeedbackStyle = .regular
         table.allowsMultipleSelection = false; table.allowsColumnSelection = false
         table.allowsColumnReordering = false; table.allowsColumnResizing = false
         table.dataSource = self; table.delegate = self
@@ -702,6 +721,7 @@ struct SidebarExtensionItem {
         row.ungroupFolder = { [weak self, weak row] in if let id = row?.item.id { self?.ungroupFolder?(id) } }
         row.moveToFolder = { [weak self, weak row] target in if let id = row?.item.id { self?.moveToFolder?(id, target) } }
         row.folderTargets = { [weak self, weak row] in row.flatMap { self?.folderTargets?($0.item.id) } ?? [] }
+        row.willBeginDrag = { [weak self] id in self?.rowDragWillBegin?(id) ?? true }
         row.arrow = { [weak self, weak row] delta in
             guard let self, let row else { return false }
             let index = self.table.row(for: row)
@@ -746,6 +766,41 @@ struct SidebarExtensionItem {
             divider.identifier = key; return divider
         }
     }
+    // MARK: Drag and drop
+
+    /// Maps the table's proposed drop to a model target. Dropping on a folder
+    /// files the row inside it; between rows means "before that row" in its
+    /// folder; the divider/New Tab gap is the end of the kept section; Today
+    /// rows (and the end of the list) unkeep into Today at that position.
+    func dropTarget(row: Int, operation: NSTableView.DropOperation) -> (target: BrowserSession.SidebarDropTarget, row: Int, operation: NSTableView.DropOperation) {
+        if operation == .on, entries.indices.contains(row), case .tab(let index) = entries[row], tabs[index].isFolder {
+            return (.into(tabs[index].id), row, .on)
+        }
+        if entries.indices.contains(row) {
+            switch entries[row] {
+            case .tab(let index): return (tabs[index].isPinned ? .before(tabs[index].id) : .today(before: tabs[index].id), row, .above)
+            case .divider, .newTab: return (.keptEnd, row, .above)
+            }
+        }
+        return (.today(before: nil), entries.count, .above)
+    }
+    func tableView(_ tableView: NSTableView, validateDrop info: NSDraggingInfo, proposedRow row: Int,
+                   proposedDropOperation operation: NSTableView.DropOperation) -> NSDragOperation {
+        guard let raw = info.draggingPasteboard.string(forType: .bamSidebarRow), let id = UUID(uuidString: raw),
+              let space = spaceAppearance?.id else { return [] }
+        let proposal = dropTarget(row: row, operation: operation)
+        // Only show an indicator where the model would accept the row: no cycles,
+        // no over-deep nesting, no folders in Today.
+        guard canDrop?(id, proposal.target, space) == true else { return [] }
+        tableView.setDropRow(proposal.row, dropOperation: proposal.operation)
+        return .move
+    }
+    func tableView(_ tableView: NSTableView, acceptDrop info: NSDraggingInfo, row: Int, dropOperation: NSTableView.DropOperation) -> Bool {
+        guard let raw = info.draggingPasteboard.string(forType: .bamSidebarRow), let id = UUID(uuidString: raw),
+              let space = spaceAppearance?.id else { return false }
+        return drop?(id, dropTarget(row: row, operation: dropOperation).target, space) ?? false
+    }
+
     override func layout() {
         super.layout(); let w = bounds.width
         heading.frame = NSRect(x: 12, y: 0, width: max(0, w-24), height: 32)
@@ -768,6 +823,17 @@ struct SidebarExtensionItem {
 @MainActor private final class SidebarTableRowView: NSTableRowView {
     override func drawBackground(in dirtyRect: NSRect) {}
     override func drawSelection(in dirtyRect: NSRect) {}
+    /// A folder about to receive a row lights up like a hovered row with a ring.
+    override func drawDraggingDestinationFeedback(in dirtyRect: NSRect) {
+        let shape = NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: ArkMetrics.rowRadius, yRadius: ArkMetrics.rowRadius)
+        ArkPalette.selection.setFill(); shape.fill()
+        NSColor.controlAccentColor.withAlphaComponent(0.7).setStroke(); shape.lineWidth = 1.5; shape.stroke()
+    }
+}
+
+extension NSPasteboard.PasteboardType {
+    /// A sidebar row's tab or folder ID, for moves within Bam only.
+    static let bamSidebarRow = NSPasteboard.PasteboardType("com.ari.bam.sidebar-row")
 }
 @MainActor private final class SidebarTabCell: NSTableCellView {
     let row: ArkTabRow
@@ -1144,11 +1210,27 @@ private final class ArkSpaceButton: ArkHoverButton {
     private var emoji: String?
     private var tint = ArkPalette.ink
     var manage: (() -> Void)?
+    /// A dragged tab or folder dropped here moves to this Space.
+    var acceptDrop: ((UUID) -> Bool)?
+    private var dropHovered = false { didSet { if oldValue != dropHovered { needsDisplay = true } } }
     var selected = false { didSet { needsDisplay = true; setAccessibilityValue(selected ? "Selected" : "Not selected") } }
     init(space: BrowserSpace) {
         index = space.id
         super.init(frame: .zero)
+        registerForDraggedTypes([.bamSidebarRow])
         configure(space)
+    }
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        // The current Space is not a destination; rows reorder in the list instead.
+        guard !selected, sender.draggingPasteboard.string(forType: .bamSidebarRow) != nil else { return [] }
+        dropHovered = true; return .move
+    }
+    override func draggingExited(_ sender: NSDraggingInfo?) { dropHovered = false }
+    override func draggingEnded(_ sender: NSDraggingInfo) { dropHovered = false }
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        dropHovered = false
+        guard let raw = sender.draggingPasteboard.string(forType: .bamSidebarRow), let id = UUID(uuidString: raw) else { return false }
+        return acceptDrop?(id) ?? false
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     func configure(_ space: BrowserSpace) {
@@ -1158,11 +1240,15 @@ private final class ArkSpaceButton: ArkHoverButton {
         needsDisplay = true
     }
     override func draw(_ dirtyRect: NSRect) {
-        if selected || hovered { fill(selected ? ArkPalette.selection : ArkPalette.hover, radius: 7) }
+        if selected || hovered || dropHovered { fill(selected || dropHovered ? ArkPalette.selection : ArkPalette.hover, radius: 7) }
+        if dropHovered {
+            NSColor.controlAccentColor.withAlphaComponent(0.7).setStroke()
+            let ring = NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: 7, yRadius: 7); ring.lineWidth = 1.5; ring.stroke()
+        }
         // Unselected Spaces recede, as Arc's footer dots do.
         let size: CGFloat = emoji == nil ? 16 : 15
         ArkSpaceIcon.draw((emoji, symbolName, tint), in: NSRect(x: (bounds.width - size) / 2, y: (bounds.height - size) / 2, width: size, height: size),
-                          opacity: selected || hovered ? 1 : 0.62)
+                          opacity: selected || hovered || dropHovered ? 1 : 0.62)
     }
     override func menu(for event: NSEvent) -> NSMenu? {
         let menu = NSMenu()
@@ -1198,7 +1284,7 @@ private final class ArkSpaceHeading: ArkHoverButton {
 }
 
 @MainActor
-private final class ArkTabRow: ArkFlippedView {
+private final class ArkTabRow: ArkFlippedView, NSDraggingSource {
     override func resetCursorRects() {
         super.resetCursorRects()
         addCursorRect(bounds, cursor: .pointingHand)
@@ -1220,6 +1306,8 @@ private final class ArkTabRow: ArkFlippedView {
     var folderTargets: (() -> [SidebarFolderTarget])?
     /// Moves keyboard focus to the neighboring row; returns whether it moved.
     var arrow: ((Int) -> Bool)?
+    /// Called with the pressed row's ID just before a drag session starts; false cancels it.
+    var willBeginDrag: ((UUID) -> Bool)?
     var canMoveEarlier = false
     var canMoveLater = false
     private var currentSpace = 0
@@ -1233,6 +1321,10 @@ private final class ArkTabRow: ArkFlippedView {
     private var hovered = false
     private var area: NSTrackingArea?
     private var configured = false
+    private var dragOrigin: NSPoint?
+    /// The row identity captured at mouse-down; a drag only ever carries this ID.
+    private var pressedID: UUID?
+    private var didDrag = false
     init(item: SidebarTabItem) {
         self.item = item
         titleLabel = arkLabel(item.title.isEmpty ? "New Tab" : item.title, size: ArkType.rowSize, weight: item.isActive ? .medium : .regular)
@@ -1262,6 +1354,8 @@ private final class ArkTabRow: ArkFlippedView {
         if first || old.id != item.id {
             hovered = false; closeButton.hovered = false
             identifier = NSUserInterfaceItemIdentifier("tab-row-\(item.id.uuidString)")
+            // Reused for another row mid-press: abandon that press and any drag it began.
+            dragOrigin = nil; pressedID = nil; didDrag = false
         }
         if first || old.title != item.title { titleLabel.stringValue = item.title.isEmpty ? (item.isFolder ? "Folder" : "New Tab") : item.title; setAccessibilityLabel(item.title) }
         if first || old.isActive != item.isActive || old.isFolder != item.isFolder { titleLabel.font = ArkType.rowFont(active: item.isActive, folder: item.isFolder) }
@@ -1386,9 +1480,41 @@ private final class ArkTabRow: ArkFlippedView {
     private func activate() { if item.isFolder { toggleFolder?() } else { select?() } }
     override func mouseDown(with event: NSEvent) {
         // Folders are not table selections; keep keyboard focus on the row so
-        // arrows and Return keep working after a click.
-        if item.isFolder { window?.makeFirstResponder(self) }
-        activate()
+        // arrows and Return keep working after a click. Tabs select at once
+        // (as before); folders wait for mouse-up so dragging one doesn't toggle it.
+        // Capture what was pressed now: selecting can reload the list and
+        // recycle this view for another row before the drag begins.
+        dragOrigin = convert(event.locationInWindow, from: nil); didDrag = false; pressedID = item.id
+        if item.isFolder { window?.makeFirstResponder(self) } else { activate() }
+    }
+    override func mouseDragged(with event: NSEvent) {
+        guard let origin = dragOrigin, !didDrag, let source = pressedID, source == item.id else { return }
+        let point = convert(event.locationInWindow, from: nil)
+        guard hypot(point.x - origin.x, point.y - origin.y) > 4 else { return }
+        didDrag = true
+        guard willBeginDrag?(source) ?? true else { return }
+        let payload = NSPasteboardItem()
+        payload.setString(source.uuidString, forType: .bamSidebarRow)
+        let dragItem = NSDraggingItem(pasteboardWriter: payload)
+        dragItem.setDraggingFrame(bounds, contents: snapshot())
+        let session = beginDraggingSession(with: [dragItem], event: event, source: self)
+        session.animatesToStartingPositionsOnCancelOrFail = !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        session.draggingFormation = .none
+    }
+    override func mouseUp(with event: NSEvent) {
+        defer { dragOrigin = nil; pressedID = nil }
+        if item.isFolder, dragOrigin != nil, !didDrag, pressedID == item.id { toggleFolder?() }
+    }
+    func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation {
+        context == .withinApplication ? .move : []
+    }
+    /// The row as it looks now, lifted slightly, for the drag image.
+    private func snapshot() -> NSImage {
+        let image = NSImage(size: bounds.size)
+        if let rep = bitmapImageRepForCachingDisplay(in: bounds) {
+            cacheDisplay(in: bounds, to: rep); image.addRepresentation(rep)
+        }
+        return image
     }
     override func accessibilityPerformPress() -> Bool { activate(); return true }
     private func folderSubmenu() -> NSMenuItem {
