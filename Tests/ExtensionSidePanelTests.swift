@@ -89,6 +89,15 @@ import Foundation
                   fails(.invalidPath) { try model.setOptions(extensionID: "A", tabId: nil, enabled: nil, path: "../x.html") } &&
                   fails(.invalidPath) { try model.setOptions(extensionID: "A", tabId: nil, enabled: nil, path: "//x.html") } &&
                   Model.validPath("/panel.html") == "panel.html" && Model.validPath("?") == nil, "path validation accepted a non-local page")
+        // Relative local-page contract: schemes, authority, decoded traversal, backslashes and control characters refused.
+        let refused = ["javascript:alert(1)", "JavaScript:alert(1)", "data:text/html,<p>x</p>", "blob:panel", "%2e%2e/panel.html", "%2E%2E/panel.html",
+                       "a/%2e%2e/%2e%2e/panel.html", "a%2f..%2fpanel.html", "./panel.html", "a//panel.html", "..\\panel.html", "a\\panel.html",
+                       "a%5cpanel.html", "//host/panel.html", "http://user@host/panel.html", "user@host:80/panel.html", " panel.html", "panel.html\n",
+                       "pa%00nel.html", "javascript%3Aalert(1)", "%zz.html", "", "/", "#only"]
+        let accepted = ["panel.html": "panel.html", "/sub/panel.html": "sub/panel.html", "sub/panel.html?tab=1#top": "sub/panel.html?tab=1#top",
+                        "panel%20one.html": "panel%20one.html"]
+        try check(refused.allSatisfy { Model.validPath($0) == nil } && accepted.allSatisfy { Model.validPath($0.key) == $0.value },
+                  "path contract: accepted \(refused.filter { Model.validPath($0) != nil }); mismatched \(accepted.filter { Model.validPath($0.key) != $0.value }.keys.sorted())")
 
         // openPanelOnActionClick toggles; without it the action click is not handled.
         var clicks = Model()

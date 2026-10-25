@@ -224,12 +224,23 @@ struct ExtensionSidePanelModel {
         let window = tabOpenWindow.removeValue(forKey: tab) ?? -1
         return Change(kind: .closed, extensionID: owner, path: tabOptions[owner]?[tab]?.path ?? "", windowId: window, tabId: tab)
     }
-    /// A local page of the extension: relative, no scheme, no network-path or parent references.
+    /// A local page of the extension, as a relative reference: no scheme (javascript:, data:, http:…), no authority,
+    /// and a path whose percent-decoded segments contain no empty, "." or ".." segment, backslash, colon or control
+    /// character. Query and fragment are kept. This is a syntactic contract only: the host must still resolve the
+    /// result against the extension's base URL and confirm the loaded document stays on that origin.
     static func validPath(_ raw: String) -> String? {
-        var path = raw.trimmingCharacters(in: .whitespaces)
+        var path = raw
         if path.hasPrefix("/") && !path.hasPrefix("//") { path.removeFirst() }
-        guard !path.isEmpty, !path.hasPrefix("/"), !path.contains("://"), !path.contains("\\"),
-              !path.components(separatedBy: "?")[0].split(separator: "/", omittingEmptySubsequences: false).contains(where: { $0 == ".." || $0.isEmpty }) else { return nil }
+        guard !path.contains("\\"), path.unicodeScalars.allSatisfy({ !CharacterSet.whitespacesAndNewlines.contains($0) && !CharacterSet.controlCharacters.contains($0) }),
+              // The parser must not have re-encoded anything (newer Foundation repairs "%zz"), so the
+              // string returned is exactly the reference that was checked.
+              let components = URLComponents(string: path), components.string == path, components.scheme == nil, components.percentEncodedHost == nil,
+              components.percentEncodedUser == nil, components.percentEncodedPassword == nil, components.port == nil else { return nil }
+        let encoded = components.percentEncodedPath
+        guard !encoded.isEmpty, !encoded.hasPrefix("/"), let decoded = encoded.removingPercentEncoding,
+              !decoded.contains("\\"), !decoded.contains(":"),
+              decoded.unicodeScalars.allSatisfy({ !CharacterSet.controlCharacters.contains($0) }),
+              !decoded.split(separator: "/", omittingEmptySubsequences: false).contains(where: { $0.isEmpty || $0 == "." || $0 == ".." }) else { return nil }
         return path
     }
 }
