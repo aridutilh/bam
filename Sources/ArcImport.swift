@@ -59,7 +59,8 @@ enum ArcImport {
         case folder(isLive: Bool)
         case split
         case container
-        case easel
+        /// An Easel's reference metadata only (no canvas is present in the layout).
+        case easel(id: String?, title: String?)
         case unknown(String)
     }
     struct Node: Equatable {
@@ -202,7 +203,9 @@ enum ArcImport {
             return .folder(isLive: list["automaticLiveFolderData"] != nil)
         case "itemContainer": return .container
         case "splitView": return .split
-        case "easel": return .easel
+        case "easel":
+            let easel = data["easel"] as? [String: Any] ?? [:]
+            return .easel(id: easel["easelID"] as? String, title: (easel["title"] as? String).flatMap { $0.isEmpty ? nil : $0 })
         default: return .unknown(key)
         }
     }
@@ -246,12 +249,16 @@ enum ArcImport {
         var todayTabs = 0
         var favorites = 0
         var splits = 0
+        /// Easels kept as reference rows in their places (canvas not imported).
+        var easels = 0
     }
     struct Report: Equatable {
         var spaces: [SpaceReport] = []
         var newProfiles: [String] = []
         var alreadyImported = 0
+        /// Easels Bam could not place (e.g. inside Favorites); not represented.
         var easels = 0
+        var easelReferences: Int { spaces.reduce(0) { $0 + $1.easels } }
         var liveFolders = 0
         var flattenedTodayFolders = 0
         var invalidAddresses = 0
@@ -275,12 +282,12 @@ enum ArcImport {
 
         var importedTabs: Int { spaces.reduce(0) { $0 + $1.keptTabs + $1.todayTabs + $1.favorites } }
         var importedFolders: Int { spaces.reduce(0) { $0 + $1.folders } }
-        var isEmpty: Bool { importedTabs == 0 && importedFolders == 0 && !spaces.contains(where: \.isNew) }
+        var isEmpty: Bool { importedTabs == 0 && importedFolders == 0 && easelReferences == 0 && !spaces.contains(where: \.isNew) }
         /// Why nothing would be added, without implying skipped items were imported.
         var emptyReason: String {
             if skippedSpaces > 0 { return "Nothing can be added: Bam’s \(BrowserSession.maximumSpaces)-Space limit is reached." }
             if removedSpaces > 0 && alreadyImported == 0 { return "Nothing new: the Spaces from this layout were removed after an earlier import." }
-            if alreadyImported > 0 { return "Everything in this layout is already in Bam." }
+            if alreadyImported > 0 { return "All supported sidebar items in this layout are already in Bam." }
             return "This layout has no Spaces, tabs or folders Bam can import."
         }
         /// Plain-language notes about everything not carried over exactly.
@@ -290,7 +297,10 @@ enum ArcImport {
             if alreadyImported > 0 { lines.append("\(plural(alreadyImported, "item")) already imported earlier will be skipped.") }
             if removedSpaces > 0 { lines.append("\(plural(removedSpaces, "Space")) you removed after an earlier import will stay removed. A removed Space comes back only if Arc has new items for it, holding just those items.") }
             if excludedFavorites > 0 { lines.append("\(plural(excludedFavorites, "Favorite")) of Spaces left out of this import won’t be imported.") }
-            if easels > 0 { lines.append("\(plural(easels, "Easel")) can’t be imported; Bam has no Easels.") }
+            if easelReferences > 0 {
+                lines.append("\(plural(easelReferences, "Easel")) will be kept as references in their places, with their names. Their canvases aren’t imported and stay in Arc.")
+            }
+            if easels > 0 { lines.append("\(plural(easels, "Easel")) outside a Space’s sidebar can’t be kept; Bam has no Easels.") }
             if liveFolders > 0 { lines.append("\(plural(liveFolders, "live folder")) will be imported as ordinary folders; live updates aren’t supported.") }
             if flattenedTodayFolders > 0 { lines.append("\(plural(flattenedTodayFolders, "folder")) in Today will be flattened; Bam keeps folders in the kept section.") }
             if favoriteOverflow > 0 { lines.append("\(plural(favoriteOverflow, "Favorite")) beyond Bam’s 12 per profile will go in a “More Favorites” folder.") }
@@ -395,6 +405,16 @@ enum ArcImport {
                                                   isUnloaded: true, profileID: $0 == .favorite ? profile : nil) }
             return BrowserTab(title: title, address: url, space: space, saved: saved, folderID: kind == .kept ? folder : nil)
         }
+        /// An Easel kept as a reference row: Arc's rename, else its own title,
+        /// else a generic name; identity from its Easel ID (else its sidebar ID).
+        /// No URL is invented and no canvas data exists to import.
+        func makeEasel(_ node: Node, easelID: String?, payloadTitle: String?, space: Int, kept: Bool, folder: UUID?) -> BrowserTab {
+            let identity = easelID.flatMap(UUID.init(uuidString:)) ?? UUID(uuidString: node.id) ?? UUID()
+            let reference = ArcEaselReference.address(for: identity)
+            let title = clipped(node.title, limit: 300) ?? clipped(payloadTitle, limit: 300) ?? "Arc Easel"
+            let saved = kept ? SavedTabState(kind: .kept, address: reference, isUnloaded: true) : nil
+            return BrowserTab(title: title, address: reference, space: space, saved: saved, folderID: kept ? folder : nil)
+        }
 
         // Profiles: Arc default -> Bam default; each custom Arc profile -> its own Bam profile.
         var profileMap: [Profile: UUID] = [:]
@@ -474,7 +494,13 @@ enum ArcImport {
                     }
                 case .container:
                     importPinned(node.children, space: space, folder: folder, depth: depth, isNewContainer: isNewContainer, spaceReport: &spaceReport)
-                case .easel: report.easels += 1
+                case .easel(let easelID, let payloadTitle):
+                    // Kept in its exact folder and position as a reference row.
+                    let key = "arc:\(node.id)"
+                    if links[key] != nil { note(existing: key, in: container, prefix: "tab:"); continue }
+                    let row = makeEasel(node, easelID: easelID, payloadTitle: payloadTitle, space: space, kept: true, folder: folder)
+                    session.tabs.append(row); links[key] = "tab:\(row.id.uuidString)"
+                    place(row.id, in: container, isNewContainer: isNewContainer); spaceReport.easels += 1
                 case .unknown: report.unknownItems += 1
                 }
             }
@@ -509,7 +535,11 @@ enum ArcImport {
                         session.splits?.append(BrowserSplit(primaryID: created[0], secondaryID: created[1])); spaceReport.splits += 1
                     }
                 case .container: importToday(node.children, space: space, spaceReport: &spaceReport)
-                case .easel: report.easels += 1
+                case .easel(let easelID, let payloadTitle):
+                    let key = "arc:\(node.id)"
+                    if links[key] != nil { report.alreadyImported += 1; continue }
+                    let row = makeEasel(node, easelID: easelID, payloadTitle: payloadTitle, space: space, kept: false, folder: nil)
+                    session.tabs.append(row); links[key] = "tab:\(row.id.uuidString)"; spaceReport.easels += 1
                 case .unknown: report.unknownItems += 1
                 }
             }
@@ -523,7 +553,8 @@ enum ArcImport {
                 case .tab(let raw, _): if links["arc:\(id)"] == nil, address(raw) != nil { return true }
                 case .folder: if links["arc:\(id)"] == nil { return true }; stack += node.children
                 case .split, .container: stack += node.children
-                case .easel, .unknown: continue
+                case .easel: if links["arc:\(id)"] == nil { return true }
+                case .unknown: continue
                 }
             }
             return false
