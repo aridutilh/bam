@@ -229,11 +229,6 @@ import WebKit
             let opened = await request(popupA, kind: "offscreen")?["has"] as? Bool, closed = await request(popupA, kind: "offscreen-close")?["has"] as? Bool
             try check(opened == true && closed == false, "Offscreen create/close cycle \(cycle) failed")
         }
-        // A is still loading when its grants are revoked; B is loaded when B is disabled.
-        _ = await stalledOffscreen(popupA); _ = await request(popupB, kind: "offscreen")
-        try check(runtimeA.compatibility.offscreen.entry(for: contextA.uniqueIdentifier)?.isLoaded == false && runtimeB.compatibility.offscreen.has(contextB.uniqueIdentifier),
-                  "Offscreen documents were not reopened for the lifecycle checks")
-        weak var revokedWeb = runtimeA.compatibility.offscreen.currentDocument(for: contextA.uniqueIdentifier)
         // A load that never finishes: close and revoke must end it at once, not at the timeout.
         let stallParameters = NWParameters.tcp
         stallParameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: .any)
@@ -265,6 +260,11 @@ import WebKit
         try check(recreated?["has"] as? Bool == true && (recreated?["echo"] as? [String: Any])?["echo"] as? String == "ping" &&
                   (recreated?["echo"] as? [String: Any])?["path"] as? String == "/offscreen.html", "Recreating after a cancelled load failed: \(recreated ?? [:])")
         _ = await request(popupA, kind: "offscreen-close")
+        // A is still loading when its grants are revoked; B is loaded when B is disabled.
+        _ = await stalledOffscreen(popupA); _ = await request(popupB, kind: "offscreen")
+        try check(runtimeA.compatibility.offscreen.entry(for: contextA.uniqueIdentifier)?.isLoaded == false && runtimeB.compatibility.offscreen.has(contextB.uniqueIdentifier),
+                  "Offscreen documents were not reopened for the lifecycle checks")
+        weak var revokedWeb = runtimeA.compatibility.offscreen.currentDocument(for: contextA.uniqueIdentifier)
         let denied = await request(popupA, kind: "denials")
         try check(denied?["external"] is String && denied?["undeclared"] is String && denied?["unknown"] is String,
                   "Worker native messaging allowed an external app, undeclared capability or unknown method: \(denied ?? [:])")
