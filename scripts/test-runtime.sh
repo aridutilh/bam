@@ -1,7 +1,14 @@
 #!/bin/bash
 set -euo pipefail
 ROOT=$(cd -- "$(dirname -- "$0")/.." && pwd)
-APP=${BAM_TEST_APP:-${ARK_TEST_APP:-${ORBIT_TEST_APP:-"$ROOT/Bam.app"}}}
+APP=${BAM_TEST_APP:-${ARK_TEST_APP:-${ORBIT_TEST_APP:-"/Applications/Bam Preview.app"}}}
+if [ "$APP" = '/Applications/Bam Preview.app' ]; then
+    PREVIEW_ID=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Contents/Info.plist" 2>/dev/null || true)
+    if [ "$PREVIEW_ID" != com.ari.bam.preview ]; then
+        echo 'Prepare the canonical Bam Preview with bash scripts/preview-draft.sh --prepare-only first.' >&2
+        exit 1
+    fi
+fi
 # Honor older app bundles supplied through a legacy test-app override too.
 EXECUTABLE=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP/Contents/Info.plist")
 if [[ "$EXECUTABLE" == */* || ! -x "$APP/Contents/MacOS/$EXECUTABLE" ]]; then

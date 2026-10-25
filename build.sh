@@ -43,7 +43,7 @@ rm -f "$APP/Contents/Resources/ArkIcon.icns"
 # Package the verified staging bundle before File Provider can add metadata.
 /usr/bin/ditto --norsrc --noextattr -c -k --keepParent "$APP" "$PROJECT_DIR/Bam-macOS.zip"
 # Replace this generated bundle rather than merging into an old File Provider inode.
-if [ -d "$DELIVERABLE_APP" ]; then mv "$DELIVERABLE_APP" "$STAGING_DIR/previous-Bam.app"; fi
+if [ -d "$DELIVERABLE_APP" ]; then mv "$DELIVERABLE_APP" "$STAGING_DIR/previous-Bam"; fi
 /usr/bin/ditto --norsrc --noextattr "$APP" "$DELIVERABLE_APP"
 # File Provider can reattach FinderInfo asynchronously just after the copy.
 VERIFIED=false
@@ -64,6 +64,7 @@ if [ "$VERIFIED" != true ]; then exit 1; fi
 "$BUILD_DIR/model-tests" "$BUILD_DIR"
 "$SWIFTC" "${COMMON[@]}" -parse-as-library "$PROJECT_DIR/Sources/BrowserState.swift" "$PROJECT_DIR/Sources/PreviewProfile.swift" "$PROJECT_DIR/Tests/PreviewProfileTests.swift" -o "$BUILD_DIR/preview-profile-tests"
 "$BUILD_DIR/preview-profile-tests"
+python3 -B "$PROJECT_DIR/Tests/PreviewInstallerTests.py"
 "$SWIFTC" "${COMMON[@]}" -parse-as-library -framework AppKit "$PROJECT_DIR/Sources/PreviewProfile.swift" "$PROJECT_DIR/Sources/PreviewIcon.swift" "$PROJECT_DIR/Tests/PreviewIconTests.swift" -o "$BUILD_DIR/preview-icon-tests"
 "$BUILD_DIR/preview-icon-tests" "$DELIVERABLE_APP"
 "$SWIFTC" "${COMMON[@]}" -parse-as-library "$PROJECT_DIR/Sources/ProfileLock.swift" "$PROJECT_DIR/Tests/ProfileLockTests.swift" -o "$BUILD_DIR/profile-lock-tests"

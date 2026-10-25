@@ -2,6 +2,9 @@
 
 ## 0.21.3 unreleased draft — build 44
 
+- Preserve early and late external URL-open requests in duplicate launches through an acknowledged, retryable handoff to the owning profile. Deduplicate transport retries without suppressing intentional repeated opens.
+- Consolidate all branch testing into `/Applications/Bam Preview.app`, with `com.ari.bam.preview` and the stable `BamPreview` data namespace. Safely replace older preview bundles, refuse live/unrelated/symlink destinations, serialize installers and roll back failures. Preserve legacy preview data without importing it; never replace the installed Bam through these scripts.
+
 - Restore original Bam construction artwork from the unshipped preview draft. Fresh previews and the isolated persistent preview use it; normal builds retain the production icon. Generate both ICNS packages at build time from authored PNG masters.
 - Take an exclusive `flock` on each persistent profile’s `instance.lock` before opening session or WebKit state. Duplicate launches request focus from that profile’s owner, restoring hidden/minimized windows, and exit. Fresh previews and fixtures do not lock. I/O failures stop startup with an explanatory error instead of proceeding unguarded.
 - Retain ownership through quit confirmation, cancellation and store teardown; process exit or death releases the lock without deleting its inode. Older Bam versions do not cooperate with this lock and must be quit before using the same profile.

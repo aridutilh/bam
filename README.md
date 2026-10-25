@@ -28,7 +28,9 @@ bash build.sh
 bash scripts/preview-draft.sh
 ```
 
-That builds for your machine, locally signs the app, and runs the component test suites on the way out. The script prepares a separate **Bam Extension Preview** app with its own persistent profile, preferences and WebKit data. It leaves the installed Bam and any running old Preview alone. Use `bash scripts/preview-draft.sh --fresh` for a disposable session instead. No existing cookies or password-vault state are migrated. It's a development build — not notarized, tuned for Apple Silicon — so expect macOS to give you a look the first time you open it.
+That builds for your machine, locally signs the app, and runs the component test suites. Every interactive test build then replaces the single **/Applications/Bam Preview.app**, with construction artwork and a stable `com.ari.bam.preview` identity. All worktrees share its `BamPreview` profile, preferences and WebKit namespace. Quit Bam Preview before replacing it; a running preview is never stopped automatically. Use `bash scripts/preview-draft.sh --fresh` for a disposable session or `bash scripts/preview-onboarding.sh` for the disposable welcome. `--prepare-only` installs without launching; `bash scripts/test-runtime.sh` tests that canonical preview by default.
+
+Bam has exactly two app names: **Bam Preview** for unmerged work and **Bam** for merged main. Do not create feature-specific copies or launch the branch's generated `Bam.app` outside explicit fixture modes. `/Applications/Bam.app` is never changed by the preview scripts. The older preview bundle may be replaced only if its identifier belongs to `com.ari.bam.*preview`; its old profile, preferences, cookies and vault state are preserved in place, without import into the new namespace. This development build is ad-hoc signed, not notarized.
 
 ## What's in the box
 
