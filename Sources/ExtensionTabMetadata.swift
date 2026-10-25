@@ -197,27 +197,57 @@ enum ExtensionTabMetadata {
             else if lastStar >= 0 { pi = lastStar + 1; resume += 1; ti = resume }
             else { return .noMatch }
         }
-        while pi < p.count && p[pi] == star { pi += 1 }
+        while pi < p.count && p[pi] == star {
+            budget -= 1
+            if budget < 0 { return .exhausted }
+            pi += 1
+        }
         return pi == p.count ? .match : .noMatch
     }
 
-    /// Bytes `response` counts for one value.
-    private static func cost(_ value: Value) -> Int { value.url.utf8.count + (value.title?.utf8.count ?? 0) }
+    // MARK: Response size (an upper bound for any standard JSON encoding of the reply)
 
-    /// False when `response` would null any later entry. For a *filtered* request a nulled entry would read as
-    /// "doesn't match" and drop a matching tab, so the engine must answer such a request null (fallback) instead.
-    static func responseFits(_ values: [Value?]) -> Bool {
-        values.reduce(0) { $0 + ($1.map(cost) ?? 0) } <= maxResponseUTF8
+    /// Encoded bytes of a JSON string, assuming the most expansive standard encoder: quotes; `"` `\` `/` as two-byte
+    /// escapes; control characters as `\u00XX`; every non-ASCII scalar as `\uXXXX` (a surrogate pair for non-BMP).
+    static func encodedUpperBound(_ string: String) -> Int {
+        var bytes = 2
+        for scalar in string.unicodeScalars {
+            switch scalar.value {
+            case 0x22, 0x5C, 0x2F: bytes += 2
+            case 0..<0x20, 0x7F: bytes += 6
+            case 0x80..<0x10000: bytes += 6
+            case 0x10000...: bytes += 12
+            default: bytes += 1
+            }
+        }
+        return bytes
+    }
+    private static let nullBytes = 4                               // null
+    /// `{"url":…}` or `{"url":…,"title":…}` with the keys' own bytes.
+    private static func encodedUpperBound(_ value: Value) -> Int {
+        1 + encodedUpperBound("url") + 1 + encodedUpperBound(value.url)
+            + (value.title.map { 1 + encodedUpperBound("title") + 1 + encodedUpperBound($0) } ?? 0) + 1
     }
 
-    /// JSON-ready reply: one element per entry, `["url": …, "title": …]` (title omitted when nil) or NSNull, in order,
-    /// with later elements nulled once `maxResponseUTF8` would be exceeded.
+    /// The array's brackets and commas plus every slot as `null`: what a reply of `count` entries costs at least.
+    private static func baseline(_ count: Int) -> Int { 2 + max(0, count - 1) + count * nullBytes }
+
+    /// False when `response` would null any value for size. For a *filtered* request a nulled entry would read as
+    /// "doesn't match" and drop a matching tab, so the engine must answer such a request null (fallback) instead.
+    static func responseFits(_ values: [Value?]) -> Bool {
+        values.reduce(baseline(values.count)) { $0 + ($1.map { encodedUpperBound($0) - nullBytes } ?? 0) } <= maxResponseUTF8
+    }
+
+    /// JSON-ready reply: one element per entry, `["url": …, "title": …]` (title omitted when nil) or NSNull, in order.
+    /// Once including a value would take the encoded reply past `maxResponseUTF8`, it and every later value are nulled,
+    /// so the encoded reply never exceeds the limit (slots are reserved as `null` up front).
     static func response(_ values: [Value?]) -> [Any] {
-        var spent = 0
+        var spent = baseline(values.count), full = false
         return values.map { value -> Any in
-            guard let value else { return NSNull() }
-            spent += cost(value)
-            guard spent <= maxResponseUTF8 else { return NSNull() }
+            guard let value, !full else { return NSNull() }
+            let extra = encodedUpperBound(value) - nullBytes
+            guard spent + extra <= maxResponseUTF8 else { full = true; return NSNull() }
+            spent += extra
             var object: [String: Any] = ["url": value.url]
             if let title = value.title { object["title"] = title }
             return object

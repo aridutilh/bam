@@ -185,6 +185,52 @@ import Foundation
         try check(firstNull != nil && nulled[..<firstNull!].allSatisfy { $0 is [String: Any] } && nulled[firstNull!...].allSatisfy { $0 is NSNull },
                   "The response budget did not null later entries in order")
         try check(!M.responseFits(many) && M.responseFits(Array(many.prefix(firstNull!))), "responseFits disagrees with the response budget")
+
+        // The limit holds for the *encoded* reply: keys, quotes, commas, null slots and escaping included.
+        func encoded(_ object: Any, slashes: Bool = true) throws -> Int {
+            try JSONSerialization.data(withJSONObject: object, options: slashes ? [] : [.withoutEscapingSlashes]).count
+        }
+        let slashy = URL(string: prefix + String(repeating: "a/", count: (M.maxURLUTF8 - prefix.utf8.count) / 2))!
+        let nasty = "\"\\/\u{01}\u{1F}é😀\t\n" + String(repeating: "\u{07}", count: 600)
+        let adversarial: [M.Value?] = (0..<M.maxEntries).map { index in
+            index % 7 == 3 ? nil : M.admissible(url: index % 2 == 0 ? slashy : atURL, title: index % 3 == 0 ? nasty : "plain")
+        }
+        try check(adversarial.compactMap { $0 }.count > 400, "The adversarial fixture lost its values")
+        let adversarialReply = M.response(adversarial)
+        let escapedSize = try encoded(adversarialReply), unescapedSize = try encoded(adversarialReply, slashes: false)
+        try check(escapedSize <= M.maxResponseUTF8 && unescapedSize <= M.maxResponseUTF8,
+                  "An encoded reply exceeded the response limit: \(escapedSize) / \(unescapedSize)")
+        try check(!M.responseFits(adversarial) && adversarialReply.contains { $0 is NSNull },
+                  "An over-limit reply was reported as fitting, or nothing was nulled")
+        // Each value's bound covers its real encoding (escaped slashes, control characters, non-BMP).
+        for value in [M.Value(url: slashy.absoluteString, title: nasty), M.Value(url: "https://example.com/", title: nil), M.Value(url: page.absoluteString, title: "")] {
+            let alone = M.response([value])
+            try check(try encoded(alone) <= M.encodedUpperBound(value.url) + (value.title.map(M.encodedUpperBound) ?? 0) + 20 + 2
+                      && M.responseFits([value]), "A value's encoded size exceeded its bound: \(value.title ?? "-")")
+        }
+        try check(M.encodedUpperBound("") == 2 && M.encodedUpperBound("a") == 3 && M.encodedUpperBound("/") == 4 && M.encodedUpperBound("\u{01}") == 8
+                  && M.encodedUpperBound("é") == 8 && M.encodedUpperBound("😀") == 14, "The string bound is not the documented worst case")
+        // Filtered all-or-nothing uses the same boundary: whenever it fits, nothing is nulled and the encoding is within the limit.
+        var growing: [M.Value?] = []
+        while M.responseFits(growing + [M.Value(url: slashy.absoluteString, title: nasty)]) { growing.append(M.Value(url: slashy.absoluteString, title: nasty)) }
+        let fitting = M.response(growing)
+        try check(!growing.isEmpty && !fitting.contains { $0 is NSNull } && (try encoded(fitting)) <= M.maxResponseUTF8,
+                  "A reply that fits was nulled or encoded over the limit")
+        let overflowing = M.response(growing + [M.Value(url: slashy.absoluteString, title: nasty)])
+        try check(overflowing.last is NSNull && overflowing.dropLast().allSatisfy { !($0 is NSNull) } && (try encoded(overflowing)) <= M.maxResponseUTF8,
+                  "The first value past the boundary was not the one nulled")
+        // Null slots are paid for up front, so a reply of only nulls stays within the limit too.
+        try check((try encoded(M.response(Array(repeating: nil, count: M.maxEntries)))) <= M.maxResponseUTF8, "A reply of nulls exceeded the limit")
+
+        // Trailing stars count against the budget like every other step.
+        var tight = 50
+        try check(M.titleMatches("a" + String(repeating: "*", count: 100), "a", budget: &tight) == .exhausted, "Trailing stars were not budgeted")
+        var enough = 200
+        try check(M.titleMatches("a" + String(repeating: "*", count: 100), "a", budget: &enough) == .match && enough >= 0,
+                  "Trailing stars with enough budget did not match")
+        var longest = M.titleMatchBudget
+        try check(M.titleMatches(String(repeating: "*", count: M.maxTitlePatternUTF8), "", budget: &longest) == .match
+                  && longest == M.titleMatchBudget - M.maxTitlePatternUTF8, "A maximal all-star pattern was not charged per step")
         return checks
     }
 }
