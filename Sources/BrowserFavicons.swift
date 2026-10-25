@@ -9,7 +9,7 @@ import WebKit
               tab.saved?.customSymbol == nil else { return nil }
         let address = tab.isUnloaded ? (tab.saved?.address ?? tab.address) : tab.address
         // An icon carried over from Arc wins while the tab is still on that site.
-        if let imported = importedTabIcons.image(for: id, address: address) { return imported }
+        if let imported = importedTabIcons.image(for: id, address: address, profile: session.profileID(for: tab)) { return imported }
         guard let url = URL(string: address) else { return nil }
         // Imported tabs never reach their sites for an icon until the user
         // opens them; Bam's own cache may still answer.

@@ -77,17 +77,19 @@ import UniformTypeIdentifiers
         var capped = ArcIconImport.Limits(); capped.maximumIcons = 1
         require(ArcIconImport.loadIcons(for: [("item-ok", ok), ("item-other", other)], in: cache, limits: capped).count == 1, "Icon count is bounded")
 
-        // Per-tab, per-site memory store.
+        // Per-tab, per-site, per-profile memory store.
         let store = ImportedTabIcons(maximumEntries: 2)
-        store.install(loaded[ok]!, for: ok, address: "https://same.example/a")
-        store.install(loaded[other]!, for: other, address: "https://same.example/b")
-        require(store.image(for: ok, address: "https://same.example/a") !== store.image(for: other, address: "https://same.example/b"),
+        let home = BrowserProfile.defaultID, work = UUID()
+        store.install(loaded[ok]!, for: ok, origin: "https://same.example", profile: home)
+        store.install(loaded[other]!, for: other, origin: "https://same.example", profile: home)
+        require(store.image(for: ok, address: "https://same.example/a", profile: home) !== store.image(for: other, address: "https://same.example/b", profile: home),
                 "Same-origin tabs keep separate imported icons")
-        require(store.image(for: ok, address: "https://same.example/elsewhere") != nil, "The icon follows the tab within its site")
-        require(store.image(for: ok, address: "https://different.example/") == nil, "Navigating to another site falls back to the normal favicon")
-        require(store.image(for: ok, address: "https://same.example/a")?.size == NSSize(width: 16, height: 16), "32px cache icons draw at 16pt")
-        store.install(loaded[ok]!, for: UUID(), address: "https://third.example/")
-        require(store.count == 2 && store.image(for: ok, address: "https://same.example/a") == nil, "The store is bounded; oldest goes first")
+        require(store.image(for: ok, address: "https://same.example/elsewhere", profile: home) != nil, "The icon follows the tab within its site")
+        require(store.image(for: ok, address: "https://different.example/", profile: home) == nil, "Navigating to another site falls back to the normal favicon")
+        require(store.image(for: ok, address: "https://same.example/a", profile: work) == nil, "A tab moved to another login profile loses the imported icon")
+        require(store.image(for: ok, address: "https://same.example/a", profile: home)?.size == NSSize(width: 16, height: 16), "32px cache icons draw at 16pt")
+        store.install(loaded[ok]!, for: UUID(), origin: "https://third.example", profile: home)
+        require(store.count == 2 && store.image(for: ok, address: "https://same.example/a", profile: home) == nil, "The store is bounded; oldest goes first")
 
         // End to end with the synthetic layout: provenance → files → icons.
         let source = try ArcImport.load(from: layout)
@@ -100,6 +102,91 @@ import UniformTypeIdentifiers
         for (index, item) in added.prefix(5).enumerated() { try png(size: 32, red: CGFloat(index) / 5).write(to: path(item.itemID)) }
         let fromLayout = ArcIconImport.loadIcons(for: added, in: ArcIconImport.cacheDirectory(besideLayout: layout)!)
         require(fromLayout.count == 5 && Set(fromLayout.keys).isSubset(of: Set(added.map(\.tabID))), "Icons resolve for exactly the cached imported tabs")
+
+        // Memory bounds: thumbnails, decoded budget, cancellation between files.
+        try png(size: 200, red: 0.4).write(to: path("item-wide"))
+        let wideID = UUID()
+        let thumb = ArcIconImport.loadIcons(for: [("item-wide", wideID)], in: cache)[wideID]
+        require(thumb != nil && thumb!.width <= 64 && thumb!.height <= 64, "Large sources decode as 64 px thumbnails, never full size")
+        var budget = ArcIconImport.Limits(); budget.maximumDecodedBytes = 32 * 32 * 4   // room for exactly one 32 px icon
+        require(ArcIconImport.loadIcons(for: [("item-ok", ok), ("item-other", other)], in: cache, limits: budget).count == 1,
+                "The decoded-memory budget stops the import's icon work")
+        var polls = 0
+        let cancelled = ArcIconImport.loadIcons(for: [("item-ok", ok), ("item-other", other), ("item-wide", wideID)], in: cache,
+                                                isCancelled: { polls += 1; return polls > 1 })
+        require(cancelled.count == 1, "Cancellation (shutdown or a newer import) stops between files")
+
+        // Jobs capture the imported site and profile at commit; completion revalidates.
+        let jobs = ArcIconImport.jobs(for: added, in: after)
+        require(jobs.count == added.count, "Every added web tab gets a job")
+        let todayJob = jobs.first { job in after.tabs.first { $0.id == job.tabID }?.saved == nil }!
+        let todayOrigin = todayJob.origin
+        var navigated = after
+        let todayIndex = navigated.tabs.firstIndex { $0.id == todayJob.tabID }!
+        navigated.tabs[todayIndex].address = "https://somewhere-else.example/page"   // Today tab navigated during decode
+        require(ArcIconImport.stillValid(todayJob, in: navigated) && todayJob.origin == todayOrigin,
+                "A navigated tab keeps its job; the icon stays bound to the imported origin, not the new one")
+        let navigatedStore = ImportedTabIcons()
+        navigatedStore.install(loaded[ok]!, for: todayJob.tabID, origin: todayJob.origin, profile: todayJob.profile)
+        require(navigatedStore.image(for: todayJob.tabID, address: navigated.tabs[todayIndex].address, profile: todayJob.profile) == nil,
+                "So the old icon is never stamped onto the new site")
+        var removedTab = after; removedTab.tabs.removeAll { $0.id == todayJob.tabID }
+        require(!ArcIconImport.stillValid(todayJob, in: removedTab), "A tab removed before completion gets no icon")
+        var relinked = after; relinked.importLinks?["arc:\(todayJob.itemID)"] = "tab:\(UUID().uuidString)"
+        require(!ArcIconImport.stillValid(todayJob, in: relinked), "Changed provenance invalidates the job")
+        let keptJob = jobs.first { job in after.tabs.first { $0.id == job.tabID }?.saved?.kind == .kept }!
+        var moved = after
+        let workProfile = moved.createProfile(name: "Elsewhere")!
+        let workSpace = moved.createSpace(name: "Elsewhere", symbol: "globe", colorIndex: 1, profileID: workProfile)!
+        _ = moved.moveTab(id: keptJob.tabID, toSpace: workSpace)
+        require(!ArcIconImport.stillValid(keptJob, in: moved), "A tab moved to another login profile before completion gets no icon")
+
+        // Persistent cache: relaunch, isolation, deletion, corruption, bounds.
+        let diskDirectory = base.appendingPathComponent("Support/ImportedIcons", isDirectory: true)
+        let disk = ImportedIconDiskCache(directory: diskDirectory)
+        let tabA = UUID(), tabB = UUID(), tabC = UUID()
+        require(disk.save([(tabA, home, "https://a.example", loaded[ok]!), (tabB, home, "https://b.example", loaded[other]!),
+                           (tabC, work, "https://c.example", loaded[ok]!)]) == 3, "Icons save")
+        let indexText = try String(contentsOf: diskDirectory.appendingPathComponent("index.json"), encoding: .utf8)
+        require(!indexText.contains("item-") && !indexText.contains(cache.path) && !indexText.contains("SidebarItemsFaviconCache"),
+                "The index keeps no Arc item IDs or source paths")
+        require(fm.fileExists(atPath: disk.fileURL(profile: work, tab: tabC).path), "Icons are stored per login profile")
+        let relaunch = ImportedIconDiskCache(directory: diskDirectory)
+        let restored = relaunch.restore(validTabs: [tabA: home, tabB: home, tabC: work])
+        require(Set(restored.map(\.tab)) == [tabA, tabB, tabC] && restored.first { $0.tab == tabA }?.origin == "https://a.example"
+                && restored.first { $0.tab == tabC }?.profile == work, "Icons survive a relaunch with their site and profile")
+        require(abs(red(of: restored.first { $0.tab == tabA }!.image) - 0.9) < 0.05, "Restored pixels match what was saved")
+        // Deleted tab and moved profile are pruned, files removed.
+        let pruning = ImportedIconDiskCache(directory: diskDirectory)
+        let afterPrune = pruning.restore(validTabs: [tabA: home, tabC: home])
+        require(Set(afterPrune.map(\.tab)) == [tabA], "Removed tabs and tabs now in another profile are not restored")
+        require(!fm.fileExists(atPath: pruning.fileURL(profile: home, tab: tabB).path)
+                && !fm.fileExists(atPath: pruning.fileURL(profile: work, tab: tabC).path) && pruning.recordCount == 1,
+                "Their files and index entries are deleted")
+        pruning.remove(tabs: [tabA])
+        require(pruning.recordCount == 0 && !fm.fileExists(atPath: pruning.fileURL(profile: home, tab: tabA).path), "Explicit removal deletes the icon")
+        // Corruption: tampered file and damaged index fall back without failing.
+        let tamper = ImportedIconDiskCache(directory: diskDirectory)
+        tamper.save([(tabA, home, "https://a.example", loaded[ok]!), (tabB, home, "https://b.example", loaded[other]!)])
+        try Data("garbage".utf8).write(to: tamper.fileURL(profile: home, tab: tabB))
+        try fm.removeItem(at: tamper.fileURL(profile: home, tab: tabA))
+        try fm.createSymbolicLink(at: tamper.fileURL(profile: home, tab: tabA), withDestinationURL: tamper.fileURL(profile: home, tab: tabB))
+        require(ImportedIconDiskCache(directory: diskDirectory).restore(validTabs: [tabA: home, tabB: home]).isEmpty,
+                "Tampered or substituted files are refused (size/hash/symlink checks)")
+        try Data("{ not json".utf8).write(to: diskDirectory.appendingPathComponent("index.json"))
+        let recovered = ImportedIconDiskCache(directory: diskDirectory)
+        require(recovered.restore(validTabs: [tabA: home]).isEmpty && recovered.save([(tabA, home, "https://a.example", loaded[ok]!)]) == 1
+                && ImportedIconDiskCache(directory: diskDirectory).restore(validTabs: [tabA: home]).count == 1,
+                "A damaged index starts over and the cache keeps working")
+        // Bounds: entries and per-file size.
+        var tight = ImportedIconDiskCache.Limits(); tight.maximumEntries = 2
+        let bounded = ImportedIconDiskCache(directory: base.appendingPathComponent("Bounded", isDirectory: true), limits: tight)
+        let three = (0..<3).map { _ in UUID() }
+        bounded.save(three.map { ($0, home, "https://x.example", loaded[ok]!) })
+        require(bounded.recordCount == 2 && bounded.record(for: three[0]) == nil, "Entry count is bounded; the oldest goes first")
+        var small = ImportedIconDiskCache.Limits(); small.maximumFileBytes = 10
+        require(ImportedIconDiskCache(directory: base.appendingPathComponent("Small", isDirectory: true), limits: small)
+                .save([(UUID(), home, "https://x.example", loaded[ok]!)]) == 0, "Oversized encodings are not stored")
         print("PASS: \(checks) Arc icon import checks")
     }
 }
