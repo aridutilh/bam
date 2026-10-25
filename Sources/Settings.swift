@@ -328,6 +328,14 @@ struct SettingsActions {
         return [caption("Look"), look, caption("Import"), bring, caption("Playback"), playback, caption("Memory"), memory, caption("Keyboard"), keys]
     }
     private weak var appearanceChips: NSStackView?
+    /// An appearance change (from here, the View menu or a relaunch) updates
+    /// the chips in place. Rebuilding the section would drop keyboard focus.
+    func syncAppearance() {
+        reload()
+        for case let chip as BamChip in appearanceChips?.arrangedSubviews ?? [] {
+            chip.isPicked = BrowserAppearance.allCases.indices.contains(chip.tag) && BrowserAppearance.allCases[chip.tag] == snapshot.appearance
+        }
+    }
     @objc private func pickAppearance(_ sender: BamChip) {
         guard BrowserAppearance.allCases.indices.contains(sender.tag) else { return }
         act { actions.setAppearance(BrowserAppearance.allCases[sender.tag]) }
