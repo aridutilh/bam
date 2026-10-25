@@ -26,16 +26,46 @@ import WebKit
         func showsReference() -> Bool { browser.webHost.subviews.last is EaselReferenceView }
         func shownName() -> String? { (browser.webHost.subviews.last as? EaselReferenceView)?.shownName }
         func name(_ id: UUID) -> String? { browser.session.tabs.first { $0.id == id }?.displayTitle }
+        /// The extension host's own tab callbacks (tabs.update → navigateTab, tabs.reload →
+        /// reloadTab) on this private controller, aimed at an Easel row: each is refused, and
+        /// the row, the visible view, renderers and pending loads are all unchanged.
+        func extensionCallbacksRefused(_ id: UUID, _ label: String) throws {
+            guard #available(macOS 15.4, *) else { return }
+            let host = browser.browserExtensions
+            let row = browser.session.tabs.first { $0.id == id }
+            let active = browser.session.activeID, visible = browser.webHost.subviews.last, shown = shownName()
+            let renderers = Set(browser.browsers.keys), pending = browser.pendingLoads
+            let navigated = host.navigateTab?(id, url) ?? true
+            let reloaded = host.reloadTab?(id, false) ?? true
+            let reloadedFromOrigin = host.reloadTab?(id, true) ?? true
+            try check(row?.isArcEasel == true && !navigated && !reloaded && !reloadedFromOrigin,
+                      "\(label): the extension host's navigateTab and reloadTab are refused")
+            let after = browser.session.tabs.first { $0.id == id }
+            try check(after?.address == row?.address && after?.title == row?.title && after?.displayTitle == row?.displayTitle && after?.saved == row?.saved,
+                      "\(label): the row keeps its reference address and name")
+            try check(browser.session.activeID == active && browser.webHost.subviews.last === visible && shownName() == shown,
+                      "\(label): the visible view is unchanged")
+            try check(browser.browsers[id] == nil && Set(browser.browsers.keys) == renderers && browser.observations[id] == nil
+                        && !browser.pendingLoads.contains(id) && browser.pendingLoads.isSubset(of: pending),
+                      "\(label): no renderer, pending load or observation is created")
+        }
 
         browser.select(kept.id)
         try check(browser.browsers[kept.id] == nil && showsReference(), "Selecting an Easel shows the native reference view, no web view")
+        // The initially active home tab's own first load can still be pending here (it waits
+        // for extension readiness), so compare against a snapshot rather than an empty set:
+        // reload must add no pending load anywhere and no renderer at all.
+        let rendererIDs = Set(browser.browsers.keys), pendingBefore = browser.pendingLoads
         browser.reload(nil)
-        try check(browser.browsers[kept.id] == nil && browser.pendingLoads.isEmpty, "Reload on an Easel creates no renderer and requests nothing")
+        try check(browser.browsers[kept.id] == nil && !browser.pendingLoads.contains(kept.id)
+                    && browser.pendingLoads.isSubset(of: pendingBefore) && Set(browser.browsers.keys) == rendererIDs,
+                  "Reload on an Easel creates no renderer and requests nothing")
         let tabsBefore = browser.session.tabs.map(\.id)
         browser.splitWithNewPage(nil)
         try check(browser.session.tabs.map(\.id) == tabsBefore && browser.session.split(for: kept.id) == nil
                     && browser.session.activeID == kept.id && browser.browsers[kept.id] == nil && showsReference(),
                   "Split with New Page on an Easel has no side effects: no new tab, selection or renderer")
+        try extensionCallbacksRefused(kept.id, "Active kept Easel")
 
         // Navigating away installs the page as the visible host.
         browser.navigate(url.absoluteString)
@@ -64,15 +94,29 @@ import WebKit
         try check(browser.browsers[kept.id] == nil && extensionPage.superview == nil && showsReference()
                     && name(kept.id) == "Fixture Easel" && shownName() == "Fixture Easel",
                   "Reset after navigatePane retires that page and restores the named reference")
+        try extensionCallbacksRefused(kept.id, "Kept Easel after reset")
 
         // A Today Easel closes to the archive and reopens as itself.
         browser.select(today.id)
         try check(showsReference() && browser.browsers[today.id] == nil, "Today Easel shows the reference view")
+        try extensionCallbacksRefused(today.id, "Active Today Easel")
+        try extensionCallbacksRefused(kept.id, "Inactive kept Easel")
         browser.close(today.id)
         try check(!browser.session.tabs.contains { $0.id == today.id }, "Closing a Today Easel removes the row")
         browser.reopenTab(nil)
         guard let reopened = browser.session.active else { throw Failure.assertion("Reopen selected nothing") }
         try check(reopened.address == today.address && reopened.displayTitle == "Today Easel" && browser.browsers[reopened.id] == nil && showsReference(),
                   "Reopen brings the Easel reference back without a page")
+        try extensionCallbacksRefused(reopened.id, "Reopened Today Easel")
+
+        // Control: the same callback loads an ordinary tab that has no page yet, so the refusals
+        // above come from the Easel guard rather than an unwired callback.
+        if #available(macOS 15.4, *) {
+            let host = browser.browserExtensions
+            let control = BrowserTab(title: "Control", address: url.absoluteString, space: 0)
+            browser.session.tabs.append(control)
+            try check(browser.browsers[control.id] == nil && host.reloadTab?(control.id, false) == true && browser.browsers[control.id] != nil,
+                      "Control: the extension host's reloadTab creates and reloads a page for an ordinary tab")
+        }
     }
 }
