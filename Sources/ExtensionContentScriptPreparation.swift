@@ -9,7 +9,7 @@ import Foundation
 /// wrapper cache. Extension JavaScript is never changed; the original manifest is
 /// preserved next to the package when no earlier step saved it.
 enum ExtensionContentScriptPreparation {
-    static let adapterSource = """
+    static let legacyAdapterSource = """
     // Bam compatibility: callback-style runtime.sendMessage from content scripts.
     (() => {
       const held = [];
@@ -35,6 +35,68 @@ enum ExtensionContentScriptPreparation {
       try { Object.defineProperty(globalThis, "__bamMessagingHeld", { value: held, configurable: true }); } catch (error) {}
     })();
     """
+
+    static let adapterSource = ExtensionSelectPickerCompatibility.source + "\n" + legacyAdapterSource
+
+    /// Updates only byte-exact, previously generated Bam adapters. Vendor files,
+    /// the manifest, permissions and signed Safari bundles are not rewritten.
+    /// Validate all candidates before writing, and exclude any MAIN-world reference.
+    @discardableResult
+    static func refreshBamAdapters(package: URL) throws -> Int {
+        guard package.isFileURL else { throw ExtensionPackagePreparation.failure("Extension preparation requires a local file URL.") }
+        let package = package.standardizedFileURL
+        let packageValues = try package.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+        guard packageValues.isDirectory == true, packageValues.isSymbolicLink != true else {
+            throw ExtensionPackagePreparation.failure("The extension package must be a regular directory.")
+        }
+        func readBounded(_ url: URL, limit: Int) throws -> Data {
+            let handle = try FileHandle(forReadingFrom: url)
+            defer { try? handle.close() }
+            let data = try handle.read(upToCount: limit + 1) ?? Data()
+            guard data.count <= limit else { throw ExtensionPackagePreparation.failure("The extension adapter input exceeds its size limit.") }
+            return data
+        }
+        let manifestURL = package.appendingPathComponent("manifest.json")
+        let values = try manifestURL.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey])
+        guard values.isRegularFile == true, values.isSymbolicLink != true,
+              let size = values.fileSize, size <= ExtensionPackagePreparation.maximumManifestBytes else {
+            throw ExtensionPackagePreparation.failure("The extension manifest must be a regular file no larger than 1 MiB.")
+        }
+        guard let manifest = try JSONSerialization.jsonObject(with: readBounded(manifestURL, limit: ExtensionPackagePreparation.maximumManifestBytes)) as? [String: Any] else {
+            throw ExtensionPackagePreparation.failure("The extension manifest must be a JSON object.")
+        }
+        guard let rawEntries = manifest["content_scripts"] else { return 0 }
+        guard let entries = rawEntries as? [[String: Any]] else {
+            throw ExtensionPackagePreparation.failure("content_scripts must be an array of objects.")
+        }
+        var isolated = Set<String>(), main = Set<String>()
+        for entry in entries {
+            guard let raw = entry["js"] else { continue }
+            guard let scripts = raw as? [String] else {
+                throw ExtensionPackagePreparation.failure("Content script js lists must be arrays of local paths.")
+            }
+            if (entry["world"] as? String)?.uppercased() == "MAIN" { main.formUnion(scripts) }
+            else { isolated.formUnion(scripts) }
+        }
+        let mainLocations = Set(main.compactMap { $0.removingPercentEncoding }.map {
+            package.appendingPathComponent($0).resolvingSymlinksInPath().standardizedFileURL.path
+        })
+        let legacy = Data(legacyAdapterSource.utf8)
+        var replacements: [URL] = []
+        for path in isolated.subtracting(main).sorted() {
+            let prefix = "__bam_messaging_", suffix = ".js"
+            guard path.hasPrefix(prefix), path.hasSuffix(suffix) else { continue }
+            let identifier = String(path.dropFirst(prefix.count).dropLast(suffix.count))
+            guard let uuid = UUID(uuidString: identifier), identifier == uuid.uuidString.lowercased() else { continue }
+            try ExtensionPackagePreparation.validateScript(path, in: package, kind: "Bam adapter")
+            let url = package.appendingPathComponent(path)
+            guard !mainLocations.contains(url.resolvingSymlinksInPath().standardizedFileURL.path) else { continue }
+            guard try url.resourceValues(forKeys: [.fileSizeKey]).fileSize == legacy.count else { continue }
+            if try readBounded(url, limit: legacy.count) == legacy { replacements.append(url) }
+        }
+        for url in replacements { try Data(adapterSource.utf8).write(to: url, options: .atomic) }
+        return replacements.count
+    }
 
     /// Returns a disclosure note when the manifest was adapted, nil when there was
     /// nothing to adapt. Validation finishes before any file changes.
@@ -97,6 +159,6 @@ enum ExtensionContentScriptPreparation {
             try? fm.removeItem(at: adapterURL)
             throw error
         }
-        return "Added a messaging adapter before \(adapted.count) content script list\(adapted.count == 1 ? "" : "s") so callback-style runtime.sendMessage is answered. Extension scripts are unchanged."
+        return "Added a messaging adapter before \(adapted.count) content script list\(adapted.count == 1 ? "" : "s") so callback-style runtime.sendMessage is answered and missing WebKit select-picker styles use the native open state. Extension scripts are unchanged."
     }
 }

@@ -5,6 +5,14 @@
 - Hide the window's close, minimize and zoom buttons together with the sidebar, as Arc does: they fade out over the last 80 points of the collapse, so a collapsed sidebar leaves the page alone in the window, and they return as the sidebar slides back in.
 - Retire the “A little space” start page. An empty tab is now a plain dark surface titled “New tab” (the address bar still reads “Search or enter URL”), and the History ▸ Home command (⇧⌘H) that navigated to it is gone. Existing tabs on that page keep working and simply show the blank surface.
 
+## 0.21.1 draft — build 42
+
+- Add pointing-hand cursors to enabled sidebar buttons and selectable tab rows, including cursor invalidation when a control becomes disabled. Webpage cursor behavior remains under investigation.
+
+- Normalize unavailable select-picker overlay styles only inside isolated extension content-script worlds, using native `select:open` state. This addresses Dashlane mistaking a closed page dropdown for an open overlay and dismissing its inline panel; genuinely open pickers remain detectable.
+- Refresh only Bam’s recognized, byte-exact legacy content-script adapter in existing private packages. Vendor scripts, MAIN-world scripts and signed Safari resources remain unchanged.
+- Record signed-in Dashlane popup search, manual creation of an invented login and inline filling on a control page without the dropdown. Picker compatibility passes 38 checks and content preparation/migration passes 51; post-fix live validation remains pending.
+
 ## 0.21.0 draft — build 41
 
 - Add a separate, profile-scoped desktop connection review for the verified Chrome Web Store build of 1Password. Authenticate the official installed BrowserSupport helper and app, pin the reviewed host, bound message/connection queues, and close helpers on revoke, disable, update or shutdown. This transport is fixture-tested; real 1Password pairing and Touch ID remain unverified and require an Apple-signed Bam build plus vendor trust.

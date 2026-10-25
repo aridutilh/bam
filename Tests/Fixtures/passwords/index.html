@@ -27,6 +27,9 @@ document.querySelector('select').onchange=render;render();
 <pre id="picker-probe" aria-label="Select compatibility diagnostics"></pre>
 <script>
 const probeSelect=document.querySelector('select');
+function updatePickerProbe(){
 let nativeOpen;try{nativeOpen=probeSelect.matches('select:open')}catch{nativeOpen='unsupported'}
 document.querySelector('#picker-probe').textContent=JSON.stringify({selectOpenSupported:CSS.supports('selector(select:open)'),pickerSupported:CSS.supports('selector(::picker(select))'),overlaySupported:CSS.supports('overlay','auto'),selectOpen:nativeOpen,pickerOverlay:getComputedStyle(probeSelect,'::picker(select)').getPropertyValue('overlay')});
+}
+updatePickerProbe();setInterval(updatePickerProbe,100);
 </script>

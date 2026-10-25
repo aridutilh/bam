@@ -75,6 +75,40 @@ import JavaScriptCore
         let manifestObject = try object(typicalURL.appendingPathComponent("manifest.json"))
         try check((manifestObject["content_scripts"] as? [[String: Any]])?[1]["run_at"] as? String == "document_idle" && manifestObject["permissions"] as? [String] == ["storage"], "Other manifest keys survive the rewrite")
 
+        // Existing installs update only exact Bam-owned legacy bytes, once per file.
+        let adapterURL = typicalURL.appendingPathComponent(adapterName)
+        let preparedManifest = try Data(contentsOf: typicalURL.appendingPathComponent("manifest.json"))
+        let legacy = Data(ExtensionContentScriptPreparation.legacyAdapterSource.utf8)
+        try legacy.write(to: adapterURL)
+        try check(try ExtensionContentScriptPreparation.refreshBamAdapters(package: typicalURL) == 1, "A shared legacy adapter is migrated once")
+        try check(try Data(contentsOf: adapterURL) == Data(ExtensionContentScriptPreparation.adapterSource.utf8), "Migration installs the known current adapter")
+        try check(try ExtensionContentScriptPreparation.refreshBamAdapters(package: typicalURL) == 0, "Current adapters are not rewritten")
+        try check(try Data(contentsOf: typicalURL.appendingPathComponent("manifest.json")) == preparedManifest && Data(contentsOf: backup) == typical && Data(contentsOf: typicalURL.appendingPathComponent("content.js")) == scriptBytes, "Migration preserves manifest, original backup and vendor source")
+        let modifiedAdapter = Data((ExtensionContentScriptPreparation.legacyAdapterSource + "/* user edit */").utf8)
+        try modifiedAdapter.write(to: adapterURL)
+        try check(try ExtensionContentScriptPreparation.refreshBamAdapters(package: typicalURL) == 0 && Data(contentsOf: adapterURL) == modifiedAdapter, "Unrecognized generated-looking files are left intact")
+        try legacy.write(to: adapterURL)
+        var sharedMain = manifestObject
+        var sharedEntries = sharedMain["content_scripts"] as! [[String: Any]]
+        sharedEntries[0]["js"] = ["./" + adapterName]
+        sharedMain["content_scripts"] = sharedEntries
+        try JSONSerialization.data(withJSONObject: sharedMain).write(to: typicalURL.appendingPathComponent("manifest.json"))
+        try check(try ExtensionContentScriptPreparation.refreshBamAdapters(package: typicalURL) == 0 && Data(contentsOf: adapterURL) == legacy, "A MAIN-world alias prevents migration of the shared adapter")
+        try preparedManifest.write(to: typicalURL.appendingPathComponent("manifest.json"))
+        try fm.removeItem(at: adapterURL)
+        try fm.createSymbolicLink(at: adapterURL, withDestinationURL: typicalURL.appendingPathComponent("content.js"))
+        var unsafeRejected = false
+        do { _ = try ExtensionContentScriptPreparation.refreshBamAdapters(package: typicalURL) } catch { unsafeRejected = true }
+        try check(unsafeRejected && Data(contentsOf: typicalURL.appendingPathComponent("content.js")) == scriptBytes, "A generated-name symlink is refused without touching its target")
+        try fm.removeItem(at: adapterURL)
+        try Data(ExtensionContentScriptPreparation.adapterSource.utf8).write(to: adapterURL)
+
+        let linkedPackage = root.appendingPathComponent("linked-package")
+        try fm.createSymbolicLink(at: linkedPackage, withDestinationURL: typicalURL)
+        var rootLinkRejected = false
+        do { _ = try ExtensionContentScriptPreparation.refreshBamAdapters(package: linkedPackage) } catch { rootLinkRejected = true }
+        try check(rootLinkRejected, "A symlink package root is refused before migration")
+
         // Running again after an earlier step saved the original must not overwrite that backup.
         let repeated = try ExtensionContentScriptPreparation.prepare(package: typicalURL, originalManifestURL: backup)
         try check(repeated != nil && Data(contentsOf: backup) == typical, "An existing original-manifest backup is preserved")
