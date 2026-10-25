@@ -335,7 +335,11 @@ import Darwin
         try check(stalePopupError != nil && tabAction.popupPopover?.isShown != true, "An asynchronously presented popup appeared over a different profile")
         try checkLiveLookup(profile); try checkLiveLookup(other)
         host.reconcile()
-        guard let context = host.context(for: extensionID), let popup = context.action(for: nil)?.popupWebView else { throw ExtensionSmokeTest.Failure(description: "Missing browser-adapter action popup") }
+        guard let context = host.context(for: extensionID), context.action(for: nil)?.popupWebView != nil else { throw ExtensionSmokeTest.Failure(description: "Missing browser-adapter action popup") }
+        // Held only until its last use (below): a test-held extension web view keeps its web process, and with it every
+        // CORS pattern it ever had, which would confound the withheld-fetch checks later in this run.
+        var heldPopup: WKWebView? = context.action(for: nil)?.popupWebView
+        var popup: WKWebView { heldPopup! }
         try await wait("Browser-adapter popup did not initialize") { (try? await popup.evaluateJavaScript("document.title")) as? String == "Bam fixture ready" }
         // A finished load must reach the extension as `tabs.onUpdated` with `status: "complete"`
         // even though the URL did not change after commit (Dashlane's sign-in check waits for it).
@@ -805,15 +809,21 @@ import Darwin
         try await host.remove(id: activeID)
         host.reconcile()
         _ = try await popup.evaluateJavaScript("document.getElementById('open-page').click(); true")
+        // Last use of the original popup: release the test's references to it (and the first action's popup).
+        heldPopup = nil
+        tabAction.closePopup(); actionContext.action(for: nil)?.closePopup()
         try await wait("Browser adapter did not open its own extension page") { controller.session.tabs.contains { URLInput.extensionURL($0.address) != nil } }
-        guard let tab = controller.session.tabs.first(where: { URLInput.extensionURL($0.address) != nil }), let extensionWeb = controller.browsers[tab.id] else { throw ExtensionSmokeTest.Failure(description: "Missing extension renderer") }
-        try await wait("Browser adapter used the wrong configuration for its extension page") { extensionWeb.title == "Bam extension page ready" }
-        try check(controller.session.profileID(for: tab) == profile && controller.profileID(of: extensionWeb) == profile, "Extension-created page escaped its source profile")
+        guard let tab = controller.session.tabs.first(where: { URLInput.extensionURL($0.address) != nil }), controller.browsers[tab.id] != nil else { throw ExtensionSmokeTest.Failure(description: "Missing extension renderer") }
+        // Bam owns its renderers; the test only observes them weakly, so it never keeps an old one (and its process) alive.
+        weak let extensionWeb = controller.browsers[tab.id]
+        try await wait("Browser adapter used the wrong configuration for its extension page") { extensionWeb?.title == "Bam extension page ready" }
+        try check(controller.session.profileID(for: tab) == profile && extensionWeb.map { controller.profileID(of: $0) } == profile, "Extension-created page escaped its source profile")
         let extensionURL = URL(string: tab.address)!
         try check(controller.openProfileTab(extensionURL, profileID: other, active: false) == nil, "Browser adapter opened extension page in a foreign profile")
         controller.navigatePane(tab.id, address: url.absoluteString)
         try await wait("Extension-to-HTTP navigation did not replace renderer") { controller.browsers[tab.id] !== extensionWeb && controller.browsers[tab.id]?.url == url && controller.browsers[tab.id]?.isLoading == false }
-        let normal = controller.browsers[tab.id]!
+        weak let normal = controller.browsers[tab.id]
+        try check(normal != nil, "The HTTP renderer was missing")
         controller.navigatePane(tab.id, address: extensionURL.absoluteString)
         try await wait("HTTP-to-extension navigation did not replace renderer") { controller.browsers[tab.id] !== normal && controller.browsers[tab.id]?.title == "Bam extension page ready" }
         // Cancellation is a no-op on the running package and signed-in storage.
@@ -965,8 +975,18 @@ import Darwin
                 (host.context(for: extensionID)?.deniedPermissionMatchPatterns.keys.filter { $0.matches(url) }.map(\.string) ?? []) +
                 (host.records.first { $0.id == extensionID }?.deniedPatterns.keys.filter { (try? WKWebExtension.MatchPattern(string: $0))?.matches(url) == true } ?? [])
             }
-            guard let liveContext = host.context(for: extensionID), let promptController = liveContext.webExtensionController,
+            guard let promptController = host.context(for: extensionID)?.webExtensionController,
                   let promptRuntime = promptController.delegate as? BrowserExtensionRuntime else { throw ExtensionSmokeTest.Failure(description: "No live runtime for consent checks") }
+            // A withdrawal can restart the extension with a NEW context (work/extension-renderer-restart-fixture-contract.md):
+            // never keep one across a Site Access change. Every use re-reads the context and requires it to be loaded and
+            // owned by this profile's runtime, so nothing here can pass against a retired context.
+            func live() throws -> WKWebExtensionContext {
+                guard let context = host.context(for: extensionID), context.isLoaded, promptRuntime.contexts[extensionID] === context,
+                      context.webExtensionController === promptController else {
+                    throw ExtensionSmokeTest.Failure(description: "The extension has no loaded context owned by this profile's runtime")
+                }
+                return context
+            }
             try check(host.siteAccess(id: extensionID)?.state.mode == .allRequested && granted(ip) && granted(newSite), "Consent checks did not start from All requested")
             let earlierPrompt = host.permissionPrompt
             defer { host.permissionPrompt = earlierPrompt }
@@ -977,7 +997,8 @@ import Darwin
             let consentBase = try perform(host.siteAccess(id: extensionID)!, .choose(.withheld))
             var implicitAnswer: Set<URL>?
             host.permissionPrompt = { _ in reviewsShown += 1; return true }
-            promptRuntime.webExtensionController(promptController, promptForPermissionToAccess: [optionalURL, ip], in: nil, for: liveContext) { granted, _ in implicitAnswer = granted }
+            let implicitTarget = try live()
+            promptRuntime.webExtensionController(promptController, promptForPermissionToAccess: [optionalURL, ip], in: nil, for: implicitTarget) { granted, _ in implicitAnswer = granted }
             try check(reviewsShown == 0 && implicitAnswer == [] && !granted(ip) && deniedKeys(optionalURL).isEmpty && deniedKeys(ip).isEmpty &&
                 host.siteAccess(id: extensionID)?.state.mode == .withheld && host.siteAccess(id: extensionID)?.revision == consentBase.revision,
                 "An implicit URL request showed a review, granted, denied or changed Site Access: shown=\(reviewsShown), answer=\(String(describing: implicitAnswer))")
@@ -985,31 +1006,53 @@ import Darwin
             let optionalPattern = try WKWebExtension.MatchPattern(string: optionalOrigin)
             var declinedAnswer: Set<WKWebExtension.MatchPattern>?
             host.permissionPrompt = { _ in reviewsShown += 1; return false }
-            promptRuntime.webExtensionController(promptController, promptForPermissionMatchPatterns: [optionalPattern], in: nil, for: liveContext) { granted, _ in declinedAnswer = granted }
-            try check(reviewsShown == 1 && declinedAnswer == [] && liveContext.permissionStatus(for: optionalURL) == .deniedExplicitly && !deniedKeys(optionalURL).isEmpty,
-                "An offered and declined pattern must be denied: shown=\(reviewsShown), status=\(liveContext.permissionStatus(for: optionalURL).rawValue)")
+            let declineTarget = try live()
+            promptRuntime.webExtensionController(promptController, promptForPermissionMatchPatterns: [optionalPattern], in: nil, for: declineTarget) { granted, _ in declinedAnswer = granted }
+            try check(reviewsShown == 1 && declinedAnswer == [] && live().permissionStatus(for: optionalURL) == .deniedExplicitly && !deniedKeys(optionalURL).isEmpty,
+                "An offered and declined pattern must be denied: shown=\(reviewsShown), status=\(String(describing: try? live().permissionStatus(for: optionalURL).rawValue))")
             // Test cleanup only: drop the declined denial so the installed-engine checks below start from the same state.
-            for key in liveContext.deniedPermissionMatchPatterns.keys where key.matches(optionalURL) { liveContext.deniedPermissionMatchPatterns.removeValue(forKey: key) }
-            host.persistPermissions(liveContext)
+            func dropOptionalDenial() throws {
+                let context = try live()
+                for key in context.deniedPermissionMatchPatterns.keys where key.matches(optionalURL) { context.deniedPermissionMatchPatterns.removeValue(forKey: key) }
+                host.persistPermissions(context)
+            }
+            try dropOptionalDenial()
 
             // The same policy through the installed engine, from a real extension page and a real 127.0.0.1 tab.
-            guard let consentConfiguration = liveContext.webViewConfiguration else { throw ExtensionSmokeTest.Failure(description: "No extension page configuration") }
             let consentTabURL = { () -> URL in
                 var components = URLComponents(url: url, resolvingAgainstBaseURL: false)!; components.query = "consent"; return components.url!
             }()
             guard let consentTab = controller.openProfileTab(consentTabURL, profileID: profile, active: false) else { throw ExtensionSmokeTest.Failure(description: "No consent tab") }
             defer { _ = host.closeTab?(consentTab) }
             try await wait("The consent tab did not load") { controller.browsers[consentTab]?.url == consentTabURL && controller.browsers[consentTab]?.isLoading == false }
-            let consentPage = WKWebView(frame: NSRect(x: 0, y: 0, width: 320, height: 240), configuration: consentConfiguration)
-            defer { consentPage.stopLoading() }
-            consentPage.load(URLRequest(url: liveContext.baseURL.appendingPathComponent("page.html")))
-            try await wait("The extension page for consent checks did not load") { consentPage.title == "Bam extension page ready" }
+            // The test's own extension page, always built from the current context and rebuilt after a withdrawal; it is
+            // held in exactly one place so releasing it really drops the test's reference.
+            var consentPage: WKWebView?
+            defer { consentPage?.stopLoading() }
+            func buildConsentPage() async throws {
+                let context = try live()
+                guard let configuration = context.webViewConfiguration else { throw ExtensionSmokeTest.Failure(description: "No extension page configuration") }
+                let web = WKWebView(frame: NSRect(x: 0, y: 0, width: 320, height: 240), configuration: configuration)
+                web.load(URLRequest(url: context.baseURL.appendingPathComponent("page.html")))
+                consentPage = web
+                try await wait("The extension page for consent checks did not load") { web.title == "Bam extension page ready" }
+            }
+            /// Drops the test's reference and reports (not asserts) whether WebKit deallocated it: cleanup, not policy.
+            func releaseConsentPage(_ reason: String) async throws {
+                weak let released = consentPage
+                consentPage?.stopLoading(); consentPage = nil
+                let deadline = ProcessInfo.processInfo.systemUptime + 5
+                while released != nil && ProcessInfo.processInfo.systemUptime < deadline { try await Task.sleep(nanoseconds: 40_000_000) }
+                print("CONSENT_PAGE_RELEASE reason=\(reason) deallocated=\(released == nil)"); fflush(stdout)
+            }
+            try await buildConsentPage()
             promptRuntime.reconcile()
             guard let surface = promptRuntime.currentSurface(consentTab) else { throw ExtensionSmokeTest.Failure(description: "The consent tab is not visible to the extension") }
             let consentIndex = promptRuntime.tabIndex(consentTab, in: promptRuntime.windowKey(surface))
             func consentProbe(_ body: String, _ arguments: [String: Any] = [:]) async throws -> [String: Any] {
                 let script = "const tab = (await browser.tabs.query({})).find((t) => t.index === index && t.windowId !== undefined); return JSON.stringify(await (async () => {\n" + body + "\n})());"
-                let text = try await consentPage.callAsyncJavaScript(script, arguments: arguments.merging(["index": consentIndex]) { a, _ in a }, contentWorld: .page) as? String
+                guard let page = consentPage else { throw ExtensionSmokeTest.Failure(description: "No consent page") }
+                let text = try await page.callAsyncJavaScript(script, arguments: arguments.merging(["index": consentIndex]) { a, _ in a }, contentWorld: .page) as? String
                 guard let data = text?.data(using: .utf8), let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
                     throw ExtensionSmokeTest.Failure(description: "Consent probe returned \(text ?? "nil")")
                 }
@@ -1023,7 +1066,13 @@ import Darwin
                 guard let record = host.records.first(where: { $0.id == extensionID }) else { return "no-record" }
                 return "\(record.patterns.keys.sorted()) \(record.deniedPatterns.keys.sorted()) \(record.siteAccess?.base64EncodedString() ?? "-")"
             }
-            func undecided(_ url: URL) -> Bool { ![.grantedExplicitly, .deniedExplicitly].contains(liveContext.permissionStatus(for: url)) }
+            func undecided(_ url: URL) throws -> Bool { ![.grantedExplicitly, .deniedExplicitly].contains(try live().permissionStatus(for: url)) }
+            func loopbackState() -> String {
+                guard let context = try? live() else { return "no loaded context" }
+                return "native status=\(context.permissionStatus(for: consentTabURL).rawValue) hasAccess=\(context.hasAccess(to: consentTabURL)) " +
+                    "granted127=\(context.grantedPermissionMatchPatterns.keys.filter { $0.string.contains("127.0.0.1") }.map(\.string).sorted()) " +
+                    "denied127=\(context.deniedPermissionMatchPatterns.keys.filter { $0.string.contains("127.0.0.1") }.map(\.string).sorted())"
+            }
             let recordBefore = recordState()
             reviewsShown = 0
             host.permissionPrompt = { _ in reviewsShown += 1; return true }
@@ -1045,14 +1094,12 @@ import Darwin
                 !granted(ip) && deniedKeys(ip).isEmpty && undecided(consentTabURL) && recordState() == recordBefore &&
                 host.siteAccess(id: extensionID)?.state.mode == .withheld && host.siteAccess(id: extensionID)?.revision == consentBase.revision,
                 "Using a withheld requested site prompted, granted, denied or changed Site Access: shown=\(reviewsShown), \(withheldUse); " +
-                "native status=\(liveContext.permissionStatus(for: consentTabURL).rawValue) hasAccess=\(liveContext.hasAccess(to: consentTabURL)) " +
-                "granted127=\(liveContext.grantedPermissionMatchPatterns.keys.filter { $0.string.contains("127.0.0.1") }.map(\.string).sorted()) " +
-                "denied127=\(liveContext.deniedPermissionMatchPatterns.keys.filter { $0.string.contains("127.0.0.1") }.map(\.string).sorted())")
+                loopbackState())
             // activeTab on the withheld site: a user gesture in the tab lets injection run with no review and no lasting grant.
             guard let consentAdapter = promptRuntime.tabs[consentTab] else { throw ExtensionSmokeTest.Failure(description: "No adapter for the consent tab") }
-            liveContext.userGesturePerformed(in: consentAdapter)
+            try live().userGesturePerformed(in: consentAdapter)
             let gestured = try await consentProbe("return {injected: await (async () => { \(injection) })()};")
-            liveContext.clearUserGesture(in: consentAdapter)
+            try live().clearUserGesture(in: consentAdapter)
             try check((gestured["injected"] as? String)?.hasPrefix("ran:127.0.0.1") == true && reviewsShown == 0 && recordState() == recordBefore &&
                 host.siteAccess(id: extensionID)?.state.mode == .withheld,
                 "activeTab on a withheld site prompted, failed or left a lasting grant: shown=\(reviewsShown), \(gestured)")
@@ -1061,10 +1108,9 @@ import Darwin
             host.permissionPrompt = { review in reviewed.append(review); return false }
             let declinedRequest = try await consentProbe("return {granted: await browser.permissions.request({origins: [origin]})};", ["origin": optionalOrigin])
             try check(reviewed.count == 1 && reviewed[0].websites == [optionalOrigin] && reviewed[0].permissions.isEmpty &&
-                declinedRequest["granted"] as? Bool == false && liveContext.permissionStatus(for: optionalURL) == .deniedExplicitly,
+                declinedRequest["granted"] as? Bool == false && live().permissionStatus(for: optionalURL) == .deniedExplicitly,
                 "A declined permissions.request did not show one pattern review or record its denial: \(reviewed.map(\.websites)) \(declinedRequest)")
-            for key in liveContext.deniedPermissionMatchPatterns.keys where key.matches(optionalURL) { liveContext.deniedPermissionMatchPatterns.removeValue(forKey: key) }
-            host.persistPermissions(liveContext)
+            try dropOptionalDenial()
             // A stale explicit answer: Site Access changes while the review is open (the panel adds the site); the
             // dialog's Allow then grants nothing beyond the panel's change and denies nothing.
             reviewed = []
@@ -1077,8 +1123,12 @@ import Darwin
             try check(reviewed.count == 1 && staleRequest["granted"] as? Bool == false && granted(ip) && deniedKeys(ip).isEmpty &&
                 host.siteAccess(id: extensionID)?.state.mode == .specific(["http://127.0.0.1/*"]),
                 "A stale explicit answer granted or denied beyond the panel's change: \(reviewed.map(\.websites)) \(staleRequest)")
+            // This withdrawal may restart the extension: the old page belongs to the old context, so release it and build
+            // the page for the approved request from the context loaded now.
+            try await releaseConsentPage("before-second-withhold")
             _ = try perform(host.siteAccess(id: extensionID)!, .choose(.withheld))
             try check(!granted(ip), "The consent checks could not withhold the requested site again")
+            try await buildConsentPage()
             reviewed = []
             host.permissionPrompt = { review in reviewed.append(review); return true }
             let approvedRequest = try await consentProbe("const granted = await browser.permissions.request({origins: ['http://127.0.0.1/*']}); const injected = await (async () => { \(injection) })(); return {granted, injected};")
@@ -1192,8 +1242,12 @@ import Darwin
             "An update retained removed permissions or lost approved required permissions")
         try check(host.items(profileID: profile).first { $0.id == extensionID }?.version == "2.0.0" && host.context(for: extensionID) != nil,
             "Approved update did not activate its final package")
-        guard let updatedPopup = host.context(for: extensionID)?.action(for: nil)?.popupWebView else { throw ExtensionSmokeTest.Failure(description: "Updated package has no popup") }
-        try await wait("Updated extension still looked for scripts at the staging URL") { (try? await updatedPopup.evaluateJavaScript("document.title")) as? String == "Bam fixture ready" }
+        do {
+            // Scoped, so the test's reference to this popup ends here (see heldPopup above).
+            guard let updatedPopup = host.context(for: extensionID)?.action(for: nil)?.popupWebView else { throw ExtensionSmokeTest.Failure(description: "Updated package has no popup") }
+            try await wait("Updated extension still looked for scripts at the staging URL") { (try? await updatedPopup.evaluateJavaScript("document.title")) as? String == "Bam fixture ready" }
+        }
+        host.context(for: extensionID)?.action(for: nil)?.closePopup()
         // Diagnostic: CORS fetch access across grant, withdrawal, new page and new context (FETCH_ACCESS lines).
         checks += try await ExtensionFetchAccessProbe.run(controller: controller, host: host, profile: profile, pageURL: pageURL)
         try await checkExplicitConsent()
