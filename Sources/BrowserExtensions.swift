@@ -1600,21 +1600,15 @@ struct BrowserExtensionPermissionReview {
         for permission in permissions { context.setPermissionStatus(granted.contains(permission) ? .grantedExplicitly : .deniedExplicitly, for: permission) }
         owner.persistPermissions(context); completionHandler(granted, nil)
     }
+    /// WebKit's *implicit* URL requests: it asks here before tab and window reads, script and CSS injection, cookies,
+    /// captureVisibleTab, detectLanguage, getMatchedRules, devtools eval and failed CORS loads, and would grant `*://host/*`
+    /// on approval. Chrome never prompts from those calls: an extension regains a withheld or optional site only through
+    /// an explicit request (`permissions.request`, which WebKit routes to `promptForPermissionMatchPatterns` below) or a
+    /// user gesture (activeTab), and the user can allow a site in Site Access. So Bam answers every implicit request
+    /// empty, at once: no review, no denial, no record change. The call then proceeds without that access (tab url/title
+    /// stay blank for the tab metadata facade to supply; injection fails with WebKit's own access error).
     func webExtensionController(_ controller: WKWebExtensionController, promptForPermissionToAccess urls: Set<URL>, in tab: (any WKWebExtensionTab)?, for context: WKWebExtensionContext, completionHandler: @escaping (Set<URL>, Date?) -> Void) {
-        guard authorizes(tab, for: context), let owner else { completionHandler([], nil); return }
-        // Each URL as its site, classified before asking: requested access, an optional grant, or refused.
-        let (decisions, revision) = owner.promptDecisions(urls.map { ($0, ExtensionSiteAccessEngine.site(for: $0)) }, for: context)
-        let offered = urls.filter { decisions[$0].map { $0 != .refused } ?? false }
-        let review = BrowserExtensionPermissionReview(name: context.webExtension.displayName ?? "Extension", profileName: owner.profileName?(profileID) ?? "Current profile", permissions: [], websites: Set(offered.compactMap { ExtensionSiteAccessEngine.site(for: $0) }).sorted(), unsupported: [], isOptional: true)
-        let approved = Set(!offered.isEmpty && owner.approve(review) ? offered : [])
-        guard authorizes(tab, for: context), owner.promptIsCurrent(context, revision: revision) else { completionHandler([], nil); return }
-        // Bound to the state the dialog was computed from: a revoke, mode change or update meanwhile grants nothing.
-        let granted = owner.recordSiteApprovals(context, approved.compactMap { decisions[$0] }, revision: revision) ? approved : []
-        // Only what the user was shown and declined becomes a denial. Items refused before any review (undeclared, or
-        // pending under All requested) are answered empty with no denial: WebKit would store one for the whole host,
-        // ahead of any later grant, as if the user had decided.
-        for url in offered where !approved.contains(url) { context.setPermissionStatus(.deniedExplicitly, for: url) }
-        owner.persistPermissions(context); completionHandler(granted, nil)
+        completionHandler([], nil)
     }
     func webExtensionController(_ controller: WKWebExtensionController, promptForPermissionMatchPatterns patterns: Set<WKWebExtension.MatchPattern>, in tab: (any WKWebExtensionTab)?, for context: WKWebExtensionContext, completionHandler: @escaping (Set<WKWebExtension.MatchPattern>, Date?) -> Void) {
         guard authorizes(tab, for: context), let owner else { completionHandler([], nil); return }
