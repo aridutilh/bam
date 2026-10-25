@@ -23,8 +23,15 @@ import WebKit
         fixtureWindow.contentViewController = browser
         defer { browser.prepareToClose(); fixtureWindow.close() }
         try await establishKeyWindow(fixtureWindow, label: "Easel browser")
-        func showsReference() -> Bool { browser.webHost.subviews.last is EaselReferenceView }
-        func shownName() -> String? { (browser.webHost.subviews.last as? EaselReferenceView)?.shownName }
+        // Transient page feedback (a toast added above everything in webHost, e.g. the Split
+        // refusal) is not the page: the content host is the topmost other attached subview.
+        func contentHost() -> NSView? { browser.webHost.subviews.last { $0 !== browser.pageFeedback.view } }
+        func hostDescription() -> String {
+            let top = browser.webHost.subviews.last
+            return "content \(contentHost().map { String(describing: type(of: $0)) } ?? "none"), top \(top === browser.pageFeedback.view ? "feedback" : top.map { String(describing: type(of: $0)) } ?? "none")"
+        }
+        func showsReference() -> Bool { contentHost() is EaselReferenceView }
+        func shownName() -> String? { (contentHost() as? EaselReferenceView)?.shownName }
         func name(_ id: UUID) -> String? { browser.session.tabs.first { $0.id == id }?.displayTitle }
         /// The extension host's own tab callbacks (tabs.update → navigateTab, tabs.reload →
         /// reloadTab) on this private controller, aimed at an Easel row: each is refused, and
@@ -33,7 +40,7 @@ import WebKit
             guard #available(macOS 15.4, *) else { return }
             let host = browser.browserExtensions
             let row = browser.session.tabs.first { $0.id == id }
-            let active = browser.session.activeID, visible = browser.webHost.subviews.last, shown = shownName()
+            let active = browser.session.activeID, visible = contentHost(), shown = shownName()
             let renderers = Set(browser.browsers.keys), pending = browser.pendingLoads
             let navigated = host.navigateTab?(id, url) ?? true
             let reloaded = host.reloadTab?(id, false) ?? true
@@ -43,8 +50,8 @@ import WebKit
             let after = browser.session.tabs.first { $0.id == id }
             try check(after?.address == row?.address && after?.title == row?.title && after?.displayTitle == row?.displayTitle && after?.saved == row?.saved,
                       "\(label): the row keeps its reference address and name")
-            try check(browser.session.activeID == active && browser.webHost.subviews.last === visible && shownName() == shown,
-                      "\(label): the visible view is unchanged")
+            try check(browser.session.activeID == active && contentHost() === visible && shownName() == shown,
+                      "\(label): the visible view is unchanged (\(hostDescription()))")
             try check(browser.browsers[id] == nil && Set(browser.browsers.keys) == renderers && browser.observations[id] == nil
                         && !browser.pendingLoads.contains(id) && browser.pendingLoads.isSubset(of: pending),
                       "\(label): no renderer, pending load or observation is created")
@@ -60,17 +67,26 @@ import WebKit
         try check(browser.browsers[kept.id] == nil && !browser.pendingLoads.contains(kept.id)
                     && browser.pendingLoads.isSubset(of: pendingBefore) && Set(browser.browsers.keys) == rendererIDs,
                   "Reload on an Easel creates no renderer and requests nothing")
-        let tabsBefore = browser.session.tabs.map(\.id)
+        let tabsBefore = browser.session.tabs.map(\.id), renderersBeforeSplit = Set(browser.browsers.keys)
         browser.splitWithNewPage(nil)
-        try check(browser.session.tabs.map(\.id) == tabsBefore && browser.session.split(for: kept.id) == nil
-                    && browser.session.activeID == kept.id && browser.browsers[kept.id] == nil && showsReference(),
-                  "Split with New Page on an Easel has no side effects: no new tab, selection or renderer")
+        let tabsAfter = browser.session.tabs.map(\.id)
+        try check(tabsAfter == tabsBefore, "Split with New Page on an Easel adds no tab (\(tabsBefore.count) → \(tabsAfter.count))")
+        try check(browser.session.split(for: kept.id) == nil && browser.session.activeID == kept.id,
+                  "Split with New Page on an Easel makes no Split and keeps the selection (active is Easel: \(browser.session.activeID == kept.id))")
+        try check(browser.browsers[kept.id] == nil && Set(browser.browsers.keys) == renderersBeforeSplit,
+                  "Split with New Page on an Easel creates no renderer (\(renderersBeforeSplit.count) → \(browser.browsers.count))")
+        try check(showsReference() && shownName() == "Fixture Easel" && contentHost()?.isHidden == false,
+                  "The Easel's reference view stays attached and visible beneath any feedback (\(hostDescription()))")
+        try check(browser.pageFeedback.view.superview === browser.webHost && !browser.pageFeedback.view.isHidden
+                    && browser.pageFeedback.message == "Easels can’t be in a Split",
+                  "The refusal is explained with transient feedback (\(browser.pageFeedback.message ?? "none"); \(hostDescription()))")
         try extensionCallbacksRefused(kept.id, "Active kept Easel")
 
         // Navigating away installs the page as the visible host.
         browser.navigate(url.absoluteString)
         guard let page = browser.browsers[kept.id] else { throw Failure.assertion("Navigating from an Easel created no page") }
-        try check(browser.webHost.subviews.last === page && !showsReference(), "The new page is the visible host, not hidden behind the reference view")
+        try check(contentHost() === page && !showsReference(),
+                  "The new page is the visible host, not hidden behind the reference view (\(hostDescription()))")
         try await wait("page loaded after leaving the Easel") { !page.isLoading && page.url?.absoluteString == url.absoluteString }
         browser.updateMetadata(page)
         try check(browser.session.tabs.first { $0.id == kept.id }?.title == "Orbit Feature Fixture" && name(kept.id) == "Fixture Easel",
@@ -86,8 +102,8 @@ import WebKit
         // The extension path (tabs.update → navigatePane) also shows its page.
         browser.navigatePane(kept.id, address: url.absoluteString)
         guard let extensionPage = browser.browsers[kept.id] else { throw Failure.assertion("navigatePane from an Easel created no page") }
-        try check(browser.webHost.subviews.last === extensionPage && !showsReference() && extensionPage !== page,
-                  "navigatePane makes the new page the visible host with a fresh view")
+        try check(contentHost() === extensionPage && !showsReference() && extensionPage !== page,
+                  "navigatePane makes the new page the visible host with a fresh view (\(hostDescription()))")
         try await wait("page loaded via navigatePane") { !extensionPage.isLoading && extensionPage.url?.absoluteString == url.absoluteString }
         browser.updateMetadata(extensionPage)
         browser.resetSavedTab(kept.id)
