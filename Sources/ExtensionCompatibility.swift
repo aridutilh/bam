@@ -31,7 +31,7 @@ enum ExtensionCompatibility {
     /// Members the layer always offers when the host namespace exists but the member does not.
     static let runtimeExtras: [String] = ["runtime.getBrowserInfo", "runtime.onSuspend", "runtime.requestUpdateCheck", "runtime.getContexts",
                                           "webNavigation.onCreatedNavigationTarget", "storage.managed", "commands", "action.getUserSettings",
-                                          "scripting.ExecutionWorld", "runtime.onUpdateAvailable"]
+                                          "scripting.ExecutionWorld", "runtime.onUpdateAvailable", "windows.onBoundsChanged"]
 
     /// Computes what the layer will define for a parsed extension, from its manifest.
     static func plan(manifest: [String: Any]) -> Plan {
@@ -156,7 +156,7 @@ enum ExtensionCompatibility {
       const pending = new Map();
       let nextRequest = 1;
       let eventPort = null;
-      const nativeEvents = new Set(["notifications.onClosed", "notifications.onClicked", "notifications.onButtonClicked", "notifications.onShown", "idle.onStateChanged"]);
+      const nativeEvents = new Set(["notifications.onClosed", "notifications.onClicked", "notifications.onButtonClicked", "notifications.onShown", "idle.onStateChanged", "windows.onBoundsChanged"]);
       const subscribe = (name) => {
         if (!isWorker || !nativeEvents.has(name)) return;
         if (!nativeConnect) throw unsupported("Worker event delivery");
@@ -577,6 +577,69 @@ enum ExtensionCompatibility {
       // user-initiated in Bam's extension manager, reviewed, and replace the extension directly.
       // Proton Pass registers a listener unconditionally at worker start.
       if (provided.has("runtime.onUpdateAvailable")) extend("runtime", "onUpdateAvailable", extensionEvent("runtime", "onUpdateAvailable"));
+      // windows.onBoundsChanged (Chrome: fired when a window's new bounds are committed). WebKit has no
+      // such event; Session Buddy registers one unconditionally while starting. Bam's native side only
+      // signals "a window this profile exposes committed a move or resize" (debounced). Each signal reads
+      // WebKit's own windows.getAll and reports, as WebKit's Window object, each window whose left, top,
+      // width or height differs from the previous read, so IDs and coordinates are WebKit's, never Bam's.
+      // Baseline and signals are serialized on one chain per listening period: the baseline is read when
+      // the first listener is added; a change committed before that read completes becomes part of the
+      // baseline (not reported); several changes between two reads are reported once, with the final
+      // bounds. New and removed windows are not reported here (onCreated/onRemoved cover them). When the
+      // last listener is removed the period ends and pending reads are discarded.
+      const boundsChangedEvent = () => {
+        const name = "windows.onBoundsChanged";
+        const e = event(name), own = new Set();
+        compat.events[name] = e;
+        const nativeAdd = e.addListener, nativeRemove = e.removeListener;
+        let period = 0, snapshot = null, chain = Promise.resolve();
+        const geometry = (w) => [w.left, w.top, w.width, w.height].join(",");
+        const read = () => Promise.resolve().then(() => api.windows.getAll({ populate: false }));
+        const enqueue = (work) => {
+          const current = period;
+          chain = chain.then(() => current === period ? work(current) : undefined)
+            .catch((error) => { if (current === period) console.error("[Bam compatibility] windows.onBoundsChanged read failed", error); });
+        };
+        const remember = (list) => { snapshot = new Map((Array.isArray(list) ? list : []).map((w) => [w.id, geometry(w)])); };
+        const start = () => {
+          period += 1; snapshot = null; chain = Promise.resolve();
+          enqueue(async (current) => { const list = await read(); if (current === period) remember(list); });
+        };
+        define(e, "addListener", function (fn) {
+          if (typeof fn !== "function") return;
+          const first = own.size === 0;
+          own.add(fn); nativeAdd.call(e, fn);
+          if (first) start();
+        });
+        define(e, "removeListener", function (fn) {
+          if (!own.delete(fn)) return;
+          nativeRemove.call(e, fn);
+          if (own.size === 0) { period += 1; snapshot = null; }
+        });
+        Object.defineProperty(e, "__bamDispatch", { value: () => {
+          if (own.size === 0) return;
+          enqueue(async (current) => {
+            const list = await read();
+            if (current !== period) return;
+            const previous = snapshot;
+            remember(list);
+            // A failed baseline read makes this read the baseline; nothing is invented.
+            if (!previous || !Array.isArray(list)) return;
+            for (const w of list) {
+              const before = previous.get(w.id);
+              if (before === undefined || before === geometry(w)) continue;
+              for (const fn of Array.from(own)) {
+                if (current !== period) return;
+                if (!own.has(fn)) continue;
+                try { fn(Object.assign({}, w)); } catch (error) { console.error("[Bam compatibility] windows.onBoundsChanged listener failed", error); }
+              }
+            }
+          });
+        }, enumerable: false, writable: true, configurable: true });
+        compat.windowsBounds = { get period() { return period; }, get baseline() { return snapshot ? Array.from(snapshot.keys()) : null; } };
+        return e;
+      };
+      if (provided.has("windows.onBoundsChanged")) extend("windows", "onBoundsChanged", boundsChangedEvent);
       if (provided.has("runtime.requestUpdateCheck")) extend("runtime", "requestUpdateCheck", () => call(async () => { const value = ["no_update", { version: String(manifest().version || "") }]; value.__bamSpread = true; return value; }));
       // Only the offscreen document Bam hosts is reported; other contexts are not enumerated.
       if (provided.has("runtime.getContexts")) extend("runtime", "getContexts", () => call(async (filter) => {
@@ -777,6 +840,16 @@ enum ExtensionCompatibility {
     }
     private static let eventPermissions = ["notifications.onClosed": "notifications", "notifications.onClicked": "notifications",
         "notifications.onButtonClicked": "notifications", "notifications.onShown": "notifications", "idle.onStateChanged": "idle"]
+    /// Events Chrome delivers without any permission. They still require a registered, loaded context of
+    /// this profile whose compatibility plan provides the event.
+    private static let unpermissionedEvents: Set<String> = ["windows.onBoundsChanged"]
+    private func allowsEvent(_ event: String, for context: WKWebExtensionContext) -> Bool {
+        if Self.unpermissionedEvents.contains(event) {
+            return ownsRegisteredContext(context) && context.isLoaded && registrations[context.uniqueIdentifier]?.plan.provided.contains(event) == true
+        }
+        guard let permission = Self.eventPermissions[event] else { return false }
+        return permits(permission, for: context)
+    }
     private static func bridgeError(_ message: String) -> NSError {
         NSError(domain: "Bam.ExtensionCompatibility", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
     }
@@ -818,7 +891,7 @@ enum ExtensionCompatibility {
         port.messageHandler = { [weak self, weak context, weak port] message, error in
             guard let self, let context, let port, error == nil, self.ownsRegisteredContext(context),
                   let body = message as? [String: Any], let kind = body["kind"] as? String,
-                  let event = body["event"] as? String, let permission = Self.eventPermissions[event], self.permits(permission, for: context) else {
+                  let event = body["event"] as? String, self.allowsEvent(event, for: context) else {
                 port?.disconnect(throwing: Self.bridgeError("This event subscription is not authorized.")); return
             }
             guard var connection = self.eventConnections[key]?[identifier] else { return }
@@ -989,14 +1062,24 @@ enum ExtensionCompatibility {
 
     /// Delivers an event to every live document of one extension.
     func dispatch(_ event: String, _ arguments: [Any], to uniqueIdentifier: String) {
-        guard let context = registrations[uniqueIdentifier]?.context,
-              let permission = Self.eventPermissions[event], permits(permission, for: context) else { return }
+        guard let context = registrations[uniqueIdentifier]?.context, allowsEvent(event, for: context) else { return }
         let script = "globalThis.__bamCompatibility && globalThis.__bamCompatibility.dispatch(\(Self.json(event)), \(Self.json(arguments)));"
         documents[uniqueIdentifier]?.removeAll { !$0.isLive }
         for document in documents[uniqueIdentifier] ?? [] { document.web?.evaluateJavaScript(script, in: document.frame, in: .page) { _ in } }
         for connection in eventConnections[uniqueIdentifier]?.values ?? Dictionary<ObjectIdentifier, EventConnection>().values where connection.events.contains(event) {
             connection.port.sendMessage(["event": event, "args": arguments]) { _ in }
         }
+    }
+
+    /// A window this profile exposes committed new bounds: every registered context of this bridge's profile
+    /// that provides the event is signalled (pages directly, workers only while subscribed). The payload is
+    /// read by the adapter from WebKit's own windows.getAll, so the signal carries no arguments.
+    func signalWindowBoundsChanged() {
+        for key in registrations.keys.sorted() { dispatch("windows.onBoundsChanged", [], to: key) }
+    }
+    /// Contexts a bounds signal would reach (diagnostics and fixtures).
+    func boundsSignalRecipients() -> [String] {
+        registrations.keys.sorted().filter { key in registrations[key]?.context.map { allowsEvent("windows.onBoundsChanged", for: $0) } == true }
     }
 
     /// Installed font families as Chrome lists them: an ID and a localized display name,

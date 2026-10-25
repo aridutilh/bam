@@ -48,6 +48,9 @@ import WebKit
             const api = globalThis.browser || globalThis.chrome;
             // Registered unconditionally at start, as Proton Pass does; a missing event would stop the worker.
             chrome.runtime.onUpdateAvailable.addListener(() => {});
+            // Registered unconditionally at start, as Session Buddy does; WebKit has no such event.
+            const boundsEvents = [];
+            chrome.windows.onBoundsChanged.addListener(w => boundsEvents.push({id: w.id, left: w.left, top: w.top, width: w.width, height: w.height}));
             // cookies.onChanged as Chrome extensions use it: the listener reads changeInfo fields.
             const cookieEvents = [];
             chrome.cookies.onChanged.addListener(info => cookieEvents.push({type: typeof info, removed: info?.removed, name: info?.cookie?.name, cause: info?.cause}));
@@ -86,6 +89,11 @@ import WebKit
                 const shimmed = await new Promise(resolve => chrome.fontSettings.setFont({genericFamily: 'serif', fontId: 'Fixture'}, () => resolve(chrome.runtime.lastError ? String(chrome.runtime.lastError.message) : null)));
                 const relay = await new Promise(resolve => chrome.runtime.sendNativeMessage('com.ari.bam.compatibility', {kind: 'lastError-measurement'}, () => resolve(chrome.runtime.lastError ? String(chrome.runtime.lastError.message) : null)));
                 return {lastError: shimmed, relay};
+              }
+              if (message?.kind === 'bounds') {
+                const windows = await chrome.windows.getAll({populate: false});
+                return {events: boundsEvents.slice(), windows: windows.map(w => ({id: w.id, left: w.left, top: w.top, width: w.width, height: w.height})),
+                  baseline: globalThis.__bamCompatibility?.windowsBounds?.baseline ?? null};
               }
               if (message?.kind === 'cookie-diagnostics') {
                 const describe = async details => { try { const list = await chrome.cookies.getAll(details); return {count: list.length, hasFixture: list.some(c => c.name === 'bam-fixture-cookie')}; } catch (error) { return 'error: ' + String(error?.message || error); } };
@@ -259,6 +267,58 @@ import WebKit
         try check((try? await popupA.evaluateJavaScript("typeof Symbol.dispose + ',' + typeof Symbol.asyncDispose")) as? String == "symbol,symbol",
                   "Extension page lacked Symbol.dispose/asyncDispose")
         try await wait("Module worker did not answer its real action popup") { await result(popupB)?["starts"] as? Int == 1 }
+        // windows.onBoundsChanged: a committed move/resize of a window a profile exposes reaches that profile's
+        // worker once, as WebKit's own Window object; a window another profile does not expose never reaches it.
+        func boundsReport(_ popup: WKWebView) async -> (events: [[String: Any]], windows: [[String: Any]], baseline: [Any]) {
+            let report = await request(popup, kind: "bounds")
+            return (report?["events"] as? [[String: Any]] ?? [], report?["windows"] as? [[String: Any]] ?? [], report?["baseline"] as? [Any] ?? [])
+        }
+        try await wait("Workers did not take a windows.onBoundsChanged baseline at start") {
+            let a = await boundsReport(popupA), b = await boundsReport(popupB)
+            return a.baseline.count == 1 && b.baseline.count == 1 && a.events.isEmpty && b.events.isEmpty
+        }
+        let signalsBefore = (runtimeA.boundsSignalCount, runtimeB.boundsSignalCount)
+        let sharedBefore = window.frame
+        window.setFrame(NSRect(x: sharedBefore.minX + 37, y: sharedBefore.minY + 23, width: sharedBefore.width + 40, height: sharedBefore.height), display: false)
+        try await wait("A committed move/resize of the shared window did not reach both profiles' workers") {
+            let a = await boundsReport(popupA), b = await boundsReport(popupB)
+            return a.events.count == 1 && b.events.count == 1
+        }
+        try await Task.sleep(nanoseconds: 1_000_000_000)
+        let sharedA = await boundsReport(popupA), sharedB = await boundsReport(popupB)
+        let sharedWidth = Int(window.frame.width)
+        let sharedIDA = sharedA.windows.first { $0["width"] as? Int == sharedWidth }?["id"] as? Int
+        try check(sharedA.events.count == 1 && sharedB.events.count == 1 && runtimeA.boundsSignalCount == signalsBefore.0 + 1 && runtimeB.boundsSignalCount == signalsBefore.1 + 1,
+                  "One programmatic move+resize was not exactly one committed change per profile: A=\(sharedA.events) B=\(sharedB.events) signals=\(runtimeA.boundsSignalCount - signalsBefore.0),\(runtimeB.boundsSignalCount - signalsBefore.1)")
+        try check(sharedIDA != nil && sharedA.events[0]["id"] as? Int == sharedIDA && sharedA.events[0]["width"] as? Int == sharedWidth && sharedB.events[0]["width"] as? Int == sharedWidth,
+                  "The bounds event did not carry WebKit's window id and the new width: \(sharedA.events) windows=\(sharedA.windows) width=\(sharedWidth)")
+        // Scoped so the extra window and tab are gone before the remaining checks run.
+        do {
+            let onlyA = NSWindow(contentRect: NSRect(x: 60, y: 60, width: 320, height: 240), styleMask: [.titled], backing: .buffered, defer: false)
+            onlyA.isReleasedWhenClosed = false; onlyA.orderFront(nil)
+            let tabOnlyA = UUID(), sharedSurfaces = host.surfaces
+            host.surfaces = { profile in
+                var list = sharedSurfaces?(profile) ?? []
+                if profile == profileA { list.append(BrowserExtensionSurface(id: tabOnlyA, title: "Profile A only", url: pageURL, webView: nil, window: onlyA, isActive: true, isSelected: true)) }
+                return list
+            }
+            host.reconcile()
+            defer { host.surfaces = sharedSurfaces; host.reconcile(); onlyA.orderOut(nil); onlyA.close() }
+            try await wait("Profile A's worker did not add its new window to the bounds baseline") { await boundsReport(popupA).baseline.count == 2 }
+            let crossBefore = (runtimeA.boundsSignalCount, runtimeB.boundsSignalCount)
+            let onlyBefore = onlyA.frame
+            onlyA.setFrame(NSRect(x: onlyBefore.minX + 50, y: onlyBefore.minY, width: onlyBefore.width + 30, height: onlyBefore.height + 10), display: false)
+            try await wait("A committed resize of profile A's own window did not reach its worker") { await boundsReport(popupA).events.count == 2 }
+            try await Task.sleep(nanoseconds: 1_000_000_000)
+            let crossA = await boundsReport(popupA), crossB = await boundsReport(popupB)
+            let onlyWidth = Int(onlyA.frame.width)
+            let onlyIDA = crossA.windows.first { $0["width"] as? Int == onlyWidth }?["id"] as? Int
+            try check(crossA.events.count == 2 && onlyIDA != nil && crossA.events[1]["id"] as? Int == onlyIDA && onlyIDA != sharedIDA && crossA.events[1]["width"] as? Int == onlyWidth,
+                      "Profile A's own window change was missed, duplicated or misidentified: \(crossA.events) windows=\(crossA.windows)")
+            try check(crossB.events.count == 1 && runtimeB.boundsSignalCount == crossBefore.1 && runtimeA.boundsSignalCount == crossBefore.0 + 1,
+                      "A window profile B does not expose signalled or reached profile B: B=\(crossB.events) signalsB=\(runtimeB.boundsSignalCount - crossBefore.1)")
+        }
+
         // offscreen: a worker creates a hidden page, messages it, and closes it; profiles stay separate.
         let offscreenReport = await request(popupA, kind: "offscreen")
         let echo = offscreenReport?["echo"] as? [String: Any]
