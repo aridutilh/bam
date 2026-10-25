@@ -64,14 +64,6 @@ final class NetworkTripwire: @unchecked Sendable {
     func stop() { listener?.cancel(); listener = nil }
 }
 
-/// The relaunched child's PID, readable from the background hard deadline.
-final class OwnedChildPID: @unchecked Sendable {
-    private let lock = NSLock()
-    private var pid: pid_t = 0
-    func set(_ value: pid_t) { lock.lock(); pid = value; lock.unlock() }
-    var value: pid_t { lock.lock(); defer { lock.unlock() }; return pid }
-}
-
 /// A child's stdout, collected as it arrives, bounded to 1 MiB.
 final class ChildOutput: @unchecked Sendable {
     private let lock = NSLock()
@@ -107,9 +99,8 @@ final class ChildOutput: @unchecked Sendable {
     private var childPIDs: [Int32] = []
     /// The relaunched child this fixture owns while one runs; every exit path stops it first.
     private var activeChild: Process?
-    private let ownedChildPID = OwnedChildPID()
     /// Overall deadline on the main run loop, then a background hard deadline that still works
-    /// if the main thread stalls (it kills only the owned child and exits).
+    /// if the main thread stalls (it only exits; it never signals a stored PID).
     static let parentDeadline: TimeInterval = 420
     static let parentHardDeadline: TimeInterval = 480
 
@@ -123,7 +114,7 @@ final class ChildOutput: @unchecked Sendable {
             for _ in 0..<30 where child.isRunning { try? await Task.sleep(for: .milliseconds(100)) }
         }
         let exited = !child.isRunning
-        if exited, activeChild === child { activeChild = nil; ownedChildPID.set(0) }
+        if exited, activeChild === child { activeChild = nil }
         return exited
     }
     private var tripwirePort: UInt16 = 0
@@ -287,7 +278,7 @@ final class ChildOutput: @unchecked Sendable {
         }
         child.standardOutput = output
         try child.run()
-        activeChild = child; ownedChildPID.set(child.processIdentifier)
+        activeChild = child
         let deadline = Date().addingTimeInterval(90)
         while child.isRunning && Date() < deadline && !finished { try await Task.sleep(for: .milliseconds(100)) }
         // finish() owns the child once the fixture is finishing.
@@ -297,7 +288,7 @@ final class ChildOutput: @unchecked Sendable {
             output.fileHandleForReading.readabilityHandler = nil
             throw Failure.assertion("\(mode) relaunch timed out after 90 s; \(stopped ? "stopped and confirmed exited" : "could not be confirmed stopped")")
         }
-        activeChild = nil; ownedChildPID.set(0)
+        activeChild = nil
         // Bounded drain: the pipe normally reaches EOF at exit; never wait more than 2 s for it.
         for _ in 0..<40 where !collected.isEnded { try await Task.sleep(for: .milliseconds(50)) }
         output.fileHandleForReading.readabilityHandler = nil
@@ -397,13 +388,11 @@ final class ChildOutput: @unchecked Sendable {
         watchdog = Timer.scheduledTimer(withTimeInterval: Self.parentDeadline, repeats: false) { [weak self] _ in
             Task { @MainActor [weak self] in self?.finish(false, "Overall fixture timeout") }
         }
-        // Last resort if the main thread stalls: kill only the owned child, then exit. The
-        // fixture's temporary folder is left in place rather than removed under a live child.
-        let owned = ownedChildPID
+        // Last resort if the main thread stalls: exit without signalling anything. A raw PID
+        // could already belong to another process by now; each relaunch child enforces its own
+        // 75 s exit. The temporary folder is left in place rather than removed.
         DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + Self.parentHardDeadline) {
-            let pid = owned.value
-            if pid > 0 { kill(pid, SIGKILL) }
-            print("FAIL: Arc import — hard deadline reached with the main thread unresponsive\(pid > 0 ? "; killed owned relaunch child \(pid)" : "")")
+            print("FAIL: Arc import — hard deadline reached with the main thread unresponsive; temporary folder left in place")
             fflush(stdout); exit(1)
         }
         Task { @MainActor in
