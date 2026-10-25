@@ -51,23 +51,22 @@ enum ExtensionBookmarkTree {
         private(set) var items = 0
         private(set) var exceeded = false
         init() {}
-        private mutating func spend(_ count: Int) -> Bool {
-            guard !exceeded, items + count <= maximumInputItems else { exceeded = true; return false }
-            items += count; return true
-        }
-        private static func weight(_ children: [Child]) -> Int {
-            children.reduce(0) { total, child in if case .split = child { return total + 2 }; return total + 1 }
+        /// Spends one item for the container plus its children's weight; counting stops at the remaining budget.
+        private mutating func spend(_ children: [Child]?) -> Bool {
+            guard !exceeded, items < maximumInputItems,
+                  let weight = children.map({ ExtensionBookmarkTree.weight($0, limit: maximumInputItems - items - 1) }) ?? 0 else { exceeded = true; return false }
+            items += 1 + weight; return true
         }
         @discardableResult mutating func addFavorite(_ page: Page) -> Bool {
-            guard spend(1) else { return false }
+            guard spend(nil) else { return false }
             input.favorites.append(page); return true
         }
         @discardableResult mutating func addSpace(id: Int, name: String, children: [Child]) -> Bool {
-            guard spend(1 + Self.weight(children)) else { return false }
+            guard spend(children) else { return false }
             input.spaces.append(Space(id: id, name: name, children: children)); return true
         }
         @discardableResult mutating func addFolder(id: UUID, name: String, children: [Child]) -> Bool {
-            guard spend(1 + Self.weight(children)) else { return false }
+            guard spend(children) else { return false }
             input.folders.append(Folder(id: id, name: name, children: children)); return true
         }
         /// Nil when the budget was exceeded: the caller must not return a partial tree.
@@ -78,20 +77,46 @@ enum ExtensionBookmarkTree {
     static let tooLarge = Failure(description: "These bookmarks are too large or too deeply nested for Bam to provide.")
     static let inconsistent = Failure(description: "Bam's saved items could not be read consistently; try again.")
 
+    /// Items a child list supplies (a split is two pages), or nil as soon as it exceeds `limit`; never scans past it.
+    static func weight(_ children: [Child], limit: Int) -> Int? {
+        var total = 0
+        for child in children {
+            if case .split = child { total += 2 } else { total += 1 }
+            if total > limit { return nil }
+        }
+        return total
+    }
+    /// Everything supplied counts, including unreachable folders and pages that will be dropped as non-web.
+    static func preflight(_ input: Input) -> Failure? {
+        var supplied = input.favorites.count + input.spaces.count + input.folders.count
+        guard supplied <= maximumInputItems else { return tooLarge }
+        for space in input.spaces {
+            guard let weight = weight(space.children, limit: maximumInputItems - supplied) else { return tooLarge }
+            supplied += weight
+        }
+        for folder in input.folders {
+            guard let weight = weight(folder.children, limit: maximumInputItems - supplied) else { return tooLarge }
+            supplied += weight
+        }
+        return nil
+    }
+
     /// Chrome-shaped nodes: `getTree()` resolves to `[root]`. IDs: root "0", "favorites", "space-<id>", then Bam's
     /// own folder and tab UUIDs. `index`/`parentId` are positions after omitting non-web pages. No dates are set.
     static func tree(_ input: Input) -> Result<[String: Any], Failure> {
+        if let failure = preflight(input) { return .failure(failure) }
         var folders: [UUID: Folder] = [:]
         for folder in input.folders {
             guard folders[folder.id] == nil else { return .failure(inconsistent) }
             folders[folder.id] = folder
         }
-        var usedFolders = Set<UUID>(), usedPages = Set<UUID>(), nodes = 1
+        // One ID space for folders and pages: a page may not reuse a folder's UUID, in either order.
+        var usedIDs = Set<UUID>(), nodes = 1
         var failure: Failure?
 
         func page(_ page: Page, parent: String, index: Int) -> [String: Any]? {
             guard failure == nil else { return nil }
-            guard usedPages.insert(page.id).inserted else { failure = inconsistent; return nil }
+            guard folders[page.id] == nil, usedIDs.insert(page.id).inserted else { failure = inconsistent; return nil }
             guard isWeb(page.address) else { return nil }
             nodes += 1
             guard nodes <= maximumNodes else { failure = tooLarge; return nil }
@@ -108,7 +133,7 @@ enum ExtensionBookmarkTree {
                 case .split(let primary, let secondary):
                     for item in [primary, secondary] { if let node = page(item, parent: parent, index: result.count) { result.append(node) } }
                 case .folder(let id):
-                    guard let folder = folders[id], usedFolders.insert(id).inserted else { failure = inconsistent; return [] }
+                    guard let folder = folders[id], usedIDs.insert(id).inserted else { failure = inconsistent; return [] }
                     guard depth + 1 <= maximumDepth else { failure = tooLarge; return [] }
                     nodes += 1
                     guard nodes <= maximumNodes else { failure = tooLarge; return [] }

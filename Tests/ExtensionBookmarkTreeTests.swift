@@ -93,6 +93,26 @@ import Foundation
         for item in many + many.prefix(5) { if budget.addFavorite(item) { accepted += 1 } else { break } }
         try check(accepted == T.maximumInputItems && budget.result == nil && !budget.addSpace(id: 1, name: "S", children: []),
                   "The builder kept collecting past its budget or still produced a partial input")
+        // One ID space: a page reusing a folder's UUID is refused whichever comes first.
+        let shared = UUID(), clash = T.Page(id: shared, title: "Clash", address: "https://clash.example/")
+        try check(refused(T.Input(spaces: [T.Space(id: 1, name: "S", children: [.page(clash), .folder(shared)])], folders: [T.Folder(id: shared, name: "F", children: [])]), T.inconsistent) &&
+                  refused(T.Input(spaces: [T.Space(id: 1, name: "S", children: [.folder(shared), .page(clash)])], folders: [T.Folder(id: shared, name: "F", children: [])]), T.inconsistent) &&
+                  refused(T.Input(favorites: [clash], spaces: [T.Space(id: 1, name: "S", children: [.folder(shared)])], folders: [T.Folder(id: shared, name: "F", children: [])]), T.inconsistent),
+                  "A page and a folder sharing a UUID produced duplicate node IDs")
+
+        // Input preflight: everything supplied counts before anything is built, including unreachable folders,
+        // non-web pages that would be dropped, and child lists.
+        let unreachable = (0...T.maximumInputItems).map { _ in T.Folder(id: UUID(), name: "u", children: []) }
+        let nonWeb = (0...T.maximumInputItems).map { _ in T.Page(id: UUID(), title: "n", address: "orbit://newtab") }
+        try check(refused(T.Input(spaces: [], folders: unreachable), T.tooLarge) && refused(T.Input(favorites: nonWeb), T.tooLarge) &&
+                  refused(T.Input(spaces: [T.Space(id: 1, name: "S", children: nonWeb.map { .page($0) })]), T.tooLarge) &&
+                  refused(T.Input(spaces: [T.Space(id: 1, name: "S", children: Array(nonWeb.prefix(T.maximumInputItems / 2 + 1)).map { .split(primary: $0, secondary: $0) })]), T.tooLarge),
+                  "Large unreachable, non-web or split-heavy input was not refused before building")
+        try check(T.weight(Array(repeating: .folder(UUID()), count: 50_000), limit: 10) == nil && T.weight([.page(docs), .split(primary: primary, secondary: secondary)], limit: 3) == 3,
+                  "Child weight did not stop at its limit or miscounted splits")
+        var wide = T.Builder()
+        try check(!wide.addSpace(id: 1, name: "S", children: nonWeb.map { .page($0) }) && wide.result == nil && wide.items == 0,
+                  "The builder accepted or partly counted an oversized child list")
         return checks
     }
 }
