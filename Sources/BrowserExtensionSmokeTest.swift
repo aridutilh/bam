@@ -24,7 +24,7 @@ import Darwin
         }
     }
     static func run(fixtureURL: URL, pageURL: URL) async throws -> Int {
-        var checks = 0
+        var checks = try await ExtensionSiteAccessSmokeTest.run(pageURL: pageURL)
         func check(_ condition: Bool, _ message: String) throws {
             guard condition else { throw ExtensionSmokeTest.Failure(description: message) }; checks += 1
         }
