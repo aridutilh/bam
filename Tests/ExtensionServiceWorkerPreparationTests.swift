@@ -143,7 +143,7 @@ import JavaScriptCore
             do { _ = try prepare(url, backup: backupLocation?(url), source: source) } catch { rejected = true }
             try check(rejected && snapshot(url) == before, "Invalid input is rejected without package mutations: \(name)")
         }
-        for (index, path) in ["../outside.js", "/lib/worker.js", "https://example.com/a.js", "lib\\worker.js", "lib//worker.js", "lib/./worker.js", "lib/%2e%2e/a.js", "lib%2fworker.js", "lib/worker.js?x", "lib/worker.js#x", "lib/bad%ZZ.js", ""].enumerated() {
+        for (index, path) in ["../outside.js", "https://example.com/a.js", "lib\\worker.js", "lib//worker.js", "lib/./worker.js", "lib/%2e%2e/a.js", "lib%2fworker.js", "lib/worker.js?x", "lib/worker.js#x", "lib/bad%ZZ.js", ""].enumerated() {
             try reject("path-\(index)", bytes: manifest(worker: path))
         }
         try reject("missing", bytes: manifest(worker: "missing.js"))
@@ -154,6 +154,10 @@ import JavaScriptCore
         try reject("empty-adapter", source: "")
         try reject("large-adapter", source: String(repeating: "x", count: ExtensionPackagePreparation.maximumManifestBytes + 1))
         try reject("inside-backup", backupLocation: { $0.appendingPathComponent("original.json") })
+        try reject("rooted-worker-symlink", bytes: manifest(worker: "/lib/worker.js"), setup: { url in
+            try fm.removeItem(at: url.appendingPathComponent("lib/worker.js"))
+            try fm.createSymbolicLink(at: url.appendingPathComponent("lib/worker.js"), withDestinationURL: url.appendingPathComponent("lib/helper.js"))
+        })
         try reject("worker-symlink", setup: { url in
             try fm.removeItem(at: url.appendingPathComponent("lib/worker.js"))
             try fm.createSymbolicLink(at: url.appendingPathComponent("lib/worker.js"), withDestinationURL: url.appendingPathComponent("lib/helper.js"))
@@ -186,6 +190,40 @@ import JavaScriptCore
         var rejectedTamper = false
         do { _ = try prepare(classic) } catch { rejectedTamper = true }
         try check(rejectedTamper && snapshot(classic) == tampered, "A modified prepared wrapper is rejected without overwriting evidence")
+        // A root-relative worker path ("/js/background.js", as uBlock Origin Lite ships) is the same file
+        // for Chrome; it prepares to package-relative paths. Only one leading slash is accepted.
+        for type in [nil, "module"] as [String?] {
+            let name = "rooted-" + (type ?? "classic")
+            let url = try package(name, try manifest(worker: "/lib/worker.js", type: type), scripts: [:])
+            _ = try prepare(url)
+            let prepared = try object(url.appendingPathComponent("manifest.json"))
+            let rootedMarker = prepared[ExtensionServiceWorkerPreparation.markerKey] as! [String: Any]
+            let entryPath = (prepared["background"] as! [String: Any])["service_worker"] as! String
+            try check(rootedMarker["original"] as? String == "lib/worker.js" && !entryPath.hasPrefix("/") && entryPath.hasPrefix("lib/") &&
+                      ExtensionServiceWorkerPreparation.isPrepared(manifest: prepared), "\(name): a root-relative worker did not prepare to package-relative paths")
+            try check(try prepare(url) == nil, "\(name): a prepared root-relative worker did not verify on repeat")
+            try check(((try object(root.appendingPathComponent(name + "-original.json")))["background"] as? [String: Any])?["service_worker"] as? String == "/lib/worker.js",
+                      "\(name): the preserved original manifest lost the declared root-relative path")
+            try check(try ExtensionServiceWorkerPreparation.refreshAdapter(package: url, originalManifestURL: root.appendingPathComponent(name + "-original.json"), adapterSource: adapter + "// next\n"),
+                      "\(name): a prepared root-relative worker could not refresh its adapter")
+        }
+        // An earlier step (content-script preparation) already saved the original manifest: its declared
+        // root-relative worker must still match, and the saved bytes keep the declared form.
+        do {
+            let original = try manifest(worker: "/lib/worker.js", type: nil)
+            let url = try package("rooted-with-backup", original, scripts: [:])
+            let backupURL = root.appendingPathComponent("rooted-with-backup-original.json")
+            try original.write(to: backupURL)
+            _ = try prepare(url, backup: backupURL)
+            try check(try Data(contentsOf: backupURL) == original &&
+                      ((try object(backupURL))["background"] as? [String: Any])?["service_worker"] as? String == "/lib/worker.js",
+                      "A pre-existing original manifest was not accepted or did not keep the declared root-relative path")
+            try check(try prepare(url, backup: backupURL) == nil, "A root-relative preparation with a pre-existing backup did not verify on repeat")
+        }
+        for (index, path) in ["//lib/worker.js", "/../lib/worker.js", "/", "/lib/../lib/worker.js", "/lib//worker.js", "///lib/worker.js",
+                              "/lib/worker.js?x", "/c:/lib/worker.js", "/lib%2fworker.js", "/lib/%2e%2e/worker.js", "/%2flib/worker.js"].enumerated() {
+            try reject("rooted-\(index)", bytes: manifest(worker: path))
+        }
         try refreshChecks(root: root, manifest: manifest, package: package, snapshot: snapshot, object: object, adapter: adapter)
     }
 
