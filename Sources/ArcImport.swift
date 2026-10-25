@@ -313,6 +313,8 @@ enum ArcImport {
         /// Arc themes brought over with their own colors and gradient (new
         /// Spaces, or earlier-imported Spaces that still wear the color Bam chose).
         var importedThemes = 0
+        /// Of those, themes whose background wasn't a two-color gradient Bam reads.
+        var themesWithoutGradient = 0
         var customIcons = 0
         var firstSpaceID: Int?
         /// Previously imported Spaces the user removed and Arc has nothing new for.
@@ -358,8 +360,14 @@ enum ArcImport {
             if skippedSpaces > 0 { lines.append("\(plural(skippedSpaces, "Space")) won’t fit within Bam’s \(BrowserSession.maximumSpaces)-Space limit.") }
             if importedThemes > 0 {
                 lines.append(importedThemes == 1
-                    ? "1 Space keeps its Arc theme colors and gradient, in light and dark. Arc’s grain and vibrancy aren’t reproduced."
-                    : "\(importedThemes) Spaces keep their Arc theme colors and gradients, in light and dark. Arc’s grain and vibrancy aren’t reproduced.")
+                    ? "1 Space keeps its Arc theme colors, in light and dark. Arc’s grain and vibrancy aren’t reproduced."
+                    : "\(importedThemes) Spaces keep their Arc theme colors, in light and dark. Arc’s grain and vibrancy aren’t reproduced.")
+                // Only claim a gradient when Bam could read one.
+                if themesWithoutGradient > 0 {
+                    lines.append(themesWithoutGradient == 1
+                        ? "1 Arc theme has a background Bam can’t draw; its Space uses the theme’s own background colors instead."
+                        : "\(themesWithoutGradient) Arc themes have backgrounds Bam can’t draw; their Spaces use the themes’ own background colors instead.")
+                }
             }
             if approximatedThemes > 0 {
                 lines.append(approximatedThemes == 1
@@ -699,6 +707,7 @@ enum ArcImport {
                session.setSpaceTheme(id: space, theme: theme) {
                 links["arc-theme:\(arcSpace.id)"] = "space:\(space)"
                 report.importedThemes += 1
+                if theme.gradient.isEmpty { report.themesWithoutGradient += 1 }
                 themedNow = true
             }
             if report.firstSpaceID == nil { report.firstSpaceID = space }
