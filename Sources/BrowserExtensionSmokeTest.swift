@@ -915,6 +915,34 @@ import Darwin
             try check(restored.state.mode == .allRequested && restored.timed.requested.isEmpty && granted(ip) && granted(newSite) &&
                 !isFinite(host.context(for: extensionID)?.grantedPermissionMatchPatterns[ipPattern]),
                 "A fresh All requested approval must grant every requested site permanently")
+            // Refused before any review (undeclared): answered empty, nothing shown, and no denial recorded, for both
+            // prompt kinds. A stored denial would cover the whole host ahead of any later grant.
+            guard let liveContext = host.context(for: extensionID) else { throw ExtensionSmokeTest.Failure(description: "No live context for refusal checks") }
+            let earlierPrompt = host.permissionPrompt
+            defer { host.permissionPrompt = earlierPrompt }
+            var reviewsShown = 0
+            host.permissionPrompt = { _ in reviewsShown += 1; return false }
+            func deniedKeys(_ url: URL) -> [String] {
+                (host.context(for: extensionID)?.deniedPermissionMatchPatterns.keys.filter { $0.matches(url) }.map(\.string) ?? []) +
+                (host.records.first { $0.id == extensionID }?.deniedPatterns.keys.filter { (try? WKWebExtension.MatchPattern(string: $0))?.matches(url) == true } ?? [])
+            }
+            let undeclaredURL = URL(string: "https://undeclared.invalid/page")!
+            var urlAnswer: Set<URL>?, patternAnswer: Set<WKWebExtension.MatchPattern>?
+            promptRuntime.webExtensionController(promptController, promptForPermissionToAccess: [undeclaredURL], in: nil, for: liveContext) { granted, _ in urlAnswer = granted }
+            promptRuntime.webExtensionController(promptController, promptForPermissionMatchPatterns: [try WKWebExtension.MatchPattern(string: "https://undeclared.invalid/*")],
+                                                 in: nil, for: liveContext) { granted, _ in patternAnswer = granted }
+            try check(reviewsShown == 0 && urlAnswer == [] && patternAnswer == [] && deniedKeys(undeclaredURL).isEmpty &&
+                liveContext.permissionStatus(for: undeclaredURL) != .deniedExplicitly,
+                "A refusal the user never saw recorded a denial or showed a review: shown=\(reviewsShown), denied=\(deniedKeys(undeclaredURL))")
+            // Offered and declined (an optional site): that is the user's decision, so it is denied.
+            let declinedURL = URL(string: "http://localhost/declined")!
+            var declinedAnswer: Set<URL>?
+            promptRuntime.webExtensionController(promptController, promptForPermissionToAccess: [declinedURL], in: nil, for: liveContext) { granted, _ in declinedAnswer = granted }
+            try check(reviewsShown == 1 && declinedAnswer == [] && liveContext.permissionStatus(for: declinedURL) == .deniedExplicitly && !deniedKeys(declinedURL).isEmpty,
+                "An offered and declined site must be denied: shown=\(reviewsShown), status=\(liveContext.permissionStatus(for: declinedURL).rawValue)")
+            // Test cleanup only: drop the fixture's declined denial so later checks start from the same state.
+            for key in liveContext.deniedPermissionMatchPatterns.keys where key.matches(declinedURL) { liveContext.deniedPermissionMatchPatterns.removeValue(forKey: key) }
+            host.persistPermissions(liveContext)
         }
         let originalContext = host.context(for: extensionID)!
         seedOptionalPermissions(originalContext)

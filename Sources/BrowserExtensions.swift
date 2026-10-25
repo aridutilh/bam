@@ -1500,7 +1500,10 @@ struct BrowserExtensionPermissionReview {
         guard authorizes(tab, for: context), owner.promptIsCurrent(context, revision: revision) else { completionHandler([], nil); return }
         // Bound to the state the dialog was computed from: a revoke, mode change or update meanwhile grants nothing.
         let granted = owner.recordSiteApprovals(context, approved.compactMap { decisions[$0] }, revision: revision) ? approved : []
-        for url in urls where !granted.contains(url) && !(approved.contains(url)) { context.setPermissionStatus(.deniedExplicitly, for: url) }
+        // Only what the user was shown and declined becomes a denial. Items refused before any review (undeclared, or
+        // pending under All requested) are answered empty with no denial: WebKit would store one for the whole host,
+        // ahead of any later grant, as if the user had decided.
+        for url in offered where !approved.contains(url) { context.setPermissionStatus(.deniedExplicitly, for: url) }
         owner.persistPermissions(context); completionHandler(granted, nil)
     }
     func webExtensionController(_ controller: WKWebExtensionController, promptForPermissionMatchPatterns patterns: Set<WKWebExtension.MatchPattern>, in tab: (any WKWebExtensionTab)?, for context: WKWebExtensionContext, completionHandler: @escaping (Set<WKWebExtension.MatchPattern>, Date?) -> Void) {
@@ -1512,7 +1515,7 @@ struct BrowserExtensionPermissionReview {
         guard authorizes(tab, for: context), owner.promptIsCurrent(context, revision: revision) else { completionHandler([], nil); return }
         // Bound to the state the dialog was computed from: a revoke, mode change or update meanwhile grants nothing.
         let granted = owner.recordSiteApprovals(context, approved.compactMap { decisions[$0] }, revision: revision) ? approved : []
-        for pattern in patterns where !granted.contains(pattern) && !approved.contains(pattern) { context.setPermissionStatus(.deniedExplicitly, for: pattern) }
+        for pattern in offered where !approved.contains(pattern) { context.setPermissionStatus(.deniedExplicitly, for: pattern) }
         owner.persistPermissions(context); completionHandler(granted, nil)
     }
     func webExtensionController(_ controller: WKWebExtensionController, presentActionPopup action: WKWebExtension.Action, for context: WKWebExtensionContext, completionHandler: @escaping (Error?) -> Void) {
