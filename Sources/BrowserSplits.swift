@@ -17,7 +17,8 @@ import WebKit
                 isActive: tab.id == snapshot.activeID, isFavorite: tab.isFavorite, isUnloaded: tab.isUnloaded, isSleeping: tab.isSleeping,
                 isSplit: companion != nil, canFavorite: companion == nil && (tab.isFavorite || favoriteCount < BrowserSession.maximumFavorites),
                 depth: depth, parentFolderID: parent, hasEarlierSibling: earlier, hasLaterSibling: later,
-                canWrapInFolder: !tab.isFavorite && URLInput.extensionURL(tab.address) == nil)
+                canWrapInFolder: !tab.isFavorite && URLInput.extensionURL(tab.address) == nil,
+                monogram: companion == nil ? tab.monogram : nil)
         }
         let visible = snapshot.visibleTabs
         // Stable indent: from the whole tree, so collapsing the deepest branch doesn't shift rows.

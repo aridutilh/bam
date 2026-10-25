@@ -633,6 +633,33 @@ import AppKit
                 "Adding only a theme re-tints the footer icon, heading and visible rows")
         sidebar.configureSpaces(plainSpaces); sidebar.layoutSubtreeIfNeeded()
         require(tints().allSatisfy { $0 === ArkPalette.spaceTint(0) }, "Removing only the theme (undo) restores the flat tint everywhere")
+        // Monograms: rows without a favicon show their mark on a Space-tinted
+        // disc; a favicon replaces it and losing the favicon brings it back;
+        // a custom/special symbol (no monogram) keeps the symbol.
+        let markedID = UUID(), symbolID = UUID()
+        func marked(_ mark: String?) -> [SidebarTabItem] {
+            [SidebarTabItem(id: markedID, title: "Gamma notes", subtitle: "", symbol: "globe", isPinned: true, isActive: false, monogram: mark),
+             SidebarTabItem(id: symbolID, title: "Book", subtitle: "", symbol: "book", isPinned: true, isActive: false)]
+        }
+        sidebar.configureSpaces(plainSpaces); cache[markedID] = nil
+        sidebar.faviconProvider = { id in cache[id] }
+        update(0, marked("G")); sidebar.refreshFavicons()
+        let markedIcon = icon(row(table(in: 0), 0)), symbolIcon = icon(row(table(in: 0), 1))
+        require(markedIcon.identifier?.rawValue == "monogram-G" && markedIcon.image?.isTemplate == false && markedIcon.frame.size == NSSize(width: 16, height: 16),
+                "An icon-less row shows its monogram in the 16pt icon slot")
+        require(symbolIcon.identifier == nil && symbolIcon.image?.isTemplate == true, "A row with a custom symbol keeps the symbol")
+        let firstMark = markedIcon.image
+        sidebar.configureSpaces(themedSpaces); sidebar.layoutSubtreeIfNeeded()
+        require(icon(row(table(in: 0), 0)).image !== firstMark && icon(row(table(in: 0), 0)).identifier?.rawValue == "monogram-G",
+                "A Space tint change redraws the monogram's disc")
+        cache[markedID] = red; sidebar.refreshFavicons()
+        require(icon(row(table(in: 0), 0)).image === red && icon(row(table(in: 0), 0)).identifier?.rawValue == "website-favicon", "A favicon wins over the monogram")
+        cache[markedID] = nil; update(0, marked("H")); sidebar.refreshFavicons()
+        require(icon(row(table(in: 0), 0)).identifier?.rawValue == "monogram-H", "Losing the favicon brings the (updated) monogram back")
+        update(0, marked(nil))
+        require(icon(row(table(in: 0), 0)).identifier == nil && icon(row(table(in: 0), 0)).image?.isTemplate == true,
+                "A row whose monogram goes away shows its symbol again")
+        sidebar.configureSpaces(plainSpaces); sidebar.faviconProvider = nil
         print("PASS: \(checks) sidebar virtualization, identity, scrolling, paging and extension action checks")
         window.contentView = nil
     }

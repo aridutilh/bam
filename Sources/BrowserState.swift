@@ -95,6 +95,13 @@ struct BrowserTab: Codable, Identifiable, Equatable {
         if address.contains("wikipedia.org") { return "book.closed" }
         return "globe"
     }
+    /// A one-character mark shown instead of the generic globe, so pages
+    /// without an icon yet are still told apart. Nil when a custom or
+    /// special symbol applies (those, and real favicons, always win).
+    var monogram: String? {
+        guard saved?.customSymbol == nil, symbol == "globe" else { return nil }
+        return Monogram.make(title: displayTitle, address: address)
+    }
     static func validAddress(_ address: String) -> Bool {
         address == "orbit://newtab" || address == "orbit://video" || URLInput.directURL(address) != nil || URLInput.extensionURL(address) != nil
             || ArcEaselReference.isReference(address)
@@ -323,6 +330,30 @@ struct SpaceTheme: Codable, Hashable {
             amount = min(1, amount + 0.05); color = base.mixed(toward: ink, by: amount)
         }
         return worst(color) >= Self.minimumIconContrast ? color : nil
+    }
+}
+
+/// The mark for a page with no icon: the first letter, number or emoji of its
+/// title, or of its host (without "www.") when the title is empty or is just
+/// the address. Letters are uppercased.
+enum Monogram {
+    static func make(title: String, address: String) -> String? {
+        // Only web addresses lend their host; Bam's own orbit:// pages don't.
+        let url = URL(string: address)
+        let host = ["http", "https"].contains(url?.scheme?.lowercased() ?? "") ? url?.host.map { $0.lowercased().hasPrefix("www.") ? String($0.dropFirst(4)) : $0 } : nil
+        let text = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !text.isEmpty, text != address, text.lowercased() != host?.lowercased(), let mark = first(in: text) { return mark }
+        return host.flatMap(first(in:))
+    }
+    private static func first(in text: String) -> String? {
+        for character in text {
+            let emoji = character.unicodeScalars.contains { $0.properties.isEmojiPresentation }
+            guard character.isLetter || character.isNumber || emoji else { continue }
+            if emoji { return String(character) }
+            let upper = String(character).uppercased()
+            return upper.count == 1 ? upper : String(character)
+        }
+        return nil
     }
 }
 
