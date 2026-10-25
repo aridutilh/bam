@@ -6,6 +6,9 @@ import WebKit
     private var watchdog: Timer?
     private var finished = false
     private var task: Task<Void, Never>?
+    private var suiteName: String {
+        CommandLine.arguments.contains("--extension-site-access-only") ? "Extension site access diagnostic" : "Extensions"
+    }
 
     func start() {
         guard #available(macOS 15.4, *) else {
@@ -79,6 +82,12 @@ import WebKit
                     ExtensionFocusProbe.start(pageURL: page)
                     return
                 }
+                // A separately labelled diagnostic; the default full run still includes this fixture.
+                if CommandLine.arguments.contains("--extension-site-access-only") {
+                    let checks = try await ExtensionSiteAccessSmokeTest.run(pageURL: page)
+                    self.finish(true, "\(checks) (site access only; not a full extension run)")
+                    return
+                }
                 // Diagnostic modifier: `--extension-test --extension-dnr-only` runs only the
                 // declarativeNetRequest suite. The full run (no modifier) always includes it.
                 if CommandLine.arguments.contains("--extension-dnr-only") {
@@ -102,7 +111,7 @@ import WebKit
     private func finish(_ success: Bool, _ message: String) {
         guard !finished else { return }
         finished = true; watchdog?.invalidate(); watchdog = nil
-        print("\(success ? "PASS" : "FAIL"): Extensions — \(message)")
+        print("\(success ? "PASS" : "FAIL"): \(suiteName) — \(message)")
         fflush(stdout); exit(success ? 0 : 1)
     }
 }
