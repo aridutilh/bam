@@ -16,9 +16,9 @@ import JavaScriptCore
     /// `distinctRoots` (set before this script) makes `chrome` a separate root with its own event objects.
     static let fakeEngine = """
     var console = {error: function() {}, log: function() {}};
-    var clock = 0, timers = [];
+    var clock = 0, timers = [], nextTimer = 0;
     var performance = {now: function() { return clock; }};
-    function setTimeout(fn, ms) { timers.push({fn: fn, at: clock + (ms || 0), id: timers.length + 1}); return timers.length; }
+    function setTimeout(fn, ms) { var id = ++nextTimer; timers.push({fn: fn, at: clock + (ms || 0), id: id}); return id; }
     function clearTimeout(id) { timers = timers.filter(function(t) { return t.id !== id; }); }
     function advance(ms) { clock += ms; var due = timers.filter(function(t) { return t.at <= clock; }); timers = timers.filter(function(t) { return t.at > clock; }); due.forEach(function(t) { t.fn(); }); }
     var location = {origin: 'webkit-extension://fixture', href: 'webkit-extension://fixture/worker.js'};
@@ -122,6 +122,20 @@ import JavaScriptCore
             return (js, { errors })
         }
         @discardableResult func eval(_ js: JSContext, _ source: String) -> JSValue { js.evaluateScript(source)! }
+
+        // MARK: The fake clock's timer IDs are unique, so clearing one never cancels another.
+        let (clockCheck, _) = context(permissions: ["storage"])
+        eval(clockCheck, """
+        var fired = []; var t1 = setTimeout(function() { fired.push(1); }, 10), t2 = setTimeout(function() { fired.push(2); }, 10);
+        clearTimeout(t1); var t3 = setTimeout(function() { fired.push(3); }, 10); clearTimeout(t2); advance(10);
+        """)
+        try check(eval(clockCheck, "t1 === 1 && t2 === 2 && t3 === 3 && fired.join() === '3'").toBool(),
+                  "Fake timers must use unique IDs: \(eval(clockCheck, "[t1, t2, t3, fired.join()].join('|')"))")
+
+        // MARK: The review names the capability in words, never the internal plan key.
+        let label = ExtensionCompatibility.reviewLabel(["notifications", "tabs.metadata"])
+        try check(label == "notifications, tab addresses and titles (requires the tabs permission; no page-content access)" && !label.contains("tabs.metadata"),
+                  "The tab metadata review label must be human-readable: \(label)")
 
         // MARK: Without `tabs` nothing is wrapped.
         let (plain, plainErrors) = context(permissions: ["storage"])

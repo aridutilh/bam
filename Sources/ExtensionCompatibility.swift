@@ -55,6 +55,7 @@ enum ExtensionCompatibility {
             switch $0 {
             case "bookmarks": return "bookmarks (read-only: getTree of this profile's Favorites and kept tabs; no changes or events)"
             case "history": return "history (read-only: search this profile's history and hear new visits and clearing; no adding or deleting)"
+            case "tabs.metadata": return "tab addresses and titles (requires the tabs permission; no page-content access)"
             default: return $0
             }
         }
