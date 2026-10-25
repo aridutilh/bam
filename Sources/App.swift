@@ -306,6 +306,7 @@ import WebKit
         bound(file, "Open Location…", #selector(BrowserController.focusAddress(_:)), .openLocation, controller)
         item(file, "Close Tab", #selector(BrowserController.closeTab(_:)), "w", .command, controller)
         item(file, "Reopen Closed Tab", #selector(BrowserController.reopenTab(_:)), "t", [.command, .shift], controller)
+        file.addItem(.separator()); item(file, "Import from Arc…", #selector(BrowserController.importFromArc(_:)), "", .command, controller)
         file.addItem(.separator()); item(file, "Print…", #selector(BrowserController.printPage(_:)), "p", .command, controller)
         let edit = menu("Edit")
         item(edit, "Undo", Selector(("undo:")), "z"); item(edit, "Redo", Selector(("redo:")), "z", [.command, .shift]); edit.addItem(.separator())

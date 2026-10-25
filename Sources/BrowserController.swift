@@ -257,6 +257,7 @@ import QuartzCore
     var privateMode: Bool
     var spaceManager: SpaceManagementController?
     var savedTabEditor: SavedTabEditorController?
+    var arcImporter: ArcImportController?
     var onSpacesChanged: (() -> Void)?
     var saveWork: DispatchWorkItem?
     var sessionWriter: SessionWriter?

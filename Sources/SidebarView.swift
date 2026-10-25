@@ -38,6 +38,10 @@ struct SidebarTabItem: Equatable {
     var hasLaterSibling: Bool = false
     /// Number of tabs anywhere inside a folder row.
     var folderTabCount: Int = 0
+    /// Whether a folder can hold another folder (depth limit).
+    var canNestFolder: Bool = true
+    /// Whether a tab can be wrapped in a new folder (it must be keepable).
+    var canWrapInFolder: Bool = true
 }
 
 /// A destination offered by Move to Folder menus.
@@ -160,7 +164,7 @@ struct SidebarExtensionItem {
         let definitions = Array(definitions.filter { seen.insert($0.id).inserted }.prefix(32))
         guard !definitions.isEmpty else { return }
         guard !definitions.elementsEqual(spaceDefinitions, by: {
-            $0.id == $1.id && $0.name == $1.name && $0.symbol == $1.symbol && $0.colorIndex == $1.colorIndex
+            $0.id == $1.id && $0.name == $1.name && $0.symbol == $1.symbol && $0.colorIndex == $1.colorIndex && $0.emoji == $1.emoji
         }) else { return }
         spaceDefinitions = definitions
         let ids = Set(definitions.map(\.id))
@@ -204,7 +208,7 @@ struct SidebarExtensionItem {
             let item = NSMenuItem(title: definition.name, action: #selector(chooseSpaceFromMenu(_:)), keyEquivalent: "")
             item.target = self; item.tag = definition.id
             item.state = definition.id == selectedSpace ? .on : .off
-            item.image = SidebarSymbol.image(named: definition.symbol, color: ArkPalette.spaceColor(definition.colorIndex), pointSize: 14)
+            item.image = ArkSpaceIcon.image(for: definition, pointSize: 14)
             menu.addItem(item)
         }
         menu.addItem(.separator())
@@ -400,32 +404,39 @@ struct SidebarExtensionItem {
         // Keep navigation clear of the traffic lights and sidebar toggle.
         let compact = w < 218
         forward.isHidden = compact; back.isHidden = compact
-        search.frame = NSRect(x: 8, y: 46, width: max(0, w - 16), height: 36)
-        extensionMenu.frame = NSRect(x: 8, y: 87, width: 30, height: 30)
+        // Arc/Yab proportions: a 34-point address field under the window
+        // controls, Favorites as a 3-column grid of 46-point tiles, then the
+        // Space's rows. Extension actions take a row only when installed.
+        let fieldTop = ArkMetrics.addressTop, fieldHeight = ArkMetrics.addressHeight
+        search.frame = NSRect(x: 8, y: fieldTop, width: max(0, w - 16), height: fieldHeight)
+        let hasActions = !extensionButtons.isEmpty
+        search.trailingInset = hasActions ? 10 : 34
+        extensionLibrary.isHidden = hasActions
+        extensionLibrary.frame = NSRect(x: w - 8 - 32, y: fieldTop + (fieldHeight - 28) / 2, width: 28, height: 28)
+        extensionMenu.isHidden = !hasActions
+        let actionTop = fieldTop + fieldHeight + 6
+        extensionMenu.frame = NSRect(x: 8, y: actionTop, width: 30, height: 30)
         let actionCapacity = max(0, Int((w - 52) / 34))
         for (index, button) in extensionButtons.enumerated() {
             button.isHidden = index >= actionCapacity
-            if !button.isHidden { button.frame = NSRect(x: 45 + CGFloat(index) * 34, y: 86, width: 32, height: 32) }
+            if !button.isHidden { button.frame = NSRect(x: 45 + CGFloat(index) * 34, y: actionTop - 1, width: 32, height: 32) }
         }
         let hiddenCount = max(0, extensionButtons.count - actionCapacity)
         extensionMenu.setSymbol(hiddenCount > 0 ? "ellipsis.circle" : "puzzlepiece.extension",
             label: hiddenCount > 0 ? "All extensions, including \(hiddenCount) more" : "Extensions")
-        extensionLibrary.isHidden = !extensionButtons.isEmpty
-        extensionLibrary.frame = NSRect(x: 43, y: 87, width: max(0, w - 51), height: 30)
-        // Four 47-point tiles fit the normal 228-point sidebar. Keep three
-        // columns at narrow widths (44-point tiles at the 164-point minimum)
-        // so twelve Favorites still leave room for the scrolling tab list.
-        let columns = w >= 224 ? 4 : 3
+        let gridTop = hasActions ? actionTop + 38 : fieldTop + fieldHeight + 10
+        let columns = w >= 330 ? 4 : 3
+        let gap = ArkMetrics.favoriteGap, tileHeight = ArkMetrics.favoriteHeight
         let favoriteRows = (favorites.count + columns - 1) / columns
-        let favoriteHeight = favoriteRows == 0 ? CGFloat.zero : CGFloat(favoriteRows) * 47 + CGFloat(favoriteRows - 1) * 8
+        let favoriteHeight = favoriteRows == 0 ? CGFloat.zero : CGFloat(favoriteRows) * tileHeight + CGFloat(favoriteRows - 1) * gap
         favoritesHost.isHidden = favorites.isEmpty
-        favoritesHost.frame = NSRect(x: 0, y: 124, width: w, height: favoriteHeight)
-        let tileWidth = max(0, (w - 16 - CGFloat(columns - 1) * 8) / CGFloat(columns))
+        favoritesHost.frame = NSRect(x: 0, y: gridTop, width: w, height: favoriteHeight)
+        let tileWidth = max(0, (w - 16 - CGFloat(columns - 1) * gap) / CGFloat(columns))
         for (index, button) in favorites.enumerated() {
-            button.frame = NSRect(x: 8 + CGFloat(index % columns) * (tileWidth + 8),
-                                  y: CGFloat(index / columns) * 55, width: tileWidth, height: 47)
+            button.frame = NSRect(x: 8 + CGFloat(index % columns) * (tileWidth + gap),
+                                  y: CGFloat(index / columns) * (tileHeight + gap), width: tileWidth, height: tileHeight)
         }
-        let pageTop: CGFloat = 124 + favoriteHeight + (favorites.isEmpty ? 0 : 8)
+        let pageTop: CGFloat = gridTop + favoriteHeight + (favorites.isEmpty ? 0 : 10)
         clip.frame = NSRect(x: 0, y: pageTop, width: w, height: max(0, bounds.height - pageTop - 45))
         setPagingOffset(offset)
         let y = bounds.height-36
@@ -658,8 +669,8 @@ struct SidebarExtensionItem {
     override init(frame: NSRect) { super.init(frame: frame); setAccessibilityElement(false) }
     required init?(coder: NSCoder) { fatalError() }
     override func draw(_ dirtyRect: NSRect) {
-        NSColor.white.withAlphaComponent(0.13).setFill()
-        NSRect(x: 9, y: bounds.midY, width: max(0,bounds.width-18), height: 0.5).fill()
+        NSColor.white.withAlphaComponent(0.10).setFill()
+        NSRect(x: 10, y: bounds.midY, width: max(0,bounds.width-20), height: 1).fill()
     }
 }
 
@@ -688,8 +699,48 @@ enum ArkPalette {
         .systemFont(ofSize: rowSize, weight: folder ? .semibold : active ? .medium : .regular)
     }
 }
+/// Sidebar geometry in points, matched to Arc/Yab at a ~230-point sidebar.
 @MainActor enum ArkMetrics {
     static let folderIndent: CGFloat = 14
+    /// Indentation shrinks for deep trees so titles keep this much room.
+    static let minimumTitleWidth: CGFloat = 96
+    static let addressTop: CGFloat = 44
+    static let addressHeight: CGFloat = 34
+    static let favoriteHeight: CGFloat = 46
+    static let favoriteGap: CGFloat = 8
+    static let rowRadius: CGFloat = 9
+    /// Per-level indent for a row of `width` at `depth`, never squeezing the title below the minimum.
+    static func indentStep(depth: Int, width: CGFloat) -> CGFloat {
+        guard depth > 0 else { return 0 }
+        let available = max(0, width - 72 - minimumTitleWidth)
+        return min(folderIndent, available / CGFloat(depth))
+    }
+}
+
+/// A Space's icon: its emoji when it has one, otherwise its tinted symbol.
+@MainActor enum ArkSpaceIcon {
+    static func draw(_ space: (emoji: String?, symbol: String, tint: NSColor), in rect: NSRect, opacity: CGFloat = 1) {
+        if let emoji = space.emoji {
+            let font = NSFont.systemFont(ofSize: rect.height * 0.86)
+            let string = NSAttributedString(string: emoji, attributes: [.font: font])
+            let size = string.size()
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current?.cgContext.setAlpha(opacity)
+            string.draw(at: NSPoint(x: rect.midX - size.width / 2, y: rect.midY - size.height / 2))
+            NSGraphicsContext.restoreGraphicsState()
+        } else {
+            SidebarSymbol.draw(named: space.symbol, in: rect, color: space.tint, pointSize: rect.height, opacity: opacity)
+        }
+    }
+    static func image(for space: BrowserSpace, pointSize: CGFloat) -> NSImage? {
+        guard let emoji = space.emoji else {
+            return SidebarSymbol.image(named: space.symbol, color: ArkPalette.spaceColor(space.colorIndex), pointSize: pointSize)
+        }
+        let side = pointSize + 4
+        return NSImage(size: NSSize(width: side, height: side), flipped: false) { rect in
+            draw((emoji, space.symbol, .labelColor), in: rect); return true
+        }
+    }
 }
 
 @MainActor
@@ -785,9 +836,12 @@ private final class ArkIconButton: ArkHoverButton {
         toolTip = "Find and install extensions"; setAccessibilityLabel("Add extensions")
     }
     required init?(coder: NSCoder) { fatalError() }
+    // A quiet icon at the address field's trailing edge, like Arc's toolbar
+    // extension affordance; the full library opens on click.
     override func draw(_ dirtyRect: NSRect) {
-        if hovered || isHighlighted { fill(NSColor.white.withAlphaComponent(isHighlighted ? 0.20 : 0.10), radius: 7) }
-        text("Add extensions", rect: NSRect(x: 4, y: 7, width: bounds.width - 8, height: 20), size: 12, color: ArkPalette.secondary)
+        if hovered || isHighlighted { fill(NSColor.white.withAlphaComponent(isHighlighted ? 0.20 : 0.12), radius: 7) }
+        symbol("puzzlepiece.extension", rect: NSRect(x: (bounds.width - 14) / 2, y: (bounds.height - 14) / 2, width: 14, height: 14),
+               color: hovered ? ArkPalette.ink : ArkPalette.secondary, size: 14)
     }
 }
 
@@ -823,6 +877,8 @@ private final class ArkIconButton: ArkHoverButton {
 
 @MainActor private final class ArkSearchButton: ArkHoverButton {
     var address = "Search or enter URL" { didSet { needsDisplay = true } }
+    /// Room kept clear at the trailing edge for the extension control.
+    var trailingInset: CGFloat = 12 { didSet { if oldValue != trailingInset { needsDisplay = true } } }
     init() {
         super.init(frame: .zero); setAccessibilityLabel("Search or enter a web address"); hint()
         NotificationCenter.default.addObserver(self, selector: #selector(hint), name: ShortcutStore.didChange, object: nil)
@@ -830,9 +886,10 @@ private final class ArkIconButton: ArkHoverButton {
     @objc private func hint() { toolTip = "Search or enter address (\(ShortcutStore.shared.combo(for: .openLocation).compact))" }
     required init?(coder: NSCoder) { fatalError() }
     override func draw(_ dirtyRect: NSRect) {
-        fill(NSColor.black.withAlphaComponent(hovered ? 0.25 : 0.18), radius: 10)
-        text(address, rect: NSRect(x: 12, y: 9, width: max(0, bounds.width - 38), height: 20), size: 14, color: ArkPalette.ink)
-        symbol("ellipsis", rect: NSRect(x: bounds.width-25, y: 11, width: 14, height: 14), color: ArkPalette.secondary, size: 14)
+        // A lifted, translucent field like Arc/Yab rather than a dark well.
+        fill(NSColor.white.withAlphaComponent(hovered || isHighlighted ? 0.14 : 0.09), radius: 10)
+        text(address, rect: NSRect(x: 12, y: (bounds.height - 18) / 2, width: max(0, bounds.width - 12 - trailingInset), height: 18),
+             size: 13.5, color: ArkPalette.ink.withAlphaComponent(0.92))
     }
 }
 
@@ -873,9 +930,14 @@ private final class ArkFavoriteButton: ArkHoverButton {
         else { super.keyDown(with: event) }
     }
     override func draw(_ dirtyRect: NSRect) {
-        fill(NSColor.white.withAlphaComponent(item.isActive ? 0.18 : hovered ? 0.14 : 0.08), radius: 9)
+        fill(NSColor.white.withAlphaComponent(item.isActive ? 0.22 : hovered ? 0.15 : 0.09), radius: 10)
+        if item.isActive {
+            NSColor.white.withAlphaComponent(0.28).setStroke()
+            let ring = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.75, dy: 0.75), xRadius: 10, yRadius: 10)
+            ring.lineWidth = 1; ring.stroke()
+        }
         if let image, image.size.width > 0, image.size.height > 0 {
-            let scale = min(19 / image.size.width, 19 / image.size.height)
+            let scale = min(20 / image.size.width, 20 / image.size.height)
             let size = NSSize(width: image.size.width * scale, height: image.size.height * scale)
             image.draw(in: NSRect(x: (bounds.width - size.width) / 2, y: (bounds.height - size.height) / 2,
                                  width: size.width, height: size.height), from: .zero, operation: .sourceOver,
@@ -923,9 +985,10 @@ private final class ArkNewTabButton: ArkHoverButton {
     @objc private func hint() { toolTip = "New tab (\(ShortcutStore.shared.combo(for: .newTab).compact))" }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     override func draw(_ dirtyRect: NSRect) {
-        if hovered { fill(NSColor.white.withAlphaComponent(0.08)) }
-        symbol("plus", rect: NSRect(x: 10, y: 10, width: 16, height: 16), color: ArkPalette.secondary, size: 16)
-        text("New Tab", rect: NSRect(x: 36, y: 9, width: max(0, bounds.width - 48), height: 20), size: 14, color: ArkPalette.secondary)
+        if hovered { fill(NSColor.white.withAlphaComponent(0.07), radius: ArkMetrics.rowRadius) }
+        symbol("plus", rect: NSRect(x: 10, y: (bounds.height - 15) / 2, width: 15, height: 15), color: ArkPalette.secondary, size: 15)
+        text("New Tab", rect: NSRect(x: 36, y: (bounds.height - 18) / 2, width: max(0, bounds.width - 48), height: 18),
+             size: ArkType.rowSize, color: ArkPalette.secondary)
     }
 }
 
@@ -934,6 +997,7 @@ private final class ArkSpaceButton: ArkHoverButton {
     let index: Int
     private var name = ""
     private var symbolName = "globe"
+    private var emoji: String?
     private var tint = ArkPalette.ink
     var manage: (() -> Void)?
     var selected = false { didSet { needsDisplay = true; setAccessibilityValue(selected ? "Selected" : "Not selected") } }
@@ -944,15 +1008,17 @@ private final class ArkSpaceButton: ArkHoverButton {
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     func configure(_ space: BrowserSpace) {
-        name = space.name; symbolName = space.symbol; tint = ArkPalette.spaceColor(space.colorIndex)
+        name = space.name; symbolName = space.symbol; emoji = space.emoji; tint = ArkPalette.spaceColor(space.colorIndex)
         setAccessibilityLabel("Switch to \(name) space")
         toolTip = name
         needsDisplay = true
     }
     override func draw(_ dirtyRect: NSRect) {
         if selected || hovered { fill(NSColor.white.withAlphaComponent(selected ? 0.14 : 0.07), radius: 7) }
-        symbol(symbolName, rect: NSRect(x: (bounds.width - 16) / 2, y: (bounds.height - 16) / 2, width: 16, height: 16),
-               color: tint.withAlphaComponent(selected ? 1 : 0.78), size: 16)
+        // Unselected Spaces recede, as Arc's footer dots do.
+        let size: CGFloat = emoji == nil ? 16 : 15
+        ArkSpaceIcon.draw((emoji, symbolName, tint), in: NSRect(x: (bounds.width - size) / 2, y: (bounds.height - size) / 2, width: size, height: size),
+                          opacity: selected || hovered ? 1 : 0.62)
     }
     override func menu(for event: NSEvent) -> NSMenu? {
         let menu = NSMenu()
@@ -966,19 +1032,24 @@ private final class ArkSpaceButton: ArkHoverButton {
 private final class ArkSpaceHeading: ArkHoverButton {
     private var name = "Studio"
     private var symbolName = "sparkles"
+    private var emoji: String?
     private var tint = ArkPalette.ink
     init() { super.init(frame: .zero); toolTip = "Manage Spaces" }
     required init?(coder: NSCoder) { fatalError() }
     func configure(_ space: BrowserSpace) {
-        name = space.name; symbolName = space.symbol; tint = ArkPalette.spaceColor(space.colorIndex)
+        name = space.name; symbolName = space.symbol; emoji = space.emoji; tint = ArkPalette.spaceColor(space.colorIndex)
         setAccessibilityLabel("Manage Spaces — \(name)")
         needsDisplay = true
     }
+    // Arc and Yab label the Space quietly above its rows: a small icon and a
+    // muted semibold name, aligned with the row icons below.
     override func draw(_ dirtyRect: NSRect) {
-        if hovered { fill(NSColor.white.withAlphaComponent(0.06), radius: 6) }
-        symbol(symbolName, rect: NSRect(x: 4, y: 8, width: 16, height: 16), color: tint, size: 16)
-        text(name, rect: NSRect(x: 32, y: 7, width: max(0, bounds.width - 50), height: 20), size: 14, weight: .medium)
-        if hovered { symbol("chevron.down", rect: NSRect(x: bounds.width - 15, y: 11, width: 10, height: 10), color: ArkPalette.secondary, size: 10) }
+        if hovered { fill(NSColor.white.withAlphaComponent(0.06), radius: 7) }
+        let iconSize: CGFloat = emoji == nil ? 15 : 14
+        ArkSpaceIcon.draw((emoji, symbolName, tint), in: NSRect(x: 2, y: (bounds.height - iconSize) / 2, width: iconSize, height: iconSize))
+        text(name, rect: NSRect(x: 28, y: (bounds.height - 18) / 2, width: max(0, bounds.width - 46), height: 18),
+             size: 13, weight: .semibold, color: ArkPalette.secondary)
+        if hovered { symbol("chevron.down", rect: NSRect(x: bounds.width - 15, y: (bounds.height - 10) / 2, width: 10, height: 10), color: ArkPalette.secondary, size: 10) }
     }
 }
 
@@ -1062,7 +1133,9 @@ private final class ArkTabRow: ArkFlippedView {
             setAccessibilityHelp(item.isSplit ? "Split. Closing unloads saved panes and keeps their saved tabs; ordinary panes close." : item.isPinned ? "Kept tab. Closing unloads its page and keeps the saved tab." : "Tab")
         }
         closeButton.isHidden = item.isFolder || item.isUnloaded || (!hovered && !item.isActive)
+        setAccessibilityDisclosureLevel(item.depth)
         if item.isFolder {
+            setAccessibilityDisclosed(item.isExpanded)
             setAccessibilityValue(item.isExpanded ? "Expanded" : "Collapsed")
             setAccessibilityHelp("Folder with \(item.folderTabCount) tab\(item.folderTabCount == 1 ? "" : "s"). Press to \(item.isExpanded ? "collapse" : "expand").")
         } else if first || old.isActive != item.isActive || old.isUnloaded != item.isUnloaded || old.isSleeping != item.isSleeping || old.isFolder {
@@ -1103,7 +1176,7 @@ private final class ArkTabRow: ArkFlippedView {
     }
     override func layout() {
         super.layout()
-        let indent = CGFloat(min(item.depth, 8)) * ArkMetrics.folderIndent
+        let indent = CGFloat(item.depth) * ArkMetrics.indentStep(depth: item.depth, width: bounds.width)
         iconView.frame = NSRect(x: 10 + indent, y: (bounds.height - 16) / 2, width: 16, height: 16)
         let textWidth = max(0, bounds.width - 72 - indent + (item.isFolder ? 28 : 0))
         let hasSubtitle = false
@@ -1117,15 +1190,15 @@ private final class ArkTabRow: ArkFlippedView {
             NSColor.keyboardFocusIndicatorColor.setStroke()
             let ring = NSBezierPath(roundedRect: bounds.insetBy(dx: 1.5, dy: 1.5), xRadius: 8, yRadius: 8); ring.lineWidth = 2; ring.stroke()
         }
-        if (item.isActive && !item.isFolder) || hovered {
-            NSColor.white.withAlphaComponent(item.isActive ? 0.16 : 0.08).setFill()
-            NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 9, yRadius: 9).fill()
+        // Arc/Yab selection: one soft lifted pill, no outline; hover is fainter.
+        let selected = item.isActive && !item.isFolder
+        if selected || hovered {
+            NSColor.white.withAlphaComponent(selected ? 0.15 : 0.07).setFill()
+            NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: ArkMetrics.rowRadius, yRadius: ArkMetrics.rowRadius).fill()
         }
-        if item.isActive {
-            NSColor.white.withAlphaComponent(0.05).setStroke()
-            let border = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.75, dy: 0.75), xRadius: 9, yRadius: 9)
-            border.lineWidth = 0.5
-            border.stroke()
+        if selected {
+            NSColor.white.withAlphaComponent(0.10).setFill()
+            NSRect(x: ArkMetrics.rowRadius, y: 0.5, width: max(0, bounds.width - 2 * ArkMetrics.rowRadius), height: 0.5).fill()
         }
     }
     override func updateTrackingAreas() {
@@ -1144,7 +1217,12 @@ private final class ArkTabRow: ArkFlippedView {
         return hit === closeButton ? closeButton : self
     }
     private func activate() { if item.isFolder { toggleFolder?() } else { select?() } }
-    override func mouseDown(with event: NSEvent) { activate() }
+    override func mouseDown(with event: NSEvent) {
+        // Folders are not table selections; keep keyboard focus on the row so
+        // arrows and Return keep working after a click.
+        if item.isFolder { window?.makeFirstResponder(self) }
+        activate()
+    }
     override func accessibilityPerformPress() -> Bool { activate(); return true }
     private func folderSubmenu() -> NSMenuItem {
         let moveItem = NSMenuItem(title: "Move to Folder", action: nil, keyEquivalent: "")
@@ -1170,7 +1248,8 @@ private final class ArkTabRow: ArkFlippedView {
         }
         add(item.isExpanded ? "Collapse Folder" : "Expand Folder", #selector(toggleFromMenu), item.isExpanded ? "chevron.up" : "chevron.down")
         add("Rename Folder…", #selector(renameFromMenu), "pencil")
-        add("New Folder Inside", #selector(newFolderFromMenu), "folder.badge.plus")
+        add("New Folder Inside", #selector(newFolderFromMenu), "folder.badge.plus", enabled: item.canNestFolder)
+        if !item.canNestFolder { menu.items.last?.toolTip = "Folders can nest \(BrowserSession.maximumFolderDepth) levels deep." }
         menu.addItem(.separator())
         add("Move Earlier", #selector(earlierFromMenu), nil, enabled: canMoveEarlier)
         add("Move Later", #selector(laterFromMenu), nil, enabled: canMoveLater)
@@ -1189,7 +1268,7 @@ private final class ArkTabRow: ArkFlippedView {
             destination.target = self; destination.tag = space.id
             destination.state = space.id == currentSpace ? .on : .off
             destination.isEnabled = space.id != currentSpace && move != nil
-            destination.image = SidebarSymbol.image(named: space.symbol, color: ArkPalette.spaceColor(space.colorIndex), pointSize: 14)
+            destination.image = ArkSpaceIcon.image(for: space, pointSize: 14)
             submenu.addItem(destination)
         }
         moveItem.submenu = submenu
@@ -1220,7 +1299,8 @@ private final class ArkTabRow: ArkFlippedView {
         menu.addItem(.separator())
         let newFolder = NSMenuItem(title: "Add to New Folder", action: #selector(newFolderFromMenu), keyEquivalent: "")
         newFolder.image = NSImage(systemSymbolName: "folder.badge.plus", accessibilityDescription: nil)
-        newFolder.target = self; menu.addItem(newFolder)
+        newFolder.target = self; newFolder.isEnabled = item.canWrapInFolder; menu.addItem(newFolder)
+        if !item.canWrapInFolder { newFolder.toolTip = "This page can’t be kept, so it can’t go in a folder." }
         menu.addItem(folderSubmenu())
         if item.parentFolderID != nil {
             let out = NSMenuItem(title: "Remove from Folder", action: #selector(removeFromFolderFromMenu), keyEquivalent: "")
