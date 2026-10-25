@@ -306,8 +306,8 @@ import QuartzCore
         root.onTranslucencyChange = { [weak self] clear in self?.windowTranslucent = clear }
         [sidebar, card, handle].forEach(root.addSubview)
         card.wantsLayer = true; card.layer?.backgroundColor = NSColor(white: 0.10, alpha: 1).cgColor
-        card.layer?.cornerRadius = 9; card.layer?.masksToBounds = true
-        card.layer?.borderWidth = 1; card.layer?.borderColor = NSColor.white.withAlphaComponent(0.30).cgColor
+        card.layer?.cornerRadius = 10; card.layer?.masksToBounds = true
+        card.layer?.borderWidth = 1; card.layer?.borderColor = NSColor.white.withAlphaComponent(0.09).cgColor
         card.addSubview(webHost)
         progress.wantsLayer = true; progress.layer?.backgroundColor = NSColor(srgbRed: 0.47, green: 0.39, blue: 0.66, alpha: 1).cgColor
         card.addSubview(progress)
@@ -409,8 +409,9 @@ import QuartzCore
         let collapse = 1 - min(1, max(0, width / 80))
         let inset = 8 * (1 - collapse)
         card.frame = NSRect(x: width + inset, y: inset, width: max(100, w - width - 2 * inset), height: h - 2 * inset)
-        card.layer?.cornerRadius = 9 * (1 - collapse)
-        card.layer?.borderColor = NSColor.white.withAlphaComponent(0.30 * (1 - collapse)).cgColor
+        // Arc/Yab frame the page with a soft corner and a barely-there edge.
+        card.layer?.cornerRadius = 10 * (1 - collapse)
+        card.layer?.borderColor = NSColor.white.withAlphaComponent(0.09 * (1 - collapse)).cgColor
         applyWindowButtons(collapse: collapse)
         webHost.frame = card.bounds
         if let web = activeWebView, web.superview === webHost { web.frame = webHost.bounds }

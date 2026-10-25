@@ -537,6 +537,7 @@ struct SidebarExtensionItem {
         }
         let changed = structureChanged ? [] : items.indices.filter { tabs[$0] != items[$0] }
         let origin = scroll.contentView.bounds.origin
+        let oldKeys = structureChanged ? entryKeys : []
         tabs = items
         configureAppearance(space: space, destinations: destinations)
         if structureChanged || entries.isEmpty {
@@ -549,7 +550,7 @@ struct SidebarExtensionItem {
                 rowByID[tabs[index].id] = entries.count; entries.append(.tab(index))
             }
             synchronizingSelection = true
-            table.reloadData()
+            if !animateContiguousChange(from: oldKeys) { table.reloadData() }
             synchronizingSelection = false
             needsLayout = true; layoutSubtreeIfNeeded()
             // Table reloads/reorders must not reset a Space's retained scroll position.
@@ -565,6 +566,44 @@ struct SidebarExtensionItem {
             }
         }
         synchronizeSelection()
+    }
+
+    private static let dividerKey = UUID(), newTabKey = UUID()
+    private var entryKeys: [UUID] {
+        entries.map { entry in
+            switch entry { case .tab(let index): return tabs.indices.contains(index) ? tabs[index].id : UUID()
+            case .divider: return Self.dividerKey
+            case .newTab: return Self.newTabKey }
+        }
+    }
+    /// Expanding or collapsing a folder inserts or removes one contiguous run
+    /// of rows. Slide just those rows (Arc-like) instead of reloading the
+    /// list; anything else, offscreen pages and Reduce Motion reload directly.
+    private func animateContiguousChange(from oldKeys: [UUID]) -> Bool {
+        guard !oldKeys.isEmpty, window?.isVisible == true, superview != nil,
+              !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { return false }
+        let newKeys = entryKeys
+        var prefix = 0
+        while prefix < min(oldKeys.count, newKeys.count), oldKeys[prefix] == newKeys[prefix] { prefix += 1 }
+        var suffix = 0
+        while suffix < min(oldKeys.count, newKeys.count) - prefix,
+              oldKeys[oldKeys.count - 1 - suffix] == newKeys[newKeys.count - 1 - suffix] { suffix += 1 }
+        let removed = oldKeys.count - prefix - suffix, inserted = newKeys.count - prefix - suffix
+        guard (removed == 0) != (inserted == 0), max(removed, inserted) <= 300 else { return false }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.18
+            table.beginUpdates()
+            if inserted > 0 { table.insertRows(at: IndexSet(prefix..<(prefix + inserted)), withAnimation: [.effectFade, .slideDown]) }
+            else { table.removeRows(at: IndexSet(prefix..<(prefix + removed)), withAnimation: [.effectFade, .slideUp]) }
+            table.endUpdates()
+        }
+        // Surviving rows keep their views; refresh their models (indices and the folder's own state moved).
+        table.enumerateAvailableRowViews { [weak self] _, row in
+            guard let self, self.entries.indices.contains(row), case .tab(let index) = self.entries[row],
+                  let cell = self.table.view(atColumn: 0, row: row, makeIfNecessary: false) as? SidebarTabCell else { return }
+            self.configure(cell, item: self.tabs[index])
+        }
+        return true
     }
 
     func configureAppearance(space: BrowserSpace, destinations: [BrowserSpace]) {
@@ -703,7 +742,9 @@ enum ArkPalette {
 @MainActor enum ArkMetrics {
     static let folderIndent: CGFloat = 14
     /// Indentation shrinks for deep trees so titles keep this much room.
-    static let minimumTitleWidth: CGFloat = 96
+    /// At the 164pt minimum sidebar a row has 76pt for its title, so the floor
+    /// stays below that; deep rows still indent a little to show hierarchy.
+    static let minimumTitleWidth: CGFloat = 64
     static let addressTop: CGFloat = 44
     static let addressHeight: CGFloat = 34
     static let favoriteHeight: CGFloat = 46
@@ -1134,8 +1175,9 @@ private final class ArkTabRow: ArkFlippedView {
         }
         closeButton.isHidden = item.isFolder || item.isUnloaded || (!hovered && !item.isActive)
         setAccessibilityDisclosureLevel(item.depth)
+        // Recycled cells must not keep a folder's disclosure state.
+        setAccessibilityDisclosed(item.isFolder && item.isExpanded)
         if item.isFolder {
-            setAccessibilityDisclosed(item.isExpanded)
             setAccessibilityValue(item.isExpanded ? "Expanded" : "Collapsed")
             setAccessibilityHelp("Folder with \(item.folderTabCount) tab\(item.folderTabCount == 1 ? "" : "s"). Press to \(item.isExpanded ? "collapse" : "expand").")
         } else if first || old.isActive != item.isActive || old.isUnloaded != item.isUnloaded || old.isSleeping != item.isSleeping || old.isFolder {

@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased draft — folders, Arc import, sidebar look
+
+- Add folders to each Space's kept section: create (including around a tab), rename, nest up to 12 levels, collapse, reorder, move between folders and Spaces, and ungroup in place. A collapsed folder still shows the selected tab; Splits move as one row. Folder metadata is additive to session format 5 and damaged records repair without losing tabs.
+- Add File ▸ Import from Arc… (also in Settings ▸ General). Bam reads Arc's `StorableSidebar.json` read-only, previews Spaces, folders, kept and Today tabs, per-profile Favorites, Splits and every limitation, then imports in one step. Imported pages stay asleep until opened; the window lands on a blank tab. Repeat imports add only new Arc items and keep local edits and removals. If saving fails, the import is undone and the outcome reported truthfully. Layout only: no passwords, cookies, history or extensions.
+- Bring the sidebar closer to Arc and Yab: a lifted translucent address field with the extension control inside it, an extension row only when extensions are installed, three-column Favorites tiles, a quiet Space heading, emoji Space icons, outline-free selected rows, a softer page frame, readable indentation for deep folders and folder rows that slide open (not under Reduce Motion).
+- Component tests only so far; native checks in Bam Preview are pending (see `VALIDATION.md`). Version number to be assigned at integration.
+
 ## Unreleased extension-compatibility draft (branch work, after 0.21.3)
 
 - Expose `tabs.detectLanguage`, which Bam had hidden even though its tab adapter and documentation claimed it. Dashlane asks for it (callback form, behind a feature check). The answer is the page’s recognizable text, else its `<html lang>`/`<meta http-equiv="content-language">`, else `und`, never the user’s own locale. Unlike Chrome, Bam samples the page (from an isolated world), so it needs access to that tab — a host grant or the tab’s `activeTab` grant — and discards a sample if the tab, document or access changed meanwhile. `tabs.captureVisibleTab` now also honors a tab’s `activeTab` grant (it checked only global grants before). Component checks pass; the canonical-Preview fixture check (callback, promise, missing-tab error) is written but **not yet run**.
