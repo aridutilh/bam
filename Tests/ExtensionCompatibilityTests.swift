@@ -229,17 +229,80 @@ import JavaScriptCore
             JSON.stringify(seen) === JSON.stringify([[false,'session','a','explicit'], [true,'session','a','overwrite'], [false,'session','b','explicit'],
               [true,'session','b','explicit'], [false,'old','x','explicit'], [true,'old','x','expired']])
             """)!.toBool(), "Diffed changeInfo did not follow Chrome's add/overwrite/remove/expire shape: \(cookieJS.evaluateScript("JSON.stringify(seen)")!) \(cookieErrors)")
-        // Two native fires before a diff runs report each change once; an engine that passes changeInfo is forwarded as-is.
+        // Two native fires before a diff runs report the change once. (Engine-provided changeInfo has its own race test below.)
         settle("seen = []; jar.push(cookie('burst', '1')); fire(); fire()")
-        settle("seen = []; var engineInfo = {removed: false, cookie: cookie('engine', 'z'), cause: 'explicit'}; jar.push(engineInfo.cookie); fire(engineInfo)")
-        settle("fire()")
-        try check(cookieJS.evaluateScript("JSON.stringify(seen) === JSON.stringify([[false,'engine','z','explicit']])")!.toBool(),
-                  "Coalesced or engine-provided changes were duplicated or lost: \(cookieJS.evaluateScript("JSON.stringify(seen)")!)")
+        try check(cookieJS.evaluateScript("JSON.stringify(seen) === JSON.stringify([[false,'burst','1','explicit']])")!.toBool(),
+                  "Coalesced changes were duplicated or lost: \(cookieJS.evaluateScript("JSON.stringify(seen)")!)")
         // A throwing listener does not stop others; removing the last listener detaches the native trigger.
         settle("seen = []; globalThis.thrower = function () { throw new Error('vendor'); }; chrome.cookies.onChanged.addListener(thrower); jar.push(cookie('after', '1')); fire()")
         cookieJS.evaluateScript("chrome.cookies.onChanged.removeListener(thrower); chrome.cookies.onChanged.removeListener(grammarlyWatch);")
         try check(cookieErrors.isEmpty && cookieJS.evaluateScript("seen.length === 1 && seen[0][1] === 'after' && nativeListeners.length === 0 && !chrome.cookies.onChanged.hasListeners()")!.toBool(),
                   "Listener isolation or native detach failed: \(cookieJS.evaluateScript("JSON.stringify([seen, nativeListeners.length])")!)")
+        // Races with reads held open: a read captures the jar when issued and resolves only when released.
+        func heldCookieContext() -> (JSContext, () -> [String]) {
+            let js = JSContext()!
+            var errors: [String] = []
+            js.exceptionHandler = { _, error in errors.append(error?.toString() ?? "JavaScript error") }
+            js.evaluateScript("""
+                var location = {origin: 'webkit-extension://fixture', href: 'webkit-extension://fixture/worker.js'}, console = {error: function() {}}, performance = {now: function() { return 0; }};
+                var jar = [], nativeListeners = [], held = [], seen = [];
+                function NativeEvent() {}
+                NativeEvent.prototype.addListener = function (fn) { nativeListeners.push(fn); };
+                NativeEvent.prototype.removeListener = function (fn) { nativeListeners = nativeListeners.filter(function (x) { return x !== fn; }); };
+                var nativeChanged = new NativeEvent();
+                function Cookies() {}
+                Object.defineProperty(Cookies.prototype, 'onChanged', {get: function () { return nativeChanged; }, configurable: true});
+                Cookies.prototype.getAll = function () { var copy = jar.map(function (c) { return Object.assign({}, c); }); return new Promise(function (resolve) { held.push(function () { resolve(copy); }); }); };
+                function fire(info) { nativeListeners.slice().forEach(function (fn) { info === undefined ? fn() : fn(info); }); }
+                function release() { var next = held.shift(); if (next) next(); }
+                function cookie(name, value) { return {name: name, value: value, domain: '127.0.0.1', path: '/', storeId: '0'}; }
+                var browser = {runtime: {getURL: function(path) { return 'webkit-extension://fixture' + path; }, getManifest: function() { return {}; }}, cookies: new Cookies()};
+                var watch = function (n) { seen.push([n.removed, n.cookie.name, n.cause]); };
+                """)
+            js.evaluateScript(ExtensionCompatibility.workerScript(manifest: ["permissions": ["cookies"]], browserVersion: "test"))
+            return (js, { errors })
+        }
+        // Engine changeInfo arriving while the baseline read is pending is delivered once; the stale
+        // baseline never produces a second, synthesized copy, and later argument-less fires add nothing.
+        let (payloadRace, payloadErrors) = heldCookieContext()
+        payloadRace.evaluateScript("browser.cookies.onChanged.addListener(watch); browser.cookies.onChanged.addListener(function (n) { forwarded = n; });")
+        payloadRace.evaluateScript("var forwarded, payload = {removed: false, cookie: cookie('x', '1'), cause: 'explicit'}; jar.push(cookie('x', '1')); fire(payload); release();")
+        payloadRace.evaluateScript("(async function () { await __bamCompatibility.cookies.settled(); fire(); while (held.length) release(); await __bamCompatibility.cookies.settled(); })();")
+        try check(payloadErrors().isEmpty && payloadRace.evaluateScript("JSON.stringify(seen) === JSON.stringify([[false,'x','explicit']]) && held.length === 0 && forwarded === payload")!.toBool(),
+                  "An engine-provided change during the baseline read was duplicated or lost: \(payloadRace.evaluateScript("JSON.stringify(seen)")!) \(payloadErrors())")
+        // Detach and re-attach while the old baseline read is pending: the old read never seeds the new
+        // generation, so a cookie added in between is not reported as a change.
+        let (generationRace, generationErrors) = heldCookieContext()
+        generationRace.evaluateScript("browser.cookies.onChanged.addListener(watch);")   // baseline read issued and held
+        generationRace.evaluateScript("browser.cookies.onChanged.removeListener(watch); jar.push(cookie('between', '1')); browser.cookies.onChanged.addListener(watch);")
+        // Each evaluateScript drains microtasks, so each step's read issue/resolution is explicit.
+        // The old read is still held and the new period issued its own baseline at once (separate chains).
+        try check(generationRace.evaluateScript("held.length === 2")!.toBool(), "The new listener period's baseline waited behind the detached period's read")
+        generationRace.evaluateScript("release();")   // stale read from the detached period: discarded
+        try check(generationRace.evaluateScript("held.length === 1 && seen.length === 0")!.toBool(), "The detached period's read was used or issued more work")
+        generationRace.evaluateScript("release();")   // new baseline includes 'between'
+        generationRace.evaluateScript("jar.push(cookie('after', '1')); fire();")
+        generationRace.evaluateScript("release();")
+        try check(generationErrors().isEmpty && generationRace.evaluateScript("JSON.stringify(seen) === JSON.stringify([[false,'after','explicit']])")!.toBool(),
+                  "A read from a detached listener period seeded the new baseline: \(generationRace.evaluateScript("JSON.stringify(seen)")!) \(generationErrors())")
+
+        // An old read finishing after the final detach stores nothing and starts no further reads; a
+        // listener mutating a delivered cookie does not change the next comparison.
+        let (afterDetach, afterDetachErrors) = heldCookieContext()
+        afterDetach.evaluateScript("browser.cookies.onChanged.addListener(watch);")
+        afterDetach.evaluateScript("browser.cookies.onChanged.removeListener(watch); jar.push(cookie('late', '1')); release(); fire();")
+        try check(afterDetachErrors().isEmpty && afterDetach.evaluateScript("held.length === 0 && seen.length === 0 && nativeListeners.length === 0")!.toBool(),
+                  "A read completing after detach continued work or delivered events: \(afterDetach.evaluateScript("JSON.stringify([held.length, seen, nativeListeners.length])")!)")
+        let (mutation, mutationErrors) = heldCookieContext()
+        mutation.evaluateScript("browser.cookies.onChanged.addListener(function (n) { seen.push([n.removed, n.cookie.name, n.cause]); n.cookie.value = 'mutated'; });")
+        mutation.evaluateScript("release();")
+        mutation.evaluateScript("jar.push(cookie('m', '1')); fire();")
+        mutation.evaluateScript("release();")
+        mutation.evaluateScript("fire();")
+        mutation.evaluateScript("release();")
+        try check(mutationErrors().isEmpty && mutation.evaluateScript("JSON.stringify(seen) === JSON.stringify([[false,'m','explicit']])")!.toBool(),
+                  "A listener's mutation of a delivered cookie produced a spurious change: \(mutation.evaluateScript("JSON.stringify(seen)")!)")
+
         let noCookies = JSContext()!
         noCookies.evaluateScript("var location = {origin: 'webkit-extension://fixture', href: 'x'}, console = {error: function() {}}, performance = {now: function() { return 0; }}; var browser = {runtime: {getURL: function(p) { return 'webkit-extension://fixture' + p; }, getManifest: function() { return {}; }}};")
         noCookies.evaluateScript(ExtensionCompatibility.workerScript(manifest: [:], browserVersion: "test"))

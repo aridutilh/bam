@@ -395,40 +395,49 @@ enum ExtensionCompatibility {
       if (nativeCookies && nativeCookies.onChanged && typeof nativeCookies.getAll === "function" && !nativeCookies.__bamChangeInfo) {
         const nativeEvent = nativeCookies.onChanged;
         const listeners = new Set();
-        let snapshot = null, work = Promise.resolve(), rebaseline = false, attached = false;
+        // generation: bumped on attach/detach so a read from an earlier listener period never
+        // seeds or diffs a later one. enginePassesInfo: once WebKit supplies real changeInfo, it
+        // is forwarded from then on and no diff (including one already in flight) is delivered.
+        let snapshot = null, work = Promise.resolve(), attached = false, generation = 0, enginePassesInfo = false;
         const key = (c) => [c.storeId || "", c.domain || "", c.path || "", c.name || "", c.partitionKey ? JSON.stringify(c.partitionKey) : ""].join("\u0000");
         const read = async () => { const map = new Map(); for (const c of (await nativeCookies.getAll({})) || []) map.set(key(c), c); return map; };
         const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
         const deliver = (info) => { for (const fn of Array.from(listeners)) { try { fn(info); } catch (error) { console.error("[Bam compatibility] cookies.onChanged listener failed", error); } } };
+        // Delivered cookies are copies, so a listener mutating one cannot change the next comparison.
+        const copy = (c) => JSON.parse(JSON.stringify(c));
         const refresh = () => {
+          const requested = generation;
           work = work.then(async () => {
+            if (requested !== generation || enginePassesInfo) return;
             let next;
             try { next = await read(); } catch (error) { return; }
+            if (requested !== generation || enginePassesInfo) return;
             const previous = snapshot; snapshot = next;
-            if (!previous || rebaseline) { rebaseline = false; return; }
+            if (!previous) return;
             const now = Date.now() / 1000;
             for (const [k, old] of previous) {
               const current = next.get(k);
-              if (!current) deliver({ removed: true, cookie: old, cause: typeof old.expirationDate === "number" && old.expirationDate <= now ? "expired" : "explicit" });
-              else if (!same(old, current)) deliver({ removed: true, cookie: old, cause: "overwrite" });
+              if (!current) deliver({ removed: true, cookie: copy(old), cause: typeof old.expirationDate === "number" && old.expirationDate <= now ? "expired" : "explicit" });
+              else if (!same(old, current)) deliver({ removed: true, cookie: copy(old), cause: "overwrite" });
             }
-            for (const [k, current] of next) { const old = previous.get(k); if (!old || !same(old, current)) deliver({ removed: false, cookie: current, cause: "explicit" }); }
+            for (const [k, current] of next) { const old = previous.get(k); if (!old || !same(old, current)) deliver({ removed: false, cookie: copy(current), cause: "explicit" }); }
           });
           return work;
         };
         const onNative = (info) => {
-          if (info && typeof info === "object") { deliver(info); rebaseline = true; refresh(); return; }
-          refresh();
+          if (info && typeof info === "object") { enginePassesInfo = true; snapshot = null; deliver(info); return; }
+          if (!enginePassesInfo) refresh();
         };
         const bamEvent = {
           addListener(fn) {
             if (typeof fn !== "function") return;
             listeners.add(fn);
-            if (!attached) { attached = true; snapshot = null; nativeEvent.addListener(onNative); refresh(); }
+            // A fresh chain per listener period: an old read that never settles cannot stall this one.
+            if (!attached) { attached = true; generation++; snapshot = null; work = Promise.resolve(); nativeEvent.addListener(onNative); refresh(); }
           },
           removeListener(fn) {
             listeners.delete(fn);
-            if (attached && !listeners.size) { attached = false; nativeEvent.removeListener(onNative); snapshot = null; }
+            if (attached && !listeners.size) { attached = false; generation++; nativeEvent.removeListener(onNative); snapshot = null; }
           },
           hasListener(fn) { return listeners.has(fn); },
           hasListeners() { return listeners.size > 0; }
