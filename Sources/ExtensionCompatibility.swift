@@ -1176,18 +1176,18 @@ enum ExtensionCompatibility {
     /// are re-checked at dispatch (`dispatch` → `allowsEvent`), so nothing reaches a revoked or unloaded extension.
     func dispatchHistory(_ change: ExtensionHistory.Change) {
         guard !isPrivateHost else { return }
-        let event: String, payload: Any
-        switch change {
-        case .visited(let visit):
-            event = "history.onVisited"; payload = ExtensionHistory.item(url: visit.url, title: visit.title, lastVisit: visit.visitedAt)
-        case .removed(let urls):
-            guard !urls.isEmpty else { return }
-            event = "history.onVisitRemoved"; payload = ["allHistory": false, "urls": urls]
-        case .cleared:
-            event = "history.onVisitRemoved"; payload = ["allHistory": true, "urls": [String]()]
+        let events = ExtensionHistory.events(for: change)
+        // Changes too large to deliver are not invented or truncated; they are recorded (bounded, no URLs) and logged.
+        for message in events.undeliverable {
+            historyDiagnostics.append(message); if historyDiagnostics.count > 20 { historyDiagnostics.removeFirst(historyDiagnostics.count - 20) }
+            NSLog("Bam: %@", message)
         }
-        for key in registrations.keys.sorted() { dispatch(event, [payload], to: key) }
+        for (event, payload) in events.deliveries {
+            for key in registrations.keys.sorted() { dispatch(event, [payload], to: key) }
+        }
     }
+    /// The last undeliverable history changes of this profile (diagnostics and fixtures).
+    private(set) var historyDiagnostics: [String] = []
     /// Contexts a bounds signal would reach (diagnostics and fixtures).
     func boundsSignalRecipients() -> [String] {
         registrations.keys.sorted().filter { key in registrations[key]?.context.map { allowsEvent("windows.onBoundsChanged", for: $0) } == true }

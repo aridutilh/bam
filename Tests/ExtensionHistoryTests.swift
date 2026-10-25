@@ -76,6 +76,8 @@ import Foundation
         }
         try check(undercounted.isEmpty, "The encoded-size estimate undercounted: \(undercounted)")
         try check(H.encodedLength(String(repeating: "x", count: 1_000_000), limit: 10) == nil, "The length count did not stop at its limit")
+        try check(H.encodedLength("", limit: 0) == nil && H.encodedLength("", limit: 1) == nil && H.encodedLength("", limit: 2) == 2,
+                  "An empty string's two quote bytes were not checked against the limit")
         let hugeURL = H.Visit(url: "https://huge.example/" + String(repeating: "x", count: H.maximumReplyBytes), title: "t", visitedAt: at(1))
         let hugeTitle = H.Visit(url: "https://title.example/", title: String(repeating: "\"", count: H.maximumReplyBytes / 2), visitedAt: at(2))
         for visit in [hugeURL, hugeTitle] {
@@ -83,6 +85,35 @@ import Foundation
             checks += 1
         }
         print("history reply: 5,000 short records encode to \(encoded) bytes (bound \(H.maximumReplyBytes))")
+
+        // Exact search boundary of the preflight (ASCII without escapes): the largest accepted size passes, one more refuses.
+        let fits = H.maximumReplyBytes - 2 - H.itemOverhead - 2 - 2
+        let edge = { (count: Int) in H.Visit(url: String(repeating: "a", count: count), title: "", visitedAt: at(3)) }
+        if case .failure = H.search([edge(fits)], H.Query(words: [], start: 0, end: nil, maxResults: 1)) { throw Failure(description: "The exact size boundary was refused") }
+        if case .success = H.search([edge(fits + 1)], H.Query(words: [], start: 0, end: nil, maxResults: 1)) { throw Failure(description: "One byte over the size boundary was accepted") }
+        checks += 2
+        try check(parsed(#"{"text": "", "maxResults": -0}"#)?.maxResults == 0, "maxResults -0 was not taken as 0")
+
+        // Events: sized before building; undeliverable changes are reported, never truncated or invented.
+        let small = H.events(for: .visited(H.Visit(url: "https://e.example/", title: "E", visitedAt: at(9))))
+        try check(small.deliveries.count == 1 && small.deliveries[0].0 == "history.onVisited" && (small.deliveries[0].1 as? [String: Any])?["url"] as? String == "https://e.example/" &&
+                  small.undeliverable.isEmpty, "A normal visit was not delivered as one item")
+        let bigURL = H.events(for: .visited(H.Visit(url: "https://big.example/" + String(repeating: "u", count: H.maximumEventBytes), title: "", visitedAt: at(9))))
+        let bigTitle = H.events(for: .visited(H.Visit(url: "https://t.example/", title: String(repeating: "\u{01}", count: H.maximumEventBytes / 4), visitedAt: at(9))))
+        try check(bigURL.deliveries.isEmpty && bigURL.undeliverable.count == 1 && bigTitle.deliveries.isEmpty && bigTitle.undeliverable.count == 1 &&
+                  !(bigURL.undeliverable + bigTitle.undeliverable).contains { $0.contains("https://") },
+                  "An oversized visit was delivered, or its diagnostic was missing or contained the URL")
+        let longURLs = (0..<2_500).map { "https://long\($0).example/" + String(repeating: "p", count: 1_000) }
+        let oversizedURL = "https://huge.example/" + String(repeating: "h", count: H.maximumEventBytes)
+        let split = H.events(for: .removed(urls: Array(longURLs[..<1_000]) + [oversizedURL] + Array(longURLs[1_000...])))
+        let chunks = split.deliveries.map { ($0.1 as? [String: Any])?["urls"] as? [String] ?? [] }
+        let sizes = split.deliveries.map { (try? JSONSerialization.data(withJSONObject: $0.1))?.count ?? .max }
+        try check(split.deliveries.count > 1 && split.deliveries.allSatisfy { $0.0 == "history.onVisitRemoved" && ($0.1 as? [String: Any])?["allHistory"] as? Bool == false } &&
+                  chunks.flatMap { $0 } == longURLs && sizes.allSatisfy { $0 <= H.maximumEventBytes } && split.undeliverable.count == 1,
+                  "Removed URLs were not split into bounded events in order, or the oversized URL was not reported: chunks=\(chunks.map(\.count)) sizes=\(sizes)")
+        let cleared = H.events(for: .cleared)
+        try check(cleared.deliveries.count == 1 && (cleared.deliveries[0].1 as? [String: Any])?["allHistory"] as? Bool == true, "Clearing did not produce one allHistory event")
+        try check(H.events(for: .removed(urls: [])).deliveries.isEmpty, "An empty removal produced an event")
 
         // Trim: only URLs with no retained visit, once each.
         try check(H.removedURLs(dropped: ["https://a.example/", "https://x.example/", "https://x.example/"], retained: visits) == ["https://x.example/"],

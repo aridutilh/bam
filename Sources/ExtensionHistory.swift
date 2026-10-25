@@ -108,7 +108,56 @@ enum ExtensionHistory {
             guard let title = encodedLength(visit.title, limit: budget) else { return .failure(tooLarge) }
             budget -= title
         }
-        return .success(selected.map { item(url: $0.url, title: $0.title, lastVisit: $0.visitedAt) })
+        let items = selected.map { item(url: $0.url, title: $0.title, lastVisit: $0.visitedAt) }
+        // Defense only: the preflight above is an upper bound, so this encoding is already bounded.
+        guard let data = try? JSONSerialization.data(withJSONObject: items), data.count <= maximumReplyBytes else { return .failure(tooLarge) }
+        return .success(items)
+    }
+
+    /// Per-event bound for onVisited / onVisitRemoved payloads (pages get them as script, workers through a port).
+    static let maximumEventBytes = 1_048_576
+    /// Fixed bytes of `{"allHistory":false,"urls":[]}` plus slack.
+    static let removalOverhead = 40
+    struct Events {
+        /// (event name, payload) pairs to deliver, in order.
+        var deliveries: [(String, Any)] = []
+        /// Truthful diagnostics for changes that could not be delivered within the bound (no URLs or titles in them).
+        var undeliverable: [String] = []
+    }
+    /// Event payloads for a library change, sized from UTF-8 lengths before any item, hash or message is built.
+    /// Nothing is truncated or invented: an onVisited too large for one event is not delivered; removed URLs are split
+    /// across several onVisitRemoved events that each fit (every URL once, in order); a single URL too large for any
+    /// event is not delivered. Each undelivered change is reported in `undeliverable`.
+    static func events(for change: Change) -> Events {
+        var result = Events()
+        switch change {
+        case .visited(let visit):
+            var budget = maximumEventBytes - itemOverhead
+            guard let url = encodedLength(visit.url, limit: budget) else {
+                result.undeliverable.append("history.onVisited was not delivered: the visit's URL alone exceeds \(maximumEventBytes) encoded bytes."); return result
+            }
+            budget -= url
+            guard encodedLength(visit.title, limit: budget) != nil else {
+                result.undeliverable.append("history.onVisited was not delivered: the visit's URL and title exceed \(maximumEventBytes) encoded bytes."); return result
+            }
+            result.deliveries.append(("history.onVisited", item(url: visit.url, title: visit.title, lastVisit: visit.visitedAt)))
+        case .removed(let urls):
+            var chunk: [String] = [], used = removalOverhead, oversized = 0
+            for url in urls {
+                guard let length = encodedLength(url, limit: maximumEventBytes - removalOverhead - 1) else { oversized += 1; continue }
+                if used + length + 1 > maximumEventBytes, !chunk.isEmpty {
+                    result.deliveries.append(("history.onVisitRemoved", ["allHistory": false, "urls": chunk])); chunk = []; used = removalOverhead
+                }
+                chunk.append(url); used += length + 1
+            }
+            if !chunk.isEmpty { result.deliveries.append(("history.onVisitRemoved", ["allHistory": false, "urls": chunk])) }
+            if oversized > 0 {
+                result.undeliverable.append("history.onVisitRemoved was not delivered for \(oversized) URL(s) whose encoding exceeds \(maximumEventBytes) bytes.")
+            }
+        case .cleared:
+            result.deliveries.append(("history.onVisitRemoved", ["allHistory": true, "urls": [String]()]))
+        }
+        return result
     }
     static let tooLarge = Failure(description: "The history results are too large to deliver; request fewer with maxResults or a narrower time range.")
     /// Upper bound for one item's encoded bytes besides its URL and title: keys, quotes, separators, the 64-character
@@ -118,6 +167,7 @@ enum ExtensionHistory {
     /// characters up to 6 bytes; quote, backslash and slash 2); nil once over `limit`, without scanning further.
     static func encodedLength(_ string: String, limit: Int) -> Int? {
         var total = 2
+        guard total <= limit else { return nil }
         for byte in string.utf8 {
             total += byte < 0x20 ? 6 : (byte == 0x22 || byte == 0x5C || byte == 0x2F) ? 2 : 1
             if total > limit { return nil }
