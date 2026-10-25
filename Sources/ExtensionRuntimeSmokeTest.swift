@@ -38,6 +38,12 @@ import WebKit
                 guard let page = components.url else {
                     throw ExtensionSmokeTest.Failure(description: "Could not construct the local extension test page URL")
                 }
+                if CommandLine.arguments.contains("--extension-gesture-probe") {
+                    // Measurement only, not a suite: the probe owns its 60 s budget, output, cleanup and exit.
+                    self.watchdog?.invalidate(); self.watchdog = nil
+                    ExtensionGestureProbe.start(pageURL: page)
+                    return
+                }
                 // Diagnostic modifier: `--extension-test --extension-dnr-only` runs only the
                 // declarativeNetRequest suite. The full run (no modifier) always includes it.
                 if CommandLine.arguments.contains("--extension-dnr-only") {
