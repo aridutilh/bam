@@ -38,7 +38,7 @@ import WebKit
             if module { background["type"] = "module" }
             let manifest: [String: Any] = ["manifest_version": 3, "name": module ? "Bam module worker fixture" : "Bam classic worker fixture", "version": "1.0", "description": "Original fixture for Bam service-worker runtime tests",
                 "content_security_policy": ["extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"],
-                "background": background, "permissions": ["storage", "idle", "notifications", "offscreen", "fontSettings", "cookies", "bookmarks"], "host_permissions": ["http://127.0.0.1/*", "http://localhost/*", "https://127.0.0.1/*"],
+                "background": background, "permissions": ["storage", "idle", "notifications", "offscreen", "fontSettings", "cookies", "bookmarks", "history"], "host_permissions": ["http://127.0.0.1/*", "http://localhost/*", "https://127.0.0.1/*"],
                 "action": ["default_popup": "popup.html"], "content_scripts": [["matches": ["http://127.0.0.1/*", "http://localhost/*"], "js": ["content.js"], "run_at": "document_end"]]]
             try JSONSerialization.data(withJSONObject: manifest, options: [.sortedKeys]).write(to: package.appendingPathComponent("manifest.json"))
             let dependency = "globalThis.fixtureOrder = [globalThis.__bamCompatibility?.worker === true ? 'adapter' : 'missing-adapter', 'dependency'];\n"
@@ -48,6 +48,10 @@ import WebKit
             const api = globalThis.browser || globalThis.chrome;
             // Registered unconditionally at start, as Proton Pass does; a missing event would stop the worker.
             chrome.runtime.onUpdateAvailable.addListener(() => {});
+            // history events registered at start, as Vimium's history cache does after its first search.
+            const historyEvents = [];
+            chrome.history.onVisited.addListener(item => historyEvents.push({kind: 'visited', url: item.url, keys: Object.keys(item).sort().join(',')}));
+            chrome.history.onVisitRemoved.addListener(info => historyEvents.push({kind: 'removed', all: info.allHistory, urls: info.urls}));
             // Registered unconditionally at start, as Session Buddy does; WebKit has no such event.
             const boundsEvents = [];
             chrome.windows.onBoundsChanged.addListener(w => boundsEvents.push({id: w.id, left: w.left, top: w.top, width: w.width, height: w.height}));
@@ -89,6 +93,12 @@ import WebKit
                 const shimmed = await new Promise(resolve => chrome.fontSettings.setFont({genericFamily: 'serif', fontId: 'Fixture'}, () => resolve(chrome.runtime.lastError ? String(chrome.runtime.lastError.message) : null)));
                 const relay = await new Promise(resolve => chrome.runtime.sendNativeMessage('com.ari.bam.compatibility', {kind: 'lastError-measurement'}, () => resolve(chrome.runtime.lastError ? String(chrome.runtime.lastError.message) : null)));
                 return {lastError: shimmed, relay};
+              }
+              if (message?.kind === 'history') {
+                try {
+                  const items = await chrome.history.search({text: '', startTime: 0, maxResults: 20000});
+                  return {count: items.length, urls: items.slice(0, 3).map(i => i.url), last: items[items.length - 1]?.url ?? null, events: historyEvents.slice()};
+                } catch (error) { return {error: String(error?.message || error), events: historyEvents.slice()}; }
               }
               if (message?.kind === 'bookmarks') {
                 try { const tree = await chrome.bookmarks.getTree(); return {tree, keys: Object.keys(chrome.bookmarks)}; }
@@ -238,6 +248,14 @@ import WebKit
         }
         func exercise() async throws -> Int {
         host.permissionPrompt = { _ in true }; host.reconcile()
+        // history source: each profile's own in-memory visits (A: the library's full 5,000 short records; B: three).
+        var historyCalls: [UUID] = []
+        let historyEpoch = Date().addingTimeInterval(-3_600)
+        host.historySnapshot = { profile in
+            historyCalls.append(profile)
+            let count = profile == profileA ? ExtensionHistory.maximumVisits : 3, label = profile == profileA ? "a" : "b"
+            return (0..<count).map { ExtensionHistory.Visit(url: "https://\(label)\($0).example/", title: "\(label)\($0)", visitedAt: historyEpoch.addingTimeInterval(-Double($0))) }
+        }
         // bookmarks.getTree source: each profile's own saved items, built through the published input contract.
         var snapshotCalls: [UUID] = []
         host.bookmarkSnapshot = { profile in
@@ -378,6 +396,28 @@ import WebKit
         let steeredTitle = ((steered.0 as? [[String: Any]])?.first?["children"] as? [[String: Any]])?.last?["title"] as? String
         try check(forged.1 != nil && forged.0 == nil && snapshotCalls.count == callsBeforeForgery + 1 && snapshotCalls.last == profileB && steeredTitle == "B space",
                   "A cross-profile bookmarks request was served, or a caller-chosen profile was honored: forged=\(String(describing: forged.1)) steered=\(steeredTitle ?? "nil")")
+
+        // history: each worker searches only its own profile; the full 5,000-record reply arrives intact; genuine changes
+        // reach only that profile's workers; another profile's context is refused at this bridge.
+        let historyA = await request(popupA, kind: "history"), historyB = await request(popupB, kind: "history")
+        try check(historyA?["count"] as? Int == ExtensionHistory.maximumVisits && historyA?["urls"] as? [String] == ["https://a0.example/", "https://a1.example/", "https://a2.example/"] &&
+                  historyA?["last"] as? String == "https://a4999.example/" && historyB?["count"] as? Int == 3 && historyB?["urls"] as? [String] == ["https://b0.example/", "https://b1.example/", "https://b2.example/"],
+                  "history.search crossed profiles or did not deliver the full 5,000 records: A=\(historyA?["count"] ?? historyA?["error"] ?? "nil") B=\(historyB ?? [:])")
+        host.historyChanged(profileID: profileA, change: .visited(ExtensionHistory.Visit(url: "https://new.example/", title: "New", visitedAt: Date())))
+        host.historyChanged(profileID: profileA, change: .removed(urls: ["https://a4999.example/"]))
+        host.historyChanged(profileID: profileA, change: .cleared)
+        func historyEvents(_ popup: WKWebView) async -> [[String: Any]] { await request(popup, kind: "history")?["events"] as? [[String: Any]] ?? [] }
+        try await wait("Genuine history changes did not reach profile A's worker") { await historyEvents(popupA).count == 3 }
+        try await Task.sleep(nanoseconds: 500_000_000)
+        let heardA = await historyEvents(popupA), heardB = await historyEvents(popupB)
+        try check(heardA.count == 3 && heardA[0]["url"] as? String == "https://new.example/" && heardA[0]["keys"] as? String == "id,lastVisitTime,title,url" &&
+                  heardA[1]["all"] as? Bool == false && heardA[1]["urls"] as? [String] == ["https://a4999.example/"] &&
+                  heardA[2]["all"] as? Bool == true && (heardA[2]["urls"] as? [String])?.isEmpty == true && heardB.isEmpty,
+                  "History events were wrong, invented fields, or reached another profile: A=\(heardA) B=\(heardB)")
+        let historyCallsBefore = historyCalls.count
+        let forgedHistory = await runtimeA.compatibility.receiveNativeMessage(["kind": "request", "method": "history.search", "params": ["text": "", "profileID": profileA.uuidString]], context: contextB)
+        try check(forgedHistory.0 == nil && forgedHistory.1 != nil && historyCalls.count == historyCallsBefore,
+                  "A cross-profile history request was served: \(String(describing: forgedHistory.1))")
 
         // offscreen: a worker creates a hidden page, messages it, and closes it; profiles stay separate.
         let offscreenReport = await request(popupA, kind: "offscreen")
@@ -526,6 +566,8 @@ import WebKit
         try await wait("Inactivity transition did not cross the worker event port") {
             (await request(popupA)?["events"] as? [[String: String]])?.contains { $0["kind"] == "idle" && $0["value"] == "active" } == true
         }
+        // Across revocation the snapshot hooks must not be read at all, whichever layer refuses first.
+        let snapshotsBeforeRevoke = (snapshotCalls.count, historyCalls.count)
         try host.revokePermissions(id: idA)
         try check(!runtimeA.compatibility.offscreen.has(contextA.uniqueIdentifier) && runtimeB.compatibility.offscreen.has(contextB.uniqueIdentifier),
                   "Revoking one extension did not close only its offscreen document")
@@ -534,11 +576,29 @@ import WebKit
         runtimeA.compatibility.dispatch("notifications.onClicked", [revokedID], to: contextA.uniqueIdentifier)
         let revokedNative = await runtimeA.compatibility.receiveNativeMessage(["kind": "request", "method": "idle.queryState"], context: contextA)
         let revoked = await request(popupA, kind: "revoked")
+        host.historyChanged(profileID: profileA, change: .visited(ExtensionHistory.Visit(url: "https://after-revoke.example/", title: "Late", visitedAt: Date())))
+        try await Task.sleep(nanoseconds: 500_000_000)
+        // Revoke Permissions removes every grant, which also closes the worker's compatibility transport, so a worker
+        // call may be refused there (before the bridge). WebKit wraps the reply error, so the worker's message must
+        // contain the complete transport refusal or the complete bridge refusal; anything else, or any data, fails.
+        // The bridge itself must still refuse with exactly its own text when called directly.
+        func refusedAfterRevoke(_ error: Any?, bridgeText: String) -> Bool {
+            guard let text = error as? String else { return false }
+            return text.contains(bridgeText) || text.contains(BrowserExtensions.compatibilityTransportUnavailable)
+        }
+        let revokedHistory = await request(popupA, kind: "history")
+        let revokedHistoryNative = await runtimeA.compatibility.receiveNativeMessage(["kind": "request", "method": "history.search", "params": ["text": ""]], context: contextA)
+        try check(refusedAfterRevoke(revokedHistory?["error"], bridgeText: ExtensionCompatibilityBridge.historyNotGranted) && revokedHistory?["count"] == nil &&
+                  (revokedHistory?["events"] as? [[String: Any]])?.contains { $0["url"] as? String == "https://after-revoke.example/" } == false &&
+                  revokedHistoryNative.0 == nil && revokedHistoryNative.1?.localizedDescription == ExtensionCompatibilityBridge.historyNotGranted,
+                  "Revoked history access searched, delivered an event, or was refused for another reason: \(revokedHistory ?? [:]) bridge=\(String(describing: revokedHistoryNative.1))")
         let revokedMarks = await request(popupA, kind: "bookmarks")
         let revokedMarksNative = await runtimeA.compatibility.receiveNativeMessage(["kind": "request", "method": "bookmarks.getTree"], context: contextA)
-        try check((revokedMarks?["error"] as? String)?.contains("not been granted bookmarks access") == true && revokedMarks?["tree"] == nil &&
-                  revokedMarksNative.0 == nil && revokedMarksNative.1 != nil,
-                  "Revoked bookmarks access still returned a tree: \(revokedMarks ?? [:])")
+        try check(refusedAfterRevoke(revokedMarks?["error"], bridgeText: ExtensionCompatibilityBridge.bookmarksNotGranted) && revokedMarks?["tree"] == nil &&
+                  revokedMarksNative.0 == nil && revokedMarksNative.1?.localizedDescription == ExtensionCompatibilityBridge.bookmarksNotGranted,
+                  "Revoked bookmarks access returned a tree or was refused for another reason: \(revokedMarks ?? [:]) bridge=\(String(describing: revokedMarksNative.1))")
+        try check(snapshotCalls.count == snapshotsBeforeRevoke.0 && historyCalls.count == snapshotsBeforeRevoke.1,
+                  "A revoked extension's request read the bookmarks or history snapshot")
         try check(revokedNative.1 != nil && revoked?["requestDenied"] is String &&
                   (revoked?["events"] as? [[String: String]])?.contains { $0["value"] == revokedID } == false,
                   "Revoked worker grants still allowed native requests or event delivery")
@@ -587,7 +647,7 @@ import WebKit
         // Installs reviewed before Bam provided bookmarks: their stored grants lack it. It must not be granted silently.
         let registryFile = registryURL.appendingPathComponent("registry.json")
         if var stored = try JSONSerialization.jsonObject(with: Data(contentsOf: registryFile)) as? [[String: Any]] {
-            for index in stored.indices { if var grants = stored[index]["compatibilityGrants"] as? [String: Any] { grants.removeValue(forKey: "bookmarks"); stored[index]["compatibilityGrants"] = grants } }
+            for index in stored.indices { if var grants = stored[index]["compatibilityGrants"] as? [String: Any] { grants.removeValue(forKey: "bookmarks"); grants.removeValue(forKey: "history"); stored[index]["compatibilityGrants"] = grants } }
             try JSONSerialization.data(withJSONObject: stored).write(to: registryFile, options: .atomic)
         }
         func relaunch(refreshing: Bool, minimumStarts: Int, expectedVersion: String) async throws -> (BrowserExtensions, [UUID: Int], [UUID: BrowserExtensionRecord]) {
@@ -617,6 +677,9 @@ import WebKit
         for install in installs {
             guard let context = agedHost.context(for: install.id), let runtime = context.webExtensionController?.delegate as? BrowserExtensionRuntime,
                   let record = agedHost.records.first(where: { $0.id == install.id }) else { throw Failure(description: "The relaunched \(install.label) context is missing") }
+            let earlierHistory = await runtime.compatibility.receiveNativeMessage(["kind": "request", "method": "history.search", "params": ["text": ""]], context: context)
+            try check(earlierHistory.0 == nil && earlierHistory.1?.localizedDescription == ExtensionCompatibilityBridge.historyNotGranted && record.compatibilityGrants?["history"] == nil,
+                      "An earlier \(install.label) install gained history access without review: \(String(describing: earlierHistory.1))")
             let earlier = await runtime.compatibility.receiveNativeMessage(["kind": "request", "method": "bookmarks.getTree"], context: context)
             try check(earlier.0 == nil && earlier.1?.localizedDescription == ExtensionCompatibilityBridge.bookmarksNotGranted && record.compatibilityGrants?["bookmarks"] == nil &&
                       record.compatibility?.contains("bookmarks") == true && ExtensionManagement.details(record)?.contains("Not granted: bookmarks") == true,

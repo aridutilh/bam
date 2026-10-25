@@ -16,6 +16,7 @@
 
 ## Unreleased extension-compatibility draft (branch work, after 0.21.3)
 
+- Read-only `history.search` with genuine `onVisited`/`onVisitRemoved` for extensions declaring `history` with an explicit grant (no add/delete/getVisits): the login profile's in-memory history, schema-validated query, documented subset matching, full-SHA-256 IDs, no invented counts, 4 MiB reply bound. History 13, compatibility 77; library hook (Arc owner) and canonical fixture pending.
 - Read-only `bookmarks.getTree` for extensions declaring `bookmarks` with an explicit grant (no mutation methods or events): the extension's login profile's Favorites and Spaces with their kept tabs and folders, kept addresses, no Today/other profiles/Easels, bounded; refused when ungranted or private; installs reviewed earlier stay ungranted until re-review. Bookmark tree 16, compatibility 75; integration snapshot (Arc owner) and canonical fixture pending.
 - Extension tab/window targeting is honored or refused before anything opens: Little Bam windows report `popup` (integration patch pending); `windows.create` refuses non-popup, maximized, full-screen and bounded requests; `tabs.create` refuses popup, other-profile or missing targets, insertions before existing tabs, and an end index that would count an exposed Peek. Targeting 10; canonical checks written (**not yet run**).
 - Manage Extensions: the static-rule warning follows any error or message in a scrollable, accessible details area; affected rows are marked.

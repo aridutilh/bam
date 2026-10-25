@@ -513,6 +513,55 @@ import JavaScriptCore
         try check(undeclared.evaluateScript("browser.bookmarks === undefined")!.toBool() && engineMarks.evaluateScript("browser.bookmarks === engine")!.toBool(),
                   "bookmarks appeared without the declared permission, or replaced an engine namespace")
 
+        // history: search + two genuine events only, when declared and absent; the query is validated before bridging.
+        let hist = JSContext()!
+        var histErrors: [String] = []
+        hist.exceptionHandler = { _, error in histErrors.append(error?.toString() ?? "JavaScript error") }
+        hist.evaluateScript("""
+            var location = {origin: 'webkit-extension://fixture', href: 'webkit-extension://fixture/worker.js'}, logged = [], console = {error: function (a, b) { logged.push(String(a) + ' ' + String(b && b.message || b)); }}, performance = {now: function() { return 0; }};
+            var granted = true, requests = [], portLog = [], items = [{id: 'x', url: 'https://a.example/', title: 'A', lastVisitTime: 5}];
+            function Runtime() {}
+            Runtime.prototype.getURL = function (p) { return 'webkit-extension://fixture' + p; }; Runtime.prototype.getManifest = function () { return {permissions: ['history']}; };
+            Runtime.prototype.sendNativeMessage = function (app, body) { if (body.kind === 'request') requests.push(body); return body.kind !== 'request' || granted ? Promise.resolve(items) : Promise.reject(new Error('Bam has not been granted history access for this extension.')); };
+            Runtime.prototype.connectNative = function () { return {postMessage: function (m) { portLog.push(m.kind + ':' + m.event); }, onMessage: {addListener: function () {}}, onDisconnect: {addListener: function () {}}, disconnect: function () { portLog.push('disconnect'); }}; };
+            var browser = {runtime: new Runtime()}, chrome = browser;
+            """)
+        hist.evaluateScript(ExtensionCompatibility.workerScript(manifest: ["permissions": ["history"]], browserVersion: "test"))
+        hist.evaluateScript("""
+            var out = {keys: Object.keys(chrome.history).sort().join(','), heard: [], removed: []};
+            chrome.history.search({text: 'a', startTime: 0, maxResults: 20000}).then(function (value) { out.passed = value === items; });
+            var invalid = [{}, {text: 1}, {text: '', startTime: '0'}, {text: '', endTime: Infinity}, {text: '', maxResults: 1.5}, {text: '', maxResults: -1}, {text: '', maxResults: true}, null, Object.assign([], {text: ''}), {text: '', maxResults: 2147483648}, {text: '', startTime: null}];
+            out.rejections = 0;
+            invalid.forEach(function (query) { chrome.history.search(query).then(function () {}, function (error) { if (error instanceof TypeError) out.rejections += 1; }); });
+            chrome.history.search({}, function () { out.invalidCallbackArgs = arguments.length; });
+            var onVisit = function (item) { out.heard.push(item.url); }, onRemove = function (info) { out.removed.push(info); };
+            chrome.history.onVisited.addListener(onVisit); chrome.history.onVisitRemoved.addListener(onRemove);
+            __bamCompatibility.dispatch('history.onVisited', [items[0]]);
+            __bamCompatibility.dispatch('history.onVisitRemoved', [{allHistory: true, urls: []}]);
+            """)
+        hist.evaluateScript("""
+            out.validRequests = requests.length; out.request = JSON.stringify(requests[0]);
+            granted = false;
+            chrome.history.search({text: ''}).then(function () { out.denied = 'resolved'; }, function (error) { out.denied = error.message; });
+            chrome.history.search({text: ''}, function () { out.deniedCallbackArgs = arguments.length; });
+            chrome.history.onVisited.removeListener(onVisit); chrome.history.onVisitRemoved.removeListener(onRemove);
+            """)
+        try check(histErrors.isEmpty && hist.evaluateScript("""
+            out.keys === 'onVisitRemoved,onVisited,search' && out.passed && out.rejections === 11 && out.invalidCallbackArgs === 0 && out.validRequests === 1
+            && out.request === '{"kind":"request","method":"history.search","params":{"text":"a","startTime":0,"maxResults":20000}}'
+            && JSON.stringify(out.heard) === '["https://a.example/"]' && out.removed.length === 1 && out.removed[0].allHistory === true
+            && out.denied === 'Bam has not been granted history access for this extension.' && out.deniedCallbackArgs === 0
+            && portLog.indexOf('subscribe:history.onVisited') >= 0 && portLog.indexOf('subscribe:history.onVisitRemoved') >= 0 && portLog[portLog.length - 1] === 'disconnect'
+            """)!.toBool(), "history shape, validation, pass-through, events or denial contract was wrong: \(hist.evaluateScript("JSON.stringify([out, portLog, logged])")!) \(histErrors)")
+        let engineHistory = JSContext()!
+        engineHistory.evaluateScript("var location = {origin: 'webkit-extension://fixture', href: 'x'}, console = {error: function() {}}, performance = {now: function() { return 0; }}; var engine = {search: function () {}}; var browser = {runtime: {getURL: function (p) { return p; }, getManifest: function () { return {}; }}, history: engine};")
+        engineHistory.evaluateScript(ExtensionCompatibility.workerScript(manifest: ["permissions": ["history"]], browserVersion: "test"))
+        let noHistory = JSContext()!
+        noHistory.evaluateScript("var location = {origin: 'webkit-extension://fixture', href: 'x'}, console = {error: function() {}}, performance = {now: function() { return 0; }}; var browser = {runtime: {getURL: function (p) { return p; }, getManifest: function () { return {}; }}};")
+        noHistory.evaluateScript(ExtensionCompatibility.workerScript(manifest: ["permissions": ["bookmarks"]], browserVersion: "test"))
+        try check(engineHistory.evaluateScript("browser.history === engine")!.toBool() && noHistory.evaluateScript("browser.history === undefined")!.toBool(),
+                  "history replaced an engine namespace or appeared without its own declared permission")
+
         // declarativeNetRequest guard: unsafe added rules are refused before WebKit; valid calls pass through untouched.
         let guardJS = JSContext()!
         var guardErrors: [String] = []

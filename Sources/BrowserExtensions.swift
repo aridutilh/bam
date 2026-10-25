@@ -102,6 +102,13 @@ struct BrowserExtensionPermissionReview {
     /// Saved items of one login profile for bookmarks.getTree (see ExtensionBookmarkTree's input contract).
     /// Called on the main actor only for a granted, registered context of that profile's own runtime.
     var bookmarkSnapshot: ((UUID) -> ExtensionBookmarkTree.Input?)?
+    /// One login profile's in-memory history visits, newest first (see ExtensionHistory's hook contract).
+    var historySnapshot: ((UUID) -> [ExtensionHistory.Visit]?)?
+    /// The integration reports a genuine change in a profile's library; only that profile's extensions hear it.
+    func historyChanged(profileID: UUID, change: ExtensionHistory.Change) {
+        guard !isPrivate, let runtime = runtimes[profileID] else { return }
+        runtime.compatibility.dispatchHistory(change)
+    }
     /// Closes a window an extension created; the main browser window refuses.
     var closeWindow: ((NSWindow) -> Bool)?
     /// Starts a download requested by an extension document through Bam's downloads.
@@ -135,6 +142,8 @@ struct BrowserExtensionPermissionReview {
     private var manager: ExtensionManagement?
     private var stopped = false
 
+    /// Refusal when an extension's compatibility transport is closed (for example after Revoke Permissions).
+    static let compatibilityTransportUnavailable = "This native application is not available in Bam."
     static let supportedPermissions: Set<String> = ["activeTab", "alarms", "clipboardWrite", "contextMenus", "menus", "cookies", "declarativeNetRequest", "declarativeNetRequestFeedback", "declarativeNetRequestWithHostAccess", "scripting", "storage", "tabs", "unlimitedStorage", "webNavigation", "webRequest"]
     // windows.create/update/remove are implemented through Little Bam windows since 0.17.
     // notifications/downloads/management are absent from WebKit; Bam's compatibility
@@ -819,7 +828,7 @@ struct BrowserExtensionPermissionReview {
         for task in preparation.values { task.cancel() }; preparation.removeAll()
         for runtime in runtimes.values { for context in runtime.contexts.values { runtime.closePopup(for: context); try? runtime.controller.unload(context) }; runtime.contexts.removeAll(); runtime.shutdown() }
         runtimes.removeAll()
-        surfaces = nil; selectTab = nil; closeTab = nil; navigateTab = nil; reloadTab = nil; createTab = nil; createWindow = nil; bookmarkSnapshot = nil; closeWindow = nil; startDownload = nil
+        surfaces = nil; selectTab = nil; closeTab = nil; navigateTab = nil; reloadTab = nil; createTab = nil; createWindow = nil; bookmarkSnapshot = nil; historySnapshot = nil; closeWindow = nil; startDownload = nil
         if ownsTemporaryStorage { try? FileManager.default.removeItem(at: storageURL) }
     }
     static func failure(_ message: String) -> NSError { NSError(domain: "BamExtensions", code: 1, userInfo: [NSLocalizedDescriptionKey: message]) }
@@ -918,6 +927,10 @@ struct BrowserExtensionPermissionReview {
         compatibility.bookmarkInput = { [weak self] in
             guard let self, let owner = self.owner, !owner.isPrivate else { return nil }
             return owner.bookmarkSnapshot?(self.profileID)
+        }
+        compatibility.historyVisits = { [weak self] in
+            guard let self, let owner = self.owner, !owner.isPrivate else { return nil }
+            return owner.historySnapshot?(self.profileID).map { Array($0.prefix(ExtensionHistory.maximumVisits)) }
         }
         compatibility.permissionGranted = { [weak self] context, permission in
             guard let self, self.owns(context), let id = UUID(uuidString: context.uniqueIdentifier),
@@ -1243,7 +1256,7 @@ struct BrowserExtensionPermissionReview {
             sendNative(message, context: context, reply: replyHandler); return
         }
         guard allowsCompatibilityTransport(context), applicationIdentifier == ExtensionCompatibility.nativeApplicationIdentifier else {
-            replyHandler(nil, BrowserExtensions.failure("This native application is not available in Bam.")); return
+            replyHandler(nil, BrowserExtensions.failure(BrowserExtensions.compatibilityTransportUnavailable)); return
         }
         Task { @MainActor in
             let (value, error) = await compatibility.receiveNativeMessage(message, context: context)
@@ -1256,7 +1269,7 @@ struct BrowserExtensionPermissionReview {
             connectNative(port, context: context, completion: completionHandler); return
         }
         guard allowsCompatibilityTransport(context), port.applicationIdentifier == ExtensionCompatibility.nativeApplicationIdentifier else {
-            completionHandler(BrowserExtensions.failure("This native application is not available in Bam.")); return
+            completionHandler(BrowserExtensions.failure(BrowserExtensions.compatibilityTransportUnavailable)); return
         }
         completionHandler(compatibility.connectNativePort(port, context: context))
     }

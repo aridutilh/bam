@@ -27,7 +27,7 @@ enum ExtensionCompatibility {
     }
 
     /// Permissions WebKit's engine does not implement and this layer can stand in for.
-    static let bridgedPermissions: [String] = ["notifications", "idle", "privacy", "management", "downloads", "offscreen", "fontSettings", "bookmarks"]
+    static let bridgedPermissions: [String] = ["notifications", "idle", "privacy", "management", "downloads", "offscreen", "fontSettings", "bookmarks", "history"]
     /// Members the layer always offers when the host namespace exists but the member does not.
     static let runtimeExtras: [String] = ["runtime.getBrowserInfo", "runtime.onSuspend", "runtime.requestUpdateCheck", "runtime.getContexts",
                                           "webNavigation.onCreatedNavigationTarget", "storage.managed", "commands", "action.getUserSettings",
@@ -47,7 +47,13 @@ enum ExtensionCompatibility {
 
     /// Names shown in the permission review for a bridged permission list.
     static func reviewLabel(_ permissions: [String]) -> String {
-        permissions.map { $0 == "bookmarks" ? "bookmarks (read-only: getTree of this profile's Favorites and kept tabs; no changes or events)" : $0 }
+        permissions.map {
+            switch $0 {
+            case "bookmarks": return "bookmarks (read-only: getTree of this profile's Favorites and kept tabs; no changes or events)"
+            case "history": return "history (read-only: search this profile's history and hear new visits and clearing; no adding or deleting)"
+            default: return $0
+            }
+        }
             .joined(separator: ", ")
     }
 
@@ -157,7 +163,7 @@ enum ExtensionCompatibility {
       const pending = new Map();
       let nextRequest = 1;
       let eventPort = null;
-      const nativeEvents = new Set(["notifications.onClosed", "notifications.onClicked", "notifications.onButtonClicked", "notifications.onShown", "idle.onStateChanged", "windows.onBoundsChanged"]);
+      const nativeEvents = new Set(["notifications.onClosed", "notifications.onClicked", "notifications.onButtonClicked", "notifications.onShown", "idle.onStateChanged", "windows.onBoundsChanged", "history.onVisited", "history.onVisitRemoved"]);
       const subscribe = (name) => {
         if (!isWorker || !nativeEvents.has(name)) return;
         if (!nativeConnect) throw unsupported("Worker event delivery");
@@ -285,6 +291,30 @@ enum ExtensionCompatibility {
         const ns = {};
         define(ns, "getTree", call(async () => await bridge("bookmarks.getTree", null)));
         define(api, "bookmarks", ns);
+      }
+
+      // history: read-only search plus the two genuine events (Bam's library reports new visits, trims and clears),
+      // when declared and absent. No add/delete/getVisits. The query is checked against the official schema here and
+      // natively; like every bridged call, errors reject the promise or are logged with an argument-less callback.
+      if (provided.has("history") && !api.history) {
+        const ns = {};
+        const invalid = (detail) => new TypeError("Invalid history.search query: " + detail + ".");
+        define(ns, "search", call(async (query) => {
+          if (query === null || typeof query !== "object" || Array.isArray(query)) throw invalid("a query object is required");
+          if (typeof query.text !== "string") throw invalid("'text' must be a string");
+          for (const key of ["startTime", "endTime"]) {
+            if (query[key] !== undefined && (typeof query[key] !== "number" || !Number.isFinite(query[key]))) throw invalid("'" + key + "' must be a finite number");
+          }
+          if (query.maxResults !== undefined && (typeof query.maxResults !== "number" || !Number.isInteger(query.maxResults) || query.maxResults < 0 || query.maxResults > 2147483647)) {
+            throw invalid("'maxResults' must be an integer from 0 to 2147483647");
+          }
+          const params = { text: query.text };
+          for (const key of ["startTime", "endTime", "maxResults"]) if (query[key] !== undefined) params[key] = query[key];
+          return await bridge("history.search", params);
+        }));
+        registerEvent(ns, "onVisited", "history.onVisited");
+        registerEvent(ns, "onVisitRemoved", "history.onVisitRemoved");
+        define(api, "history", ns);
       }
 
       // privacy: every setting reads as not controllable by the extension.
@@ -781,6 +811,9 @@ enum ExtensionCompatibility {
     var isNotificationDeliveryAvailable: (() -> Bool)?
     /// This profile's saved items for bookmarks.getTree; nil when unavailable. Never called for private hosts.
     var bookmarkInput: (() -> ExtensionBookmarkTree.Input?)?
+    /// This profile's in-memory history visits, newest first; nil when unavailable. Never called for private hosts.
+    var historyVisits: (() -> [ExtensionHistory.Visit]?)?
+    static let historyNotGranted = "Bam has not been granted history access for this extension. Disable and enable it in Manage Extensions to review access."
     var isPrivateHost = false
     static let bookmarksNotGranted = "Bam has not been granted bookmarks access for this extension. Disable and enable it in Manage Extensions to review access."
     let browserVersion: String
@@ -871,7 +904,8 @@ enum ExtensionCompatibility {
         return (context.webExtension.manifest["permissions"] as? [String] ?? []).contains(namespace)
     }
     private static let eventPermissions = ["notifications.onClosed": "notifications", "notifications.onClicked": "notifications",
-        "notifications.onButtonClicked": "notifications", "notifications.onShown": "notifications", "idle.onStateChanged": "idle"]
+        "notifications.onButtonClicked": "notifications", "notifications.onShown": "notifications", "idle.onStateChanged": "idle",
+        "history.onVisited": "history", "history.onVisitRemoved": "history"]
     /// Events Chrome delivers without any permission. They still require a registered, loaded context of
     /// this profile whose compatibility plan provides the event.
     private static let unpermissionedEvents: Set<String> = ["windows.onBoundsChanged"]
@@ -880,6 +914,7 @@ enum ExtensionCompatibility {
             return ownsRegisteredContext(context) && context.isLoaded && registrations[context.uniqueIdentifier]?.plan.provided.contains(event) == true
         }
         guard let permission = Self.eventPermissions[event] else { return false }
+        if permission == "history" && isPrivateHost { return false }
         return permits(permission, for: context)
     }
     private static func bridgeError(_ message: String) -> NSError {
@@ -1015,13 +1050,27 @@ enum ExtensionCompatibility {
     private func handle(method: String, params: [String: Any], context: WKWebExtensionContext, web: WKWebView?) async -> (Any?, String?) {
         let methods = ["idle.queryState": "idle", "notifications.permissionLevel": "notifications", "notifications.create": "notifications",
                        "notifications.clear": "notifications", "downloads.download": "downloads",
-                       "fontSettings.getFontList": "fontSettings", "bookmarks.getTree": "bookmarks",
+                       "fontSettings.getFontList": "fontSettings", "bookmarks.getTree": "bookmarks", "history.search": "history",
                        "offscreen.createDocument": "offscreen", "offscreen.closeDocument": "offscreen", "offscreen.hasDocument": "offscreen", "offscreen.contexts": "offscreen"]
         guard let permission = methods[method], permits(permission, for: context) else {
             if method.hasPrefix("bookmarks.") { return (nil, Self.bookmarksNotGranted) }
+            if method.hasPrefix("history.") { return (nil, Self.historyNotGranted) }
             return (nil, "This compatibility capability is not available to the extension.")
         }
         switch method {
+        case "history.search":
+            // This bridge's own profile; nothing the caller sends selects one. The library is already in memory.
+            if isPrivateHost { return (nil, "History is not available to extensions in private windows.") }
+            let query: ExtensionHistory.Query
+            switch ExtensionHistory.query(params, now: Date()) {
+            case .success(let parsed): query = parsed
+            case .failure(let failure): return (nil, failure.description)
+            }
+            guard let visits = historyVisits?() else { return (nil, "Bam's history is not available right now.") }
+            switch ExtensionHistory.search(visits, query) {
+            case .success(let items): return (items, nil)
+            case .failure(let failure): return (nil, failure.description)
+            }
         case "bookmarks.getTree":
             // The profile is this bridge's own (the context was matched to its registration above); nothing the
             // caller sends selects a profile.
@@ -1123,6 +1172,22 @@ enum ExtensionCompatibility {
     func signalWindowBoundsChanged(topologyOnly: Bool = false) {
         for key in registrations.keys.sorted() { dispatch("windows.onBoundsChanged", topologyOnly ? ["topology"] : [], to: key) }
     }
+    /// A genuine change in this profile's library: delivered to each registered context whose grant and loaded state
+    /// are re-checked at dispatch (`dispatch` → `allowsEvent`), so nothing reaches a revoked or unloaded extension.
+    func dispatchHistory(_ change: ExtensionHistory.Change) {
+        guard !isPrivateHost else { return }
+        let events = ExtensionHistory.events(for: change)
+        // Changes too large to deliver are not invented or truncated; they are recorded (bounded, no URLs) and logged.
+        for message in events.undeliverable {
+            historyDiagnostics.append(message); if historyDiagnostics.count > 20 { historyDiagnostics.removeFirst(historyDiagnostics.count - 20) }
+            NSLog("Bam: %@", message)
+        }
+        for (event, payload) in events.deliveries {
+            for key in registrations.keys.sorted() { dispatch(event, [payload], to: key) }
+        }
+    }
+    /// The last undeliverable history changes of this profile (diagnostics and fixtures).
+    private(set) var historyDiagnostics: [String] = []
     /// Contexts a bounds signal would reach (diagnostics and fixtures).
     func boundsSignalRecipients() -> [String] {
         registrations.keys.sorted().filter { key in registrations[key]?.context.map { allowsEvent("windows.onBoundsChanged", for: $0) } == true }
