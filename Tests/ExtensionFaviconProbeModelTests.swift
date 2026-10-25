@@ -29,6 +29,21 @@ import Foundation
         try check(M.classify(report(fetch: answered, seen: []), contextRecordedFaviconError: false).0 == .incomplete &&
                   M.classify(report(fetch: ["status": 200, "body": "packaged file"], seen: ["/_favicon/"]), contextRecordedFaviconError: false).0 == .incomplete,
                   "Inconsistent worker records were not incomplete (a packaged fallback must not count as interception)")
+        // Records must be terminal and valid: a worker error, an image timeout or empty record, an empty fetch are incomplete.
+        var workerError = report(fetch: failed, seen: []); workerError["seen"] = ["error": "Could not establish connection"]
+        var imageTimeout = report(fetch: failed, seen: []); imageTimeout["img"] = ["timeout": true]
+        var imageEmpty = report(fetch: failed, seen: []); imageEmpty["img"] = [String: Any]()
+        var fetchEmpty = report(fetch: [:], seen: [])
+        fetchEmpty["fetch"] = [String: Any]()
+        try check([workerError, imageTimeout, imageEmpty, fetchEmpty].allSatisfy { M.classify($0, contextRecordedFaviconError: true).0 == .incomplete },
+                  "A worker error, image timeout/empty record or empty fetch counted as a result")
+        var imageError = report(fetch: failed, seen: []); imageError["img"] = ["error": true]
+        try check(M.classify(imageError, contextRecordedFaviconError: true).0 == .notIntercepted, "A terminal image error with complete records was not a negative")
+        // The negative claims WebKit's own lookup only when its matching error was observed.
+        let withError = M.classify(report(fetch: failed, seen: []), contextRecordedFaviconError: true).1
+        let withoutError = M.classify(report(fetch: failed, seen: []), contextRecordedFaviconError: false)
+        try check(withError.contains("resource-lookup error") && withoutError.0 == .notIntercepted && withoutError.1.contains("not observed") && !withoutError.1.contains("resource-lookup"),
+                  "The negative overclaimed WebKit's resource lookup: \(withoutError.1)")
         return checks
     }
 }

@@ -27,18 +27,27 @@ enum ExtensionFaviconProbeModel {
         guard control?["status"] as? Int == 200, control?["body"] as? String == controlBody else {
             return (.incomplete, "The ordinary packaged control resource did not load, so the page's loading was not established.")
         }
-        guard report["seen"] is [String: Any], report["fetch"] is [String: Any], report["img"] is [String: Any] else {
-            return (.incomplete, "A required record (worker observations, fetch or image result) is missing.")
+        // Every record must be terminal: the worker's list of seen requests (not an error), a finished fetch (status or
+        // error) and a finished image (load or error; a timeout or empty record is not a result).
+        guard let seenRecords = (report["seen"] as? [String: Any])?["seen"] as? [[String: Any]] else {
+            return (.incomplete, "The worker did not return its list of observed requests.")
         }
-        let fetch = report["fetch"] as? [String: Any] ?? [:]
+        guard let fetch = report["fetch"] as? [String: Any], fetch["status"] is Int || fetch["error"] is String else {
+            return (.incomplete, "The page's fetch did not reach a terminal outcome.")
+        }
+        guard let image = report["img"] as? [String: Any], image["loaded"] as? Bool == true || image["error"] as? Bool == true else {
+            return (.incomplete, "The image did not reach a terminal load or error (timeout or missing record).")
+        }
         let workerAnswered = fetch["status"] as? Int == 200 && fetch["probe"] as? String == "worker" && (fetch["body"] as? String)?.contains(marker) == true
-        let seenPaths = ((report["seen"] as? [String: Any])?["seen"] as? [[String: Any]] ?? []).compactMap { $0["path"] as? String }
-        let workerSaw = seenPaths.contains("/_favicon/")
+        let workerSaw = seenRecords.contains { $0["path"] as? String == "/_favicon/" }
         if workerAnswered && workerSaw {
             return (.intercepted, "The worker's fetch listener saw and answered the page's _favicon/ request" + (contextRecordedFaviconError ? ", but WebKit also recorded a context error." : "."))
         }
         if !workerAnswered && !workerSaw {
-            return (.notIntercepted, "The worker never saw the _favicon/ request; it reached WebKit's resource lookup" + (contextRecordedFaviconError ? " (context error recorded)." : " (no context error recorded)."))
+            // Only the absence of a worker hit is established; WebKit's own lookup is claimed only when its error was seen.
+            return (.notIntercepted, contextRecordedFaviconError
+                ? "The worker never saw the _favicon/ request, and WebKit recorded its _favicon resource-lookup error."
+                : "The worker never saw the _favicon/ request; how WebKit handled it was not observed (no matching context error).")
         }
         return (.incomplete, "Inconsistent records: worker saw _favicon/ = \(workerSaw), worker answer received = \(workerAnswered).")
     }
