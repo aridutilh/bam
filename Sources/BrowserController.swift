@@ -329,10 +329,13 @@ import QuartzCore
     var automaticTabSleeping = true
     var keepAwakeHosts: Set<String> = []
 
-    init(sessionURL: URL, ephemeral: Bool = false, downloadCoordinator: DownloadCoordinator? = nil) {
+    /// `profileStores` is for disposable runs only (e.g. an isolated store from
+    /// `WebsiteProfileStore(isolated:)`); nil keeps the standard store for `ephemeral`.
+    init(sessionURL: URL, ephemeral: Bool = false, downloadCoordinator: DownloadCoordinator? = nil,
+         profileStores: WebsiteProfileStore? = nil) {
         self.downloads = downloadCoordinator ?? DownloadCoordinator()
         self.sessionURL = sessionURL; self.privateMode = ephemeral
-        self.profileStores = WebsiteProfileStore(ephemeral: ephemeral)
+        self.profileStores = profileStores ?? WebsiteProfileStore(ephemeral: ephemeral)
         self.favicons = WebsiteFaviconStore(directory: ephemeral ? nil : sessionURL.deletingLastPathComponent().appendingPathComponent("Favicons", isDirectory: true))
         session = ephemeral ? .fresh() : SessionFile.load(sessionURL)
         if !ephemeral, UserDefaults.standard.object(forKey: "AutomaticallyShowPlayingVideo") != nil { automaticallyShowsVideo = UserDefaults.standard.bool(forKey: "AutomaticallyShowPlayingVideo") }

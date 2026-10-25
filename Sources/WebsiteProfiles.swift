@@ -1,28 +1,7 @@
 import AppKit
 import WebKit
 
-/// A store is chosen before constructing a web view. Sharing a profile means
-/// sharing this same store, including in nonpersistent previews.
-@MainActor final class WebsiteProfileStore {
-    let ephemeral: Bool
-    private var stores: [UUID: WKWebsiteDataStore] = [:]
-    init(ephemeral: Bool) { self.ephemeral = ephemeral }
-    func store(for profileID: UUID) -> WKWebsiteDataStore {
-        if let existing = stores[profileID] { return existing }
-        let store: WKWebsiteDataStore
-        if ephemeral { store = .nonPersistent() }
-        else if let identifier = PreviewProfile.persistentIdentifier(for: profileID) { store = WKWebsiteDataStore(forIdentifier: identifier) }
-        else { store = .default() }
-        stores[profileID] = store
-        return store
-    }
-    func profileID(for store: WKWebsiteDataStore) -> UUID? {
-        if let match = stores.first(where: { $0.value === store })?.key { return match }
-        if !ephemeral, let identifier = store.identifier,
-           let profile = stores.keys.first(where: { PreviewProfile.persistentIdentifier(for: $0) == identifier }) { return profile }
-        return nil
-    }
-}
+// WebsiteProfileStore (store choice per profile, standard or isolated) lives in WebsiteProfileStore.swift.
 
 @MainActor extension BrowserController {
     var commandProfileID: UUID {
