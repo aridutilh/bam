@@ -7,7 +7,7 @@
 - Separate pointer and keyboard focus for folder rows; use original filled open/closed folder drawings and quieter disclosure controls.
 - Simplify the footer around Downloads, Spaces and New Tab while keeping Space management, History, Recently Closed and Picture in Picture reachable.
 - Hide inactive unsaved blank-tab placeholders from the sidebar without deleting session data; suppress legacy internal URLs in sidebar copy. Imported folders explain that they contain saved links rather than automatic updates.
-- Local Preview draft only. Native validation is recorded in VALIDATION.md after integration; this entry alone makes no runtime claim.
+- Local Preview draft verified at `8422e1f`: full build, native Interactions 173 and Features 371; Favicons 85 and Arc import 155 passed on the same production behavior at `b11ccba`. Manual footer, grid and folder-focus checks passed; see VALIDATION.md for scope and limitations.
 
 ## 0.22.0 build 45 — unreleased draft: folders, Arc import, sidebar look
 
