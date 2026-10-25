@@ -616,8 +616,17 @@ enum ExtensionCompatibility {
           nativeRemove.call(e, fn);
           if (own.size === 0) { period += 1; snapshot = null; }
         });
-        Object.defineProperty(e, "__bamDispatch", { value: () => {
+        // Topology refresh: add windows the baseline lacks and drop removed ones; never report and never
+        // overwrite a known window's geometry (it may be mid-resize; only committed signals compare it).
+        const refreshTopology = (list) => {
+          if (!snapshot) { remember(list); return; }
+          const present = new Set();
+          for (const w of Array.isArray(list) ? list : []) { present.add(w.id); if (!snapshot.has(w.id)) snapshot.set(w.id, geometry(w)); }
+          for (const id of Array.from(snapshot.keys())) if (!present.has(id)) snapshot.delete(id);
+        };
+        Object.defineProperty(e, "__bamDispatch", { value: (kind) => {
           if (own.size === 0) return;
+          if (kind === "topology") { enqueue(async (current) => { const list = await read(); if (current === period) refreshTopology(list); }); return; }
           enqueue(async (current) => {
             const list = await read();
             if (current !== period) return;
@@ -1071,11 +1080,13 @@ enum ExtensionCompatibility {
         }
     }
 
-    /// A window this profile exposes committed new bounds: every registered context of this bridge's profile
-    /// that provides the event is signalled (pages directly, workers only while subscribed). The payload is
-    /// read by the adapter from WebKit's own windows.getAll, so the signal carries no arguments.
-    func signalWindowBoundsChanged() {
-        for key in registrations.keys.sorted() { dispatch("windows.onBoundsChanged", [], to: key) }
+    /// A window this profile exposes committed new bounds (`topologyOnly` false), or the set of exposed windows
+    /// changed (`topologyOnly` true): every registered context of this bridge's profile that provides the event is
+    /// signalled (pages directly, workers only while subscribed). Payloads are read by the adapter from WebKit's own
+    /// windows.getAll. A topology signal only adds/removes window IDs in the adapter's baseline; it never reports
+    /// and never overwrites a known window's geometry, so it cannot leak bounds that are not committed.
+    func signalWindowBoundsChanged(topologyOnly: Bool = false) {
+        for key in registrations.keys.sorted() { dispatch("windows.onBoundsChanged", topologyOnly ? ["topology"] : [], to: key) }
     }
     /// Contexts a bounds signal would reach (diagnostics and fixtures).
     func boundsSignalRecipients() -> [String] {

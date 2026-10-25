@@ -918,8 +918,12 @@ struct BrowserExtensionPermissionReview {
     // windows.onBoundsChanged: a committed move or resize of a window this profile exposes (its own `windows`
     // map, so other profiles' and unexposed windows never signal) signals this profile's contexts. Live
     // resizes are ignored until they end; moves and programmatic resizes settle for boundsSettleDelay with no
-    // further change and no mouse button held, so a drag or animation is signalled once, after it ends.
+    // further change. Because the adapter compares every window it reads, a signal is held while any window
+    // of this profile is in a live resize or a mouse button is down, so no read sees uncommitted bounds.
     static let boundsSettleDelay: TimeInterval = 0.3
+    /// AppKit's live-resize state. Replaceable only so the canonical fixture can hold a window mid-resize
+    /// without input injection; a real pointer drag remains a separate root check.
+    var isInLiveResize: (NSWindow) -> Bool = { $0.inLiveResize }
     private var boundsGenerations: [ObjectIdentifier: Int] = [:]
     /// Signals sent (fixture diagnostics only).
     private(set) var boundsSignalCount = 0
@@ -929,7 +933,7 @@ struct BrowserExtensionPermissionReview {
                 let window = notification.object as? NSWindow, isResize = notification.name == NSWindow.didResizeNotification
                 Task { @MainActor [weak self, weak window] in
                     guard let self, let window else { return }
-                    self.windowGeometryChanged(window, liveResizeStep: isResize && window.inLiveResize)
+                    self.windowGeometryChanged(window, liveResizeStep: isResize && self.isInLiveResize(window))
                 }
             })
         }
@@ -945,7 +949,9 @@ struct BrowserExtensionPermissionReview {
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.boundsSettleDelay) { [weak self, weak window] in
             Task { @MainActor [weak self, weak window] in
                 guard let self, let window, self.boundsGenerations[key] == generation, self.windows[key]?.native === window else { return }
-                if window.inLiveResize || NSEvent.pressedMouseButtons & 1 != 0 { self.scheduleBoundsSignal(key, generation: generation, window: window); return }
+                if NSEvent.pressedMouseButtons & 1 != 0 || self.windows.values.contains(where: { $0.native.map(self.isInLiveResize) == true }) {
+                    self.scheduleBoundsSignal(key, generation: generation, window: window); return
+                }
                 self.boundsGenerations.removeValue(forKey: key)
                 self.boundsSignalCount += 1
                 self.compatibility.signalWindowBoundsChanged()
@@ -1061,7 +1067,7 @@ struct BrowserExtensionPermissionReview {
         }
         // A new window joins windows.onBoundsChanged baselines: the adapter re-reads and remembers it without
         // reporting (it reports only differences), so the window's first committed move is not missed.
-        if openedWindow { compatibility.signalWindowBoundsChanged() }
+        if openedWindow { compatibility.signalWindowBoundsChanged(topologyOnly: true) }
         reportedActiveTabs = reportedActiveTabs.filter { windows[$0.key] != nil }
         let activeMembers = Dictionary(grouping: currentSurfaces(), by: windowKey)
         for (key, window) in windows {

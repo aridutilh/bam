@@ -305,6 +305,8 @@ import WebKit
             host.reconcile()
             defer { host.surfaces = sharedSurfaces; host.reconcile(); onlyA.orderOut(nil); onlyA.close() }
             try await wait("Profile A's worker did not add its new window to the bounds baseline") { await boundsReport(popupA).baseline.count == 2 }
+            let afterOpen = await boundsReport(popupA)
+            try check(afterOpen.events.count == 1, "Opening a window reported bounds instead of only refreshing the baseline: \(afterOpen.events)")
             let crossBefore = (runtimeA.boundsSignalCount, runtimeB.boundsSignalCount)
             let onlyBefore = onlyA.frame
             onlyA.setFrame(NSRect(x: onlyBefore.minX + 50, y: onlyBefore.minY, width: onlyBefore.width + 30, height: onlyBefore.height + 10), display: false)
@@ -317,6 +319,29 @@ import WebKit
                       "Profile A's own window change was missed, duplicated or misidentified: \(crossA.events) windows=\(crossA.windows)")
             try check(crossB.events.count == 1 && runtimeB.boundsSignalCount == crossBefore.1 && runtimeA.boundsSignalCount == crossBefore.0 + 1,
                       "A window profile B does not expose signalled or reached profile B: B=\(crossB.events) signalsB=\(runtimeB.boundsSignalCount - crossBefore.1)")
+            // Regression: window A commits while window B is mid-live-resize. Profile A's signal is held (its read
+            // would see B's uncommitted bounds) and flushes once after the resize ends, reporting both final bounds.
+            // B's live state comes from the runtime's live-resize seam (no input injection); its intermediate frame
+            // change is a live-resize step and is ignored.
+            runtimeA.isInLiveResize = { $0 === onlyA }
+            let heldBefore = (runtimeA.boundsSignalCount, runtimeB.boundsSignalCount)
+            let draft = onlyA.frame
+            onlyA.setFrame(NSRect(x: draft.minX, y: draft.minY, width: draft.width + 60, height: draft.height), display: false)
+            let committed = window.frame
+            window.setFrame(NSRect(x: committed.minX + 11, y: committed.minY, width: committed.width, height: committed.height), display: false)
+            try await wait("Profile B (no window resizing) did not receive the shared window's committed move") { await boundsReport(popupB).events.count == 2 }
+            try await Task.sleep(nanoseconds: 1_200_000_000)
+            let heldA = await boundsReport(popupA)
+            try check(heldA.events.count == 2 && runtimeA.boundsSignalCount == heldBefore.0,
+                      "A committed change was signalled while another window of the profile was mid-resize: \(heldA.events)")
+            runtimeA.isInLiveResize = { $0.inLiveResize }
+            try await wait("The held bounds signal did not flush after the resize ended") { await boundsReport(popupA).events.count == 4 }
+            try await Task.sleep(nanoseconds: 800_000_000)
+            let flushedA = await boundsReport(popupA)
+            let flushedIDs = Set(flushedA.events.suffix(2).compactMap { $0["id"] as? Int })
+            try check(flushedA.events.count == 4 && runtimeA.boundsSignalCount == heldBefore.0 + 1 && flushedIDs == Set([sharedIDA, onlyIDA].compactMap { $0 }) &&
+                      flushedA.events.suffix(2).contains { $0["width"] as? Int == Int(onlyA.frame.width) },
+                      "The flush after the resize did not report each final bound once: \(flushedA.events) signals=\(runtimeA.boundsSignalCount - heldBefore.0)")
         }
 
         // offscreen: a worker creates a hidden page, messages it, and closes it; profiles stay separate.

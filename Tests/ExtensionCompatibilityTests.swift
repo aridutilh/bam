@@ -455,6 +455,18 @@ import JavaScriptCore
             """)
         try check(bounds.evaluateScript("JSON.stringify(got) === '[\"first:1:620:1000\"]' && planned.length === 0 && logged.some(function (m) { return m.indexOf('read failed') >= 0; })")!.toBool() && boundsErrors.isEmpty,
                   "A failed baseline invented or missed a change: \(bounds.evaluateScript("JSON.stringify(got)")!) \(boundsErrors)")
+        // Topology refresh (a window opened elsewhere while window 1 is mid-resize): never reports, keeps window 1's
+        // committed geometry, adds window 4, drops window 2. The next committed read reports window 1's final bounds
+        // and window 4's first real move.
+        bounds.evaluateScript("""
+            got = [];
+            __bamCompatibility.dispatch('windows.onBoundsChanged', ['topology']); settle([win(1, 999, 1234), win(4, 10, 300)]);
+            """)
+        bounds.evaluateScript("var afterTopology = got.length; var topologyBaseline = JSON.stringify(__bamCompatibility.windowsBounds.baseline);")
+        bounds.evaluateScript("signal(); settle([win(1, 640, 1000), win(4, 15, 300)]);")
+        try check(bounds.evaluateScript("afterTopology === 0 && topologyBaseline === '[1,4]' && JSON.stringify(got) === '[\"first:1:640:1000\",\"first:4:15:300\"]'")!.toBool(),
+                  "A topology refresh reported, overwrote committed geometry, or lost the new window: \(bounds.evaluateScript("JSON.stringify([afterTopology, topologyBaseline, got])")!)")
+
         // An engine-provided event is kept; without a windows namespace nothing is defined.
         let engineBounds = JSContext()!
         engineBounds.evaluateScript("""
