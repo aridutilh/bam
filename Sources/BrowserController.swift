@@ -290,6 +290,18 @@ import QuartzCore
     var spaceManager: SpaceManagementController?
     var savedTabEditor: SavedTabEditorController?
     var arcImporter: ArcImportController?
+    /// Icons carried over from Arc's cache for imported tabs, shown from memory.
+    let importedTabIcons = ImportedTabIcons()
+    /// Their bounded on-disk copy in Bam's support folder; nil for disposable
+    /// (private/fresh preview) sessions, which keep imported icons in memory only.
+    lazy var importedIconDisk: ImportedIconDiskCache? = privateMode ? nil
+        : ImportedIconDiskCache(directory: sessionURL.deletingLastPathComponent().appendingPathComponent("ImportedIcons", isDirectory: true))
+    let importedIconQueue = DispatchQueue(label: "com.ari.bam.imported-icons", qos: .utility)
+    /// Icon batches from successive imports, decoded one at a time; cancelled at shutdown.
+    let arcIconQueue = ArcIconImportQueue()
+    /// Tabs created by an import, which must not reach the network for icons
+    /// until the user opens them. Rebuilt when provenance changes.
+    var importedTabIDsCache: (count: Int, ids: Set<UUID>)?
     var onSpacesChanged: (() -> Void)?
     var saveWork: DispatchWorkItem?
     var sessionWriter: SessionWriter?
@@ -385,6 +397,7 @@ import QuartzCore
         handle.onCollapse = { [weak self] in self?.setSidebar(false) }
         handle.onReset = { [weak self] in self?.resetSidebar(nil) }
         startTabResourceMonitoring(); showActive(); refresh()
+        restoreImportedIcons()
     }
 
     /// A Clear Space needs the window itself non-opaque so the desktop shows
@@ -682,6 +695,7 @@ import QuartzCore
         spaceManager?.cancel(nil)
         savedTabEditor?.cancel(nil)
         isShuttingDown = true; cancelAutomaticDepartures(); findBar.hide(); pageFeedback.hide(); downloads.cancelAll(); pictureInPicture.restore()
+        arcIconQueue.cancelAll()
         for peek in Array(peeks.values) { peek.dismiss() }
         for little in Array(littleWindows.values) { little.close() }
         if let monitor = scrollMonitor { NSEvent.removeMonitor(monitor); scrollMonitor = nil }

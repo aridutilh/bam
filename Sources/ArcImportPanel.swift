@@ -50,14 +50,19 @@ import AppKit
         if let refusal = report.refusal { completion(refusal); return }
         guard !report.isEmpty else { completion(report.emptyReason); return }
         session = updated
+        importedTabIDsCache = nil  // Provenance changed; don't rely on its count.
         // Exactly one blank landing tab, so nothing imported is instantiated on arrival.
         if let first = report.firstSpaceID { ArcImport.arrive(at: first, in: &session) }
         let imported = session
         showActive(); refreshPaletteResults(); onSpacesChanged?()
         let tabs = report.importedTabs
+        // Captured now: the site and profile each tab was imported with.
+        let iconJobs = ArcIconImport.jobs(for: ArcIconImport.addedTabs(before: previous.importLinks, after: imported.importLinks), in: imported)
         let succeed = { [weak self] in
             self?.pageFeedback.show("Imported \(tabs) tab\(tabs == 1 ? "" : "s") from Arc", symbol: "square.and.arrow.down", in: self?.webHost ?? NSView())
             completion(nil)
+            // Only after the layout is safely saved: never for previews, cancels or undone imports.
+            self?.importArcIcons(iconJobs, layout: source.sourceURL)
         }
         guard let writer = sessionWriter, !privateMode else { succeed(); return }
         save()
@@ -68,6 +73,7 @@ import AppKit
             // added; the serial writer saves this after any in-flight write.
             let addedIDs = Set(imported.tabs.map(\.id)).subtracting(previous.tabs.map(\.id))
             self.session = ArcImport.undo(imported, over: previous, in: self.session)
+            self.importedTabIDsCache = nil
             for id in addedIDs { self.discardInstantiatedPage(id) }
             self.showActive(); self.refresh(); self.refreshPaletteResults(); self.onSpacesChanged?()
             self.save()
@@ -75,6 +81,46 @@ import AppKit
                 completion("Bam couldn’t save the imported layout, so the import was undone and nothing was added. Check free disk space and try again.")
             } else {
                 completion("Bam couldn’t save to disk. The import was undone in this window, but Bam can’t confirm your tabs are saved — free up disk space before quitting.")
+            }
+        }
+    }
+
+    /// Best-effort: reads Arc's cached icons for the tabs this import added,
+    /// off the main thread, then shows them in place and keeps a bounded copy
+    /// in Bam's support folder (not for disposable sessions). No network, no
+    /// page. Missing or invalid icons leave the normal fallback.
+    func importArcIcons(_ jobs: [ArcIconImport.IconJob], layout: URL?) {
+        guard !jobs.isEmpty, !isShuttingDown, let layout, let directory = ArcIconImport.cacheDirectory(besideLayout: layout) else { return }
+        // Successive imports queue behind each other; none cancels another's icons.
+        arcIconQueue.onDecoded = { [weak self] jobs, icons in self?.installImportedIcons(jobs, icons) }
+        arcIconQueue.enqueue(jobs, directory: directory)
+    }
+    private func installImportedIcons(_ jobs: [ArcIconImport.IconJob], _ icons: [UUID: CGImage]) {
+        guard !isShuttingDown, !icons.isEmpty else { return }
+        var persist: [(tab: UUID, profile: UUID, origin: String, image: CGImage)] = []
+        for job in jobs {
+            // Revalidate against the session now; use the captured site and
+            // profile, never the tab's address at completion time.
+            guard let image = icons[job.tabID], ArcIconImport.stillValid(job, in: session) else { continue }
+            importedTabIcons.install(image, for: job.tabID, origin: job.origin, profile: job.profile)
+            persist.append((job.tabID, job.profile, job.origin, image))
+        }
+        sidebar.refreshFavicons(); tabSearchResults?.refreshFavicons()
+        if let disk = importedIconDisk, !persist.isEmpty { importedIconQueue.async { disk.save(persist) } }
+    }
+
+    /// At launch: shows imported icons saved earlier for tabs that still exist
+    /// in the same login profile; the cache prunes everything else.
+    func restoreImportedIcons() {
+        guard let disk = importedIconDisk else { return }
+        let valid = Dictionary(session.tabs.map { ($0.id, session.profileID(for: $0)) }, uniquingKeysWith: { first, _ in first })
+        importedIconQueue.async { [weak self] in
+            let restored = disk.restore(validTabs: valid)
+            guard !restored.isEmpty else { return }
+            DispatchQueue.main.async {
+                guard let self, !self.isShuttingDown else { return }
+                for item in restored { self.importedTabIcons.install(item.image, for: item.tab, origin: item.origin, profile: item.profile) }
+                self.sidebar.refreshFavicons(); self.tabSearchResults?.refreshFavicons()
             }
         }
     }

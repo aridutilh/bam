@@ -73,6 +73,8 @@ enum ArcImport {
         let nodes: [String: Node]
         /// Favorites roots per Arc profile, in source order.
         let favoriteRoots: [(profile: Profile, root: String)]
+        /// The layout file this came from, when loaded from disk (for its icon cache).
+        var sourceURL: URL? = nil
     }
 
     static func load(from url: URL) throws -> Source {
@@ -81,7 +83,9 @@ enum ArcImport {
         guard let handle = try? FileHandle(forReadingFrom: url) else { throw Failure.unreadable }
         defer { try? handle.close() }
         guard let data = try? handle.readToEnd() else { throw Failure.unreadable }
-        return try parse(data)
+        var source = try parse(data)
+        source.sourceURL = url
+        return source
     }
 
     static func parse(_ data: Data) throws -> Source {

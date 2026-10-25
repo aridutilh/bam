@@ -6,10 +6,24 @@ import WebKit
     /// neither the sidebar model nor command-palette typing waits on the network.
     func favicon(forTabID id: UUID) -> NSImage? {
         guard !isShuttingDown, let tab = session.tabs.first(where: { $0.id == id }),
-              tab.saved?.customSymbol == nil,
-              let url = URL(string: tab.isUnloaded ? (tab.saved?.address ?? tab.address) : tab.address) else { return nil }
+              tab.saved?.customSymbol == nil else { return nil }
+        let address = tab.isUnloaded ? (tab.saved?.address ?? tab.address) : tab.address
+        // An icon carried over from Arc wins while the tab is still on that site.
+        if let imported = importedTabIcons.image(for: id, address: address, profile: session.profileID(for: tab)) { return imported }
+        guard let url = URL(string: address) else { return nil }
+        // Imported tabs never reach their sites for an icon until the user
+        // opens them; Bam's own cache may still answer.
+        let dormantImport = browsers[id] == nil && importedTabIDs.contains(id)
         return favicons.image(for: url, profileID: session.profileID(for: tab),
-                              allowFetch: faviconNetworkAllowed(for: url))
+                              allowFetch: !dormantImport && faviconNetworkAllowed(for: url))
+    }
+    /// Tab IDs created by any Arc import (from persisted provenance).
+    var importedTabIDs: Set<UUID> {
+        let links = session.importLinks ?? [:]
+        if let cache = importedTabIDsCache, cache.count == links.count { return cache.ids }
+        let ids = Set(links.values.compactMap { $0.hasPrefix("tab:") ? UUID(uuidString: String($0.dropFirst(4))) : nil })
+        importedTabIDsCache = (links.count, ids)
+        return ids
     }
 
     func favicon(forSiteURL url: URL, allowFetch: Bool) -> NSImage? {
