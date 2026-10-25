@@ -189,6 +189,62 @@ import JavaScriptCore
         try check(managed.evaluateScript("logged.length === 2 && JSON.stringify(outcomes.GrammarlyExtensionMode) === '[\"answered\",null,0]'")!.toBool(),
                   "Grammarly's unconditional timeout log was not reproduced after a settled race")
 
+        // cookies.onChanged: WebKit fires listeners with no changeInfo; Bam diffs getAll({}) snapshots.
+        let cookieJS = JSContext()!
+        var cookieErrors: [String] = []
+        cookieJS.exceptionHandler = { _, error in cookieErrors.append(error?.toString() ?? "JavaScript error") }
+        cookieJS.evaluateScript("""
+            var location = {origin: 'webkit-extension://fixture', href: 'webkit-extension://fixture/worker.js'}, console = {error: function() {}}, performance = {now: function() { return 0; }};
+            var jar = [], nativeListeners = [], getAllCalls = 0;
+            function NativeEvent() {}
+            NativeEvent.prototype.addListener = function (fn) { nativeListeners.push(fn); };
+            NativeEvent.prototype.removeListener = function (fn) { nativeListeners = nativeListeners.filter(function (x) { return x !== fn; }); };
+            var nativeChanged = new NativeEvent();
+            function Cookies() {}
+            Object.defineProperty(Cookies.prototype, 'onChanged', {get: function () { return nativeChanged; }, configurable: true});
+            Cookies.prototype.getAll = function () { getAllCalls++; return Promise.resolve(jar.map(function (c) { return Object.assign({}, c); })); };
+            function fire(info) { nativeListeners.slice().forEach(function (fn) { info === undefined ? fn() : fn(info); }); }
+            var browser = {runtime: {getURL: function(path) { return 'webkit-extension://fixture' + path; }, getManifest: function() { return {}; }}, cookies: new Cookies()};
+            var chrome = {runtime: browser.runtime, cookies: new Cookies()};
+            var seen = [];
+            function cookie(name, value, extra) { return Object.assign({name: name, value: value, domain: '127.0.0.1', path: '/', storeId: '0', secure: false, httpOnly: false, session: true, hostOnly: true, sameSite: 'lax'}, extra || {}); }
+            """)
+        cookieJS.evaluateScript(ExtensionCompatibility.workerScript(manifest: ["permissions": ["cookies"]], browserVersion: "test"))
+        func settle(_ script: String) { cookieJS.evaluateScript("(async function () { \(script); await __bamCompatibility.cookies.settled(); })();") }
+        // Grammarly's handler shape destructures the argument.
+        cookieJS.evaluateScript("""
+            jar = [cookie('kept', '1')];
+            var grammarlyWatch = function (n) { var r = n.cookie, i = n.cause; seen.push([n.removed, r.name, r.value, i]); };
+            chrome.cookies.onChanged.addListener(grammarlyWatch);
+            """)
+        settle("")
+        try check(cookieJS.evaluateScript("chrome.cookies.onChanged === browser.cookies.onChanged && chrome.cookies.onChanged.hasListener(grammarlyWatch) && nativeListeners.length === 1 && seen.length === 0")!.toBool(),
+                  "cookies.onChanged was not one shared event with a single native trigger and a silent baseline")
+        settle("jar.push(cookie('session', 'a')); fire()")
+        settle("jar[1] = cookie('session', 'b'); fire()")
+        settle("jar = jar.filter(function (c) { return c.name !== 'session'; }); fire()")
+        settle("jar.push(cookie('old', 'x', {session: false, expirationDate: 1})); fire()")
+        settle("jar = jar.filter(function (c) { return c.name !== 'old'; }); fire()")
+        try check(cookieErrors.isEmpty && cookieJS.evaluateScript("""
+            JSON.stringify(seen) === JSON.stringify([[false,'session','a','explicit'], [true,'session','a','overwrite'], [false,'session','b','explicit'],
+              [true,'session','b','explicit'], [false,'old','x','explicit'], [true,'old','x','expired']])
+            """)!.toBool(), "Diffed changeInfo did not follow Chrome's add/overwrite/remove/expire shape: \(cookieJS.evaluateScript("JSON.stringify(seen)")!) \(cookieErrors)")
+        // Two native fires before a diff runs report each change once; an engine that passes changeInfo is forwarded as-is.
+        settle("seen = []; jar.push(cookie('burst', '1')); fire(); fire()")
+        settle("seen = []; var engineInfo = {removed: false, cookie: cookie('engine', 'z'), cause: 'explicit'}; jar.push(engineInfo.cookie); fire(engineInfo)")
+        settle("fire()")
+        try check(cookieJS.evaluateScript("JSON.stringify(seen) === JSON.stringify([[false,'engine','z','explicit']])")!.toBool(),
+                  "Coalesced or engine-provided changes were duplicated or lost: \(cookieJS.evaluateScript("JSON.stringify(seen)")!)")
+        // A throwing listener does not stop others; removing the last listener detaches the native trigger.
+        settle("seen = []; globalThis.thrower = function () { throw new Error('vendor'); }; chrome.cookies.onChanged.addListener(thrower); jar.push(cookie('after', '1')); fire()")
+        cookieJS.evaluateScript("chrome.cookies.onChanged.removeListener(thrower); chrome.cookies.onChanged.removeListener(grammarlyWatch);")
+        try check(cookieErrors.isEmpty && cookieJS.evaluateScript("seen.length === 1 && seen[0][1] === 'after' && nativeListeners.length === 0 && !chrome.cookies.onChanged.hasListeners()")!.toBool(),
+                  "Listener isolation or native detach failed: \(cookieJS.evaluateScript("JSON.stringify([seen, nativeListeners.length])")!)")
+        let noCookies = JSContext()!
+        noCookies.evaluateScript("var location = {origin: 'webkit-extension://fixture', href: 'x'}, console = {error: function() {}}, performance = {now: function() { return 0; }}; var browser = {runtime: {getURL: function(p) { return 'webkit-extension://fixture' + p; }, getManifest: function() { return {}; }}};")
+        noCookies.evaluateScript(ExtensionCompatibility.workerScript(manifest: [:], browserVersion: "test"))
+        try check(noCookies.evaluateScript("browser.cookies === undefined && __bamCompatibility.cookies === undefined")!.toBool(), "A cookies adapter appeared without a cookies namespace")
+
         // scripting.ExecutionWorld: the enum WebKit lacks, on the native namespace and its shared
         // prototype (so a distinct chrome.scripting wrapper sees it); never replacing a native enum.
         func executionWorld(_ setup: String) -> JSContext {

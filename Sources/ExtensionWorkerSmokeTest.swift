@@ -38,7 +38,7 @@ import WebKit
             if module { background["type"] = "module" }
             let manifest: [String: Any] = ["manifest_version": 3, "name": module ? "Bam module worker fixture" : "Bam classic worker fixture", "version": "1.0", "description": "Original fixture for Bam service-worker runtime tests",
                 "content_security_policy": ["extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"],
-                "background": background, "permissions": ["storage", "idle", "notifications", "offscreen", "fontSettings"], "host_permissions": ["http://127.0.0.1/*", "http://localhost/*", "https://127.0.0.1/*"],
+                "background": background, "permissions": ["storage", "idle", "notifications", "offscreen", "fontSettings", "cookies"], "host_permissions": ["http://127.0.0.1/*", "http://localhost/*", "https://127.0.0.1/*"],
                 "action": ["default_popup": "popup.html"], "content_scripts": [["matches": ["http://127.0.0.1/*", "http://localhost/*"], "js": ["content.js"], "run_at": "document_end"]]]
             try JSONSerialization.data(withJSONObject: manifest, options: [.sortedKeys]).write(to: package.appendingPathComponent("manifest.json"))
             let dependency = "globalThis.fixtureOrder = [globalThis.__bamCompatibility?.worker === true ? 'adapter' : 'missing-adapter', 'dependency'];\n"
@@ -46,6 +46,9 @@ import WebKit
             let worker = importLine + #"""
             globalThis.fixtureOrder.push('original');
             const api = globalThis.browser || globalThis.chrome;
+            // cookies.onChanged as Chrome extensions use it: the listener reads changeInfo fields.
+            const cookieEvents = [];
+            chrome.cookies.onChanged.addListener(info => cookieEvents.push({type: typeof info, removed: info?.removed, name: info?.cookie?.name, cause: info?.cause}));
             // A class whose dispose key is computed at load, as wasm-bindgen and TypeScript `using` emit.
             class FixtureResource { [Symbol.dispose]() { return 'released'; } }
             const disposal = typeof Symbol.dispose === 'symbol' && typeof Symbol.asyncDispose === 'symbol' &&
@@ -115,7 +118,7 @@ import WebKit
               };
               return {order:globalThis.fixtureOrder, hasDocument:typeof document !== 'undefined', originalURL:globalThis.fixtureOriginalURL,
                 workerURL:location.href, starts:await started, events:events.slice(), wasm:await wasmResult, disposal,
-                adapterVersion: globalThis.__bamCompatibility?.version || 'missing', idleCallback: typeof requestIdleCallback,
+                adapterVersion: globalThis.__bamCompatibility?.version || 'missing', idleCallback: typeof requestIdleCallback, cookieEvents: cookieEvents.slice(),
                 fonts: await api.fontSettings.getFontList().then(list => list.filter(font => typeof font.fontId === 'string' && typeof font.displayName === 'string').length, error => 'error: ' + error.message),
                 idle:await api.idle.queryState(15), permission:await api.notifications.getPermissionLevel()};
             });
@@ -327,6 +330,21 @@ import WebKit
         try check(runtimeA.compatibility.offscreen.entry(for: contextA.uniqueIdentifier)?.isLoaded == false && runtimeB.compatibility.offscreen.has(contextB.uniqueIdentifier),
                   "Offscreen documents were not reopened for the lifecycle checks")
         weak var revokedWeb = runtimeA.compatibility.offscreen.currentDocument(for: contextA.uniqueIdentifier)
+        // cookies.onChanged on real WebKit: a loopback cookie set and deleted in profile A's own store
+        // reaches A's worker as Chrome-shaped changeInfo; profile B's worker sees nothing.
+        let fixtureCookie = HTTPCookie(properties: [.name: "bam-fixture-cookie", .value: "1", .domain: "127.0.0.1", .path: "/"])!
+        await configA.websiteDataStore.httpCookieStore.setCookie(fixtureCookie)
+        func cookieEvents(_ popup: WKWebView) async -> [[String: Any]] { await request(popup)?["cookieEvents"] as? [[String: Any]] ?? [] }
+        try await wait("Setting a cookie did not reach the worker's cookies.onChanged as changeInfo") {
+            await cookieEvents(popupA).contains { $0["name"] as? String == "bam-fixture-cookie" && $0["removed"] as? Bool == false && $0["cause"] as? String == "explicit" }
+        }
+        await configA.websiteDataStore.httpCookieStore.deleteCookie(fixtureCookie)
+        try await wait("Deleting a cookie did not reach the worker's cookies.onChanged as changeInfo") {
+            await cookieEvents(popupA).contains { $0["name"] as? String == "bam-fixture-cookie" && $0["removed"] as? Bool == true }
+        }
+        let eventsA = await cookieEvents(popupA), eventsB = await cookieEvents(popupB)
+        try check(eventsA.allSatisfy { $0["type"] as? String == "object" } && !eventsB.contains { $0["name"] as? String == "bam-fixture-cookie" },
+                  "cookies.onChanged delivered undefined changeInfo or crossed profiles: A=\(eventsA) B=\(eventsB)")
         let denied = await request(popupA, kind: "denials")
         try check(denied?["external"] is String && denied?["undeclared"] is String && denied?["unknown"] is String,
                   "Worker native messaging allowed an external app, undeclared capability or unknown method: \(denied ?? [:])")

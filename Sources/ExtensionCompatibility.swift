@@ -386,6 +386,62 @@ enum ExtensionCompatibility {
         define(api, "offscreen", ns);
       }
 
+      // cookies.onChanged: WebKit invokes listeners with no changeInfo (its FIXME, webkit.org/b/267514),
+      // so Chrome-style handlers receive undefined (Grammarly's sign-in cookie watch throws). Keep
+      // WebKit's event as the trigger, diff cookies.getAll({}) against the last snapshot, and deliver
+      // {removed, cookie, cause}. Only cookies this extension can already read are compared. A future
+      // engine that passes changeInfo is forwarded unchanged.
+      const nativeCookies = api.cookies;
+      if (nativeCookies && nativeCookies.onChanged && typeof nativeCookies.getAll === "function" && !nativeCookies.__bamChangeInfo) {
+        const nativeEvent = nativeCookies.onChanged;
+        const listeners = new Set();
+        let snapshot = null, work = Promise.resolve(), rebaseline = false, attached = false;
+        const key = (c) => [c.storeId || "", c.domain || "", c.path || "", c.name || "", c.partitionKey ? JSON.stringify(c.partitionKey) : ""].join("\u0000");
+        const read = async () => { const map = new Map(); for (const c of (await nativeCookies.getAll({})) || []) map.set(key(c), c); return map; };
+        const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+        const deliver = (info) => { for (const fn of Array.from(listeners)) { try { fn(info); } catch (error) { console.error("[Bam compatibility] cookies.onChanged listener failed", error); } } };
+        const refresh = () => {
+          work = work.then(async () => {
+            let next;
+            try { next = await read(); } catch (error) { return; }
+            const previous = snapshot; snapshot = next;
+            if (!previous || rebaseline) { rebaseline = false; return; }
+            const now = Date.now() / 1000;
+            for (const [k, old] of previous) {
+              const current = next.get(k);
+              if (!current) deliver({ removed: true, cookie: old, cause: typeof old.expirationDate === "number" && old.expirationDate <= now ? "expired" : "explicit" });
+              else if (!same(old, current)) deliver({ removed: true, cookie: old, cause: "overwrite" });
+            }
+            for (const [k, current] of next) { const old = previous.get(k); if (!old || !same(old, current)) deliver({ removed: false, cookie: current, cause: "explicit" }); }
+          });
+          return work;
+        };
+        const onNative = (info) => {
+          if (info && typeof info === "object") { deliver(info); rebaseline = true; refresh(); return; }
+          refresh();
+        };
+        const bamEvent = {
+          addListener(fn) {
+            if (typeof fn !== "function") return;
+            listeners.add(fn);
+            if (!attached) { attached = true; snapshot = null; nativeEvent.addListener(onNative); refresh(); }
+          },
+          removeListener(fn) {
+            listeners.delete(fn);
+            if (attached && !listeners.size) { attached = false; nativeEvent.removeListener(onNative); snapshot = null; }
+          },
+          hasListener(fn) { return listeners.has(fn); },
+          hasListeners() { return listeners.size > 0; }
+        };
+        const cookieProto = Object.getPrototypeOf(nativeCookies);
+        for (const holder of [nativeCookies, cookieProto]) {
+          if (!holder || holder === Object.prototype) continue;
+          try { Object.defineProperty(holder, "onChanged", { value: bamEvent, writable: true, configurable: true, enumerable: true }); } catch (error) {}
+          try { Object.defineProperty(holder, "__bamChangeInfo", { value: true, configurable: true }); } catch (error) {}
+        }
+        compat.cookies = { namespace: nativeCookies, nativeEvent, settled: () => work };
+      }
+
       // fontSettings: the installed font families (Dark Reader's font picker). Bam has no
       // per-script or default font settings, so reading or changing those rejects.
       if (provided.has("fontSettings") && !api.fontSettings) {
