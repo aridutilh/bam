@@ -56,7 +56,7 @@ import WebKit
                 complete = try await read(manifest, directory: runDirectory, released: released, deadline: deadline, output: &output)
                 keepDirectory = !complete
             case .cleanup:
-                complete = try await cleanupOnly(manifest, directory: runDirectory, released: released, output: &output)
+                complete = try await cleanupOnly(manifest, directory: runDirectory, released: released, deadline: deadline, output: &output)
                 keepDirectory = !complete
             }
         } catch let refusal as Refusal {
@@ -263,7 +263,7 @@ import WebKit
         output["expected"] = ["A": manifest.expectedA, "B": manifest.expectedB, "L": manifest.expectedL]
         output["pageA"] = pageReport ?? NSNull()
         session.unloadAll()
-        let cleaned = try await cleanup(manifest, package: package, session: session, released: released, output: &output)
+        let cleaned = try await cleanup(manifest, package: package, session: session, released: released, deadline: deadline, output: &output)
         // Valid transport for every read is required; a value that did not survive is a legitimate measurement.
         let transportOK = ["A", "L", "B", "A new host"].allSatisfy { ((reads[$0] as? [String: Any])?["ok"] as? Bool) == true }
         // Terminal: a reply/message or an explicit error (a semantic negative). Missing, malformed or timed out is not.
@@ -276,11 +276,12 @@ import WebKit
         return transportOK && messaging && output["readFailure"] == nil && cleaned
     }
 
-    private static func cleanupOnly(_ manifest: Manifest, directory: URL, released: ExtensionVerifiedIDProbe.Released, output: inout [String: Any]) async throws -> Bool {
+    private static func cleanupOnly(_ manifest: Manifest, directory: URL, released: ExtensionVerifiedIDProbe.Released, deadline: TimeInterval,
+                                    output: inout [String: Any]) async throws -> Bool {
         let session = Session()
         defer { session.unloadAll(); session.controllers.removeAll() }
         _ = controller("A", manifest.controllerA, session: session, released: released); _ = controller("B", manifest.controllerB, session: session, released: released)
-        return try await cleanup(manifest, package: directory.appendingPathComponent("package", isDirectory: true), session: session, released: released, output: &output)
+        return try await cleanup(manifest, package: directory.appendingPathComponent("package", isDirectory: true), session: session, released: released, deadline: deadline, output: &output)
     }
 
     /// Cleanup contract (public API reality, upstream WebKit WebExtensionControllerCocoa.mm): getDataRecords lists every
@@ -289,9 +290,9 @@ import WebKit
     /// Clean therefore means, per owned namespace: only this run's records; removeData without record errors; every
     /// owned context that had data reloads with no storage.local (and storage.sync) keys; after unloading again, a
     /// second removal and re-query leave only owned, zero-byte, error-free records. Contexts are unloaded on entry.
+    /// Uses the invocation's single absolute deadline (one 60 s budget per process, inside the runner's 80 s).
     private static func cleanup(_ manifest: Manifest, package: URL, session: Session, released: ExtensionVerifiedIDProbe.Released,
-                                output: inout [String: Any]) async throws -> Bool {
-        let deadline = ProcessInfo.processInfo.systemUptime + budget
+                                deadline: TimeInterval, output: inout [String: Any]) async throws -> Bool {
         session.unloadAll()
         var report: [String: Any] = [:], clean = true
         let hosts: [String: [String: UUID]] = ["A": [manifest.probeID: manifest.hostA, manifest.legacyID: manifest.hostL], "B": [manifest.probeID: manifest.hostB]]
@@ -344,7 +345,10 @@ import WebKit
         }
         output["cleanup"] = report
         output["cleanupProvedEmpty"] = clean
-        output["metadataRetained"] = "Owned zero-byte data records may remain: WebKit lists every per-extension storage directory as a record and removeData keeps the directory; public API has no directory removal. Stored values were proved empty by reloading each owned context."
+        output["metadataRetained"] = "Owned zero-byte data records may remain: WebKit lists every per-extension storage directory as a record and removeData keeps the directory; public API has no directory removal."
+        output["valuesProvedEmpty"] = clean
+            ? "Yes: every owned context that had data reloaded with no storage.local or storage.sync keys, and a second removal left only owned zero-byte, error-free records."
+            : "No: see each namespace's cleanup entry (foreign records, removal errors, remaining keys, a failed reload or non-zero records)."
         return clean
     }
     /// {ok: true, local: [keys], sync: [keys] | "unavailable"} or {ok: false, stage, error}.
