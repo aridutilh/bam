@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.22.1 build 46 — unreleased draft: sidebar corrections
+
+- Balance Favorites across rows and draw their artwork at 16 points on whole device pixels, avoiding enlargement of imported 32-pixel icons on Retina displays.
+- Reconcile sidebar hover with the actual pointer after Space switches, row reuse, scrolling and key-window changes.
+- Separate pointer and keyboard focus for folder rows; use original filled open/closed folder drawings and quieter disclosure controls.
+- Simplify the footer around Downloads, Spaces and New Tab while keeping Space management, History, Recently Closed and Picture in Picture reachable.
+- Hide inactive unsaved blank-tab placeholders from the sidebar without deleting session data; suppress legacy internal URLs in sidebar copy. Imported folders explain that they contain saved links rather than automatic updates.
+- Local Preview draft only. Native validation is recorded in VALIDATION.md after integration; this entry alone makes no runtime claim.
+
 ## 0.22.0 build 45 — unreleased draft: folders, Arc import, sidebar look
 
 - Verified integration checkpoint `66cdd71`: full component build and all eleven native suites passed in canonical Bam Preview, including Features 369, Extensions 393 and Arc import 155. This supersedes earlier pending-runtime notes for changes included in that checkpoint: native cookie-event interception works, Easel references remain renderer-free, and icons/themes survive real relaunches. The isolated normal-profile probe also ran with explicit non-private flags and confirmed removal of its own store after its controllers and pages were released. Manual themed light/dark, rename/recolor, Space-return, recessed Favorite selection, monograms and narrow-title fade checks passed. No release or production-app replacement.
