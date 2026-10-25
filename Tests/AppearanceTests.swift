@@ -114,6 +114,54 @@ import AppKit
         require(otherTint !== invertedTint && resolved(otherTint, .aqua).isEqualIgnoringAlpha(resolved(ArkPalette.spaceTint(4), .aqua))
                 && ArkPalette.spaceTint(for: invertedOther) === otherTint,
                 "A cached themed tint is per theme and color: each Space's fallback is its own flat tint")
+
+        // Light surface hierarchy (Yab): recessed tiles, a softer field, and the
+        // selection as the only bright white card. Dark surfaces are unchanged.
+        let lightTile = resolved(ArkPalette.tile, .aqua), lightHover = resolved(ArkPalette.tileHover, .aqua)
+        let lightField = resolved(ArkPalette.field, .aqua), lightSelectedRow = resolved(ArkPalette.selection, .aqua)
+        let lightActiveTile = resolved(ArkPalette.tileActive, .aqua)
+        require(lightTile.whiteComponentApprox < 0.01 && lightTile.alphaComponent > 0.02 && lightTile.alphaComponent < 0.08
+                && lightHover.whiteComponentApprox < 0.01 && lightHover.alphaComponent > lightTile.alphaComponent,
+                "Light Favorite tiles are recessed (darker) washes, with a visible hover")
+        require(lightField.whiteComponentApprox > 0.99 && lightField.alphaComponent < lightSelectedRow.alphaComponent
+                && lightField.alphaComponent < lightActiveTile.alphaComponent,
+                "The light field is a softer wash than the selected row or tile")
+        let darkTokens: [(NSColor, CGFloat, CGFloat)] = [(ArkPalette.tile, 1, 0.09), (ArkPalette.tileHover, 1, 0.15), (ArkPalette.tileActive, 1, 0.22),
+                                                         (ArkPalette.field, 1, 0.09), (ArkPalette.fieldHover, 1, 0.14), (ArkPalette.tileRing, 1, 0.28)]
+        require(darkTokens.allSatisfy { color, white, alpha in
+            let value = resolved(color, .darkAqua); return abs(value.whiteComponentApprox - white) < 0.01 && abs(value.alphaComponent - alpha) < 0.005
+        }, "Dark tiles and field keep their exact previous values")
+
+        // Monograms: first letter/number/emoji of the title, else the host.
+        require(Monogram.make(title: "team docs", address: "https://docs.example.com/") == "T", "A title's first letter, uppercased")
+        require(Monogram.make(title: "(7) Weekly notes", address: "https://x.example/") == "7", "Leading punctuation is skipped")
+        require(Monogram.make(title: "🎨 Design", address: "https://x.example/") == "🎨", "A leading emoji is kept as the mark")
+        require(Monogram.make(title: "", address: "https://www.alpha.example/") == "A"
+                && Monogram.make(title: "https://www.alpha.example/", address: "https://www.alpha.example/") == "A"
+                && Monogram.make(title: "beta.example", address: "https://beta.example/") == "B",
+                "An empty title, or one that is just the address or host, uses the host without www")
+        require(Monogram.make(title: "école", address: "https://x.example/") == "É" && Monogram.make(title: "ßeta", address: "https://x.example/") == "ß",
+                "Non-Latin letters uppercase only when that keeps one character")
+        require(Monogram.make(title: "  ", address: "orbit://newtab") == nil && Monogram.make(title: "…", address: "not a url") == nil,
+                "Nothing to show means no monogram (the symbol stays)")
+        let plainTab = BrowserTab(title: "Gamma", address: "https://gamma.example/", space: 0)
+        var customTab = plainTab; customTab.saved = SavedTabState(kind: .kept, address: plainTab.address, customSymbol: "book")
+        require(plainTab.monogram == "G" && customTab.monogram == nil
+                && BrowserTab(title: "Code", address: "https://github.com/x", space: 0).monogram == nil
+                && BrowserTab(title: "Home", address: "orbit://newtab", space: 0).monogram == nil
+                && BrowserTab(title: "Sketch", address: ArcEaselReference.address(for: UUID()), space: 0).monogram == nil,
+                "Custom and special symbols win over monograms")
+        // The mark (Bam ink) reads on its disc over the sidebar in both appearances, for every Space tint.
+        func composite(_ top: NSColor, alpha: CGFloat, over base: CGFloat) -> SpaceTheme.RGBA {
+            SpaceTheme.RGBA(red: Double(top.redComponent * alpha + base * (1 - alpha)), green: Double(top.greenComponent * alpha + base * (1 - alpha)),
+                            blue: Double(top.blueComponent * alpha + base * (1 - alpha)))!
+        }
+        for index in 0..<BrowserSpace.flatColorCount {
+            let lightDisc = composite(resolved(ArkPalette.spaceTint(index), .aqua), alpha: ArkMonogram.tintAlpha.light, over: 0.88)
+            let darkDisc = composite(resolved(ArkPalette.spaceTint(index), .darkAqua), alpha: ArkMonogram.tintAlpha.dark, over: 0.20)
+            require(lightDisc.contrast(with: BamInk.primary(dark: false)) >= 4.5 && darkDisc.contrast(with: BamInk.primary(dark: true)) >= 4.5,
+                    "Monogram marks read on Space \(index)'s disc in light and dark")
+        }
         print("PASS: \(checks) appearance preference and color token checks")
     }
 }

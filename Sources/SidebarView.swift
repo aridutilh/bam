@@ -46,6 +46,8 @@ struct SidebarTabItem: Equatable {
     /// included. It sets one indent step for the list that doesn't change
     /// when a folder opens or closes, so rows never shift sideways.
     var treeDepth: Int = 0
+    /// Shown instead of the generic symbol until a favicon arrives.
+    var monogram: String? = nil
 }
 
 /// A destination offered by Move to Folder menus.
@@ -906,12 +908,15 @@ enum ArkPalette {
     /// The selected tab: a lifted pill.
     static let selection = NSColor.chrome(light: white(0.86), dark: white(0.15))
     static let selectionEdge = NSColor.chrome(light: black(0.06), dark: white(0.10))
-    static let field = NSColor.chrome(light: white(0.58), dark: white(0.09))
-    static let fieldHover = NSColor.chrome(light: white(0.75), dark: white(0.14))
-    static let tile = NSColor.chrome(light: white(0.46), dark: white(0.09))
-    static let tileHover = NSColor.chrome(light: white(0.66), dark: white(0.15))
+    // Light surfaces follow Yab: Favorite tiles are recessed washes, the field
+    // a soft lighter wash, and the only bright white card is the selection
+    // (row or tile). Dark surfaces are unchanged (lighter washes, as in Arc).
+    static let field = NSColor.chrome(light: white(0.45), dark: white(0.09))
+    static let fieldHover = NSColor.chrome(light: white(0.62), dark: white(0.14))
+    static let tile = NSColor.chrome(light: black(0.05), dark: white(0.09))
+    static let tileHover = NSColor.chrome(light: black(0.08), dark: white(0.15))
     static let tileActive = NSColor.chrome(light: white(0.94), dark: white(0.22))
-    static let tileRing = NSColor.chrome(light: black(0.10), dark: white(0.28))
+    static let tileRing = NSColor.chrome(light: black(0.06), dark: white(0.28))
     static let separator = NSColor.chrome(light: black(0.08), dark: white(0.10))
     /// Space icon tint: the pastel in dark mode, a deeper version on light chrome.
     static func spaceTint(_ index: Int) -> NSColor { spaceTints[min(spaceTints.count - 1, max(0, index))] }
@@ -1004,6 +1009,41 @@ enum ArkPalette {
         let titleEnd = isFolder ? chevron.minX - 4 : showsClose ? close.minX - 4 : width - ArkMetrics.trailingGap
         let titleX = ArkMetrics.leadingInset + indent
         title = NSRect(x: titleX, y: (height - 20) / 2, width: max(0, titleEnd - titleX), height: 20)
+    }
+}
+
+/// A page's monogram: its mark in Bam's ink on a soft disc. Rows tint the disc
+/// with their Space; shared Favorites use a neutral one. Drawn at render time,
+/// so it follows light/dark like every other sidebar color.
+@MainActor enum ArkMonogram {
+    static let neutralDisc = NSColor.chrome(light: NSColor(white: 0, alpha: 0.08), dark: NSColor(white: 1, alpha: 0.14))
+    /// The disc alpha over a Space tint, per appearance.
+    static let tintAlpha: (light: CGFloat, dark: CGFloat) = (0.22, 0.32)
+    static func disc(tint: NSColor) -> NSColor {
+        NSColor(name: nil) { appearance in
+            var resolved = tint
+            appearance.performAsCurrentDrawingAppearance { resolved = tint.usingColorSpace(.sRGB) ?? tint }
+            return resolved.withAlphaComponent(appearance.isDarkChrome ? tintAlpha.dark : tintAlpha.light)
+        }
+    }
+    static func draw(_ mark: String, in rect: NSRect, disc: NSColor, alpha: CGFloat = 1) {
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current?.cgContext.setAlpha(alpha)
+        disc.setFill()
+        NSBezierPath(ovalIn: rect).fill()
+        let font = NSFont.systemFont(ofSize: rect.height * 0.58, weight: .semibold)
+        let attributes: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: ArkPalette.ink]
+        let size = (mark as NSString).size(withAttributes: attributes)
+        (mark as NSString).draw(at: NSPoint(x: rect.midX - size.width / 2, y: rect.midY - size.height / 2), withAttributes: attributes)
+        NSGraphicsContext.restoreGraphicsState()
+    }
+    /// An image for an NSImageView, redrawn in the view's appearance.
+    static func image(_ mark: String, tint: NSColor, side: CGFloat) -> NSImage {
+        let image = NSImage(size: NSSize(width: side, height: side), flipped: false) { rect in
+            draw(mark, in: rect, disc: disc(tint: tint)); return true
+        }
+        image.isTemplate = false
+        return image
     }
 }
 
@@ -1228,10 +1268,22 @@ private final class ArkFavoriteButton: ArkHoverButton {
         else { super.keyDown(with: event) }
     }
     override func draw(_ dirtyRect: NSRect) {
-        fill(item.isActive ? ArkPalette.tileActive : hovered ? ArkPalette.tileHover : ArkPalette.tile, radius: 10)
+        let light = !effectiveAppearance.isDarkChrome
+        if item.isActive && light {
+            // The selected tile is the same lifted white card as the selected row.
+            NSGraphicsContext.saveGraphicsState()
+            let shadow = NSShadow()
+            shadow.shadowColor = NSColor(white: 0, alpha: 0.10); shadow.shadowBlurRadius = 2.5
+            shadow.shadowOffset = NSSize(width: 0, height: -0.5); shadow.set()
+            ArkPalette.tileActive.setFill()
+            NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: 10, yRadius: 10).fill()
+            NSGraphicsContext.restoreGraphicsState()
+        } else {
+            fill(item.isActive ? ArkPalette.tileActive : hovered ? ArkPalette.tileHover : ArkPalette.tile, radius: 10)
+        }
         if item.isActive {
             ArkPalette.tileRing.setStroke()
-            let ring = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.75, dy: 0.75), xRadius: 10, yRadius: 10)
+            let ring = NSBezierPath(roundedRect: bounds.insetBy(dx: light ? 1.25 : 0.75, dy: light ? 1.25 : 0.75), xRadius: 10, yRadius: 10)
             ring.lineWidth = 1; ring.stroke()
         }
         if let image, image.size.width > 0, image.size.height > 0 {
@@ -1240,6 +1292,10 @@ private final class ArkFavoriteButton: ArkHoverButton {
             image.draw(in: NSRect(x: (bounds.width - size.width) / 2, y: (bounds.height - size.height) / 2,
                                  width: size.width, height: size.height), from: .zero, operation: .sourceOver,
                        fraction: ArkRowInk.iconAlpha(sleeping: item.isSleeping), respectFlipped: true, hints: nil)
+        } else if let mark = item.monogram {
+            // Favorites are shared by every Space, so their mark is neutral.
+            ArkMonogram.draw(mark, in: NSRect(x: (bounds.width - 22) / 2, y: (bounds.height - 22) / 2, width: 22, height: 22),
+                             disc: ArkMonogram.neutralDisc, alpha: ArkRowInk.iconAlpha(sleeping: item.isSleeping))
         } else {
             symbol(item.symbol, rect: NSRect(x: (bounds.width - 19) / 2, y: (bounds.height - 19) / 2, width: 19, height: 19),
                    color: ArkPalette.ink.withAlphaComponent(ArkRowInk.iconAlpha(sleeping: item.isSleeping)), size: 18)
@@ -1479,7 +1535,7 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted {
         if first || old.subtitle != item.subtitle { subtitleLabel.stringValue = item.subtitle }
         if item.isFolder {
             if first || !old.isFolder || old.isExpanded != item.isExpanded { favicon = nil; iconView.image = NSImage(systemSymbolName: item.isExpanded ? "folder" : "folder.fill", accessibilityDescription: nil); iconView.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 15, weight: .regular) }
-        } else if favicon == nil, first || old.symbol != item.symbol || old.isFolder { iconView.image = NSImage(systemSymbolName: item.symbol, accessibilityDescription: nil) }
+        } else if favicon == nil, first || old.symbol != item.symbol || old.monogram != item.monogram || old.isFolder { showFallbackIcon() }
         if first || old.isActive != item.isActive || old.isFolder != item.isFolder { applyIconTint() }
         if first || old.isSplit != item.isSplit || old.isPinned != item.isPinned || old.isFolder != item.isFolder {
             closeButton.setSymbol("xmark", label: item.isSplit ? "Close Split" : item.isPinned ? "Unload tab" : "Close tab")
@@ -1514,11 +1570,24 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted {
         if item.isFolder { return }
         if favicon !== image {
             favicon = image
-            iconView.image = image ?? NSImage(systemSymbolName: item.symbol, accessibilityDescription: nil)
-            iconView.symbolConfiguration = image == nil ? NSImage.SymbolConfiguration(pointSize: 16, weight: .regular) : nil
-            iconView.identifier = image == nil ? nil : NSUserInterfaceItemIdentifier("website-favicon")
+            if let image {
+                iconView.image = image; iconView.symbolConfiguration = nil
+                iconView.identifier = NSUserInterfaceItemIdentifier("website-favicon")
+            } else { showFallbackIcon() }
         }
         applyIconTint()
+    }
+    /// Without a favicon: the page's monogram (Space-tinted disc) or its symbol.
+    private func showFallbackIcon() {
+        if let mark = item.monogram {
+            iconView.symbolConfiguration = nil
+            iconView.image = ArkMonogram.image(mark, tint: spaceTint, side: 16)
+            iconView.identifier = NSUserInterfaceItemIdentifier("monogram-\(mark)")
+        } else {
+            iconView.image = NSImage(systemSymbolName: item.symbol, accessibilityDescription: nil)
+            iconView.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 16, weight: .regular)
+            iconView.identifier = nil
+        }
     }
     private func applyIconTint() {
         if item.isFolder { iconView.contentTintColor = ArkPalette.secondary; return }
@@ -1526,7 +1595,10 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted {
     }
     func configureSpace(id: Int, tint: NSColor, destinations: [BrowserSpace]) {
         guard currentSpace != id || !spaceTint.isEqual(tint) || self.destinations != destinations else { return }
+        let tintChanged = !spaceTint.isEqual(tint)
         currentSpace = id; spaceTint = tint; self.destinations = destinations
+        // A monogram's disc carries the Space tint, so it is redrawn with it.
+        if tintChanged, favicon == nil, !item.isFolder, item.monogram != nil { showFallbackIcon() }
         applyIconTint()
     }
     override var acceptsFirstResponder: Bool { true }
