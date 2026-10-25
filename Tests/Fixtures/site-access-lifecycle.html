@@ -1,0 +1,10 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Bam site access lifecycle fixture</title>
+<style>body{font:15px system-ui;background:#fcf5e5;color:#203b2d;margin:40px}</style>
+<h1>Site access lifecycle</h1>
+<p>Original, no-account synthetic page. Each document gets its own identity so a reload or new navigation is provable.</p>
+<script>
+  // A new identity for every document; read by the native regression after each navigation.
+  document.documentElement.dataset.bamDocument = (crypto.randomUUID ? crypto.randomUUID() : String(Math.random()) + String(Date.now()));
+</script>
