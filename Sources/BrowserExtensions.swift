@@ -804,6 +804,14 @@ struct BrowserExtensionPermissionReview {
         records[index].patterns = target
         for pattern in target.keys { records[index].deniedPatterns.removeValue(forKey: pattern) }
         if let context {
+            // Candidate fix (native lifecycle regression: all-host content still injected into fresh documents after a
+            // bulk grant replacement). First reset, one by one through the public per-pattern API, every live grant the
+            // target no longer includes, so WebKit takes its per-pattern removal path for each; then apply the exact
+            // target as before. No denial is added, nothing is widened, and no shared controller script is touched.
+            let kept = Set(target.keys)
+            for pattern in Array(context.grantedPermissionMatchPatterns.keys) where !kept.contains(pattern.string) {
+                context.setPermissionStatus(.unknown, for: pattern)
+            }
             context.deniedPermissionMatchPatterns = Self.matchPatterns(records[index].deniedPatterns)
             context.grantedPermissionMatchPatterns = Self.matchPatterns(target)
         }
