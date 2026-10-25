@@ -46,12 +46,27 @@ import WebKit
         let urlB = pageURL.appending(queryItems: [URLQueryItem(name: "profile", value: "profile-B")])
         var extensionPages: [UUID: WKWebView] = [:]
         var includeProfileATab = true
+        // Single-page popup windows opened through windows.create (Little Bam stand-ins: one page, own window).
+        var popupWindows: [(id: UUID, window: NSWindow, web: WKWebView)] = []
+        var createTabCalls = 0, createWindowCalls = 0
         host.surfaces = { profile in
-            if profile == profileA { return (includeProfileATab ? [BrowserExtensionSurface(id: tabA, title: "Profile A", url: urlA, webView: webA, window: window, isActive: true, isSelected: true)] : []) + extensionPages.map { BrowserExtensionSurface(id: $0.key, title: "Extension page", url: $0.value.url, webView: $0.value, window: window) } }
+            if profile == profileA { return (includeProfileATab ? [BrowserExtensionSurface(id: tabA, title: "Profile A", url: urlA, webView: webA, window: window, isActive: true, isSelected: true)] : []) + extensionPages.map { BrowserExtensionSurface(id: $0.key, title: "Extension page", url: $0.value.url, webView: $0.value, window: window) }
+                + popupWindows.map { BrowserExtensionSurface(id: $0.id, title: "Popup", url: $0.web.url, webView: $0.web, window: $0.window, isActive: true, isSelected: true, isSinglePage: true) } }
             if profile == profileB { return [BrowserExtensionSurface(id: tabB, title: "Profile B", url: urlB, webView: webB, window: window)] }
             return []
         }
+        host.createWindow = { [weak host] url, profile, _ in
+            createWindowCalls += 1
+            guard let host, profile == profileA, let url, let configuration = host.configuration(forExtensionURL: url, profileID: profile) else { return nil }
+            let popupWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 300, height: 200), styleMask: [.titled], backing: .buffered, defer: false)
+            popupWindow.isReleasedWhenClosed = false
+            let web = WKWebView(frame: NSRect(x: 0, y: 0, width: 300, height: 200), configuration: configuration)
+            popupWindow.contentView = web; popupWindow.orderFront(nil); web.load(URLRequest(url: url))
+            popupWindows.append((UUID(), popupWindow, web)); return popupWindow
+        }
+        defer { for popup in popupWindows { popup.web.stopLoading(); popup.window.orderOut(nil); popup.window.close() } }
         host.createTab = { [weak host] url, profile, active in
+            createTabCalls += 1
             guard let host, profile == profileA, let configuration = host.configuration(forExtensionURL: url, profileID: profile) else { return nil }
             let web = WKWebView(frame: webA.frame, configuration: configuration), id = UUID()
             extensionPages[id] = web; container.addSubview(web); web.isHidden = true
@@ -275,6 +290,36 @@ import WebKit
         try await wait("browser.tabs.create did not open the extension’s own origin") { !extensionPages.isEmpty }
         guard let extensionPage = extensionPages.values.first else { throw Failure(description: "Missing created extension page") }
         try await wait("Created extension page did not execute with its extension configuration") { await javascript(extensionPage, "document.title") as? String == "Bam extension page ready" }
+        // Window targeting: honored or refused before anything is created, never placed elsewhere.
+        let tabsBefore = createTabCalls
+        let targeting = try? await popup.callAsyncJavaScript("""
+            const page = browser.runtime.getURL('page.html'), out = {};
+            const attempt = async (work) => { try { await work(); return 'ok'; } catch (error) { return String(error && error.message || error); } };
+            out.normal = await attempt(() => browser.windows.create({url: page}));
+            out.maximized = await attempt(() => browser.windows.create({type: 'popup', url: page, state: 'maximized'}));
+            const created = await browser.windows.create({type: 'popup', url: page, left: 140, top: 160, width: 420, height: 300});
+            const read = await browser.windows.get(created.id);
+            out.popup = {type: read.type, left: read.left, top: read.top, width: read.width, height: read.height};
+            const normal = await browser.windows.getAll({windowTypes: ['normal']});
+            out.popupListedAsNormal = normal.some((w) => w.id === created.id);
+            out.popupTab = await attempt(() => browser.tabs.create({windowId: created.id, url: page}));
+            out.index = await attempt(() => browser.tabs.create({windowId: normal[0].id, index: 0, url: page}));
+            return out;
+            """, arguments: [:], in: nil, contentWorld: .page) as? [String: Any]
+        let created = targeting?["popup"] as? [String: Any]
+        try check((targeting?["normal"] as? String)?.contains(ExtensionWindowTargeting.normalWindowRefusal) == true &&
+                  (targeting?["maximized"] as? String)?.contains(ExtensionWindowTargeting.stateRefusal) == true && createWindowCalls == 1,
+                  "A normal or maximized windows.create was not refused before a window was created: \(targeting ?? [:]) createWindow=\(createWindowCalls)")
+        try check(created?["type"] as? String == "popup" && targeting?["popupListedAsNormal"] as? Bool == false,
+                  "A single-page window was not reported as a popup: \(targeting ?? [:])")
+        try check(created?["left"] as? Int == 140 && created?["top"] as? Int == 160 && created?["width"] as? Int == 420 && created?["height"] as? Int == 300,
+                  "Requested popup bounds did not round-trip through windows.get: \(created ?? [:])")
+        try check((targeting?["popupTab"] as? String)?.contains(ExtensionWindowTargeting.singlePageTabRefusal) == true &&
+                  (targeting?["index"] as? String)?.contains(ExtensionWindowTargeting.indexRefusal) == true && createTabCalls == tabsBefore,
+                  "A popup-target or non-append tabs.create was not refused before a tab was created: \(targeting ?? [:]) createTab=\(createTabCalls - tabsBefore)")
+        // The popup leaves the topology before the remaining checks.
+        for popup in popupWindows { popup.web.stopLoading(); popup.window.orderOut(nil); popup.window.close() }
+        popupWindows.removeAll(); host.reconcile()
         let ownURL = contextA.baseURL.appendingPathComponent("page.html")
         try check(host.allowsExtensionURL(ownURL, profileID: profileA) && !host.allowsExtensionURL(ownURL, profileID: profileB), "Extension-origin validation crossed a login profile boundary")
         try check(host.configuration(forExtensionURL: contextB.baseURL.appendingPathComponent("page.html"), profileID: profileA) == nil, "Foreign-profile extension configuration was exposed")

@@ -16,6 +16,8 @@ import WebKit
     var isLoading: Bool = false
     /// The loading flag changed since the last list, even if it is back where it was.
     var loadingChanged: Bool = false
+    /// A Little Bam window: one page, no tabs. Its window is reported to extensions as `popup`.
+    var isSinglePage: Bool = false
 }
 
 struct BrowserExtensionRecord: Codable, Identifiable {
@@ -872,6 +874,8 @@ struct BrowserExtensionPermissionReview {
     private var activePopupPopover: NSPopover?
     private var lastFocusedWindow: ObjectIdentifier?
     private var reportedActiveTabs: [ObjectIdentifier: UUID] = [:]
+    /// Windows whose surfaces are single-page (Little Bam), reported as `popup`.
+    private(set) var singlePageWindows: Set<ObjectIdentifier> = []
     private var observers: [NSObjectProtocol] = []
 
     init(owner: BrowserExtensions, profileID: UUID, dataStore: WKWebsiteDataStore) {
@@ -1077,6 +1081,7 @@ struct BrowserExtensionPermissionReview {
         for id in orderedIDs where fresh[id] == nil { if let tab = tabs[id] { controller.didCloseTab(tab) }; tabs.removeValue(forKey: id) }
         snapshots = fresh; orderedIDs = ids
         let neededWindows = Set(supplied.map(windowKey))
+        singlePageWindows = Set(supplied.filter(\.isSinglePage).map(windowKey))
         for key in Array(windows.keys) where !neededWindows.contains(key) { if let window = windows.removeValue(forKey: key) { controller.didCloseWindow(window) } }
         var openedWindow = false
         for item in supplied {
@@ -1128,6 +1133,16 @@ struct BrowserExtensionPermissionReview {
     }
     func webExtensionController(_ controller: WKWebExtensionController, focusedWindowFor context: WKWebExtensionContext) -> (any WKWebExtensionWindow)? { owns(context) ? focusedWindow() : nil }
     func webExtensionController(_ controller: WKWebExtensionController, openNewTabUsing configuration: WKWebExtension.TabConfiguration, for context: WKWebExtensionContext, completionHandler: @escaping ((any WKWebExtensionTab)?, Error?) -> Void) {
+        // The target window and index are honored or refused before anything is created.
+        let targetWindow = configuration.window.map { $0 as? BrowserExtensionWindow }
+        let target: ExtensionWindowTargeting.Window? = targetWindow.map { window in
+            guard let window, window.runtime === self, windows[window.key] === window else { return .otherProfile }
+            return singlePageWindows.contains(window.key) ? .singlePage : .browser
+        }
+        if owns(context), let refusal = ExtensionWindowTargeting.tabCreation(target: target, index: configuration.index,
+                windowTabCount: (targetWindow ?? nil).map { tabIDs(in: $0.key).count } ?? 0) {
+            completionHandler(nil, BrowserExtensions.failure(refusal)); return
+        }
         guard owns(context), let url = configuration.url, (["http", "https"].contains(url.scheme?.lowercased() ?? "") || BrowserExtensions.isExtensionURL(url, ownedBy: context)),
               !configuration.shouldBePinned, !configuration.shouldBeMuted, !configuration.shouldReaderModeBeActive,
               let id = owner?.createTab?(url, profileID, configuration.shouldBeActive) else {
@@ -1138,6 +1153,16 @@ struct BrowserExtensionPermissionReview {
     }
     func webExtensionController(_ controller: WKWebExtensionController, openNewWindowUsing configuration: WKWebExtension.WindowConfiguration, for context: WKWebExtensionContext, completionHandler: @escaping ((any WKWebExtensionWindow)?, Error?) -> Void) {
         let url = configuration.tabURLs.first
+        let type: ExtensionWindowTargeting.RequestedType = configuration.windowType == .popup ? .popup : configuration.windowType == .normal ? .normal : .other
+        let state: ExtensionWindowTargeting.RequestedState = switch configuration.windowState {
+            case .minimized: .minimized
+            case .maximized: .maximized
+            case .fullscreen: .fullscreen
+            default: .normal
+        }
+        if owns(context), let refusal = ExtensionWindowTargeting.windowCreation(type: type, state: state, urlCount: configuration.tabURLs.count, hasTabs: !configuration.tabs.isEmpty) {
+            completionHandler(nil, BrowserExtensions.failure(refusal)); return
+        }
         guard owns(context), !configuration.shouldBePrivate, configuration.tabURLs.count <= 1, configuration.tabs.isEmpty,
               url == nil || ["http", "https"].contains(url!.scheme?.lowercased() ?? "") || BrowserExtensions.isExtensionURL(url!, ownedBy: context),
               let native = owner?.createWindow?(url, profileID, configuration.shouldBeFocused) else {
@@ -1145,6 +1170,8 @@ struct BrowserExtensionPermissionReview {
         }
         reconcile()
         guard let window = windows[ObjectIdentifier(native)] else { completionHandler(nil, BrowserExtensions.failure("The new window is not in this extension’s profile.")); return }
+        // Requested bounds (AppKit coordinates from WebKit; unrequested parts NaN) are applied, never dropped silently.
+        if let frame = ExtensionWindowTargeting.frame(requested: configuration.frame, current: native.frame) { native.setFrame(frame, display: true) }
         if configuration.windowState == .minimized { native.miniaturize(nil) }
         completionHandler(window, nil)
     }
@@ -1352,7 +1379,7 @@ struct BrowserExtensionPermissionReview {
     func tabs(for context: WKWebExtensionContext) -> [any WKWebExtensionTab] { guard runtime?.owns(context) == true else { return [] }; return runtime?.tabAdapters(in: key) ?? [] }
     func activeTab(for context: WKWebExtensionContext) -> (any WKWebExtensionTab)? { guard runtime?.owns(context) == true else { return nil }; return activeID.flatMap { runtime?.tabs[$0] } }
     func isPrivate(for context: WKWebExtensionContext) -> Bool { runtime?.owner?.isPrivate == true }
-    func windowType(for context: WKWebExtensionContext) -> WKWebExtension.WindowType { .normal }
+    func windowType(for context: WKWebExtensionContext) -> WKWebExtension.WindowType { runtime?.singlePageWindows.contains(key) == true ? .popup : .normal }
     func windowState(for context: WKWebExtensionContext) -> WKWebExtension.WindowState { native?.isMiniaturized == true ? .minimized : .normal }
     func frame(for context: WKWebExtensionContext) -> CGRect { native?.frame ?? .null }
     func screenFrame(for context: WKWebExtensionContext) -> CGRect { native?.screen?.frame ?? .null }
