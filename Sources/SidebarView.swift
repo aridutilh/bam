@@ -180,7 +180,9 @@ struct SidebarExtensionItem {
         let definitions = Array(definitions.filter { seen.insert($0.id).inserted }.prefix(32))
         guard !definitions.isEmpty else { return }
         guard !definitions.elementsEqual(spaceDefinitions, by: {
+            // The theme counts: a theme-only change (import upgrade, undo) must re-tint icons and rows.
             $0.id == $1.id && $0.name == $1.name && $0.symbol == $1.symbol && $0.colorIndex == $1.colorIndex && $0.emoji == $1.emoji
+                && $0.theme == $1.theme
         }) else { return }
         spaceDefinitions = definitions
         let ids = Set(definitions.map(\.id))
@@ -717,7 +719,7 @@ struct SidebarExtensionItem {
         identifier = NSUserInterfaceItemIdentifier("sidebar-space-\(space.id)")
         heading.configure(space)
         table.setAccessibilityLabel("Tabs in \(space.name)")
-        let tint = ArkPalette.spaceTint(space.colorIndex)
+        let tint = ArkPalette.spaceTint(for: space)
         table.enumerateAvailableRowViews { [weak self] _, index in
             guard let self, let cell = self.table.view(atColumn: 0, row: index, makeIfNecessary: false) as? SidebarTabCell else { return }
             cell.row.configureSpace(id: space.id, tint: tint, destinations: destinations)
@@ -731,7 +733,7 @@ struct SidebarExtensionItem {
         row.listMaxDepth = maxDepth
         row.update(item)
         row.setFavicon(superview == nil || item.isSplit ? nil : faviconProvider?(item.id))
-        if let spaceAppearance { row.configureSpace(id: spaceAppearance.id, tint: ArkPalette.spaceTint(spaceAppearance.colorIndex), destinations: destinations) }
+        if let spaceAppearance { row.configureSpace(id: spaceAppearance.id, tint: ArkPalette.spaceTint(for: spaceAppearance), destinations: destinations) }
         row.canMoveEarlier = item.hasEarlierSibling; row.canMoveLater = item.hasLaterSibling
         // Read the cell's current identity: AppKit can recycle it for a different tab.
         row.select = { [weak self, weak row] in if let id = row?.item.id { self?.select?(id) } }
@@ -892,8 +894,11 @@ extension NSPasteboard.PasteboardType {
 enum ArkPalette {
     private static func white(_ alpha: CGFloat) -> NSColor { NSColor(white: 1, alpha: alpha) }
     private static func black(_ alpha: CGFloat) -> NSColor { NSColor(white: 0, alpha: alpha) }
-    static let ink = NSColor.chrome(light: NSColor(white: 0.11, alpha: 1), dark: NSColor(white: 0.94, alpha: 1))
-    static let secondary = NSColor.chrome(light: NSColor(white: 0.38, alpha: 1), dark: NSColor(white: 0.73, alpha: 1))
+    // Shared with imported Space themes' contrast checks (BamInk).
+    static let ink = NSColor.chrome(light: NSColor(srgbRed: BamInk.lightPrimary, green: BamInk.lightPrimary, blue: BamInk.lightPrimary, alpha: 1),
+                                    dark: NSColor(srgbRed: BamInk.darkPrimary, green: BamInk.darkPrimary, blue: BamInk.darkPrimary, alpha: 1))
+    static let secondary = NSColor.chrome(light: NSColor(srgbRed: BamInk.lightSecondary, green: BamInk.lightSecondary, blue: BamInk.lightSecondary, alpha: 1),
+                                          dark: NSColor(srgbRed: BamInk.darkSecondary, green: BamInk.darkSecondary, blue: BamInk.darkSecondary, alpha: 1))
     /// Hover wash for rows and icon buttons.
     static let hover = NSColor.chrome(light: black(0.055), dark: white(0.07))
     static let pressed = NSColor.chrome(light: black(0.10), dark: white(0.20))
@@ -910,6 +915,21 @@ enum ArkPalette {
     static let separator = NSColor.chrome(light: black(0.08), dark: white(0.10))
     /// Space icon tint: the pastel in dark mode, a deeper version on light chrome.
     static func spaceTint(_ index: Int) -> NSColor { spaceTints[min(spaceTints.count - 1, max(0, index))] }
+    /// A Space's tint: its imported Arc accent (per appearance, contrast-checked
+    /// against its own window gradient) when it has a theme, else its flat tint.
+    static func spaceTint(for space: BrowserSpace) -> NSColor {
+        guard let theme = space.theme else { return spaceTint(space.colorIndex) }
+        if let cached = themedTints[theme] { return cached }
+        // Where the theme can't be shown (the window falls back to the flat
+        // color in that appearance), the flat tint goes with it.
+        let flat = spaceTint(space.colorIndex)
+        let tint = NSColor.chrome(light: theme.accent(dark: false).map(NSColor.init(spaceTheme:)) ?? flat,
+                                  dark: theme.accent(dark: true).map(NSColor.init(spaceTheme:)) ?? flat)
+        if themedTints.count > 64 { themedTints.removeAll() }
+        themedTints[theme] = tint   // one instance per theme keeps identity comparisons stable
+        return tint
+    }
+    private static var themedTints: [SpaceTheme: NSColor] = [:]
     /// Built once so identity comparisons stay stable across updates.
     private static let spaceTints: [NSColor] = spaceColors.map { base in
         let deep = base.usingColorSpace(.deviceRGB).map {
@@ -1009,7 +1029,7 @@ enum ArkPalette {
     }
     static func image(for space: BrowserSpace, pointSize: CGFloat) -> NSImage? {
         guard let emoji = space.emoji else {
-            return SidebarSymbol.image(named: space.symbol, color: ArkPalette.spaceTint(space.colorIndex), pointSize: pointSize)
+            return SidebarSymbol.image(named: space.symbol, color: ArkPalette.spaceTint(for: space), pointSize: pointSize)
         }
         let side = pointSize + 4
         return NSImage(size: NSSize(width: side, height: side), flipped: false) { rect in
@@ -1269,8 +1289,12 @@ private final class ArkNewTabButton: ArkHoverButton {
     }
 }
 
+/// Sidebar views drawn in their Space's tint; tests read the tint they hold.
+@MainActor protocol SpaceTinted: AnyObject { var displayedSpaceTint: NSColor { get } }
+
 @MainActor
-private final class ArkSpaceButton: ArkHoverButton {
+private final class ArkSpaceButton: ArkHoverButton, SpaceTinted {
+    var displayedSpaceTint: NSColor { tint }
     let index: Int
     private var name = ""
     private var symbolName = "globe"
@@ -1301,7 +1325,7 @@ private final class ArkSpaceButton: ArkHoverButton {
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     func configure(_ space: BrowserSpace) {
-        name = space.name; symbolName = space.symbol; emoji = space.emoji; tint = ArkPalette.spaceTint(space.colorIndex)
+        name = space.name; symbolName = space.symbol; emoji = space.emoji; tint = ArkPalette.spaceTint(for: space)
         setAccessibilityLabel("Switch to \(name) space")
         toolTip = name
         needsDisplay = true
@@ -1326,7 +1350,8 @@ private final class ArkSpaceButton: ArkHoverButton {
 }
 
 @MainActor
-private final class ArkSpaceHeading: ArkHoverButton {
+private final class ArkSpaceHeading: ArkHoverButton, SpaceTinted {
+    var displayedSpaceTint: NSColor { tint }
     private var name = "Studio"
     private var symbolName = "sparkles"
     private var emoji: String?
@@ -1334,7 +1359,7 @@ private final class ArkSpaceHeading: ArkHoverButton {
     init() { super.init(frame: .zero); toolTip = "Manage Spaces" }
     required init?(coder: NSCoder) { fatalError() }
     func configure(_ space: BrowserSpace) {
-        name = space.name; symbolName = space.symbol; emoji = space.emoji; tint = ArkPalette.spaceTint(space.colorIndex)
+        name = space.name; symbolName = space.symbol; emoji = space.emoji; tint = ArkPalette.spaceTint(for: space)
         setAccessibilityLabel("Manage Spaces — \(name)")
         needsDisplay = true
     }
@@ -1351,7 +1376,8 @@ private final class ArkSpaceHeading: ArkHoverButton {
 }
 
 @MainActor
-private final class ArkTabRow: ArkFlippedView, NSDraggingSource {
+private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted {
+    var displayedSpaceTint: NSColor { spaceTint }
     override func resetCursorRects() {
         super.resetCursorRects()
         addCursorRect(bounds, cursor: .pointingHand)

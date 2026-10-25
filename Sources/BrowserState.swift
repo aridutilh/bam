@@ -78,6 +78,13 @@ struct BrowserTab: Codable, Identifiable, Equatable {
     var isVideoDemo: Bool { address == "orbit://video" }
     /// A row kept in place of an Arc Easel; it has no web page.
     var isArcEasel: Bool { ArcEaselReference.isReference(address) }
+    /// What the address bar shows when it isn't being edited: the site's host,
+    /// or a plain name for Bam's own reference rows. Editing still starts from
+    /// `address`, which is unchanged.
+    var addressLabel: String {
+        if isArcEasel { return "Arc Easel" }
+        return URL(string: address)?.host ?? address
+    }
     var symbol: String {
         if let symbol = saved?.customSymbol { return symbol }
         if isHome { return "sparkle" }
@@ -193,6 +200,142 @@ struct BrowserProfile: Codable, Equatable, Identifiable {
 
 /// IDs remain stable as the user reorders Spaces; their array position is only
 /// presentation order. Existing sessions retain IDs 0, 1, and 2.
+/// A Space's own colors, imported from an Arc window theme. Optional and
+/// additive: Spaces without one, and every older session, use the flat
+/// `colorIndex` color, which a themed Space also keeps as its fallback.
+/// Bam draws its own gradient from these values; Arc's grain, noise and
+/// vibrancy aren't reproduced.
+struct SpaceTheme: Codable, Hashable {
+    /// One color, sRGB components. Only finite values within 0…1 are kept.
+    struct RGBA: Codable, Hashable {
+        var red: Double, green: Double, blue: Double, alpha: Double
+        init?(red: Double, green: Double, blue: Double, alpha: Double = 1) {
+            guard [red, green, blue, alpha].allSatisfy({ $0.isFinite && $0 >= -0.0005 && $0 <= 1.0005 }) else { return nil }
+            func unit(_ value: Double) -> Double { min(1, max(0, value)) }
+            self.red = unit(red); self.green = unit(green); self.blue = unit(blue); self.alpha = unit(alpha)
+        }
+        init(from decoder: Decoder) throws {
+            let values = try decoder.container(keyedBy: CodingKeys.self)
+            guard let color = RGBA(red: try values.decode(Double.self, forKey: .red), green: try values.decode(Double.self, forKey: .green),
+                                   blue: try values.decode(Double.self, forKey: .blue), alpha: try values.decode(Double.self, forKey: .alpha)) else {
+                throw DecodingError.dataCorruptedError(forKey: .red, in: values, debugDescription: "Color component out of range")
+            }
+            self = color
+        }
+        private enum CodingKeys: String, CodingKey { case red, green, blue, alpha }
+        /// WCAG relative luminance.
+        var luminance: Double {
+            func linear(_ c: Double) -> Double { c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4) }
+            return 0.2126 * linear(red) + 0.7152 * linear(green) + 0.0722 * linear(blue)
+        }
+        func contrast(with other: RGBA) -> Double {
+            let a = luminance, b = other.luminance
+            return (max(a, b) + 0.05) / (min(a, b) + 0.05)
+        }
+        /// This color moved `fraction` of the way to `other`, opaque.
+        func mixed(toward other: RGBA, by fraction: Double) -> RGBA {
+            let t = min(1, max(0, fraction))
+            return RGBA(red: red + (other.red - red) * t, green: green + (other.green - green) * t,
+                        blue: blue + (other.blue - blue) * t, alpha: 1)!
+        }
+    }
+    /// Colors for one appearance (Arc's light or dark semantic palette).
+    struct Roles: Codable, Hashable {
+        var background: RGBA
+        var backgroundExtra: RGBA?
+        /// Main text color; the window gradient keeps readable contrast with it.
+        var title: RGBA
+        var subtitle: RGBA?
+    }
+    /// The window's own one or two gradient colors; empty means "use the
+    /// appearance's background colors".
+    var gradient: [RGBA]
+    var light: Roles
+    var dark: Roles
+    /// Arc's primary palette: the Space's accent and its light/dark variants.
+    var accent: RGBA
+    var accentLight: RGBA?
+    var accentDark: RGBA?
+
+    init?(gradient: [RGBA], light: Roles, dark: Roles, accent: RGBA, accentLight: RGBA? = nil, accentDark: RGBA? = nil) {
+        guard gradient.count <= 2 else { return nil }
+        self.gradient = gradient; self.light = light; self.dark = dark
+        self.accent = accent; self.accentLight = accentLight; self.accentDark = accentDark
+    }
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        gradient = try values.decode([RGBA].self, forKey: .gradient)
+        guard gradient.count <= 2 else { throw DecodingError.dataCorruptedError(forKey: .gradient, in: values, debugDescription: "Too many gradient colors") }
+        light = try values.decode(Roles.self, forKey: .light); dark = try values.decode(Roles.self, forKey: .dark)
+        accent = try values.decode(RGBA.self, forKey: .accent)
+        accentLight = try? values.decodeIfPresent(RGBA.self, forKey: .accentLight)
+        accentDark = try? values.decodeIfPresent(RGBA.self, forKey: .accentDark)
+    }
+    private enum CodingKeys: String, CodingKey { case gradient, light, dark, accent, accentLight, accentDark }
+
+    /// Bam's sidebar text (`BamInk`) needs at least these contrasts with every
+    /// gradient color: main text and secondary text.
+    static let minimumInkContrast = 7.0
+    static let minimumSecondaryContrast = 4.5
+    /// The two window gradient colors for one appearance, or nil when this
+    /// theme can't be made readable there (the window then uses Bam's own
+    /// flat Space color for that appearance). Arc's colors are eased toward
+    /// the appearance's background (a little in light, a lot in dark) and
+    /// further until Bam's actual sidebar ink reads over them.
+    func canvasStops(dark isDark: Bool) -> [RGBA]? {
+        let roles = isDark ? dark : light
+        let base: [RGBA]
+        switch gradient.count {
+        case 0: base = [roles.background, roles.backgroundExtra ?? roles.background]
+        case 1: base = [gradient[0], gradient[0]]
+        default: base = Array(gradient.prefix(2))
+        }
+        let primary = BamInk.primary(dark: isDark), secondary = BamInk.secondary(dark: isDark)
+        func readable(_ color: RGBA) -> Bool {
+            color.contrast(with: primary) >= Self.minimumInkContrast && color.contrast(with: secondary) >= Self.minimumSecondaryContrast
+        }
+        let start = isDark ? 0.7 : 0.25
+        var stops: [RGBA] = []
+        for stop in base {
+            var amount = start
+            var color = stop.mixed(toward: roles.background, by: amount)
+            while !readable(color), amount < 1 {
+                amount = min(1, amount + 0.05); color = stop.mixed(toward: roles.background, by: amount)
+            }
+            guard readable(color) else { return nil }
+            stops.append(color)
+        }
+        return stops
+    }
+    /// Icons need at least this contrast with the window behind them.
+    static let minimumIconContrast = 3.0
+    /// The Space's accent (selected icons, Space icon) for one appearance:
+    /// Arc's lighter variant in dark, its shaded variant in light, moved toward
+    /// Bam's ink until it stands out from the gradient. Nil when the window
+    /// uses the flat Space color there (the flat tint then applies too).
+    func accent(dark isDark: Bool) -> RGBA? {
+        guard let behind = canvasStops(dark: isDark) else { return nil }
+        let base = (isDark ? accentLight : accentDark) ?? accent
+        let ink = BamInk.primary(dark: isDark)
+        func worst(_ color: RGBA) -> Double { behind.map { color.contrast(with: $0) }.min() ?? 21 }
+        var amount = 0.0, color = base.mixed(toward: ink, by: 0)
+        while worst(color) < Self.minimumIconContrast, amount < 1 {
+            amount = min(1, amount + 0.05); color = base.mixed(toward: ink, by: amount)
+        }
+        return worst(color) >= Self.minimumIconContrast ? color : nil
+    }
+}
+
+/// Bam's sidebar text colors (gray levels). The sidebar draws with these and
+/// imported Space themes are checked against them, so the two can't drift.
+enum BamInk {
+    static let lightPrimary = 0.11, lightSecondary = 0.38
+    static let darkPrimary = 0.94, darkSecondary = 0.73
+    static func primary(dark: Bool) -> SpaceTheme.RGBA { gray(dark ? darkPrimary : lightPrimary) }
+    static func secondary(dark: Bool) -> SpaceTheme.RGBA { gray(dark ? darkSecondary : lightSecondary) }
+    private static func gray(_ level: Double) -> SpaceTheme.RGBA { SpaceTheme.RGBA(red: level, green: level, blue: level)! }
+}
+
 struct BrowserSpace: Codable, Equatable, Identifiable {
     var id: Int
     var name: String
@@ -201,12 +344,17 @@ struct BrowserSpace: Codable, Equatable, Identifiable {
     var profileID: UUID
     /// An optional emoji icon (Arc-style); when present it is shown instead of the symbol.
     var emoji: String?
+    /// Imported Arc colors. Used only with a flat `colorIndex` (which stays the
+    /// fallback); choosing another Space color, Prism or Clear removes it.
+    var theme: SpaceTheme?
 
-    init(id: Int, name: String, symbol: String, colorIndex: Int, profileID: UUID = BrowserProfile.defaultID, emoji: String? = nil) {
+    init(id: Int, name: String, symbol: String, colorIndex: Int, profileID: UUID = BrowserProfile.defaultID, emoji: String? = nil,
+         theme: SpaceTheme? = nil) {
         self.id = id; self.name = name; self.symbol = symbol; self.colorIndex = colorIndex; self.profileID = profileID
         self.emoji = emoji.flatMap(Self.validEmoji)
+        self.theme = colorIndex >= 0 && colorIndex < Self.flatColorCount ? theme : nil
     }
-    private enum CodingKeys: String, CodingKey { case id, name, symbol, colorIndex, profileID, emoji }
+    private enum CodingKeys: String, CodingKey { case id, name, symbol, colorIndex, profileID, emoji, theme }
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         id = try values.decode(Int.self, forKey: .id); name = try values.decode(String.self, forKey: .name)
@@ -216,6 +364,9 @@ struct BrowserSpace: Codable, Equatable, Identifiable {
             throw DecodingError.dataCorruptedError(forKey: .profileID, in: values, debugDescription: "Invalid profile identifier")
         }
         emoji = (try? values.decodeIfPresent(String.self, forKey: .emoji)).flatMap { $0 }.flatMap(Self.validEmoji)
+        // A damaged theme falls back to the flat color; it never fails the Space.
+        let decodedTheme = (try? values.decodeIfPresent(SpaceTheme.self, forKey: .theme)).flatMap { $0 }
+        theme = colorIndex >= 0 && colorIndex < Self.flatColorCount ? decodedTheme : nil
     }
     /// A single emoji grapheme, without text or control characters.
     static func validEmoji(_ raw: String) -> String? {
@@ -407,7 +558,10 @@ struct BrowserSession: Codable {
         if profile != spaces[index].profileID {
             for i in tabs.indices where tabs[i].space == id && !tabs[i].isFavorite { tabs[i].sleepState = nil }
         }
-        spaces[index] = BrowserSpace(id: id, name: name, symbol: BrowserSpace.normalizedSymbol(symbol), colorIndex: colorIndex, profileID: profile, emoji: spaces[index].emoji)
+        // An imported theme stays while the Space keeps its color; picking another color replaces it.
+        let theme = colorIndex == spaces[index].colorIndex ? spaces[index].theme : nil
+        spaces[index] = BrowserSpace(id: id, name: name, symbol: BrowserSpace.normalizedSymbol(symbol), colorIndex: colorIndex, profileID: profile,
+                                     emoji: spaces[index].emoji, theme: theme)
         repairRememberedSelections(); repairActiveSelection()
         return true
     }
@@ -415,6 +569,11 @@ struct BrowserSession: Codable {
         guard let index = spaceIndex(id) else { return false }
         if let emoji, BrowserSpace.validEmoji(emoji) == nil { return false }
         spaces[index].emoji = emoji.flatMap(BrowserSpace.validEmoji); return true
+    }
+    /// Gives a flat-colored Space imported colors (nil removes them).
+    @discardableResult mutating func setSpaceTheme(id: Int, theme: SpaceTheme?) -> Bool {
+        guard let index = spaceIndex(id), theme == nil || (0..<BrowserSpace.flatColorCount).contains(spaces[index].colorIndex) else { return false }
+        spaces[index].theme = theme; return true
     }
     @discardableResult mutating func reorderSpace(id: Int, to index: Int) -> Bool {
         guard let oldIndex = spaceIndex(id), spaces.indices.contains(index) else { return false }
@@ -1081,7 +1240,9 @@ struct BrowserSession: Codable {
                                     ? definition.colorIndex
                                     : min(BrowserSpace.flatColorCount - 1, max(0, definition.colorIndex)),
                                 profileID: validProfiles.contains(definition.profileID) ? definition.profileID : BrowserProfile.defaultID,
-                                emoji: definition.emoji)
+                                emoji: definition.emoji,
+                                // Kept only with an in-range flat color (the initializer enforces it).
+                                theme: BrowserSpace.colorNames.indices.contains(definition.colorIndex) ? definition.theme : nil)
         }
         if spaces.isEmpty { spaces = BrowserSpace.defaults }
         lastIssuedSpaceID = max(2, max(lastIssuedSpaceID, spaces.map(\.id).max() ?? 2))

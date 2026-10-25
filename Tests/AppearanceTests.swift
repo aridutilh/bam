@@ -66,6 +66,48 @@ import AppKit
         require(ArkPalette.spaceTint(2) === ArkPalette.spaceTint(2), "Space tints are stable objects for cheap change checks")
         let lightSelection = resolved(ArkPalette.selection, .aqua), darkSelection = resolved(ArkPalette.selection, .darkAqua)
         require(lightSelection.alphaComponent > 0.8 && darkSelection.alphaComponent < 0.2, "Light selection is a lifted white card; dark keeps its wash")
+
+        // Imported Space themes: own window gradient and accent per appearance;
+        // flat colors stay for unthemed Spaces and for Prism/Clear.
+        func rgba(_ r: Double, _ g: Double, _ b: Double) -> SpaceTheme.RGBA { SpaceTheme.RGBA(red: r, green: g, blue: b)! }
+        let theme = SpaceTheme(gradient: [rgba(0.62, 0.78, 0.96), rgba(0.95, 0.70, 0.80)],
+                               light: .init(background: rgba(0.95, 0.94, 0.97), backgroundExtra: nil, title: rgba(0.08, 0.08, 0.10), subtitle: nil),
+                               dark: .init(background: rgba(0.10, 0.10, 0.13), backgroundExtra: nil, title: rgba(0.95, 0.95, 0.97), subtitle: nil),
+                               accent: rgba(0.40, 0.55, 0.90), accentLight: rgba(0.80, 0.86, 0.98), accentDark: rgba(0.30, 0.40, 0.70))!
+        let themed = BrowserSpace(id: 5, name: "Themed", symbol: "globe", colorIndex: 2, theme: theme)
+        let lightCanvas = NSColor.themedCanvas(theme, colorIndex: 2, dark: false)!, darkCanvas = NSColor.themedCanvas(theme, colorIndex: 2, dark: true)!
+        require(lightCanvas.count == 2 && !lightCanvas[0].isEqualIgnoringAlpha(lightCanvas[1]), "A themed Space draws its own two-color gradient")
+        // Bam's own dark Space gradients sit around 0.2–0.3; themed ones match.
+        require(lightCanvas.allSatisfy { $0.whiteComponentApprox > 0.6 } && darkCanvas.allSatisfy { $0.whiteComponentApprox < 0.36 },
+                "The themed gradient follows the window's light or dark appearance")
+        require(NSColor.themedCanvas(nil, colorIndex: 2, dark: false) == nil && NSColor.themedCanvas(theme, colorIndex: BrowserSpace.prismColorIndex, dark: false) == nil,
+                "Unthemed Spaces and Prism/Clear keep Bam's own backgrounds")
+        let themedTint = ArkPalette.spaceTint(for: themed)
+        require(themedTint === ArkPalette.spaceTint(for: themed), "A themed tint is one stable object per theme")
+        require(!resolved(themedTint, .aqua).isEqualIgnoringAlpha(resolved(ArkPalette.spaceTint(2), .aqua))
+                && !resolved(themedTint, .aqua).isEqualIgnoringAlpha(resolved(themedTint, .darkAqua)),
+                "The accent is the theme's own, different in light and dark")
+        require(ArkPalette.spaceTint(for: BrowserSpace(id: 6, name: "Plain", symbol: "globe", colorIndex: 2)) === ArkPalette.spaceTint(2),
+                "An unthemed Space keeps its flat tint")
+        // The sidebar draws exactly the ink the theme contrast checks use.
+        for (name, dark) in [(NSAppearance.Name.aqua, false), (.darkAqua, true)] {
+            let ink = resolved(ArkPalette.ink, name), secondary = resolved(ArkPalette.secondary, name)
+            let expectedInk = BamInk.primary(dark: dark), expectedSecondary = BamInk.secondary(dark: dark)
+            require(abs(ink.redComponent - expectedInk.red) < 0.002 && abs(secondary.redComponent - expectedSecondary.red) < 0.002,
+                    "Sidebar ink matches the theme contrast reference (dark: \(dark))")
+        }
+        // A theme Bam's ink can't be read over in light falls back to the flat
+        // canvas and flat tint there, and keeps both in dark.
+        let invertedLight = SpaceTheme(gradient: theme.gradient,
+                                       light: .init(background: rgba(0.12, 0.12, 0.14), backgroundExtra: nil, title: rgba(1, 1, 1), subtitle: nil),
+                                       dark: theme.dark, accent: theme.accent, accentLight: theme.accentLight, accentDark: theme.accentDark)!
+        let inverted = BrowserSpace(id: 7, name: "Inverted", symbol: "globe", colorIndex: 2, theme: invertedLight)
+        require(NSColor.themedCanvas(invertedLight, colorIndex: 2, dark: false) == nil && NSColor.themedCanvas(invertedLight, colorIndex: 2, dark: true) != nil,
+                "An unreadable light theme draws Bam's flat light background")
+        let invertedTint = ArkPalette.spaceTint(for: inverted)
+        require(resolved(invertedTint, .aqua).isEqualIgnoringAlpha(resolved(ArkPalette.spaceTint(2), .aqua))
+                && !resolved(invertedTint, .darkAqua).isEqualIgnoringAlpha(resolved(ArkPalette.spaceTint(2), .darkAqua)),
+                "The tint follows: flat where the canvas is flat, themed where it's themed")
         print("PASS: \(checks) appearance preference and color token checks")
     }
 }

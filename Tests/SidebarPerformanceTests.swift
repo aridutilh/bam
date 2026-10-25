@@ -607,6 +607,32 @@ import AppKit
         require(!sidebar.focusTabList() && window.firstResponder === table(in: 0), "Focus Sidebar on an empty list focuses the list itself")
         key(125, to: table(in: 0))
         require(navSelected.isEmpty, "Arrows in an empty list do nothing")
+
+        // A theme-only change to the same Space (import upgrade, undo) re-tints
+        // the footer icon, the heading and the rows already on screen.
+        func rgba(_ r: Double, _ g: Double, _ b: Double) -> SpaceTheme.RGBA { SpaceTheme.RGBA(red: r, green: g, blue: b)! }
+        let theme = SpaceTheme(gradient: [rgba(0.62, 0.78, 0.96), rgba(0.95, 0.70, 0.80)],
+                               light: .init(background: rgba(0.95, 0.94, 0.97), backgroundExtra: nil, title: rgba(0.08, 0.08, 0.10), subtitle: nil),
+                               dark: .init(background: rgba(0.10, 0.10, 0.13), backgroundExtra: nil, title: rgba(0.95, 0.95, 0.97), subtitle: nil),
+                               accent: rgba(0.30, 0.45, 0.85), accentLight: rgba(0.80, 0.86, 0.98), accentDark: rgba(0.20, 0.30, 0.65))!
+        let plainSpaces = BrowserSpace.defaults
+        var themedSpaces = plainSpaces; themedSpaces[0].theme = theme
+        update(0, (0..<4).map { SidebarTabItem(id: UUID(), title: "Tinted \($0)", subtitle: "", symbol: "globe", isPinned: true, isActive: $0 == 0) })
+        sidebar.configureSpaces(plainSpaces); sidebar.layoutSubtreeIfNeeded(); _ = row(table(in: 0), 0)
+        @MainActor func tints() -> [NSColor] {
+            let footer = descendants(sidebar).filter { $0.accessibilityLabel() == "Switch to Studio space" }
+            let heading = descendants(sidebar).filter { $0.accessibilityLabel()?.hasPrefix("Manage Spaces — Studio") == true }
+            let rows = descendants(table(in: 0)).filter { $0.identifier?.rawValue.hasPrefix("tab-row-") == true }
+            require(!footer.isEmpty && !heading.isEmpty && !rows.isEmpty, "Footer, heading and rows are present")
+            return (footer + heading + rows).compactMap { ($0 as? SpaceTinted)?.displayedSpaceTint }
+        }
+        require(tints().allSatisfy { $0 === ArkPalette.spaceTint(0) }, "An unthemed Space uses its flat tint")
+        sidebar.configureSpaces(themedSpaces); sidebar.layoutSubtreeIfNeeded()
+        let themedTint = ArkPalette.spaceTint(for: themedSpaces[0])
+        require(themedTint !== ArkPalette.spaceTint(0) && tints().allSatisfy { $0 === themedTint },
+                "Adding only a theme re-tints the footer icon, heading and visible rows")
+        sidebar.configureSpaces(plainSpaces); sidebar.layoutSubtreeIfNeeded()
+        require(tints().allSatisfy { $0 === ArkPalette.spaceTint(0) }, "Removing only the theme (undo) restores the flat tint everywhere")
         print("PASS: \(checks) sidebar virtualization, identity, scrolling, paging and extension action checks")
         window.contentView = nil
     }
