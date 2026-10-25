@@ -47,6 +47,8 @@ import WebKit
     /// requests use Bam's production dialog (never auto-granted) and the real reload offer stays wired, so a person can
     /// accept the Site Access UI by hand. Off by default: the probe behaves exactly as before.
     private var manualSiteAccess = false
+    /// Manual Site Access: the one-shot initial (non-optional) install review has been answered by the fixture rule.
+    private var initialInstallReviewConsumed = false
     private var responderSnapshots: [[String: Any]] = []
     /// IDs seeded by BAM_VENDOR_SEED_BOOKMARKS (empty when off), for the no-loaded-views check.
     private var seededBookmarkIDs: [UUID] = []
@@ -162,10 +164,11 @@ import WebKit
     }
     static let manualSiteAccessFlag = "BAM_VENDOR_MANUAL_SITE_ACCESS"
     enum ManualSiteAccessDecision: Equatable { case off, on, invalid(String) }
-    /// Only "1" enables, and only with quiet mode and the normal disposable profile; anything else set is refused.
+    /// Absent means off. Present, only "1" enables (an empty or any other value is refused), and only with quiet mode
+    /// and the normal disposable profile.
     static func manualSiteAccessDecision(_ value: String?, quiet: Bool, normalProfile: Bool) -> ManualSiteAccessDecision {
-        guard let value, !value.isEmpty else { return .off }
-        guard value == "1" else { return .invalid("\(manualSiteAccessFlag) must be 1 when set") }
+        guard let value else { return .off }
+        guard value == "1" else { return .invalid("\(manualSiteAccessFlag) must be 1 when set (it is \(value.isEmpty ? "empty" : "\"\(value)\""))") }
         guard quiet else { return .invalid("\(manualSiteAccessFlag) needs quiet mode (\(VendorQuietMode.flag)=1)") }
         guard normalProfile else { return .invalid("\(manualSiteAccessFlag) needs the normal disposable profile (BAM_VENDOR_PROFILE=normal)") }
         return .on
@@ -257,7 +260,7 @@ import WebKit
         }
         observations["manual_site_access"] = manualSiteAccess
         if manualSiteAccess {
-            observations["manual_site_access_scope"] = "diagnostic: initial install auto-approves only Bam's supported permission set (as by default); after it, runtime permission requests use Bam's production dialog, never auto-granted, and the browser's real reload offer stays wired; no product behavior changed"
+            observations["manual_site_access_scope"] = "diagnostic: only the initial non-optional install review auto-approves Bam's supported permission set (as by default); every optional/runtime review, and any later review, uses Bam's production dialog and is never auto-granted; the browser's real reload offer stays wired; no product behavior changed"
         }
         // Opt-in bookmark fixture: decided (and refused) before anything is created or mutated.
         let seedDecision = BookmarkVendorSeed.decide(flag: env[BookmarkVendorSeed.flag], isNormalMode: mode == .normal, site: env["BAM_VENDOR_SITE"])
@@ -315,6 +318,22 @@ import WebKit
         // Manual Site Access keeps the browser's real reload offer; by default the probe silences it, as before.
         if !manualSiteAccess { host.onReloadNeeded = nil }
         host.permissionPrompt = { [weak self] review in
+            // Manual Site Access: only the first non-optional review (the initial install) uses the fixture rule.
+            // Optional/runtime reviews, and any later review, go to Bam's production dialog right away, even while
+            // installer.install hasn't returned yet (the extension is already loaded and may request at startup).
+            if let self, self.manualSiteAccess {
+                if review.isOptional || self.initialInstallReviewConsumed {
+                    let approved = ExtensionManagement.reviewPermissions(review)
+                    self.reviewEvents.append([
+                        "permissions": review.permissions, "unsupported": review.unsupported,
+                        "website_patterns": review.websites, "optional": review.isOptional,
+                        "production_dialog": true, "approved_by_person": approved
+                    ])
+                    return approved
+                }
+                self.initialInstallReviewConsumed = true
+            }
+            // Default (and the manual mode's one initial install review): exactly as before.
             self?.reviewEvents.append([
                 "permissions": review.permissions, "unsupported": review.unsupported,
                 "website_patterns": review.websites, "optional": review.isOptional
@@ -382,7 +401,7 @@ import WebKit
             // The initial install is complete (approved under the supported-set rule above). From here, every runtime
             // permission request goes to Bam's production dialog: nothing is auto-granted.
             host.permissionPrompt = nil
-            observations["permission_prompt_after_install"] = "production dialog (not auto-approved; not recorded in permission_reviews)"
+            observations["permission_prompt_after_install"] = "production dialog (not auto-approved); reviews answered by a person before this point are in permission_reviews with production_dialog=true"
         }
         initialized = true
         observations["extension_name"] = context.webExtension.displayName ?? ""
