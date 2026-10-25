@@ -37,6 +37,54 @@ enum ExtensionGestureProbeRules {
         components.fragment = nil
         return components.url
     }
+    /// What one phase's page entry shows. Only a structured worker reply for this phase counts as measured.
+    enum Reply: Equatable {
+        /// The worker answered this phase: its badge (arrival signal) and the gesture-gated request's outcome.
+        case measured(badge: String, outcome: String)
+        /// The message never reached a worker reply (sendMessage rejected, or no response was delivered).
+        case transportFailure(String)
+        /// Something answered, but not a well-formed reply for this phase.
+        case malformed(String)
+    }
+    static let badgeLetters = ["baseline": "B", "click": "C", "toolbar": "T"]
+    /// Classifies a page entry (`{kind, response?, error?}` as the content script publishes it) for `kind`.
+    /// nil while there is no answer yet.
+    static func reply(_ entry: [String: Any]?, kind: String) -> Reply? {
+        guard let entry else { return nil }
+        if let error = entry["error"] as? String { return .transportFailure(String(error.prefix(300))) }
+        guard entry.keys.contains("response") else { return nil }
+        guard let response = entry["response"] as? [String: Any] else { return .transportFailure("no reply from the worker (null response)") }
+        guard response["kind"] as? String == kind else { return .malformed("reply kind \(response["kind"] ?? "missing") for \(kind)") }
+        guard let rawSequence = response["sequence"], CFGetTypeID(rawSequence as CFTypeRef) != CFBooleanGetTypeID(),
+              let sequence = rawSequence as? Int, sequence >= 1, let letter = badgeLetters[kind],
+              let badge = response["badge"] as? String, badge == "\(letter)\(sequence)" else { return .malformed("reply sequence/badge mismatch") }
+        guard response["receivedAt"] is NSNumber, response["settledAt"] is NSNumber else { return .malformed("reply timing missing") }
+        guard let request = response["request"] as? [String: Any], let outcome = request["outcome"] as? String else {
+            return .malformed("reply without a request outcome")
+        }
+        switch outcome {
+        case "resolved":
+            guard let granted = request["granted"], CFGetTypeID(granted as CFTypeRef) == CFBooleanGetTypeID() else { return .malformed("resolved without a boolean granted") }
+            return .measured(badge: badge, outcome: (granted as? Bool) == true ? "resolved granted" : "resolved not granted")
+        case "rejected", "threw":
+            guard let error = request["error"] as? String, !error.isEmpty else { return .malformed("\(outcome) without error text") }
+            return .measured(badge: badge, outcome: outcome)
+        default:
+            return .malformed("unknown request outcome \(outcome)")
+        }
+    }
+    /// A phase is measured only with a well-formed reply whose arrival badge the host actually observed.
+    static func phaseVerdict(_ reply: Reply?, observedBadges: Set<String>) -> String {
+        switch reply {
+        case nil: return "no reply"
+        case .transportFailure(let why): return "transport failure: \(why)"
+        case .malformed(let why): return "malformed reply: \(why)"
+        case .measured(let badge, let outcome):
+            return observedBadges.contains(badge) ? "measured (\(outcome))" : "reply without an observed arrival (\(badge))"
+        }
+    }
+    static func isMeasured(_ verdict: String?) -> Bool { verdict?.hasPrefix("measured") == true }
+
     /// Bam's MV3 worker preparation adds its internal `nativeMessaging` transport to the private copy; the install
     /// review lists it as unsupported, and approving the review never grants it (that transport is a separate grant).
     static let toleratedUnsupported: Set<String> = ["nativeMessaging"]

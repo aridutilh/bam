@@ -66,8 +66,8 @@ import WebKit
       if (!new URLSearchParams(location.search).has("\#(marker)") || document.getElementById("\#(marker)")) return;
       const api = globalThis.chrome;
       const results = [];
-      let untrustedClicks = 0;
-      const publish = () => { document.documentElement.dataset.bamGestureProbe = JSON.stringify({results, untrustedClicks}); };
+      let untrustedClicks = 0, earlyClicks = 0;
+      const publish = () => { document.documentElement.dataset.bamGestureProbe = JSON.stringify({results, untrustedClicks, earlyClicks}); };
       const text = (error) => String((error && error.message) || error).slice(0, 300);
       const activation = () => navigator.userActivation ? {isActive: navigator.userActivation.isActive, hasBeenActive: navigator.userActivation.hasBeenActive} : null;
       const send = (kind, details) => {
@@ -87,6 +87,8 @@ import WebKit
       let relayed = false;
       button.addEventListener("click", (event) => {
         if (event.isTrusted !== true) { untrustedClicks += 1; publish(); return; }
+        // The host arms the button when it prints READY; earlier clicks would precede the baseline phase.
+        if (document.documentElement.dataset.bamGestureArmed !== "1") { earlyClicks += 1; publish(); return; }
         if (relayed) return;
         relayed = true;
         send("click", {trusted: true, userActivation: activation(),
@@ -208,8 +210,16 @@ import WebKit
               let data = text.data(using: .utf8), let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
         pageResults = value
     }
-    private func result(_ kind: String) -> [String: Any]? {
-        (pageResults["results"] as? [[String: Any]])?.first { $0["kind"] as? String == kind && ($0["response"] != nil || $0["error"] != nil) }
+    /// The phase's page entry, classified; nil until something answered.
+    private func reply(_ kind: String) -> ExtensionGestureProbeRules.Reply? {
+        ExtensionGestureProbeRules.reply((pageResults["results"] as? [[String: Any]])?.first { $0["kind"] as? String == kind }, kind: kind)
+    }
+    /// Records the phase's verdict: measured only for a well-formed reply whose arrival was observed.
+    @discardableResult private func record(_ phase: String, kind: String) -> Bool {
+        let observed = Set(arrivals.compactMap { $0["badge"] as? String })
+        let verdict = ExtensionGestureProbeRules.phaseVerdict(reply(kind), observedBadges: observed)
+        phases[phase] = verdict
+        return ExtensionGestureProbeRules.isMeasured(verdict)
     }
     /// Polls every 20 ms (page every 200 ms) until `done` holds or the deadline passes.
     private func poll(until deadline: TimeInterval, _ done: () -> Bool) async throws -> Bool {
@@ -231,6 +241,11 @@ import WebKit
 
     private func run(_ page: URL) async throws {
         let env = ProcessInfo.processInfo.environment
+        // Runner identity invariant: only the canonical Bam Preview app runs this fixture.
+        guard VendorProbeIsolation.allowsNormalMode(bundleIdentifier: Bundle.main.bundleIdentifier) else {
+            throw BrowserExtensions.failure("The gesture probe runs only in canonical Bam Preview (\(VendorProbeIsolation.canonicalPreviewBundleIdentifier))")
+        }
+        observations["bundle_identifier"] = Bundle.main.bundleIdentifier ?? ""
         guard ExtensionGestureProbeRules.isLoopback(page), let probePage = ExtensionGestureProbeRules.probeURL(page) else { throw BrowserExtensions.failure("The fixture page is not on loopback") }
         guard let toolbar = ExtensionGestureProbeRules.toolbarMode(env["BAM_GESTURE_TOOLBAR"]) else { throw BrowserExtensions.failure("BAM_GESTURE_TOOLBAR must be button, real or off") }
         let clickSeconds = ExtensionGestureProbeRules.clickSeconds(env["BAM_GESTURE_CLICK_SECONDS"])
@@ -301,20 +316,27 @@ import WebKit
         observations["gesture_at_page_load"] = context.hasActiveUserGesture(in: tab)
 
         // Baseline: the content script's message without any click.
-        phases["baseline"] = try await poll(until: setupDeadline, { self.result("baseline") != nil }) ? "measured" : "no response"
-        guard phases["baseline"] == "measured" else { throw BrowserExtensions.failure("The content script or worker did not answer the baseline message") }
+        // A phase counts only with a well-formed worker reply for it and an observed arrival; failures are kept as such.
+        _ = try await poll(until: setupDeadline) { self.reply("baseline") != nil }
         try await settle(1.1)
+        guard record("baseline", kind: "baseline") else {
+            throw BrowserExtensions.failure("Baseline not measured: \(phases["baseline"] ?? "no reply")")
+        }
 
         // Real page click (root, pointer). The probe only waits. The earlier denial is reset first, so the click's
         // request is not answered by a remembered refusal instead of by its gesture state.
         resetOptionalPermission(context, before: "page_click")
         main.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
         browser.select(opened)
+        // Arm the button only now: clicks before READY are counted, never relayed, so phase order holds.
+        _ = try? await controller?.browsers[opened]?.evaluateJavaScript("document.documentElement.dataset.bamGestureArmed = '1'; true")
         print("EXTENSION_GESTURE_READY click \"Bam gesture probe\" in window \"\(main.title)\" within \(Int(clickSeconds)) s"); fflush(stdout)
         let clickDeadline = min(ProcessInfo.processInfo.systemUptime + clickSeconds, started + 47)
-        let clicked = try await poll(until: clickDeadline) { self.result("click") != nil }
-        phases["page_click"] = clicked ? "measured" : "no real click received"
-        if clicked { try await settle(1.1) }
+        let clicked = try await poll(until: clickDeadline) { self.reply("click") != nil }
+        if clicked {
+            try await settle(1.1)
+            record("page_click", kind: "click")
+        } else { phases["page_click"] = "no real click received" }
 
         // Toolbar: a fresh state first, so the click's gesture can't be credited to the toolbar.
         observations["gesture_before_toolbar_clear"] = context.hasActiveUserGesture(in: tab)
@@ -342,12 +364,14 @@ import WebKit
             }
             // Ends with its 1.1 s settle before the 55 s watchdog.
             let toolbarDeadline = min(ProcessInfo.processInfo.systemUptime + (toolbar == .real ? 8 : 5), started + 52.5)
-            let answered = try await poll(until: toolbarDeadline) { self.result("toolbar") != nil }
-            phases["toolbar"] = answered ? "measured" : "no toolbar result"
-            if answered { try await settle(1.1) }
+            let answered = try await poll(until: toolbarDeadline) { self.reply("toolbar") != nil }
+            if answered {
+                try await settle(1.1)
+                record("toolbar", kind: "toolbar")
+            } else { phases["toolbar"] = "no toolbar result" }
         }
         let requested = ["install", "baseline", "page_click"] + (toolbar == .off ? [] : ["toolbar"])
-        let complete = requested.allSatisfy { ["done", "measured"].contains(phases[$0] ?? "") }
+        let complete = requested.allSatisfy { phases[$0] == "done" || ExtensionGestureProbeRules.isMeasured(phases[$0]) }
         finish(complete: complete, reason: complete ? "every requested phase measured" : "phases: \(phases)")
     }
 
@@ -375,7 +399,9 @@ import WebKit
             if let data = try? JSONSerialization.data(withJSONObject: Self.jsonSafe(self.observations), options: [.sortedKeys]),
                let text = String(data: data, encoding: .utf8) { print("EXTENSION_GESTURE \(text)") }
             else { print("EXTENSION_GESTURE {\"measurement_complete\":false}") }
-            print("MEASUREMENT \(ok ? "complete" : "incomplete"): \(reason)\(cleanup.clean ? "" : "; cleanup incomplete")")
+            let removalNote = cleanup.report["fixture_removed"] as? Bool == false
+                ? "; explicit fixture removal unconfirmed (extensions were shut down and the owned temporary storage removed)" : ""
+            print("MEASUREMENT \(ok ? "complete" : "incomplete"): \(reason)\(cleanup.clean ? "" : "; cleanup incomplete")\(removalNote)")
             fflush(stdout); exit(ok ? 0 : 1)
         }
     }
@@ -383,6 +409,7 @@ import WebKit
     /// temporary storage and the run folder are gone. Removes nothing outside those two paths.
     private func cleanUp() async -> (clean: Bool, report: [String: Any]) {
         var report: [String: Any] = [:]
+        var clean = true
         measuredTab = nil; measuredContext = nil
         if let id = extensionID, let browser = controller {
             final class Outcome { var done = false; var error: String? }
@@ -393,21 +420,28 @@ import WebKit
             }
             let deadline = ProcessInfo.processInfo.systemUptime + 3
             while !outcome.done, ProcessInfo.processInfo.systemUptime < deadline { try? await Task.sleep(nanoseconds: 50_000_000) }
-            if !outcome.done { removal.cancel() }
-            report["fixture_removed"] = outcome.done && outcome.error == nil
+            if !outcome.done { removal.cancel(); report["fixture_removal_timed_out"] = true }
             if let error = outcome.error { report["fixture_removal_error"] = error }
+            // Reported precisely, not assumed: the host no longer lists or loads the fixture. Not part of `clean`:
+            // shutdown below unloads every context, and the owned temporary storage holding the package is removed and checked.
+            let host = browser.browserExtensions
+            report["fixture_removed"] = outcome.done && outcome.error == nil && host.context(for: id) == nil
+                && !host.items(profileID: browser.session.currentProfileID).contains { $0.id == id }
         }
         controller?.prepareToClose(persistSession: false)
         window?.contentViewController = nil; window?.orderOut(nil); window?.close()
         controller = nil; window = nil
         let fm = FileManager.default
-        var clean = true
-        if let storage = hostStorage, storage.standardizedFileURL.path.hasPrefix(fm.temporaryDirectory.standardizedFileURL.path + "/") {
-            if fm.fileExists(atPath: storage.path) { try? fm.removeItem(at: storage) }
-            let gone = !fm.fileExists(atPath: storage.path)
-            report["host_temporary_storage_removed"] = gone; clean = clean && gone
+        if let storage = hostStorage {
+            if storage.standardizedFileURL.path.hasPrefix(fm.temporaryDirectory.standardizedFileURL.path + "/") {
+                if fm.fileExists(atPath: storage.path) { try? fm.removeItem(at: storage) }
+                let gone = !fm.fileExists(atPath: storage.path)
+                report["host_temporary_storage_removed"] = gone; clean = clean && gone
+            } else {
+                report["host_temporary_storage_removed"] = "not a temporary path; left untouched"; clean = false
+            }
         } else {
-            report["host_temporary_storage_removed"] = "not a temporary path; left untouched"; clean = false
+            report["host_temporary_storage_removed"] = "no host was created"
         }
         if let directory = runDirectory {
             if fm.fileExists(atPath: directory.path) { try? fm.removeItem(at: directory) }

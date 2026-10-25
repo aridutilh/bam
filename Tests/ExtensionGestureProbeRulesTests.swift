@@ -51,6 +51,48 @@ import Foundation
               && !R.allowsInstall(permissions: [], unsupported: [], websites: ["http://127.0.0.1/private/*"], isOptional: false),
               "broad or path-narrowed patterns are refused")
 
+        // Worker replies, as the content script publishes them and the probe parses them (JSON text).
+        func entry(_ json: String) -> [String: Any]? { (try? JSONSerialization.jsonObject(with: Data(json.utf8))) as? [String: Any] }
+        func reply(kind: String, _ response: String) -> String { #"{"kind":""# + kind + #"","sentAt":1,"response":"# + response + "}" }
+        let denied = #"{"kind":"click","sequence":2,"badge":"C2","receivedAt":10,"settledAt":12,"request":{"outcome":"resolved","granted":false}}"#
+        check(R.reply(entry(reply(kind: "click", denied)), kind: "click") == .measured(badge: "C2", outcome: "resolved not granted"),
+              "a structured denied reply is measured")
+        let rejected = #"{"kind":"click","sequence":2,"badge":"C2","receivedAt":10,"settledAt":12,"request":{"outcome":"rejected","error":"needs a user gesture"}}"#
+        let threw = #"{"kind":"toolbar","sequence":3,"badge":"T3","receivedAt":10,"settledAt":12,"request":{"outcome":"threw","error":"sync"}}"#
+        check(R.reply(entry(reply(kind: "click", rejected)), kind: "click") == .measured(badge: "C2", outcome: "rejected")
+              && R.reply(entry(reply(kind: "toolbar", threw)), kind: "toolbar") == .measured(badge: "T3", outcome: "threw"),
+              "legitimate rejected and thrown permission attempts are measured outcomes")
+        check(R.reply(entry(#"{"kind":"click","sentAt":1}"#), kind: "click") == nil && R.reply(nil, kind: "click") == nil, "no answer yet is nil")
+        if case .transportFailure = R.reply(entry(reply(kind: "click", "null")), kind: "click") {} else { check(false, "a null response is a transport failure, not measured") }
+        if case .transportFailure(let why) = R.reply(entry(#"{"kind":"click","sentAt":1,"error":"Could not establish connection"}"#), kind: "click") {
+            check(why == "Could not establish connection", "a sendMessage error is a transport failure with its text")
+        } else { check(false, "a sendMessage error is a transport failure") }
+        func malformed(_ response: String, kind: String = "click") -> Bool {
+            if case .malformed = R.reply(entry(reply(kind: kind, response)), kind: kind) { return true }
+            return false
+        }
+        check(malformed(denied, kind: "baseline"), "a reply for another phase is malformed")
+        check(malformed(denied.replacingOccurrences(of: "\"C2\"", with: "\"C3\"")), "a badge that doesn't match the sequence is malformed")
+        check(malformed(denied.replacingOccurrences(of: "\"sequence\":2", with: "\"sequence\":true")), "a boolean sequence is malformed")
+        check(malformed(denied.replacingOccurrences(of: "\"receivedAt\":10,", with: "")), "missing timing is malformed")
+        check(malformed(denied.replacingOccurrences(of: "\"granted\":false", with: "\"granted\":0")), "a non-boolean granted is malformed")
+        check(malformed(rejected.replacingOccurrences(of: "\"error\":\"needs a user gesture\"", with: "\"error\":\"\"")), "a rejection without error text is malformed")
+        check(malformed(denied.replacingOccurrences(of: "\"resolved\"", with: "\"maybe\"")), "an unknown outcome is malformed")
+        check(malformed(#"{"kind":"click","sequence":2,"badge":"C2","receivedAt":10,"settledAt":12}"#), "a reply without a request outcome is malformed")
+        if case .transportFailure = R.reply(entry(reply(kind: "click", #""text""#)), kind: "click") {} else {
+            check(false, "a non-object response is not a worker reply")
+        }
+        checks += 1
+
+        // Phase verdicts: measured only with the arrival observed; failures kept as such.
+        let measured = R.reply(entry(reply(kind: "click", denied)), kind: "click")
+        check(R.isMeasured(R.phaseVerdict(measured, observedBadges: ["B1", "C2"])), "a structured reply with its observed arrival is measured")
+        check(!R.isMeasured(R.phaseVerdict(measured, observedBadges: ["B1"])), "a reply whose arrival wasn't observed is not measured")
+        check(!R.isMeasured(R.phaseVerdict(R.reply(entry(reply(kind: "click", "null")), kind: "click"), observedBadges: ["C2"]))
+              && R.phaseVerdict(R.reply(entry(reply(kind: "click", "null")), kind: "click"), observedBadges: []).hasPrefix("transport failure"),
+              "a transport failure stays a failure in the verdict")
+        check(!R.isMeasured(R.phaseVerdict(nil, observedBadges: [])) && !R.isMeasured("done") && !R.isMeasured(nil), "no reply is not measured")
+
         print("PASS: Extension gesture probe rules — \(checks) checks")
     }
 }
