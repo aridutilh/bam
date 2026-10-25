@@ -118,12 +118,12 @@ import WebKit
         // disabled, or shutting down.
         invalidateExtensionSurfaceTopology()
         guard !isShuttingDown, extensionRefreshWork == nil else { return }
-        guard #available(macOS 15.4, *), let extensions = extensionStorage as? BrowserExtensions,
-              extensions.records.contains(where: { $0.enabled }) else { return }
+        guard #available(macOS 15.4, *), let extensions = extensionStorage as? BrowserExtensions else { return }
         let work = DispatchWorkItem { [weak self, weak extensions] in
             self?.extensionRefreshWork = nil
             guard self?.isShuttingDown == false else { return }
             extensions?.reconcile()
+            self?.refreshExtensionActions()
         }
         extensionRefreshWork = work; DispatchQueue.main.async(execute: work)
     }
@@ -192,6 +192,45 @@ import WebKit
         if peeks[session.activeID]?.isPresented == true { return peekExtensionIDs[session.activeID] }
         return session.tabs.contains(where: { $0.id == focusedTabID }) ? focusedTabID : nil
     }
+    /// The sidebar always represents the main window, even while a Little Bam
+    /// window is key. Re-resolve its tab/profile when clicked, never from a cached row.
+    var sidebarExtensionTabID: UUID? {
+        if peeks[session.activeID]?.isPresented == true { return peekExtensionIDs[session.activeID] }
+        return session.tabs.contains(where: { $0.id == focusedTabID }) ? focusedTabID : nil
+    }
+    func refreshExtensionActions() {
+        guard isViewLoaded else { return }
+        guard #available(macOS 15.4, *), let extensions = extensionStorage as? BrowserExtensions else {
+            sidebar.updateExtensions([]); return
+        }
+        let items = extensions.actionItems(profileID: session.currentProfileID, tabID: sidebarExtensionTabID)
+        sidebar.updateExtensions(items.map { SidebarExtensionItem(id: $0.id, name: $0.name, label: $0.label,
+            icon: $0.icon, badge: $0.badge, isEnabled: $0.isEnabled) })
+    }
+    func invokeSidebarExtension(_ id: UUID, anchor: NSView) {
+        guard #available(macOS 15.4, *), !suspendsChromeInteraction,
+              browserExtensions.items(profileID: session.currentProfileID).contains(where: { $0.id == id && $0.enabled }) else { return }
+        browserExtensions.performAction(extensionID: id, tabID: sidebarExtensionTabID, anchor: anchor)
+    }
+    func showSidebarExtensions(anchor: NSView) {
+        guard #available(macOS 15.4, *), !suspendsChromeInteraction else { return }
+        browserExtensions.reconcile()
+        let menu = browserExtensions.actionsMenu(profileID: session.currentProfileID, tabID: sidebarExtensionTabID, anchor: anchor)
+        menu.addItem(.separator())
+        let library = NSMenuItem(title: "Add Extensions…", action: #selector(showExtensionLibrary(_:)), keyEquivalent: "")
+        library.target = self; menu.addItem(library)
+        let manage = NSMenuItem(title: "Manage Extensions…", action: #selector(manageExtensions(_:)), keyEquivalent: "")
+        manage.target = self; menu.addItem(manage)
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: anchor.bounds.maxY), in: anchor)
+    }
+    @objc func showExtensionLibrary(_ sender: Any?) {
+        guard #available(macOS 15.4, *) else { manageExtensions(sender); return }
+        let profile = commandProfileID
+        let configuration = WKWebViewConfiguration(); configuration.websiteDataStore = profileStores.store(for: profile)
+        browserExtensions.configure(configuration, profileID: profile)
+        browserExtensions.showLibrary(profileID: profile, relativeTo: NSApp.keyWindow ?? view.window)
+    }
+
     @objc func manageExtensions(_ sender: Any?) {
         guard #available(macOS 15.4, *) else {
             let alert = NSAlert(); alert.messageText = "Extensions need macOS 15.4 or later"; alert.addButton(withTitle: "OK"); alert.runModal(); return
@@ -205,6 +244,7 @@ import WebKit
         menu.removeAllItems()
         let profile = commandProfileID
         let heading = NSMenuItem(title: "Profile: \(session.profileName(profile))", action: nil, keyEquivalent: ""); heading.isEnabled = false; menu.addItem(heading)
+        let library = NSMenuItem(title: "Add Extensions…", action: #selector(showExtensionLibrary(_:)), keyEquivalent: ""); library.target = self; menu.addItem(library)
         let manage = NSMenuItem(title: "Manage Extensions…", action: #selector(manageExtensions(_:)), keyEquivalent: ""); manage.target = self; menu.addItem(manage)
         guard #available(macOS 15.4, *) else { return }
         menu.addItem(.separator())

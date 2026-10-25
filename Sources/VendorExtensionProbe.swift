@@ -102,7 +102,12 @@ import WebKit
         main.isReleasedWhenClosed = false
         main.title = "Bam vendor observation \(UUID().uuidString.prefix(8))"
         main.contentViewController = browser
-        window = main; main.orderFront(nil)
+        // AppKit may adopt the controller's initially empty root size. Match the
+        // app launch path so this probe exercises real, visible browser chrome.
+        main.setContentSize(NSSize(width: 920, height: 680))
+        browser.view.frame = NSRect(x: 0, y: 0, width: 920, height: 680)
+        window = main; main.makeKeyAndOrderFront(nil)
+        browser.layoutBrowser(); browser.view.layoutSubtreeIfNeeded()
 
         let host = browser.browserExtensions
         host.onReloadNeeded = nil
@@ -157,6 +162,10 @@ import WebKit
         }
         let started = ProcessInfo.processInfo.systemUptime
         var actionInvoked = false, fallbackOpened = false, lastSample = -1
+        var invokedAction: WKWebExtension.Action?
+        observations["action_invoked"] = false
+        observations["action_popup_presented"] = false
+        func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
         let budget = Self.observationSeconds
         while !finished && ProcessInfo.processInfo.systemUptime - started < budget {
             let elapsed = ProcessInfo.processInfo.systemUptime - started
@@ -165,10 +174,33 @@ import WebKit
                 observations["site_tab_opened"] = siteTabID != nil
             }
             if !actionInvoked && elapsed >= 2 {
-                actionInvoked = true
-                observations["action_invoked"] = true
-                host.performAction(extensionID: id, tabID: nil, anchor: browser.sidebar)
+                let target = siteTabID ?? home.id
+                browser.select(target); browser.refresh()
+                host.reconcile(); browser.refreshExtensionActions()
+                browser.layoutBrowser(); browser.view.layoutSubtreeIfNeeded()
+                let buttons = descendants(browser.sidebar).compactMap { $0 as? NSButton }.filter {
+                    $0.identifier?.rawValue.hasPrefix("extension-action-") == true && !$0.isHiddenOrHasHiddenAncestor &&
+                        $0.bounds.width > 0 && $0.bounds.height > 0
+                }
+                let button = buttons.first { $0.identifier?.rawValue == "extension-action-\(id.uuidString)" }
+                let item = host.actionItems(profileID: profile, tabID: target).first { $0.id == id }
+                let runtime = context.webExtensionController?.delegate as? BrowserExtensionRuntime
+                let active = runtime?.currentSurface(target)?.isActive == true
+                observations["sidebar_action_count"] = buttons.count
+                observations["sidebar_action_visible"] = button != nil
+                observations["sidebar_action_has_icon"] = item?.icon != nil
+                observations["sidebar_action_enabled"] = button?.isEnabled == true
+                observations["action_tab_active"] = active
+                if let button, button.isEnabled, active, let tab = runtime?.tabs[target] {
+                    invokedAction = context.action(for: tab)
+                    actionInvoked = true
+                    observations["action_invoked"] = true
+                    // Exercise the actual vendor-logo button and its controller
+                    // callback, including current-tab/profile resolution.
+                    button.performClick(nil)
+                }
             }
+            if invokedAction?.popupPopover?.isShown == true { observations["action_popup_presented"] = true }
             if !fallbackOpened && elapsed >= 5 {
                 fallbackOpened = true
                 let options = manifest["options_ui"] as? [String: Any]
@@ -191,8 +223,9 @@ import WebKit
                 }
                 observations["manifest_errors"] = context.webExtension.errors.prefix(20).map(errorDescription)
                 observations["context_error_count"] = context.errors.count
-                if let action = context.action(for: nil) {
+                if let action = invokedAction ?? context.action(for: nil) {
                     observations["action_has_popup"] = action.presentsPopup
+                    observations["action_popup_is_shown"] = action.popupPopover?.isShown == true
                     if let popup = action.popupWebView { samplePage(popup, key: "action_popup", context: context) }
                 }
                 for (tabID, web) in browser.browsers where web.url.map({ BrowserExtensions.isExtensionURL($0, ownedBy: context) }) == true {

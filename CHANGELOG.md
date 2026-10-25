@@ -5,6 +5,13 @@
 - Hide the window's close, minimize and zoom buttons together with the sidebar, as Arc does: they fade out over the last 80 points of the collapse, so a collapsed sidebar leaves the page alone in the window, and they return as the sidebar slides back in.
 - Retire the “A little space” start page. An empty tab is now a plain dark surface titled “New tab” (the address bar still reads “Search or enter URL”), and the History ▸ Home command (⇧⌘H) that navigated to it is gone. Existing tabs on that page keep working and simply show the blank surface.
 
+## 0.19.0 draft — build 37
+
+- Search Chrome Web Store, Firefox Add-ons and Safari Mac App Store sources inside one Bam extension library, with product icons, store marks, publisher, recommended source and permissions/details on demand. Exact known-product store identities combine Dashlane, 1Password, vidIQ and Bitwarden; unrelated products are kept separate. Individual source failures are shown without discarding successful results. Safari apps are App Store handoffs, and known-blocked Chrome Dashlane/1Password builds direct users to Firefox.
+- Show enabled extensions below the main address bar with their own icons, labels and badges. Clicking opens the real WebKit action popup; the Extensions menu retains overflow and access with the sidebar collapsed. Actions follow the current tab/profile and close on context changes.
+- Repeated Add/Enable reuses the installed build in that profile. Search is debounced and cancelable; closing the library cancels uncommitted installation work. Canceling an update review preserves the old running package, permissions and identity.
+- Prepare a separate persistent Bam Extension Preview with its own bundle ID, preferences, session and WebKit stores, so development installs and sign-ins survive relaunch. Existing fresh previews remain disposable; no profile or vault data are migrated.
+
 ## 0.18.0 draft — build 36
 
 - Add an extension library (Manage Extensions ▸ Add from Store or Link): paste a Chrome Web Store, Firefox Add-ons or direct package link, or search Firefox Add-ons by name. Each product is listed once with every build Bam knows about, its publisher, source, permissions and the reason Bam recommends a build; a different build can be picked. Packages are verified before unpacking (Mozilla’s published SHA-256 for Firefox Add-ons files; every RSA publisher proof and the derived ID for Chrome Web Store CRX3 files; direct links are marked unverified), then go through the existing permission review. The manager shows source, publisher and verification per extension.

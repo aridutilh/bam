@@ -14,7 +14,7 @@ import UniformTypeIdentifiers
     private let removeButton = NSButton(title: "Remove", target: nil, action: nil)
     private let revoke = NSButton(title: "Revoke Permissions", target: nil, action: nil)
     private let importButton = NSButton(title: "Import Folder…", target: nil, action: nil)
-    private let libraryButton = NSButton(title: "Add from Store or Link…", target: nil, action: nil)
+    private let libraryButton = NSButton(title: "Find Extensions…", target: nil, action: nil)
     private let updateButton = NSButton(title: "Check for Update", target: nil, action: nil)
     private var busy = false
     /// A one-shot message shown by the next refresh instead of the generic guidance.
@@ -28,7 +28,7 @@ import UniformTypeIdentifiers
         let root = NSView(frame: NSRect(x: 0, y: 0, width: 620, height: 500))
         window.contentView = root
         heading.font = .systemFont(ofSize: 20, weight: .semibold); heading.frame = NSRect(x: 22, y: 453, width: 576, height: 28); root.addSubview(heading)
-        let detail = NSTextField(wrappingLabelWithString: "Extensions live in this login profile. Add them from a Chrome Web Store or Firefox Add-ons link, a Firefox Add-ons search, a direct package link or a local folder. Native messaging to desktop apps is unavailable; some Chrome-only APIs are provided by Bam’s compatibility layer with limits.")
+        let detail = NSTextField(wrappingLabelWithString: "Manage extensions in this login profile. Find new extensions in the Bam library, or import an unpacked folder. Enabled extensions appear below the browser’s address bar; click an icon to open its popup.")
         detail.font = .systemFont(ofSize: 12); detail.textColor = .secondaryLabelColor; detail.frame = NSRect(x: 22, y: 384, width: 576, height: 62); root.addSubview(detail)
         let scroll = NSScrollView(frame: NSRect(x: 22, y: 148, width: 576, height: 228)); scroll.hasVerticalScroller = true; scroll.borderType = .bezelBorder
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("extensions")); column.width = 570; table.addTableColumn(column)
@@ -121,7 +121,8 @@ import UniformTypeIdentifiers
                 alert.addButton(withTitle: "Cancel"); alert.addButton(withTitle: "Update")
                 guard alert.runModal() == .alertSecondButtonReturn else { return }
                 try await host.installer.update(selected, to: candidate)
-            } catch { host.setError(error, for: selected.id) }
+            } catch let error as BrowserExtensionUpdateCancelled { self?.pendingStatus = error.localizedDescription }
+            catch { host.setError(error, for: selected.id) }
         }
     }
     @objc private func importPackage() {

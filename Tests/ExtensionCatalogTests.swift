@@ -34,10 +34,11 @@ import Security
         }
         var routes: [String: Route] = [:]
         var requests: [URLRequest] = []
+        private let lock = NSLock()
 
         func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
-            requests.append(request)
-            guard let url = request.url, let route = routes[url.absoluteString] else {
+            let route = lock.withLock { requests.append(request); return routes[request.url?.absoluteString ?? ""] }
+            guard let url = request.url, let route else {
                 throw CheckFailure(description: "unexpected request: \(request.url?.absoluteString ?? "nil")")
             }
             let response = HTTPURLResponse(url: route.finalURL ?? url, statusCode: route.status, httpVersion: "HTTP/1.1", headerFields: route.headers)!
@@ -266,11 +267,105 @@ import Security
                   ChromeWebStoreSource.version(fromPackageURL: URL(string: "https://x/\(cwsID.uppercased())_1_0.zip")!, id: cwsID) == nil,
                   "Filename version parsing accepts only <ID>_<digits...>.crx")
 
+        // Unified public search: original miniature records, not vendor code.
+        let searchManifest = String(data: try manifest(["manifest_version": 3, "name": "__MSG_title__", "version": "2.4",
+            "background": ["service_worker": "worker.js"], "permissions": ["storage", "https://example.com/*"],
+            "description": "A bracket ] and a quoted \"word\"", "homepage_url": "https://vendor.example"]), encoding: .utf8)!
+        let chromeSearchRow: [Any] = [cwsID, "https://images.example/icon.png", "Fixture Tool", 4.8, 100, "https://images.example/banner.png",
+                                     "A useful fixture", "Vendor", NSNull(), searchManifest]
+        func chromePage(_ rows: [Any]) throws -> Data {
+            let json = String(data: try JSONSerialization.data(withJSONObject: [rows]), encoding: .utf8)!
+            return Data("<script>AF_initDataCallback({key: 'ds:1', data:\(json), sideChannel: {}});</script>".utf8)
+        }
+        let searchHTML = try chromePage([chromeSearchRow, chromeSearchRow, ["invalid", "x", "Fake"]])
+        let chromeSearchCandidates = try ChromeWebStoreSource.searchCandidates(fromHTML: searchHTML)
+        try check(chromeSearchCandidates.count == 1 && chromeSearchCandidates[0].name == "Fixture Tool" &&
+                  chromeSearchCandidates[0].version == "2.4" && chromeSearchCandidates[0].backgroundKind == .serviceWorker &&
+                  chromeSearchCandidates[0].iconURL?.host == "images.example", "Chrome search reads display metadata and manifest while removing duplicate IDs")
+        try check(chromeSearchCandidates[0].permissions == ["storage"] && chromeSearchCandidates[0].hostPermissions == ["https://example.com/*"] &&
+                  chromeSearchCandidates[0].downloadURL == nil && chromeSearchCandidates[0].canInstallInBam,
+                  "Chrome search preserves host permissions and defers package resolution until install")
+        try check(try ChromeWebStoreSource.searchCandidates(fromHTML: chromePage([])).isEmpty, "A valid empty Chrome result array is an empty search")
+        try await rejects("chrome-search-schema", containing: "changed") {
+            try ChromeWebStoreSource.searchCandidates(fromHTML: Data("<html>changed layout</html>".utf8))
+        }
+        try await rejects("chrome-search-generic-page", containing: "changed") {
+            try ChromeWebStoreSource.searchCandidates(fromHTML: Data("<script>AF_initDataCallback({key: 'ds:0', data:[[1,0]], sideChannel: {}});</script>".utf8))
+        }
+        try await rejects("chrome-search-size", containing: "oversized") {
+            try ChromeWebStoreSource.searchCandidates(fromHTML: Data(repeating: 32, count: 4 * 1_048_576 + 1))
+        }
+        try check(ChromeWebStoreSource.searchURL(for: "password & privacy").absoluteString.contains("password%20&%20privacy"), "Chrome search text is encoded as one URL path")
+
+        var safariRecord: [String: Any] = ["trackId": 1569813296, "trackName": "1Password for Safari", "sellerName": "AgileBits Inc.",
+            "version": "8.0", "trackViewUrl": "https://apps.apple.com/us/app/1password-for-safari/id1569813296", "description": "A Safari extension.",
+            "artworkUrl100": "https://images.example/safari.png"]
+        let safariCandidate = SafariAppStoreSource.candidate(from: safariRecord)!
+        try check(safariCandidate.source == .safariAppStore && !safariCandidate.canInstallInBam && safariCandidate.downloadURL == nil &&
+                  safariCandidate.compatibilityNote?.contains("cannot be added directly to Bam") == true, "App Store results explicitly require a Safari handoff instead of claiming Bam installation")
+        safariRecord["trackId"] = 1234; safariRecord["trackName"] = "Photo Tool"; safariRecord["description"] = "Edits photos"
+        try check(SafariAppStoreSource.candidate(from: safariRecord) == nil, "Ordinary Mac apps are excluded from extension search")
+        safariRecord["trackName"] = "Fixture for Safari"; safariRecord["description"] = "A Safari extension"
+        safariRecord["trackViewUrl"] = "https://evil.example/app/1234"
+        try check(SafariAppStoreSource.candidate(from: safariRecord) == nil, "App Store discovery does not hand off to an unrelated host")
+        try check(ExtensionStoreLink(parsing: "https://apps.apple.com/us/app/1password-for-safari/id1569813296?mt=12") == .safariAppStore(id: "1569813296") &&
+                  ExtensionStoreLink(parsing: "https://apps.apple.com.evil.example/app/id123") == nil, "Safari store links validate host and numeric identity")
+
+        let query = "fixture"
+        let firefoxSearchURL = "https://addons.mozilla.org/api/v5/addons/search/?q=fixture&app=firefox&type=extension&sort=users&page_size=10&lang=en-US"
+        client.routes[firefoxSearchURL] = .init(status: 200, body: try JSONSerialization.data(withJSONObject: ["results": [addonJSON]]))
+        client.routes[ChromeWebStoreSource.searchURL(for: query).absoluteString] = .init(status: 503)
+        client.routes[SafariAppStoreSource.searchURL(for: query).absoluteString] = .init(status: 503)
+        let combined = await ExtensionCatalogSearch(client: client, bamVersion: "0.19.0").search(query)
+        try check(combined.candidates.count == 1 && combined.candidates[0].source == .amo && combined.notices.count == 2,
+                  "Unavailable stores do not hide results returned by the remaining store")
+        client.routes[ChromeWebStoreSource.searchURL(for: query).absoluteString] = .init(status: 200, body: searchHTML)
+        let partial = await ExtensionCatalogSearch(client: client, bamVersion: "0.19.0").search(query)
+        try check(Set(partial.candidates.map(\.source)) == [.amo, .chromeWebStore] && partial.notices.count == 1,
+                  "Unified search exposes Chrome and Firefox together while reporting a Safari outage")
+        var crosswalkChrome = chromeSearchCandidates[0]; crosswalkChrome.upstreamID = "aeblfdkhhhdcdjpifhhbdiojplfjncoa"
+        var crosswalkFirefox = candidate; crosswalkFirefox.upstreamID = "{d634138d-c276-4fc8-924b-40a0ea21d284}"; crosswalkFirefox.publisher = "Different store publisher spelling"
+        try check(ExtensionCatalogIdentity(crosswalkFirefox).matches(ExtensionCatalogIdentity(crosswalkChrome)) &&
+                  ExtensionCatalogIdentity(crosswalkChrome).matches(ExtensionCatalogIdentity(safariCandidate)),
+                  "Inspected product IDs unify 1Password across all three stores despite publisher spelling")
+        var impostor = crosswalkChrome; impostor.upstreamID = String(repeating: "b", count: 32)
+        impostor.publisher = crosswalkFirefox.publisher; impostor.homepage = crosswalkFirefox.homepage; impostor.name = crosswalkFirefox.name
+        try check(!ExtensionCatalogIdentity(impostor).matches(ExtensionCatalogIdentity(crosswalkFirefox)) &&
+                  !ExtensionCatalogIdentity(crosswalkFirefox).matches(ExtensionCatalogIdentity(impostor)),
+                  "An unknown ID cannot impersonate a known product by copying its name, publisher and homepage")
+        let dedup = ExtensionCatalogSearch.combine([partial, partial])
+        try check(dedup.candidates.count == partial.candidates.count && dedup.notices.count == 1, "Repeated source results are deduplicated before product grouping")
+
+        // Store order must not bury a direct match behind another store's broad recommendations.
+        func named(_ title: String, source: ExtensionCatalogSourceKind, id: String) -> ExtensionBuildCandidate {
+            ExtensionBuildCandidate(source: source, upstreamID: id, name: title, publisher: "Fixture", version: "1")
+        }
+        let relevance = [named("Keeper Password Manager", source: .amo, id: "unrelated"),
+                         named("Bitwarden Password Manager", source: .chromeWebStore, id: "chrome"),
+                         named("Tools for Bitwarden", source: .amo, id: "phrase"),
+                         named("Bitwarden", source: .safariAppStore, id: "exact"),
+                         named("Bítwarden — Password Manager", source: .amo, id: "firefox")]
+        try check(ExtensionCatalogSearch.ranked(relevance, for: "  BITWARDEN ").compactMap(\.upstreamID) == ["exact", "chrome", "firefox", "phrase", "unrelated"],
+                  "Unified results rank normalized exact, prefix and phrase matches across stores while preserving equal-rank API order")
+        try check(ExtensionCatalogSearch.ranked(relevance, for: "!!!") == relevance, "An empty normalized query preserves source order")
+        var urlPublisherRow = chromeSearchRow; urlPublisherRow[7] = "https://www.bitwarden.com/download/"
+        let urlPublisher = try ChromeWebStoreSource.searchCandidates(fromHTML: chromePage([urlPublisherRow]))[0]
+        try check(urlPublisher.publisher == "bitwarden.com" && ChromeWebStoreSource.publisherLabel("  Vendor Inc.  ") == "Vendor Inc.",
+                  "URL-shaped Chrome publishers display a clean host without altering named publishers")
+        let bitwardenFirefox = named("Bitwarden Password Manager", source: .amo, id: "{446900e4-71c2-419f-a6a7-df9c091e268b}")
+        let bitwardenChrome = named("Bitwarden Password Manager", source: .chromeWebStore, id: "nngceckbapebfimnlniiiahkandclblb")
+        let bitwardenSafari = named("Bitwarden", source: .safariAppStore, id: "1352778147")
+        try check(ExtensionCatalogIdentity(bitwardenFirefox).matches(ExtensionCatalogIdentity(bitwardenChrome)) &&
+                  ExtensionCatalogIdentity(bitwardenChrome).matches(ExtensionCatalogIdentity(bitwardenSafari)),
+                  "Vendor-linked Bitwarden IDs form one product across Firefox, Chrome and Safari")
+
         // Identity matching
         let amoIdentity = ExtensionCatalogIdentity(candidate)
-        let cwsIdentity = ExtensionCatalogIdentity(chromeWebStoreID: cwsID, publisher: "VIDIQ", homepageHost: "vidiq.com")
+        var identityFixture = candidate; identityFixture.upstreamID = "fixture@vendor.example"
+        let genericAMOIdentity = ExtensionCatalogIdentity(identityFixture)
+        let cwsIdentity = ExtensionCatalogIdentity(chromeWebStoreID: cwsID, publisher: "VIDIQ", homepageHost: "vidiq.com", productName: candidate.name)
         try check(amoIdentity.amoGUID == candidate.upstreamID && amoIdentity.homepageHost == "vidiq.com", "Identity normalizes the homepage host")
-        try check(amoIdentity.matches(cwsIdentity) && cwsIdentity.matches(amoIdentity), "Publisher plus homepage host matches across stores, case-insensitively")
+        try check(genericAMOIdentity.matches(cwsIdentity) && cwsIdentity.matches(genericAMOIdentity), "Unmapped product name, publisher and homepage match across stores, case-insensitively")
         try check(ExtensionCatalogIdentity(amoGUID: "A@b", publisher: "x").matches(ExtensionCatalogIdentity(amoGUID: "a@B", publisher: "y")), "A shared AMO GUID matches regardless of publisher")
         try check(ExtensionCatalogIdentity(chromeWebStoreID: cwsID, publisher: "x").matches(ExtensionCatalogIdentity(chromeWebStoreID: cwsID, publisher: "")), "A shared CWS ID matches")
         try check(!ExtensionCatalogIdentity(amoGUID: "a", publisher: "x", homepageHost: "x.com").matches(ExtensionCatalogIdentity(chromeWebStoreID: cwsID, publisher: "x", homepageHost: "y.com")),

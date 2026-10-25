@@ -328,6 +328,9 @@ import QuartzCore
         sidebar.onManageSpaces = { [weak self] in self?.manageSpaces(nil) }
         sidebar.onMoveTab = { [weak self] id, space in self?.moveTab(id, toSpace: space) }
         sidebar.onPictureInPicture = { [weak self] in self?.togglePictureInPicture(nil) }
+        sidebar.onExtensionAction = { [weak self] id, anchor in self?.invokeSidebarExtension(id, anchor: anchor) }
+        sidebar.onExtensionsMenu = { [weak self] anchor in self?.showSidebarExtensions(anchor: anchor) }
+        sidebar.onExtensionLibrary = { [weak self] in self?.showExtensionLibrary(nil) }
         sidebar.onSpaceScroll = { [weak self] event, source in
             guard let self else { return false }
             return self.handleSpaceScroll(event, source: source) == nil
@@ -683,6 +686,7 @@ import QuartzCore
     func refresh() {
         guard isViewLoaded else { return }
         scheduleExtensionRefresh()
+        refreshExtensionActions()
         root.space = session.spaceDefinition(session.space)?.colorIndex ?? 0
         sidebar.configureSpaces(session.spaces)
         let tabs = sidebarItems(in: session)

@@ -21,6 +21,7 @@ struct ExtensionCatalogRecord: Codable, Equatable {
         switch source {
         case .amo: return "Firefox Add-ons"
         case .chromeWebStore: return "Chrome Web Store"
+        case .safariAppStore: return "Safari App Store"
         case .directPackage: return "Direct download"
         case .local: return "Local folder"
         }
@@ -46,17 +47,24 @@ enum ExtensionBuildResolver {
     static let observations: [String: String] = [
         "jetpack-extension@dashlane.com": "2026-10-24: background runs, welcome popup and options page render, field icons inject into a login form.",
         "fdjamakpfbbddfjaooikfcpapjohcfmg": "2026-10-24 (earlier draft): MV3 service worker build reported runtime.connect without listeners; welcome flow not reached.",
-        "{d634138d-c276-4fc8-924b-40a0ea21d284}": "2026-10-24: HTML background page can receive Bam's compatibility layer; startup previously stopped at chrome.notifications.",
+        "{d634138d-c276-4fc8-924b-40a0ea21d284}": "2026-10-24: background initializes and renders the welcome/permissions page with the compatibility layer. Desktop-app integration is unavailable.",
         "aeblfdkhhhdcdjpifhhbdiojplfjncoa": "2026-10-24: MV3 service worker build (Chrome 140+) cannot receive Bam's compatibility layer; requires notifications and nativeMessaging.",
-        "firefox@vid.io": "2026-10-24: loads with no context errors; popup renders; YouTube content scripts inject but the overlay has not been observed yet.",
+        "firefox@vid.io": "2026-10-24: popup renders and the YouTube overlay injects with the content-script messaging adapter.",
         "pachckjkecffpdphbpmfolblodfkgbhl": "2026-10-24: MV3 service worker build; same content scripts as the Firefox build; untested in Bam.",
     ]
+
+    static func installationBlocker(_ candidate: ExtensionBuildCandidate) -> String? {
+        guard candidate.source == .chromeWebStore,
+              let id = candidate.upstreamID,
+              ["fdjamakpfbbddfjaooikfcpapjohcfmg", "aeblfdkhhhdcdjpifhhbdiojplfjncoa"].contains(id) else { return nil }
+        return "This Chrome build cannot finish setup in Bam yet. Choose the recommended Firefox build to use this extension."
+    }
 
     static func recommend(_ candidates: [ExtensionBuildCandidate]) -> (ExtensionBuildCandidate, [String])? {
         guard !candidates.isEmpty else { return nil }
         var reasons: [String] = []
         func score(_ c: ExtensionBuildCandidate) -> Int {
-            var s = 0
+            var s = c.canInstallInBam ? 0 : -1000
             let needsLayer = !Set(c.permissions).intersection(ExtensionCompatibility.bridgedPermissions).isEmpty
             // A service worker background cannot be reached by Bam's compatibility layer.
             if c.backgroundKind == .serviceWorker { s -= needsLayer ? 40 : 5 }
@@ -105,6 +113,8 @@ enum ExtensionBuildResolver {
     let amo: AMOSource
     let chromeWebStore: ChromeWebStoreSource
     let fetcher: ExtensionPackageFetch
+    let catalog: ExtensionCatalogSearch
+    private(set) var searchNotices: [String] = []
     private(set) var isBusy = false
     var statusChanged: ((String) -> Void)?
 
@@ -113,24 +123,30 @@ enum ExtensionBuildResolver {
         amo = AMOSource(client: client, bamVersion: bamVersion)
         chromeWebStore = ChromeWebStoreSource(client: client)
         fetcher = ExtensionPackageFetch(client: client, bamVersion: bamVersion)
+        catalog = ExtensionCatalogSearch(client: client, bamVersion: bamVersion)
     }
 
-    /// A store link gives one product; anything else searches Firefox Add-ons, the
-    /// only public catalog. Chrome Web Store products are reached by link.
+    /// All discovery stays in Bam. Each source may fail independently, and the
+    /// panel receives an explicit coverage notice rather than a false empty result.
     func resolve(_ text: String) async throws -> [ExtensionProductListing] {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return [] }
-        if let link = ExtensionStoreLink(parsing: trimmed) {
-            let candidate: ExtensionBuildCandidate
-            switch link {
-            case .amo(let slug): candidate = try await amo.addon(slug)
-            case .chromeWebStore(let id): candidate = try await chromeWebStore.candidate(for: id)
-            case .directPackage(let url): candidate = .direct(url)
-            }
-            return [listing(for: [candidate])]
+        let result: ExtensionCatalogSearchResult
+        if trimmed.isEmpty { result = await catalog.featured() }
+        else if let link = ExtensionStoreLink(parsing: trimmed) { result = try await catalog.resolve(link) }
+        else { result = await catalog.search(trimmed) }
+        try Task.checkCancellation()
+        searchNotices = result.notices
+        return Self.group(result.candidates)
+    }
+
+    /// Source identity is scoped to the current login profile. Choosing another
+    /// store is a separate install, never an implicit vault/settings migration.
+    func installedRecord(for candidate: ExtensionBuildCandidate, profileID: UUID) -> BrowserExtensionRecord? {
+        host?.items(profileID: profileID).first { record in
+            guard let origin = record.catalog, origin.source == candidate.source else { return false }
+            if let id = candidate.upstreamID, !id.isEmpty { return origin.upstreamID == id }
+            return candidate.downloadURL != nil && origin.downloadURL == candidate.downloadURL
         }
-        let results = try await amo.search(trimmed)
-        return Self.group(results)
     }
 
     /// Groups candidates into product listings by catalog identity.
@@ -168,14 +184,35 @@ enum ExtensionBuildResolver {
     /// The returned ID is a record, not proof the extension works; the host's
     /// permission review can still cancel activation.
     func install(_ candidate: ExtensionBuildCandidate, profileID: UUID) async throws -> UUID {
+        try Task.checkCancellation()
         guard let host else { throw BrowserExtensions.failure("The browser is closing.") }
         guard !isBusy else { throw BrowserExtensions.failure("Another extension installation is in progress.") }
+        guard candidate.canInstallInBam else { throw BrowserExtensions.failure("Safari apps are distributed through the App Store. Choose a Chrome or Firefox build to install in Bam.") }
+        if let blocker = ExtensionBuildResolver.installationBlocker(candidate) { throw BrowserExtensions.failure(blocker) }
         isBusy = true; defer { isBusy = false }
+        if let record = installedRecord(for: candidate, profileID: profileID) {
+            if !record.enabled { try await host.setEnabled(true, id: record.id) }
+            return record.id
+        }
         let staging = FileManager.default.temporaryDirectory.appendingPathComponent("bam-extension-install-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: staging) }
         statusChanged?("Downloading \(candidate.name)…")
-        let fetched = try await fetcher.fetch(candidate, into: staging)
+        var downloadable = candidate
+        // Search metadata does not carry Google's short-lived CRX URL. Resolve
+        // at install time, keeping source metadata visible in the saved record.
+        if candidate.source == .chromeWebStore, let id = candidate.upstreamID {
+            downloadable = try await chromeWebStore.candidate(for: id)
+            downloadable.name = candidate.name
+            downloadable.publisher = candidate.publisher
+            downloadable.iconURL = candidate.iconURL
+            downloadable.summary = candidate.summary
+            downloadable.compatibilityNote = candidate.compatibilityNote
+            downloadable.homepage = candidate.homepage
+            downloadable.listingURL = candidate.listingURL ?? downloadable.listingURL
+        }
+        let fetched = try await fetcher.fetch(downloadable, into: staging)
+        try Task.checkCancellation()
         statusChanged?("Verified \(fetched.candidate.name) \(fetched.candidate.version). Reviewing permissions…")
         let record = Self.catalogRecord(for: fetched, installedAt: Date())
         return try await host.importPackage(at: fetched.packageURL, profileID: profileID, catalog: record)
@@ -203,7 +240,7 @@ enum ExtensionBuildResolver {
         switch catalog.source {
         case .amo: candidate = try await amo.addon(id)
         case .chromeWebStore: candidate = try await chromeWebStore.candidate(for: id)
-        case .directPackage, .local: return nil
+        case .directPackage, .local, .safariAppStore: return nil
         }
         let current = record.version.isEmpty ? catalog.version : record.version
         host?.noteUpdateCheck(id: record.id, available: ExtensionBuildResolver.compareVersions(candidate.version, current) == .orderedDescending ? candidate.version : nil)

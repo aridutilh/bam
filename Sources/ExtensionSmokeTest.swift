@@ -89,11 +89,28 @@ import WebKit
         try check(little.webView == nil && deferredWeb.navigationDelegate == nil, "Readiness fixture retained its transient host before extension imports")
         var reviewed: [BrowserExtensionPermissionReview] = []
         host.permissionPrompt = { reviewed.append($0); return false }
-        let extensionA = try await host.importPackage(at: fixtureURL, profileID: profileA)
+        let catalogCandidate = ExtensionBuildCandidate(source: .amo, upstreamID: "bam-fixture@example.test", name: "Bam fixture", publisher: "Bam tests", version: "1", downloadURL: URL(string: "https://fixture.invalid/original.xpi"))
+        let catalogRecord = ExtensionCatalogRecord(source: .amo, upstreamID: catalogCandidate.upstreamID, publisher: "Bam tests", version: "1", sha256: "fixture", provenance: "Original local test fixture", installedAt: Date())
+        let extensionA = try await host.importPackage(at: fixtureURL, profileID: profileA, catalog: catalogRecord)
         try check(host.context(for: extensionA) == nil && host.items(profileID: profileA).first?.enabled == false, "Cancelled permission review still enabled the extension")
         try check(reviewed.count == 1 && reviewed[0].websites.contains("http://127.0.0.1/*") && reviewed[0].unsupported.contains("nativeMessaging"), "Permission review omitted required websites or unsupported native messaging")
+        let installer = host.installer
+        let canceledRetry = try await installer.install(catalogCandidate, profileID: profileA)
+        try check(canceledRetry == extensionA && host.items(profileID: profileA).count == 1 && host.context(for: extensionA) == nil, "Retrying canceled activation duplicated or enabled the extension")
+        try check(installer.installedRecord(for: catalogCandidate, profileID: profileB) == nil, "Installed state leaked into another profile")
+        var otherSource = catalogCandidate; otherSource.source = .chromeWebStore
+        try check(installer.installedRecord(for: otherSource, profileID: profileA) == nil, "Installed state silently treated a different store as the same build")
         host.permissionPrompt = { reviewed.append($0); return true }
-        try await host.setEnabled(true, id: extensionA)
+        let enabledRetry = try await installer.install(catalogCandidate, profileID: profileA)
+        try check(enabledRetry == extensionA && host.items(profileID: profileA).count == 1, "Enabling an existing install duplicated its record")
+        let reviewCount = reviewed.count
+        let repeatedInstall = try await installer.install(catalogCandidate, profileID: profileA)
+        try check(repeatedInstall == extensionA && host.items(profileID: profileA).count == 1 && reviewed.count == reviewCount, "Adding an enabled extension repeated its download or permission review")
+        let blockedChrome = ExtensionBuildCandidate(source: .chromeWebStore, upstreamID: "fdjamakpfbbddfjaooikfcpapjohcfmg", name: "Dashlane", publisher: "Dashlane", version: "", downloadURL: nil)
+        var rejectedKnownBlocker = false
+        do { _ = try await installer.install(blockedChrome, profileID: profileA) }
+        catch { rejectedKnownBlocker = error.localizedDescription.contains("Firefox") }
+        try check(rejectedKnownBlocker && host.items(profileID: profileA).count == 1, "A known-broken Chrome build was downloaded or silently installed")
         guard let contextA = host.context(for: extensionA) else { throw Failure(description: "Extension A did not load: \(host.lastError ?? "unknown")") }
         try check(contextA.hasPermission(.storage) && !contextA.hasPermission(.nativeMessaging), "Unsupported permission was granted or approved storage was omitted")
         webA.load(URLRequest(url: urlA)); webB.load(URLRequest(url: urlB))

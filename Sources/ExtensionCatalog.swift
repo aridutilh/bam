@@ -4,7 +4,7 @@ import Foundation
 
 /// Where a build comes from. One catalog listing may be backed by several of these.
 enum ExtensionCatalogSourceKind: String, Sendable, Codable {
-    case amo, chromeWebStore, directPackage, local
+    case amo, chromeWebStore, safariAppStore, directPackage, local
 }
 
 /// A user-pasted store or package URL resolved to a source reference.
@@ -12,6 +12,7 @@ enum ExtensionStoreLink: Equatable, Sendable {
     case amo(slug: String)
     case chromeWebStore(id: String)
     case directPackage(URL)
+    case safariAppStore(id: String)
 
     static let packageExtensions: Set<String> = ["xpi", "crx", "zip"]
 
@@ -48,6 +49,10 @@ enum ExtensionStoreLink: Equatable, Sendable {
             self = .chromeWebStore(id: id.lowercased())
             return
         }
+        if host == "apps.apple.com", let id = segments.last(where: { $0.hasPrefix("id") && $0.dropFirst(2).allSatisfy(\.isNumber) && $0.count > 2 }) {
+            self = .safariAppStore(id: String(id.dropFirst(2)))
+            return
+        }
         if Self.packageExtensions.contains(url.pathExtension.lowercased()) {
             self = .directPackage(url)
             return
@@ -59,6 +64,7 @@ enum ExtensionStoreLink: Equatable, Sendable {
         switch self {
         case .amo: return .amo
         case .chromeWebStore: return .chromeWebStore
+        case .safariAppStore: return .safariAppStore
         case .directPackage: return .directPackage
         }
     }
@@ -90,6 +96,13 @@ struct ExtensionBuildCandidate: Sendable, Equatable, Codable {
     var releasedAt: Date?
     var homepage: URL?
     var listingURL: URL?
+    var iconURL: URL? = nil
+    var summary: String? = nil
+    var compatibilityNote: String? = nil
+
+    /// Chrome candidates are resolved to current package URLs only when installed.
+    /// App Store apps need their containing app and are not installable by this pipeline.
+    var canInstallInBam: Bool { source != .safariAppStore && (downloadURL != nil || source == .chromeWebStore) }
 
     /// A candidate for a pasted package URL; name and version are filled from the manifest after download.
     static func direct(_ url: URL) -> ExtensionBuildCandidate {
@@ -129,8 +142,8 @@ struct ExtensionBuildCandidate: Sendable, Equatable, Codable {
 /// Canonical product identity across builds from different stores.
 ///
 /// This is a heuristic: two builds are treated as the same product when they share an upstream ID
-/// of the same kind, or when their publisher names match case-insensitively and their homepage
-/// hosts match after normalization (`www.` stripped). Publisher names and homepages are
+/// of the same kind, belong to the inspected cross-store map, or their names, publisher names
+/// and homepage hosts all match after normalization. Publisher names and homepages are
 /// self-declared by the extension author, so the UI must always show the source and publisher of
 /// each build for the user to inspect before trusting a match.
 struct ExtensionCatalogIdentity: Sendable, Equatable {
@@ -138,19 +151,25 @@ struct ExtensionCatalogIdentity: Sendable, Equatable {
     var chromeWebStoreID: String?
     var publisher: String
     var homepageHost: String?
+    var knownProductID: String? = nil
+    var safariAppStoreID: String? = nil
+    var productName: String? = nil
 
-    init(amoGUID: String? = nil, chromeWebStoreID: String? = nil, publisher: String, homepageHost: String? = nil) {
+    init(amoGUID: String? = nil, chromeWebStoreID: String? = nil, publisher: String, homepageHost: String? = nil, productName: String? = nil) {
         self.amoGUID = amoGUID
         self.chromeWebStoreID = chromeWebStoreID
         self.publisher = publisher
         self.homepageHost = Self.normalizedHost(homepageHost)
+        self.productName = productName.map(Self.normalizedPublisher)
     }
 
     init(_ candidate: ExtensionBuildCandidate) {
         self.init(amoGUID: candidate.source == .amo ? candidate.upstreamID : nil,
                   chromeWebStoreID: candidate.source == .chromeWebStore ? candidate.upstreamID : nil,
                   publisher: candidate.publisher,
-                  homepageHost: candidate.homepage?.host)
+                  homepageHost: candidate.homepage?.host, productName: candidate.name)
+        knownProductID = ExtensionKnownProducts.product(for: candidate)?.id
+        safariAppStoreID = candidate.source == .safariAppStore ? candidate.upstreamID : nil
     }
 
     static func normalizedHost(_ host: String?) -> String? {
@@ -165,11 +184,18 @@ struct ExtensionCatalogIdentity: Sendable, Equatable {
     }
 
     func matches(_ other: ExtensionCatalogIdentity) -> Bool {
-        if let mine = amoGUID, let theirs = other.amoGUID, mine.lowercased() == theirs.lowercased() { return true }
-        if let mine = chromeWebStoreID, let theirs = other.chromeWebStoreID, mine.lowercased() == theirs.lowercased() { return true }
+        // A self-declared clone must never join an inspected product merely by
+        // copying its name, publisher and homepage into an unrelated store ID.
+        if knownProductID != nil || other.knownProductID != nil {
+            return knownProductID != nil && knownProductID == other.knownProductID
+        }
+        if let mine = safariAppStoreID, let theirs = other.safariAppStoreID { return mine == theirs }
+        if let mine = amoGUID, let theirs = other.amoGUID { return mine.lowercased() == theirs.lowercased() }
+        if let mine = chromeWebStoreID, let theirs = other.chromeWebStoreID { return mine.lowercased() == theirs.lowercased() }
         let publisher = Self.normalizedPublisher(self.publisher)
         guard !publisher.isEmpty, publisher == Self.normalizedPublisher(other.publisher),
-              let host = homepageHost, host == other.homepageHost else { return false }
+              let host = homepageHost, host == other.homepageHost,
+              let name = productName, !name.isEmpty, name == other.productName else { return false }
         return true
     }
 
@@ -180,6 +206,9 @@ struct ExtensionCatalogIdentity: Sendable, Equatable {
         if copy.chromeWebStoreID == nil { copy.chromeWebStoreID = other.chromeWebStoreID }
         if copy.homepageHost == nil { copy.homepageHost = other.homepageHost }
         if copy.publisher.isEmpty { copy.publisher = other.publisher }
+        if copy.knownProductID == nil { copy.knownProductID = other.knownProductID }
+        if copy.safariAppStoreID == nil { copy.safariAppStoreID = other.safariAppStoreID }
+        if copy.productName == nil { copy.productName = other.productName }
         return copy
     }
 }
@@ -401,7 +430,9 @@ struct AMOSource: Sendable {
             permissions: permissions, hostPermissions: hostPermissions,
             releasedAt: date(file["created"]) ?? date(object["last_updated"]),
             homepage: homepage,
-            listingURL: URL(string: "https://addons.mozilla.org/firefox/addon/\(slug)/"))
+            listingURL: URL(string: "https://addons.mozilla.org/firefox/addon/\(slug)/"),
+            iconURL: (object["icon_url"] as? String).flatMap(URL.init(string:)),
+            summary: localized(object["summary"]))
     }
 }
 
@@ -437,6 +468,108 @@ struct ChromeWebStoreSource: Sendable {
 
     static func listingURL(for id: String) -> URL {
         URL(string: "https://chromewebstore.google.com/detail/\(id)")!
+    }
+
+    static func publisherLabel(_ value: String) -> String {
+        let value = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let url = URL(string: value), ["https", "http"].contains(url.scheme?.lowercased() ?? ""),
+           let host = ExtensionCatalogIdentity.normalizedHost(url.host) { return host }
+        return value
+    }
+
+    static func compatibilityNote(for id: String) -> String? {
+        switch id.lowercased() {
+        case "fdjamakpfbbddfjaooikfcpapjohcfmg":
+            return "Dashlane's Chrome build has not passed Bam's setup checks. Choose the recommended Firefox build to use Dashlane in Bam."
+        case "aeblfdkhhhdcdjpifhhbdiojplfjncoa":
+            return "1Password's Chrome build has not passed Bam's setup checks. Choose the recommended Firefox build to use 1Password in Bam."
+        default: return nil
+        }
+    }
+
+    static func searchURL(for query: String) -> URL {
+        var components = URLComponents(string: "https://chromewebstore.google.com")!
+        components.path = "/search/" + query
+        components.queryItems = [URLQueryItem(name: "hl", value: "en")]
+        return components.url!
+    }
+
+    /// The public search page currently contains JSON search records. This is
+    /// deliberately a best-effort adapter, not an undocumented RPC or a claim
+    /// that Google provides a supported catalog API. No returned script runs.
+    func search(_ query: String) async throws -> [ExtensionBuildCandidate] {
+        var request = URLRequest(url: Self.searchURL(for: query))
+        request.timeoutInterval = 15
+        request.setValue("text/html", forHTTPHeaderField: "Accept")
+        let (data, response) = try await client.data(for: request)
+        guard (200..<300).contains(response.statusCode) else {
+            throw ExtensionPackageError("Chrome Web Store search answered HTTP \(response.statusCode).")
+        }
+        return try Self.searchCandidates(fromHTML: data)
+    }
+
+    static func searchCandidates(fromHTML data: Data) throws -> [ExtensionBuildCandidate] {
+        guard data.count <= 4 * 1_048_576, let html = String(data: data, encoding: .utf8) else {
+            throw ExtensionPackageError("Chrome Web Store search returned an unreadable or oversized page.")
+        }
+        var results: [ExtensionBuildCandidate] = [], seen = Set<String>(), parsed = false
+        func visit(_ value: Any, depth: Int) {
+            guard depth < 40, results.count < 20, let array = value as? [Any] else { return }
+            if array.count > 7, let id = array[0] as? String, ExtensionStoreLink.isChromeWebStoreID(id),
+               let name = array[2] as? String, !name.isEmpty, let summary = array[6] as? String,
+               let rawPublisher = array[7] as? String, seen.insert(id).inserted {
+                let publisher = publisherLabel(rawPublisher)
+                // The manifest position has changed before. Recognize its keys,
+                // not a numeric offset, and treat its metadata as store claims.
+                let manifest = array.compactMap { $0 as? String }.first { $0.hasPrefix("{") && $0.contains("\"manifest_version\"") }
+                    .flatMap { $0.data(using: .utf8) }.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+                let background = manifest?["background"] as? [String: Any]
+                let kind: ExtensionBackgroundKind? = background?["service_worker"] is String ? .serviceWorker :
+                    background?["page"] is String ? .page : background?["scripts"] is [String] ? .scripts : manifest != nil ? ExtensionBackgroundKind.none : nil
+                let permissions = AMOSource.splitHostPatterns(manifest?["permissions"] as? [String] ?? [], hostPermissions: manifest?["host_permissions"] as? [String] ?? [])
+                var homepage = (manifest?["homepage_url"] as? String).flatMap(URL.init(string:))
+                if homepage == nil, publisher.contains("."), !publisher.contains(" ") { homepage = URL(string: "https://" + publisher) }
+                let icon = (array[1] as? String).flatMap(URL.init(string:)).flatMap { $0.scheme == "https" ? $0 : nil }
+                results.append(ExtensionBuildCandidate(source: .chromeWebStore, upstreamID: id, name: name, publisher: publisher,
+                    version: manifest?["version"] as? String ?? "", manifestVersion: manifest?["manifest_version"] as? Int,
+                    backgroundKind: kind, permissions: permissions.permissions, hostPermissions: permissions.hostPermissions,
+                    homepage: homepage, listingURL: listingURL(for: id), iconURL: icon, summary: summary,
+                    compatibilityNote: compatibilityNote(for: id)))
+                return
+            }
+            for child in array { visit(child, depth: depth + 1) }
+        }
+        // Read only JSON arrays in Google's data callbacks. Balanced JSON scanning
+        // handles nested arrays and brackets inside escaped manifest strings.
+        for fragment in html.components(separatedBy: "AF_initDataCallback(").dropFirst() {
+            let script = String(fragment.prefix(while: { $0 != "<" }))
+            // ds:0 is generic page configuration (also present on consent/error
+            // pages). Only the observed search dataset can establish an empty
+            // search; a changed schema must yield a source availability notice.
+            guard let marker = script.range(of: "data:"),
+                  script[..<marker.lowerBound].range(of: #"key\s*:\s*['"]ds:1['"]"#, options: .regularExpression) != nil,
+                  let start = script[marker.upperBound...].firstIndex(of: "[") else { continue }
+            var nesting = 0, inString = false, escaped = false
+            for index in script[start...].indices {
+                let character = script[index]
+                if inString {
+                    if escaped { escaped = false }
+                    else if character == "\\" { escaped = true }
+                    else if character == "\"" { inString = false }
+                } else if character == "\"" { inString = true }
+                else if character == "[" { nesting += 1 }
+                else if character == "]" {
+                    nesting -= 1
+                    if nesting == 0 {
+                        let json = Data(script[start...index].utf8)
+                        if let object = try? JSONSerialization.jsonObject(with: json) { parsed = true; visit(object, depth: 0) }
+                        break
+                    }
+                }
+            }
+        }
+        guard parsed else { throw ExtensionPackageError("Chrome Web Store search changed or is unavailable. Paste a listing link to install a specific extension.") }
+        return results
     }
 
     func resolverURL(for id: String) -> URL {
@@ -488,12 +621,203 @@ struct ChromeWebStoreSource: Sendable {
         return ExtensionBuildCandidate(
             source: .chromeWebStore, upstreamID: id, name: id, publisher: "",
             version: Self.version(fromPackageURL: finalURL, id: id) ?? "",
-            downloadURL: finalURL, listingURL: Self.listingURL(for: id))
+            downloadURL: finalURL, listingURL: Self.listingURL(for: id), compatibilityNote: Self.compatibilityNote(for: id))
     }
 
     /// Name, version and permissions from a downloaded package's manifest, with `__MSG_key__` names resolved.
     static func metadata(from unpackedManifestURL: URL) throws -> ExtensionManifestSummary {
         try ExtensionManifestSummary.read(manifestURL: unpackedManifestURL)
+    }
+}
+
+// MARK: - Unified discovery
+
+/// Store IDs, rather than names supplied by publishers, link the products whose
+/// variants Bam has inspected. Keep this list small and evidence-backed.
+enum ExtensionKnownProducts {
+    struct Product: Sendable {
+        var id: String
+        var name: String
+        var amoSlug: String
+        var amoGUID: String
+        var chromeID: String
+        var safariID: String?
+    }
+    static let all: [Product] = [
+        Product(id: "dashlane", name: "Dashlane", amoSlug: "dashlane", amoGUID: "jetpack-extension@dashlane.com", chromeID: "fdjamakpfbbddfjaooikfcpapjohcfmg", safariID: "517914548"),
+        Product(id: "1password", name: "1Password", amoSlug: "1password-x-password-manager", amoGUID: "{d634138d-c276-4fc8-924b-40a0ea21d284}", chromeID: "aeblfdkhhhdcdjpifhhbdiojplfjncoa", safariID: "1569813296"),
+        Product(id: "vidiq", name: "vidIQ", amoSlug: "vidiq-vision-youtube", amoGUID: "firefox@vid.io", chromeID: "pachckjkecffpdphbpmfolblodfkgbhl", safariID: nil),
+        // Verified 2026-10-24 against bitwarden.com/download's three store links
+        // and addons.mozilla.org/api/v5/addons/addon/bitwarden-password-manager/.
+        Product(id: "bitwarden", name: "Bitwarden", amoSlug: "bitwarden-password-manager", amoGUID: "{446900e4-71c2-419f-a6a7-df9c091e268b}", chromeID: "nngceckbapebfimnlniiiahkandclblb", safariID: "1352778147")
+    ]
+    static func product(for candidate: ExtensionBuildCandidate) -> Product? {
+        guard let id = candidate.upstreamID?.lowercased() else { return nil }
+        return all.first { product in
+            switch candidate.source {
+            case .amo: return product.amoGUID.lowercased() == id
+            case .chromeWebStore: return product.chromeID == id
+            case .safariAppStore: return product.safariID == id
+            case .directPackage, .local: return false
+            }
+        }
+    }
+    static func product(for link: ExtensionStoreLink) -> Product? {
+        all.first { product in
+            switch link {
+            case .amo(let slug): return product.amoSlug == slug.lowercased() || product.amoGUID.lowercased() == slug.lowercased()
+            case .chromeWebStore(let id): return product.chromeID == id.lowercased()
+            case .safariAppStore(let id): return product.safariID == id
+            case .directPackage: return false
+            }
+        }
+    }
+}
+
+/// The Mac App Store distributes containing apps, not downloadable extension
+/// archives. These records remain explicit App Store handoffs until Bam has a
+/// tested signed-app-extension import route.
+struct SafariAppStoreSource: Sendable {
+    let client: any ExtensionHTTPClient
+    static let availabilityNote = "This is an App Store app for Safari. It cannot be added directly to Bam yet. Choose another source to use this extension in Bam."
+
+    static func searchURL(for query: String) -> URL {
+        var components = URLComponents(string: "https://itunes.apple.com/search")!
+        components.queryItems = [URLQueryItem(name: "term", value: query), URLQueryItem(name: "entity", value: "macSoftware"),
+                                 URLQueryItem(name: "limit", value: "20"), URLQueryItem(name: "country", value: "us")]
+        return components.url!
+    }
+    static func lookupURL(for id: String) -> URL {
+        var components = URLComponents(string: "https://itunes.apple.com/lookup")!
+        components.queryItems = [URLQueryItem(name: "id", value: id), URLQueryItem(name: "entity", value: "macSoftware"), URLQueryItem(name: "country", value: "us")]
+        return components.url!
+    }
+    private func records(at url: URL) async throws -> [[String: Any]] {
+        var request = URLRequest(url: url); request.timeoutInterval = 15
+        let (data, response) = try await client.data(for: request)
+        guard (200..<300).contains(response.statusCode), data.count <= 4 * 1_048_576,
+              let object = try JSONSerialization.jsonObject(with: data) as? [String: Any], let rows = object["results"] as? [[String: Any]] else {
+            throw ExtensionPackageError("Safari's App Store catalog is temporarily unavailable.")
+        }
+        return rows
+    }
+    static func candidate(from object: [String: Any], requireSafariMention: Bool = true) -> ExtensionBuildCandidate? {
+        guard let number = object["trackId"] as? NSNumber, let name = object["trackName"] as? String,
+              let rawURL = object["trackViewUrl"] as? String, let url = URL(string: rawURL),
+              url.scheme == "https", url.host == "apps.apple.com" else { return nil }
+        let id = number.stringValue, description = object["description"] as? String ?? ""
+        let text = (name + " " + description).lowercased()
+        let known = ExtensionKnownProducts.all.contains { $0.safariID == id }
+        guard !requireSafariMention || known || (text.contains("safari") && text.contains("extension")) else { return nil }
+        return ExtensionBuildCandidate(source: .safariAppStore, upstreamID: id, name: name,
+            publisher: object["sellerName"] as? String ?? object["artistName"] as? String ?? "",
+            version: object["version"] as? String ?? "", homepage: (object["sellerUrl"] as? String).flatMap(URL.init(string:)),
+            listingURL: url, iconURL: (object["artworkUrl100"] as? String).flatMap(URL.init(string:)),
+            summary: description.components(separatedBy: "\n").first, compatibilityNote: availabilityNote)
+    }
+    func search(_ query: String) async throws -> [ExtensionBuildCandidate] {
+        try await records(at: Self.searchURL(for: query)).compactMap { Self.candidate(from: $0) }
+    }
+    func candidate(for id: String) async throws -> ExtensionBuildCandidate {
+        guard !id.isEmpty, id.count <= 20, id.allSatisfy(\.isNumber),
+              let candidate = try await records(at: Self.lookupURL(for: id)).compactMap({ Self.candidate(from: $0) }).first(where: { $0.upstreamID == id }) else {
+            throw ExtensionPackageError("That App Store listing does not identify a Safari extension available in the Mac catalog.")
+        }
+        return candidate
+    }
+}
+
+struct ExtensionCatalogSearchResult: Sendable {
+    var candidates: [ExtensionBuildCandidate]
+    var notices: [String]
+}
+
+struct ExtensionCatalogSearch: Sendable {
+    let amo: AMOSource
+    let chrome: ChromeWebStoreSource
+    let safari: SafariAppStoreSource
+    init(client: any ExtensionHTTPClient = URLSessionExtensionHTTPClient(), bamVersion: String) {
+        amo = AMOSource(client: client, bamVersion: bamVersion)
+        chrome = ChromeWebStoreSource(client: client)
+        safari = SafariAppStoreSource(client: client)
+    }
+    private func attempt(_ label: String, operation: @Sendable () async throws -> [ExtensionBuildCandidate]) async -> ExtensionCatalogSearchResult {
+        do { return ExtensionCatalogSearchResult(candidates: try await operation(), notices: []) }
+        catch { return ExtensionCatalogSearchResult(candidates: [], notices: ["\(label) is unavailable. Results from other stores are still shown."]) }
+    }
+    static func combine(_ results: [ExtensionCatalogSearchResult]) -> ExtensionCatalogSearchResult {
+        var seen = Set<String>()
+        let candidates = results.flatMap(\.candidates).filter {
+            seen.insert($0.source.rawValue + ":" + ($0.upstreamID ?? $0.listingURL?.absoluteString ?? $0.name)).inserted
+        }
+        return ExtensionCatalogSearchResult(candidates: candidates, notices: Array(Set(results.flatMap(\.notices))).sorted())
+    }
+
+    static func normalizedSearchText(_ value: String) -> String {
+        value.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: Locale(identifier: "en_US_POSIX"))
+            .split(whereSeparator: { !$0.isLetter && !$0.isNumber }).joined(separator: " ")
+    }
+
+    /// Source APIs use different ranking systems. Put direct name matches ahead
+    /// of broad recommendations across the combined results, while keeping the
+    /// original store/API order for equal relevance.
+    static func ranked(_ candidates: [ExtensionBuildCandidate], for query: String) -> [ExtensionBuildCandidate] {
+        let query = normalizedSearchText(query)
+        guard !query.isEmpty else { return candidates }
+        let queryWords = query.split(separator: " ")
+        func rank(_ candidate: ExtensionBuildCandidate) -> Int {
+            let title = normalizedSearchText(candidate.name)
+            if title == query { return 0 }
+            if title.hasPrefix(query + " ") { return 1 }
+            if (" " + title + " ").contains(" " + query + " ") { return 2 }
+            let titleWords = Set(title.split(separator: " "))
+            if queryWords.allSatisfy({ titleWords.contains($0) }) { return 3 }
+            if title.contains(query) { return 4 }
+            return 5
+        }
+        return candidates.enumerated().map { (index: $0.offset, candidate: $0.element, rank: rank($0.element)) }
+            .sorted { $0.rank != $1.rank ? $0.rank < $1.rank : $0.index < $1.index }.map(\.candidate)
+    }
+    func search(_ query: String) async -> ExtensionCatalogSearchResult {
+        let query = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return await featured() }
+        async let firefox = attempt("Firefox Add-ons") { try await amo.search(query) }
+        async let google = attempt("Chrome Web Store search") { try await chrome.search(query) }
+        async let apple = attempt("Safari App Store search") { try await safari.search(query) }
+        var combined = await Self.combine([firefox, google, apple])
+        combined.candidates = Self.ranked(combined.candidates, for: query)
+        return combined
+    }
+    func featured() async -> ExtensionCatalogSearchResult {
+        // Query live stores once for each familiar product. No invented versions,
+        // stale download links, or unsupported installation claims are cached.
+        await withTaskGroup(of: (Int, ExtensionCatalogSearchResult).self) { group in
+            for (index, product) in ExtensionKnownProducts.all.enumerated() {
+                group.addTask { (index, await search(product.name)) }
+            }
+            var values: [(Int, ExtensionCatalogSearchResult)] = []
+            for await value in group { values.append(value) }
+            let merged = Self.combine(values.sorted { $0.0 < $1.0 }.map(\.1))
+            return ExtensionCatalogSearchResult(candidates: merged.candidates.filter { ExtensionKnownProducts.product(for: $0) != nil }, notices: merged.notices)
+        }
+    }
+    func resolve(_ link: ExtensionStoreLink) async throws -> ExtensionCatalogSearchResult {
+        let exact: ExtensionBuildCandidate
+        switch link {
+        case .amo(let slug): exact = try await amo.addon(slug)
+        case .chromeWebStore(let id):
+            var candidate = try await chrome.candidate(for: id)
+            if let product = ExtensionKnownProducts.product(for: link) { candidate.name = product.name }
+            exact = candidate
+        case .safariAppStore(let id): exact = try await safari.candidate(for: id)
+        case .directPackage(let url): exact = .direct(url)
+        }
+        guard let product = ExtensionKnownProducts.product(for: link) else { return ExtensionCatalogSearchResult(candidates: [exact], notices: []) }
+        let alternatives = await search(product.name)
+        // Prefer search metadata to the Chrome resolver's placeholders, but retain
+        // the exact requested build even if the store search is unavailable.
+        return Self.combine([ExtensionCatalogSearchResult(candidates: alternatives.candidates.filter { ExtensionKnownProducts.product(for: $0)?.id == product.id }, notices: alternatives.notices),
+                             ExtensionCatalogSearchResult(candidates: [exact], notices: [])])
     }
 }
 
