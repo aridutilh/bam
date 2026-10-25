@@ -224,22 +224,25 @@ import WebKit
         default: return requestsAllSites ? "On all sites" : "On all requested sites"
         }
     }
-    /// Scoped to requested access, and honest about separately allowed (optional) sites in every mode.
-    static func help(for mode: ExtensionSiteAccess.Mode, drafting: Bool, oneTimeAccess: Bool, optionalCount: Int = 0) -> String {
+    /// Describes only what THIS setting grants of the requested sites (a separately approved optional grant may
+    /// overlap them, so nothing here denies access), and says separately approved access remains. Patterns aren't
+    /// counted as sites (one optional `*://*/*` is every site).
+    static let separatelyApproved = "Separately approved access remains (listed below)."
+    static func help(for mode: ExtensionSiteAccess.Mode, drafting: Bool, oneTimeAccess: Bool, hasOptionalGrants: Bool = false) -> String {
         let requested: String
-        if drafting { requested = "Add a site below to allow only specific requested sites. Until then, access stays as it is." }
+        if drafting { requested = "Add a site below to allow only specific requested sites. Until then, this setting stays as it is." }
         else {
             switch mode {
             case .withheld:
                 requested = oneTimeAccess
-                    ? "None of the sites it requests is allowed in advance. Click the extension’s button on a page to let it run on that tab."
-                    : "None of the sites it requests is allowed. This extension doesn’t support one-time access on click; choose “On specific sites” to allow some."
-            case .specific(let sites): requested = "Of the sites it requests, it’s allowed only on \(sites.count == 1 ? "the 1 site" : "the \(sites.count) sites") you chose."
-            case .allRequested: requested = "Allowed on every site it requests that you approved."
+                    ? "This setting allows none of the sites it requests in advance. Click the extension’s button on a page to let it run on that tab."
+                    : "This setting allows none of the sites it requests. This extension doesn’t support one-time access on click; choose “On specific sites” to allow some."
+            case .specific(let sites):
+                requested = "This setting allows it only on \(sites.count == 1 ? "the site" : "the \(sites.count) site entries") you chose from those it requests."
+            case .allRequested: requested = "This setting allows every site it requests that you approved."
             }
         }
-        guard optionalCount > 0 else { return requested }
-        return requested + " Separately, it still has access to \(optionalCount == 1 ? "1 site" : "\(optionalCount) sites") it asked for and you allowed (listed below)."
+        return hasOptionalGrants ? requested + " " + separatelyApproved : requested
     }
     static func describe(_ refusal: ExtensionSiteAccess.Refusal) -> String {
         switch refusal {
@@ -267,11 +270,10 @@ import WebKit
         modeMenu.selectItem(withTag: choice.rawValue)
         modeMenu.setAccessibilityLabel("Site access for \(snapshot.extensionName)")
         let requestsNothing = decl.requested.isEmpty
-        let optionalCount = state.optionalGrants.filter { ExtensionSiteAccess.isCovered($0, by: decl.optional + decl.requested) }.count
+        let hasOptional = state.optionalGrants.contains { ExtensionSiteAccess.isCovered($0, by: decl.optional + decl.requested) }
         modeHelp.stringValue = requestsNothing
-            ? "This extension doesn’t require access to any website." + (optionalCount > 0
-                ? " Separately, it has access to \(optionalCount == 1 ? "1 site" : "\(optionalCount) sites") it asked for and you allowed (listed below)." : "")
-            : Self.help(for: state.mode, drafting: draftingSites, oneTimeAccess: snapshot.oneTimeAccess, optionalCount: optionalCount)
+            ? "This extension doesn’t require access to any website." + (hasOptional ? " " + Self.separatelyApproved : "")
+            : Self.help(for: state.mode, drafting: draftingSites, oneTimeAccess: snapshot.oneTimeAccess, hasOptionalGrants: hasOptional)
         requestedLabel.stringValue = requestsNothing ? "" : "Requested: " + decl.requested.sorted().joined(separator: ", ")
         requestedLabel.isHidden = requestsNothing
         let sites: [String] = { if case .specific(let sites) = state.mode, !draftingSites { return sites }; return [] }()

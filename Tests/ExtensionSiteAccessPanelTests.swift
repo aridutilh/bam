@@ -78,10 +78,10 @@ import WebKit
         require(titles(withheldPanel) == ["No requested sites", "On specific sites", "On all requested sites"] && withheldPanel.modeMenu.selectedTag() == 0,
                 "Without activeTab, withheld is 'No requested sites', never 'On click': \(titles(withheldPanel))")
         let withheldHelp = withheldPanel.modeHelp.stringValue
-        require(withheldHelp.contains("doesn’t support one-time access") && withheldHelp.contains("None of the sites it requests"),
+        require(withheldHelp.contains("doesn’t support one-time access") && withheldHelp.contains("This setting allows none of the sites it requests"),
                 "The help says why, about requested sites: \(withheldHelp)")
         // Review (3): with an optional grant kept, nothing claims the extension has no site access at all.
-        require(withheldHelp.contains("Separately, it still has access to 1 site it asked for") && !withheldHelp.contains("No site is allowed")
+        require(withheldHelp.contains("Separately approved access remains") && !withheldHelp.contains("No site is allowed") && !withheldHelp.contains("is allowed.")
                 && !titles(withheldPanel).contains("On no sites"), "Withheld wording is scoped to requested sites and states the kept optional access")
         let (clickPanel, _) = make(.withheld(), oneTime: true)
         require(titles(clickPanel).first == "On click" && clickPanel.modeHelp.stringValue.contains("Click the extension’s button")
@@ -101,7 +101,7 @@ import WebKit
         // MARK: Choosing specific sites opens a draft; nothing changes until a site is added.
         pick(withheldPanel, tag: 1)
         require(withheldEngine.actions.isEmpty && withheldPanel.draftingSites && visible(withheldPanel.siteField)
-                && withheldPanel.snapshot.state.mode == .withheld && withheldPanel.modeHelp.stringValue.contains("access stays as it is"),
+                && withheldPanel.snapshot.state.mode == .withheld && withheldPanel.modeHelp.stringValue.contains("this setting stays as it is"),
                 "Picking 'On specific sites' sends nothing and changes nothing until the first site")
         withheldPanel.siteField.stringValue = "elsewhere.example"
         withheldPanel.addButton.performClick(nil)
@@ -187,11 +187,22 @@ import WebKit
                 "An extension requiring no sites has nothing to choose")
         let (optionalOnly, _) = make(.allRequested(approving: .init(requested: []), optionalGrants: [optionalGrant]),
                                      declarations: .init(requested: [], optional: [optionalGrant]))
-        require(optionalOnly.modeHelp.stringValue.contains("doesn’t require access") && optionalOnly.modeHelp.stringValue.contains("Separately, it has access to 1 site")
+        require(optionalOnly.modeHelp.stringValue.contains("doesn’t require access") && optionalOnly.modeHelp.stringValue.contains("Separately approved access remains")
                 && visible(optionalOnly.optionalLabel), "No required sites but an optional grant: worded about required access, optional access stated")
         let (specificOptional, _) = make(.specific(["https://api.docs.example/*"], optionalGrants: [optionalGrant]))
-        require(specificOptional.modeHelp.stringValue.contains("Of the sites it requests, it’s allowed only on the 1 site you chose")
-                && specificOptional.modeHelp.stringValue.contains("Separately, it still has access to 1 site"), "Specific sites with an optional grant say both")
+        require(specificOptional.modeHelp.stringValue.contains("This setting allows it only on the site you chose from those it requests")
+                && specificOptional.modeHelp.stringValue.contains("Separately approved access remains"), "Specific sites with an optional grant say both")
+        // A wildcard optional grant is every site, not "1 site"; and it may overlap requested sites, so the
+        // withheld text speaks only for this setting.
+        let wildcard = Access.Declarations(requested: docs.requested, optional: ["*://*/*"])
+        let (wildcardPanel, _) = make(.withheld(optionalGrants: ["*://*/*"]), declarations: wildcard)
+        let wildcardHelp = wildcardPanel.modeHelp.stringValue
+        require(wildcardHelp.contains("Separately approved access remains") && !wildcardHelp.contains("1 site") && !wildcardHelp.contains("sites it asked")
+                && wildcardHelp.hasPrefix("This setting allows none of the sites it requests") && wildcardPanel.optionalLabel.stringValue.contains("*://*/*"),
+                "A wildcard optional grant isn't counted as one site, and withheld wording is scoped to this setting: \(wildcardHelp)")
+        let (clickOptional, _) = make(.withheld(optionalGrants: ["*://*/*"]), declarations: wildcard, oneTime: true)
+        require(clickOptional.modeHelp.stringValue.hasPrefix("This setting allows none of the sites it requests in advance")
+                && clickOptional.modeHelp.stringValue.hasSuffix(Panel.separatelyApproved), "On click with a separately approved grant says both")
         var withMessage = withheldEngine.snapshot; withMessage.message = "Access was changed in another window."
         withheldPanel.reset(to: withMessage)
         require(withheldPanel.feedbackLabel.stringValue == "Access was changed in another window." && visible(withheldPanel.feedbackLabel), "Engine messages show")
