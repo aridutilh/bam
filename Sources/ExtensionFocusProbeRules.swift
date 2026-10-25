@@ -1,0 +1,150 @@
+import Foundation
+
+/// Pure rules for the iframe keyboard-focus A/B fixture (`--extension-test --extension-focus-probe`): the case, record shape
+/// and the evidence contract. Foundation only, so every rule is testable without an app.
+/// A negative focus result is a valid measurement; missing required evidence is not.
+enum ExtensionFocusProbeRules {
+    /// Child frame origin relative to the loopback parent page.
+    enum Frame: String, CaseIterable { case so, xo, ex }
+    /// How focus is attempted after the parent's trusted trigger key; `c` is the pointer-click positive control.
+    enum Pattern: String, CaseIterable { case p1, p2, p3, p4, c }
+    struct Case: Equatable {
+        let frame: Frame, pattern: Pattern
+        var label: String { "\(frame.rawValue):\(pattern.rawValue)" }
+        /// The child focuses its own input from a 17 ms timer after "show" (P1 HUD pattern; also P3, P4 after parent focus).
+        var childTimerFocus: Bool { [.p1, .p3, .p4].contains(pattern) }
+    }
+    /// `BAM_FOCUS_CASE`, e.g. `xo:p1` or `ex:c`. Required; anything else is refused.
+    static func parseCase(_ raw: String?) -> Case? {
+        let parts = (raw ?? "").trimmingCharacters(in: .whitespaces).lowercased().split(separator: ":").map(String.init)
+        guard parts.count == 2, let frame = Frame(rawValue: parts[0]), let pattern = Pattern(rawValue: parts[1]) else { return nil }
+        return Case(frame: frame, pattern: pattern)
+    }
+
+    static let triggerKey = "f"
+    static let typedKeys = ["b", "a", "m"]
+    static let typedText = "bam"
+    /// Readings after "show" in both frames (child and parent), scheduled in-page; actual offsets reported.
+    static let sampleDelaysMilliseconds = [0, 20, 100, 1000]
+    static let recordKinds: Set<String> = ["ready", "armed", "keydown", "trigger", "show_sent", "show", "focus_attempt", "focus_error",
+                                           "sample", "window_focus", "window_blur", "input_focus", "input_blur", "input", "pointer",
+                                           "hello_sent", "child_load"]
+    static let maximumRecords = 300
+
+    /// One page record as the parent publishes it, with the native phase in which the host first saw it.
+    struct Record {
+        let frame: String      // "parent" or "child"
+        let kind: String
+        let seq: Int
+        let hostPhase: String?
+        let fields: [String: Any]
+        var key: String { "\(frame):\(seq)" }
+        func bool(_ name: String) -> Bool? { Self.strictBool(fields[name]) }
+        func int(_ name: String) -> Int? { Self.strictInt(fields[name]) }
+        func string(_ name: String) -> String? { fields[name] as? String }
+        static func strictBool(_ value: Any?) -> Bool? {
+            guard let value, CFGetTypeID(value as CFTypeRef) == CFBooleanGetTypeID() else { return nil }
+            return value as? Bool
+        }
+        static func strictInt(_ value: Any?) -> Int? {
+            guard let value, value is NSNumber, CFGetTypeID(value as CFTypeRef) != CFBooleanGetTypeID() else { return nil }
+            return (value as? NSNumber)?.intValue
+        }
+    }
+
+    /// Parses the parent's published state for this exact run and case. Records with a wrong run, case or role, an unknown
+    /// kind, or a malformed shape are dropped and counted; nothing in them is trusted for anything but evidence.
+    static func records(fromState state: [String: Any], run: String, case expected: Case, firstSeen: [String: String]) -> (records: [Record], malformed: Int) {
+        guard state["run"] as? String == run, state["case"] as? String == expected.label,
+              let raw = state["records"] as? [Any] else { return ([], 0) }
+        var records: [Record] = [], malformed = 0
+        for item in raw.prefix(maximumRecords) {
+            guard let object = item as? [String: Any], let frame = object["frame"] as? String, ["parent", "child"].contains(frame),
+                  let kind = object["kind"] as? String, recordKinds.contains(kind), let seq = Record.strictInt(object["seq"]), seq >= 1,
+                  object["run"] as? String == run, object["case"] as? String == expected.label,
+                  object["role"] as? String == (frame == "parent" ? "parent" : expected.frame.rawValue),
+                  Record.strictInt(object["t"]) != nil else { malformed += 1; continue }
+            records.append(Record(frame: frame, kind: kind, seq: seq, hostPhase: firstSeen["\(frame):\(seq)"], fields: object))
+        }
+        return (records, malformed)
+    }
+
+    struct Evaluation {
+        var complete: Bool { problems.isEmpty }
+        var problems: [String]
+        var outcome: [String: Any]
+    }
+
+    /// The evidence contract. Required for P1–P4: the child's ready acknowledgement and the parent's armed record, before
+    /// any trigger; the trusted parent trigger key received in the native `trigger` phase; show sent and shown; every scheduled
+    /// reading in both frames; the child's own focus attempt for timer patterns; and the actual trusted typing (all three
+    /// keys) received in the native `typing` phase, wherever it lands. Where it lands, and whether focus moved, are outcomes:
+    /// a negative result is measured, not incomplete. For the pointer control (`c`): a trusted pointer on the child input in
+    /// the `pointer` phase and all three typed keys in the child input, with its value containing the text; missing typing
+    /// in the child is incomplete for the positive control.
+    static func evaluate(_ records: [Record], case probeCase: Case) -> Evaluation {
+        var problems: [String] = []
+        func first(_ frame: String, _ kind: String, phase: String? = nil, _ extra: (Record) -> Bool = { _ in true }) -> Record? {
+            records.first { $0.frame == frame && $0.kind == kind && (phase == nil || $0.hostPhase == phase) && extra($0) }
+        }
+        guard let ready = first("child", "ready") else { return Evaluation(problems: ["child ready acknowledgement missing"], outcome: [:]) }
+        guard let armed = first("parent", "armed") else { return Evaluation(problems: ["parent armed record missing"], outcome: [:]) }
+        if ready.hostPhase != "setup" || armed.hostPhase != "setup" { problems.append("handshake not completed before READY") }
+
+        var outcome: [String: Any] = ["case": probeCase.label]
+        let typing = records.filter { $0.kind == "keydown" && $0.bool("trusted") == true && $0.hostPhase == "typing" }
+        let typed = typing.compactMap { $0.string("key")?.lowercased() }.filter { Self.typedKeys.contains($0) }
+        let childTyped = typing.filter { $0.frame == "child" }, parentTyped = typing.filter { $0.frame == "parent" }
+        outcome["typed_keys_parent"] = parentTyped.compactMap { $0.string("key") }
+        outcome["typed_keys_child"] = childTyped.compactMap { $0.string("key") }
+        outcome["typed_into_child_input"] = childTyped.contains { $0.bool("targetIsInput") == true }
+        let childValue = records.filter { $0.frame == "child" && $0.kind == "input" }.last?.string("value") ?? ""
+        outcome["child_input_value"] = String(childValue.prefix(16))
+        outcome["typing_landed"] = childTyped.isEmpty && parentTyped.isEmpty ? "none"
+            : childTyped.isEmpty ? "parent" : parentTyped.isEmpty ? (outcome["typed_into_child_input"] as? Bool == true ? "child-input" : "child-other") : "split"
+        if !Self.typedKeys.allSatisfy(typed.contains) {
+            problems.append("trusted typing of \(typedText) not observed in the typing phase")
+        }
+        outcome["child_window_focus_fired"] = records.contains { $0.frame == "child" && $0.kind == "window_focus" && $0.hostPhase != "setup" }
+
+        if probeCase.pattern == .c {
+            if first("child", "pointer", phase: "pointer", { $0.bool("trusted") == true && $0.bool("onInput") == true }) == nil {
+                problems.append("trusted pointer on the child input not observed in the pointer phase")
+            }
+            if childTyped.isEmpty || !childValue.lowercased().contains(typedText) {
+                problems.append("positive control: typing did not reach the child input")
+            }
+            return Evaluation(problems: problems, outcome: outcome)
+        }
+
+        guard let trigger = first("parent", "trigger", phase: "trigger", { $0.bool("trusted") == true && $0.string("key") == triggerKey }) else {
+            problems.append("trusted parent trigger key '\(triggerKey)' not observed in the trigger phase")
+            return Evaluation(problems: problems, outcome: outcome)
+        }
+        outcome["parent_had_focus_at_trigger"] = trigger.bool("hasFocus") ?? NSNull()
+        guard first("parent", "show_sent", { $0.seq > trigger.seq }) != nil else {
+            problems.append("show not sent after the trigger"); return Evaluation(problems: problems, outcome: outcome)
+        }
+        guard let shown = first("child", "show") else {
+            problems.append("child show acknowledgement missing"); return Evaluation(problems: problems, outcome: outcome)
+        }
+        for frame in ["child", "parent"] {
+            for delay in sampleDelaysMilliseconds {
+                let samples = records.filter { $0.frame == frame && $0.kind == "sample" && $0.int("after_ms") == delay }
+                guard let sample = samples.first else { problems.append("\(frame) reading +\(delay)ms missing"); continue }
+                guard sample.int("actual_ms") != nil, sample.bool("hasFocus") != nil else { problems.append("\(frame) reading +\(delay)ms malformed"); continue }
+                if sample.hostPhase != "trigger" { problems.append("\(frame) reading +\(delay)ms received outside the trigger phase") }
+            }
+        }
+        if probeCase.childTimerFocus, first("child", "focus_attempt", { $0.string("trigger") == "timer-17ms" && $0.seq > shown.seq }) == nil {
+            problems.append("child timer focus attempt not recorded")
+        }
+        let childSamples = records.filter { $0.frame == "child" && $0.kind == "sample" }
+        outcome["child_input_focused_by_ms"] = Dictionary(uniqueKeysWithValues: childSamples.compactMap { sample -> (String, Bool)? in
+            guard let delay = sample.int("after_ms"), let focused = sample.bool("activeIsInput"), let has = sample.bool("hasFocus") else { return nil }
+            return ("\(delay)", focused && has)
+        })
+        outcome["child_focus_attempt_recorded"] = first("child", "focus_attempt") != nil
+        return Evaluation(problems: problems, outcome: outcome)
+    }
+}
