@@ -331,6 +331,7 @@ import QuartzCore
         sidebar.onExtensionAction = { [weak self] id, anchor in self?.invokeSidebarExtension(id, anchor: anchor) }
         sidebar.onExtensionsMenu = { [weak self] anchor in self?.showSidebarExtensions(anchor: anchor) }
         sidebar.onExtensionLibrary = { [weak self] in self?.showExtensionLibrary(nil) }
+        connectFolderCommands()
         sidebar.onSpaceScroll = { [weak self] event, source in
             guard let self else { return false }
             return self.handleSpaceScroll(event, source: source) == nil

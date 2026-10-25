@@ -17,7 +17,8 @@ import AppKit
         refresh(); refreshPaletteResults(); save()
     }
     func reorderSavedTab(_ id: UUID, by direction: Int) {
-        guard session.reorderSavedTab(id: id, by: direction) else { return }
+        let moved = session.folder(id) != nil ? session.reorderKeptItem(id: id, by: direction) : session.reorderSavedTab(id: id, by: direction)
+        guard moved else { return }
         cancelPaging(); refresh(); save()
     }
     func resetSavedTab(_ id: UUID) {

@@ -27,6 +27,25 @@ struct SidebarTabItem: Equatable {
     var isSleeping: Bool = false
     var isSplit: Bool = false
     var canFavorite: Bool = true
+    /// Kept-section hierarchy. Folder rows reuse this item with `isFolder`.
+    var depth: Int = 0
+    var isFolder: Bool = false
+    var isExpanded: Bool = true
+    /// The folder holding this row, if any.
+    var parentFolderID: UUID? = nil
+    /// Siblings within the same container, for Move Earlier/Later.
+    var hasEarlierSibling: Bool = false
+    var hasLaterSibling: Bool = false
+    /// Number of tabs anywhere inside a folder row.
+    var folderTabCount: Int = 0
+}
+
+/// A destination offered by Move to Folder menus.
+struct SidebarFolderTarget: Equatable {
+    let id: UUID?
+    let name: String
+    let depth: Int
+    let isEnabled: Bool
 }
 
 /// Display state only: the controller resolves the current profile/tab again on click.
@@ -64,6 +83,13 @@ struct SidebarExtensionItem {
     var onExtensionsMenu: ((NSView) -> Void)?
     var onExtensionLibrary: (() -> Void)?
     var onSpaceScroll: ((NSEvent, SpaceScrollSource) -> Bool)?
+    var onToggleFolder: ((UUID) -> Void)?
+    var onRenameFolder: ((UUID) -> Void)?
+    /// Creates a folder; the item is a tab to put inside it or a parent folder.
+    var onNewFolder: ((UUID?) -> Void)?
+    var onUngroupFolder: ((UUID) -> Void)?
+    var onMoveToFolder: ((UUID, UUID?) -> Void)?
+    var folderTargets: ((UUID) -> [SidebarFolderTarget])?
     override var isFlipped: Bool { true }
     private let back = ArkIconButton(symbol: "arrow.left", label: "Go back")
     private let forward = ArkIconButton(symbol: "arrow.right", label: "Go forward")
@@ -211,6 +237,12 @@ struct SidebarExtensionItem {
         page.newTab = { [weak self] in self?.onNewTab?() }
         page.manageSpaces = { [weak self] in self?.onManageSpaces?() }
         page.move = { [weak self] in self?.onMoveTab?($0, $1) }
+        page.toggleFolder = { [weak self] in self?.onToggleFolder?($0) }
+        page.renameFolder = { [weak self] in self?.onRenameFolder?($0) }
+        page.newFolder = { [weak self] in self?.onNewFolder?($0) }
+        page.ungroupFolder = { [weak self] in self?.onUngroupFolder?($0) }
+        page.moveToFolder = { [weak self] in self?.onMoveToFolder?($0, $1) }
+        page.folderTargets = { [weak self] in self?.folderTargets?($0) ?? [] }
     }
     private func configureFavorites(_ allItems: [SidebarTabItem]) {
         var seen = Set<UUID>()
@@ -435,6 +467,12 @@ struct SidebarExtensionItem {
     var editSaved: ((UUID) -> Void)?
     var resetSaved: ((UUID) -> Void)?
     var reorderSaved: ((UUID, Int) -> Void)?
+    var toggleFolder: ((UUID) -> Void)?
+    var renameFolder: ((UUID) -> Void)?
+    var newFolder: ((UUID?) -> Void)?
+    var ungroupFolder: ((UUID) -> Void)?
+    var moveToFolder: ((UUID, UUID?) -> Void)?
+    var folderTargets: ((UUID) -> [SidebarFolderTarget])?
     let heading = ArkSpaceHeading()
     let scroll = SidebarScrollView()
     private let table = NSTableView()
@@ -442,8 +480,6 @@ struct SidebarExtensionItem {
     private enum Entry { case tab(Int), divider, newTab }
     private var entries: [Entry] = []
     private var rowByID: [UUID: Int] = [:]
-    private var keptFirst: UUID?
-    private var keptLast: UUID?
     private var spaceAppearance: BrowserSpace?
     private var destinations: [BrowserSpace] = []
     private var synchronizingSelection = false
@@ -486,7 +522,7 @@ struct SidebarExtensionItem {
     func configure(_ items: [SidebarTabItem], space: BrowserSpace, destinations: [BrowserSpace]) {
         let items = items.filter { !$0.isFavorite }
         let structureChanged = tabs.count != items.count || zip(tabs, items).contains {
-            $0.id != $1.id || $0.isPinned != $1.isPinned
+            $0.id != $1.id || $0.isPinned != $1.isPinned || $0.isFolder != $1.isFolder || $0.depth != $1.depth
         }
         let changed = structureChanged ? [] : items.indices.filter { tabs[$0] != items[$0] }
         let origin = scroll.contentView.bounds.origin
@@ -495,7 +531,6 @@ struct SidebarExtensionItem {
         if structureChanged || entries.isEmpty {
             entries = []; rowByID = [:]
             let kept = tabs.indices.filter { tabs[$0].isPinned }
-            keptFirst = kept.first.map { tabs[$0].id }; keptLast = kept.last.map { tabs[$0].id }
             for index in kept { rowByID[tabs[index].id] = entries.count; entries.append(.tab(index)) }
             if !kept.isEmpty { entries.append(.divider) }
             entries.append(.newTab)
@@ -541,7 +576,7 @@ struct SidebarExtensionItem {
         row.update(item)
         row.setFavicon(superview == nil || item.isSplit ? nil : faviconProvider?(item.id))
         if let spaceAppearance { row.configureSpace(id: spaceAppearance.id, tint: ArkPalette.spaceColor(spaceAppearance.colorIndex), destinations: destinations) }
-        row.canMoveEarlier = keptFirst != item.id; row.canMoveLater = keptLast != item.id
+        row.canMoveEarlier = item.hasEarlierSibling; row.canMoveLater = item.hasLaterSibling
         // Read the cell's current identity: AppKit can recycle it for a different tab.
         row.select = { [weak self, weak row] in if let id = row?.item.id { self?.select?(id) } }
         row.close = { [weak self, weak row] in if let id = row?.item.id { self?.close?(id) } }
@@ -551,6 +586,12 @@ struct SidebarExtensionItem {
         row.editSaved = { [weak self, weak row] in if let id = row?.item.id { self?.editSaved?(id) } }
         row.resetSaved = { [weak self, weak row] in if let id = row?.item.id { self?.resetSaved?(id) } }
         row.reorderSaved = { [weak self, weak row] direction in if let id = row?.item.id { self?.reorderSaved?(id, direction) } }
+        row.toggleFolder = { [weak self, weak row] in if let id = row?.item.id { self?.toggleFolder?(id) } }
+        row.renameFolder = { [weak self, weak row] in if let id = row?.item.id { self?.renameFolder?(id) } }
+        row.newFolder = { [weak self, weak row] in if let id = row?.item.id { self?.newFolder?(id) } }
+        row.ungroupFolder = { [weak self, weak row] in if let id = row?.item.id { self?.ungroupFolder?(id) } }
+        row.moveToFolder = { [weak self, weak row] target in if let id = row?.item.id { self?.moveToFolder?(id, target) } }
+        row.folderTargets = { [weak self, weak row] in row.flatMap { self?.folderTargets?($0.item.id) } ?? [] }
     }
     private func synchronizeSelection() {
         let selected = tabs.first(where: \.isActive).flatMap { rowByID[$0.id] }
@@ -566,7 +607,7 @@ struct SidebarExtensionItem {
     }
     func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool {
         guard entries.indices.contains(row) else { return false }
-        if case .tab = entries[row] { return true }; return false
+        if case .tab(let index) = entries[row] { return !tabs[index].isFolder }; return false
     }
     func tableViewSelectionDidChange(_ notification: Notification) {
         guard !synchronizingSelection, entries.indices.contains(table.selectedRow),
@@ -638,6 +679,17 @@ enum ArkPalette {
         NSColor(calibratedRed: 0.85, green: 0.87, blue: 0.90, alpha: 1)
     ]
     static func spaceColor(_ index: Int) -> NSColor { spaceColors[min(spaceColors.count - 1, max(0, index))] }
+}
+
+/// Sidebar type scale, measured against Arc/Yab at the default sidebar width.
+@MainActor enum ArkType {
+    static let rowSize: CGFloat = 13.5
+    static func rowFont(active: Bool, folder: Bool) -> NSFont {
+        .systemFont(ofSize: rowSize, weight: folder ? .semibold : active ? .medium : .regular)
+    }
+}
+@MainActor enum ArkMetrics {
+    static let folderIndent: CGFloat = 14
 }
 
 @MainActor
@@ -945,6 +997,12 @@ private final class ArkTabRow: ArkFlippedView {
     var editSaved: (() -> Void)?
     var resetSaved: (() -> Void)?
     var reorderSaved: ((Int) -> Void)?
+    var toggleFolder: (() -> Void)?
+    var renameFolder: (() -> Void)?
+    var newFolder: (() -> Void)?
+    var ungroupFolder: (() -> Void)?
+    var moveToFolder: ((UUID?) -> Void)?
+    var folderTargets: (() -> [SidebarFolderTarget])?
     var canMoveEarlier = false
     var canMoveLater = false
     private var currentSpace = 0
@@ -960,7 +1018,7 @@ private final class ArkTabRow: ArkFlippedView {
     private var configured = false
     init(item: SidebarTabItem) {
         self.item = item
-        titleLabel = arkLabel(item.title.isEmpty ? "New Tab" : item.title, size: 14, weight: item.isActive ? .medium : .regular)
+        titleLabel = arkLabel(item.title.isEmpty ? "New Tab" : item.title, size: ArkType.rowSize, weight: item.isActive ? .medium : .regular)
         subtitleLabel = arkLabel(item.subtitle, size: 9, weight: .regular)
         super.init(frame: .zero)
         wantsLayer = true
@@ -986,22 +1044,28 @@ private final class ArkTabRow: ArkFlippedView {
             hovered = false; closeButton.hovered = false
             identifier = NSUserInterfaceItemIdentifier("tab-row-\(item.id.uuidString)")
         }
-        if first || old.title != item.title { titleLabel.stringValue = item.title.isEmpty ? "New Tab" : item.title; setAccessibilityLabel(item.title) }
-        if first || old.isActive != item.isActive { titleLabel.font = .systemFont(ofSize: 14, weight: item.isActive ? .medium : .regular) }
+        if first || old.title != item.title { titleLabel.stringValue = item.title.isEmpty ? (item.isFolder ? "Folder" : "New Tab") : item.title; setAccessibilityLabel(item.title) }
+        if first || old.isActive != item.isActive || old.isFolder != item.isFolder { titleLabel.font = ArkType.rowFont(active: item.isActive, folder: item.isFolder) }
+        if first || old.depth != item.depth { needsLayout = true }
         if first || old.isUnloaded != item.isUnloaded || old.isSleeping != item.isSleeping {
             titleLabel.textColor = item.isUnloaded || item.isSleeping ? ArkPalette.secondary : ArkPalette.ink
             iconView.alphaValue = item.isUnloaded || item.isSleeping ? 0.55 : 1
         }
         if first || old.subtitle != item.subtitle { subtitleLabel.stringValue = item.subtitle }
-        if favicon == nil, first || old.symbol != item.symbol { iconView.image = NSImage(systemSymbolName: item.symbol, accessibilityDescription: nil) }
-        if first || old.isActive != item.isActive { applyIconTint() }
-        if first || old.isSplit != item.isSplit || old.isPinned != item.isPinned {
+        if item.isFolder {
+            if first || !old.isFolder || old.isExpanded != item.isExpanded { favicon = nil; iconView.image = NSImage(systemSymbolName: item.isExpanded ? "folder" : "folder.fill", accessibilityDescription: nil); iconView.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 15, weight: .regular) }
+        } else if favicon == nil, first || old.symbol != item.symbol || old.isFolder { iconView.image = NSImage(systemSymbolName: item.symbol, accessibilityDescription: nil) }
+        if first || old.isActive != item.isActive || old.isFolder != item.isFolder { applyIconTint() }
+        if first || old.isSplit != item.isSplit || old.isPinned != item.isPinned || old.isFolder != item.isFolder {
             closeButton.setSymbol("xmark", label: item.isSplit ? "Close Split" : item.isPinned ? "Unload tab" : "Close tab")
             closeButton.setAccessibilityHelp(item.isSplit ? "Saved panes unload and remain in the sidebar; ordinary panes close." : nil)
             setAccessibilityHelp(item.isSplit ? "Split. Closing unloads saved panes and keeps their saved tabs; ordinary panes close." : item.isPinned ? "Kept tab. Closing unloads its page and keeps the saved tab." : "Tab")
         }
-        closeButton.isHidden = item.isUnloaded || (!hovered && !item.isActive)
-        if first || old.isActive != item.isActive || old.isUnloaded != item.isUnloaded || old.isSleeping != item.isSleeping {
+        closeButton.isHidden = item.isFolder || item.isUnloaded || (!hovered && !item.isActive)
+        if item.isFolder {
+            setAccessibilityValue(item.isExpanded ? "Expanded" : "Collapsed")
+            setAccessibilityHelp("Folder with \(item.folderTabCount) tab\(item.folderTabCount == 1 ? "" : "s"). Press to \(item.isExpanded ? "collapse" : "expand").")
+        } else if first || old.isActive != item.isActive || old.isUnloaded != item.isUnloaded || old.isSleeping != item.isSleeping || old.isFolder {
             setAccessibilityValue([item.isActive ? "Selected" : nil, item.isUnloaded ? "Unloaded" : item.isSleeping ? "Sleeping" : nil].compactMap { $0 }.joined(separator: ", "))
         }
         if first || old.title != item.title || old.subtitle != item.subtitle || old.isUnloaded != item.isUnloaded || old.isSleeping != item.isSleeping {
@@ -1010,6 +1074,7 @@ private final class ArkTabRow: ArkFlippedView {
         needsDisplay = true
     }
     func setFavicon(_ image: NSImage?) {
+        if item.isFolder { return }
         if favicon !== image {
             favicon = image
             iconView.image = image ?? NSImage(systemSymbolName: item.symbol, accessibilityDescription: nil)
@@ -1019,6 +1084,7 @@ private final class ArkTabRow: ArkFlippedView {
         applyIconTint()
     }
     private func applyIconTint() {
+        if item.isFolder { iconView.contentTintColor = ArkPalette.secondary; return }
         iconView.contentTintColor = favicon == nil ? (item.isActive ? spaceTint : ArkPalette.secondary) : nil
     }
     func configureSpace(id: Int, tint: NSColor, destinations: [BrowserSpace]) {
@@ -1030,15 +1096,19 @@ private final class ArkTabRow: ArkFlippedView {
     override func becomeFirstResponder() -> Bool { needsDisplay = true; return true }
     override func resignFirstResponder() -> Bool { needsDisplay = true; return true }
     override func keyDown(with event: NSEvent) {
-        if event.keyCode == 36 || event.keyCode == 49 { select?() } else { super.keyDown(with: event) }
+        if event.keyCode == 36 || event.keyCode == 49 { activate() }
+        else if item.isFolder, event.keyCode == 124, !item.isExpanded { toggleFolder?() }
+        else if item.isFolder, event.keyCode == 123, item.isExpanded { toggleFolder?() }
+        else { super.keyDown(with: event) }
     }
     override func layout() {
         super.layout()
-        iconView.frame = NSRect(x: 10, y: (bounds.height - 16) / 2, width: 16, height: 16)
-        let textWidth = max(0, bounds.width - 72)
+        let indent = CGFloat(min(item.depth, 8)) * ArkMetrics.folderIndent
+        iconView.frame = NSRect(x: 10 + indent, y: (bounds.height - 16) / 2, width: 16, height: 16)
+        let textWidth = max(0, bounds.width - 72 - indent + (item.isFolder ? 28 : 0))
         let hasSubtitle = false
-        titleLabel.frame = NSRect(x: 36, y: (bounds.height - 20) / 2, width: textWidth, height: 20)
-        subtitleLabel.frame = NSRect(x: 37, y: 23, width: textWidth, height: 12)
+        titleLabel.frame = NSRect(x: 36 + indent, y: (bounds.height - 20) / 2, width: textWidth, height: 20)
+        subtitleLabel.frame = NSRect(x: 37 + indent, y: 23, width: textWidth, height: 12)
         subtitleLabel.isHidden = !hasSubtitle
         closeButton.frame = NSRect(x: bounds.width - 30, y: (bounds.height - 24) / 2, width: 24, height: 24)
     }
@@ -1047,7 +1117,7 @@ private final class ArkTabRow: ArkFlippedView {
             NSColor.keyboardFocusIndicatorColor.setStroke()
             let ring = NSBezierPath(roundedRect: bounds.insetBy(dx: 1.5, dy: 1.5), xRadius: 8, yRadius: 8); ring.lineWidth = 2; ring.stroke()
         }
-        if item.isActive || hovered {
+        if (item.isActive && !item.isFolder) || hovered {
             NSColor.white.withAlphaComponent(item.isActive ? 0.16 : 0.08).setFill()
             NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 9, yRadius: 9).fill()
         }
@@ -1065,17 +1135,68 @@ private final class ArkTabRow: ArkFlippedView {
         addTrackingArea(next)
         area = next
     }
-    override func mouseEntered(with event: NSEvent) { hovered = true; closeButton.isHidden = item.isUnloaded; needsDisplay = true }
-    override func mouseExited(with event: NSEvent) { hovered = false; closeButton.isHidden = item.isUnloaded || !item.isActive; needsDisplay = true }
+    override func mouseEntered(with event: NSEvent) { hovered = true; closeButton.isHidden = item.isUnloaded || item.isFolder; needsDisplay = true }
+    override func mouseExited(with event: NSEvent) { hovered = false; closeButton.isHidden = item.isUnloaded || item.isFolder || !item.isActive; needsDisplay = true }
     override func hitTest(_ point: NSPoint) -> NSView? {
         guard let hit = super.hitTest(point) else { return nil }
         // Labels and symbols belong to the row's selection target; the close
         // button keeps its own native control hit target.
         return hit === closeButton ? closeButton : self
     }
-    override func mouseDown(with event: NSEvent) { select?() }
-    override func accessibilityPerformPress() -> Bool { select?(); return true }
+    private func activate() { if item.isFolder { toggleFolder?() } else { select?() } }
+    override func mouseDown(with event: NSEvent) { activate() }
+    override func accessibilityPerformPress() -> Bool { activate(); return true }
+    private func folderSubmenu() -> NSMenuItem {
+        let moveItem = NSMenuItem(title: "Move to Folder", action: nil, keyEquivalent: "")
+        let submenu = NSMenu(title: "Move to Folder"); submenu.autoenablesItems = false
+        for target in folderTargets?() ?? [] {
+            let entry = NSMenuItem(title: target.name, action: #selector(moveToFolderFromMenu(_:)), keyEquivalent: "")
+            entry.target = self; entry.representedObject = target.id; entry.isEnabled = target.isEnabled
+            entry.indentationLevel = min(8, target.depth)
+            entry.image = NSImage(systemSymbolName: target.id == nil ? "sidebar.left" : "folder", accessibilityDescription: nil)
+            submenu.addItem(entry)
+        }
+        moveItem.submenu = submenu
+        moveItem.isEnabled = submenu.items.contains(where: \.isEnabled)
+        return moveItem
+    }
+    private func folderMenu() -> NSMenu {
+        let menu = NSMenu(); menu.autoenablesItems = false
+        func add(_ title: String, _ action: Selector, _ symbol: String?, enabled: Bool = true) {
+            let entry = NSMenuItem(title: title, action: action, keyEquivalent: "")
+            entry.target = self; entry.isEnabled = enabled
+            entry.image = symbol.flatMap { NSImage(systemSymbolName: $0, accessibilityDescription: nil) }
+            menu.addItem(entry)
+        }
+        add(item.isExpanded ? "Collapse Folder" : "Expand Folder", #selector(toggleFromMenu), item.isExpanded ? "chevron.up" : "chevron.down")
+        add("Rename Folder…", #selector(renameFromMenu), "pencil")
+        add("New Folder Inside", #selector(newFolderFromMenu), "folder.badge.plus")
+        menu.addItem(.separator())
+        add("Move Earlier", #selector(earlierFromMenu), nil, enabled: canMoveEarlier)
+        add("Move Later", #selector(laterFromMenu), nil, enabled: canMoveLater)
+        menu.addItem(folderSubmenu())
+        if destinations.count > 1 { menu.addItem(spaceSubmenu()) }
+        menu.addItem(.separator())
+        add("Ungroup Folder", #selector(ungroupFromMenu), "folder.badge.minus")
+        menu.items.last?.toolTip = "Removes the folder and keeps its tabs in its place."
+        return menu
+    }
+    private func spaceSubmenu() -> NSMenuItem {
+        let moveItem = NSMenuItem(title: "Move to Space", action: nil, keyEquivalent: "")
+        let submenu = NSMenu(title: "Move to Space"); submenu.autoenablesItems = false
+        for space in destinations {
+            let destination = NSMenuItem(title: space.name, action: #selector(moveFromMenu(_:)), keyEquivalent: "")
+            destination.target = self; destination.tag = space.id
+            destination.state = space.id == currentSpace ? .on : .off
+            destination.isEnabled = space.id != currentSpace && move != nil
+            destination.image = SidebarSymbol.image(named: space.symbol, color: ArkPalette.spaceColor(space.colorIndex), pointSize: 14)
+            submenu.addItem(destination)
+        }
+        moveItem.submenu = submenu
+        return moveItem
+    }
     override func menu(for event: NSEvent) -> NSMenu? {
+        if item.isFolder { return folderMenu() }
         let menu = NSMenu(); menu.autoenablesItems = false
         let keepTitle = item.isSplit ? (item.isPinned ? "Unkeep Left Tab" : "Keep Left Tab") : (item.isPinned ? "Unkeep Tab" : "Keep Tab")
         let pinItem = NSMenuItem(title: keepTitle, action: #selector(pinFromMenu), keyEquivalent: "")
@@ -1096,19 +1217,16 @@ private final class ArkTabRow: ArkFlippedView {
                 entry.target = self; entry.isEnabled = enabled; menu.addItem(entry)
             }
         }
-        if destinations.count > 1 {
-            let moveItem = NSMenuItem(title: "Move to Space", action: nil, keyEquivalent: "")
-            let submenu = NSMenu(title: "Move to Space"); submenu.autoenablesItems = false
-            for space in destinations {
-                let destination = NSMenuItem(title: space.name, action: #selector(moveFromMenu(_:)), keyEquivalent: "")
-                destination.target = self; destination.tag = space.id
-                destination.state = space.id == currentSpace ? .on : .off
-                destination.isEnabled = space.id != currentSpace && move != nil
-                destination.image = SidebarSymbol.image(named: space.symbol, color: ArkPalette.spaceColor(space.colorIndex), pointSize: 14)
-                submenu.addItem(destination)
-            }
-            moveItem.submenu = submenu; menu.addItem(moveItem)
+        menu.addItem(.separator())
+        let newFolder = NSMenuItem(title: "Add to New Folder", action: #selector(newFolderFromMenu), keyEquivalent: "")
+        newFolder.image = NSImage(systemSymbolName: "folder.badge.plus", accessibilityDescription: nil)
+        newFolder.target = self; menu.addItem(newFolder)
+        menu.addItem(folderSubmenu())
+        if item.parentFolderID != nil {
+            let out = NSMenuItem(title: "Remove from Folder", action: #selector(removeFromFolderFromMenu), keyEquivalent: "")
+            out.target = self; menu.addItem(out)
         }
+        if destinations.count > 1 { menu.addItem(spaceSubmenu()) }
         menu.addItem(.separator())
         let closeItem = NSMenuItem(title: item.isSplit ? "Close Split" : item.isPinned ? "Unload Tab" : "Close Tab", action: #selector(closeFromMenu), keyEquivalent: "")
         closeItem.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: nil)
@@ -1125,6 +1243,12 @@ private final class ArkTabRow: ArkFlippedView {
     @objc private func earlierFromMenu() { reorderSaved?(-1) }
     @objc private func laterFromMenu() { reorderSaved?(1) }
     @objc private func closeFromMenu() { close?() }
+    @objc private func toggleFromMenu() { toggleFolder?() }
+    @objc private func renameFromMenu() { renameFolder?() }
+    @objc private func newFolderFromMenu() { newFolder?() }
+    @objc private func ungroupFromMenu() { ungroupFolder?() }
+    @objc private func removeFromFolderFromMenu() { moveToFolder?(nil) }
+    @objc private func moveToFolderFromMenu(_ sender: NSMenuItem) { moveToFolder?(sender.representedObject as? UUID) }
 }
 
 /// An original animation of a system symbol, drawn natively without image frames.
