@@ -224,6 +224,15 @@ import WebKit
                   "Permission review did not disclose the compatibility layer: \(reviewed.last?.bridged ?? []) \(reviewed.last?.unsupported ?? [])")
         try check(await result(webA)?["compat"] as? String == "absent" && (host.items(profileID: profileA).first?.compatibility ?? []).isEmpty, "MV3 fixture without bridged permissions received the compatibility layer")
         try await wait("MV2 runtime.connect handshake did not return profile B storage") { await javascript(webB, "document.documentElement.dataset.bamExtensionPort") as? String == "profile-B" }
+        // WebKit never answers callback-style sendMessage from content scripts on its own; the prepared
+        // messaging adapter must, for both the (message, callback) and (extensionId, message, callback) forms.
+        try await wait("Callback-style sendMessage from a content script was not answered") {
+            let withID = await javascript(webA, "document.documentElement.dataset.bamExtensionCallbackID") as? String
+            let plain = await javascript(webA, "document.documentElement.dataset.bamExtensionCallback") as? String
+            return withID == "callback-id" && plain == "callback"
+        }
+        try await wait("Callback-style sendMessage from an MV2 content script was not answered") { await javascript(webB, "document.documentElement.dataset.bamExtensionCallbackID") as? String == "callback-id" }
+        try check(host.items(profileID: profileA).first?.compatibilityNote?.contains("messaging adapter") == true, "The content-script adaptation is not disclosed for the MV3 fixture")
         try check(await result(webA)?["token"] as? String == "profile-A", "Profile B overwrote profile A extension storage")
         try check(await result(webB)?["urls"] as? [String] == [urlB.absoluteString], "Extension B enumerated another profile")
         guard let popup = contextA.action(for: nil)?.popupWebView else { throw Failure(description: "Native WebKit action did not provide a real popup web view") }

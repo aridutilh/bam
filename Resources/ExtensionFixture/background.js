@@ -21,6 +21,7 @@ browser.contextMenus.onClicked.addListener((info, tab) => {
 });
 
 browser.runtime.onMessage.addListener((message) => {
+  if (message?.kind === "ping") return Promise.resolve({pong: message.via});
   if (message?.kind === "updates") return browser.storage.local.get("bamTabUpdates").then(value => ({updates: value.bamTabUpdates || []}));
   if (!message || !["fixture", "popup"].includes(message.kind)) return;
   return (async () => {

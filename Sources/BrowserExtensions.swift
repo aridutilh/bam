@@ -236,7 +236,7 @@ struct BrowserExtensionPermissionReview {
             try FileManager.default.copyItem(at: source, to: package)
             // Recheck the private copy: the selected folder may change while copied.
             try Self.validatePackageSize(package)
-            let compatibilityNote = try ExtensionPackagePreparation.prepare(package: package, originalManifestURL: folder.appendingPathComponent("original-manifest.json"))
+            let compatibilityNote = try Self.preparePackage(package, originalManifestURL: folder.appendingPathComponent("original-manifest.json"))
             let ext = try await WKWebExtension(resourceBaseURL: package)
             guard ext.errors.isEmpty else { throw Self.failure(ext.errors.map(\.localizedDescription).joined(separator: "\n")) }
             guard !stopped else { throw Self.failure("The browser is closing.") }
@@ -250,6 +250,14 @@ struct BrowserExtensionPermissionReview {
             try? FileManager.default.removeItem(at: folder)
             throw error
         }
+    }
+
+    /// Both disclosed adaptations of the private copy: MV2 background page, then
+    /// the content-script messaging adapter. Extension JavaScript is never edited.
+    static func preparePackage(_ package: URL, originalManifestURL: URL) throws -> String? {
+        let notes = [try ExtensionPackagePreparation.prepare(package: package, originalManifestURL: originalManifestURL),
+                     try ExtensionContentScriptPreparation.prepare(package: package, originalManifestURL: originalManifestURL)].compactMap { $0 }
+        return notes.isEmpty ? nil : notes.joined(separator: " ")
     }
 
     func noteUpdateCheck(id: UUID, available: String?) {
@@ -279,22 +287,33 @@ struct BrowserExtensionPermissionReview {
             try? fm.removeItem(at: package); try? fm.moveItem(at: previous, to: package)
             try? fm.removeItem(at: originalManifest); if fm.fileExists(atPath: previousManifest.path) { try? fm.moveItem(at: previousManifest, to: originalManifest) }
         }
+        let before = records[i]
+        var committed = false
         do {
             try fm.copyItem(at: source, to: package)
             try Self.validatePackageSize(package)
-            let note = try ExtensionPackagePreparation.prepare(package: package, originalManifestURL: originalManifest)
+            let note = try Self.preparePackage(package, originalManifestURL: originalManifest)
             let ext = try await WKWebExtension(resourceBaseURL: package)
             guard ext.errors.isEmpty else { throw Self.failure(ext.errors.map(\.localizedDescription).joined(separator: "\n")) }
             guard !stopped, let index = records.firstIndex(where: { $0.id == id }) else { throw Self.failure("The browser is closing.") }
             records[index].name = ext.displayName ?? records[index].name; records[index].version = ext.version ?? ""
             records[index].compatibilityNote = note; records[index].catalog = catalog; records[index].enabled = false
             try persist()
-            try? fm.removeItem(at: previous); try? fm.removeItem(at: previousManifest)
+            committed = true
             if wasEnabled { try await load(id, review: true, parsed: ext) }
+            try? fm.removeItem(at: previous); try? fm.removeItem(at: previousManifest)
             changed()
         } catch {
+            if committed {
+                // The new package is the record of truth now; only its activation failed.
+                try? fm.removeItem(at: previous); try? fm.removeItem(at: previousManifest)
+                setError(error, for: id)
+                throw error
+            }
             restore()
+            if let index = records.firstIndex(where: { $0.id == id }) { records[index] = before }
             if wasEnabled { try? await load(id, review: false) }
+            changed()
             throw error
         }
     }
@@ -834,7 +853,7 @@ struct BrowserExtensionPermissionReview {
         completionHandler(nil)
     }
     func close(for context: WKWebExtensionContext, completionHandler: @escaping (Error?) -> Void) {
-        guard runtime?.owns(context) == true, let native, runtime?.owner?.closeWindow?(native) == true else { completionHandler(BrowserExtensions.failure("Only windows an extension opened can be closed by it.")); return }
+        guard runtime?.owns(context) == true, let native, runtime?.owner?.closeWindow?(native) == true else { completionHandler(BrowserExtensions.failure("Bam closes only Little Bam windows this extension opened.")); return }
         completionHandler(nil)
     }
 }
