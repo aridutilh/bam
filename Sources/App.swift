@@ -271,7 +271,8 @@ import WebKit
         for entry in appearanceMenu?.items ?? [] {
             entry.state = (entry.representedObject as? String) == BrowserAppearance.current.rawValue ? .on : .off
         }
-        if settings?.window.isVisible == true { settings?.refresh() }
+        // In place, so a keyboard user on the Appearance chips keeps focus.
+        settings?.syncAppearance()
     }
     func rebuildSpacesMenu() {
         guard let spacesMenu, let controller else { return }
