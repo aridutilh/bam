@@ -15,6 +15,7 @@ import WebKit
     var interactionSmoke: InteractionSmokeTest?
     var autoPiPSmoke: AutomaticPiPSmokeTest?
     var pendingExternalURLs: [URL] = []
+    private let profileInstance = ProfileInstance()
     var spacesMenu: NSMenu?
     var onboarding: OnboardingController?
     var settings: SettingsController?
@@ -41,6 +42,19 @@ import WebKit
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent(launch.supportDirectoryName, isDirectory: true)
         let preview = launch.isEphemeral
         PreviewIcon.apply(for: launch)
+        profileInstance.onActivation = { [weak self] in self?.activateMainWindow() }
+        do {
+            // This precedes all session/preferences/controller/store access.
+            // Persistent development previews lock their own isolated profile.
+            guard try profileInstance.start(in: support, ephemeral: preview) else { exit(0) }
+        } catch {
+            let alert = NSAlert()
+            alert.messageText = "Bam couldn’t open this profile safely"
+            alert.informativeText = "The profile lock could not be opened. Check access to \(support.path) and try again.\n\n\(error.localizedDescription)"
+            alert.addButton(withTitle: "Quit Bam")
+            alert.runModal()
+            exit(1)
+        }
         let sessionFileExists = FileManager.default.fileExists(atPath: support.appendingPathComponent("session.json").path)
         if !preview { BrowserController.restoreDefaultSearchEngine() }
         ShortcutStore.shared.configure(persists: !preview)
@@ -198,7 +212,10 @@ import WebKit
             if let controller { controller.openLittleOrbit(url: url) } else { pendingExternalURLs.append(url) }
         }
     }
-    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { window?.makeKeyAndOrderFront(nil); return true }
+    private func activateMainWindow() {
+        ProfileInstance.activate(window: window)
+    }
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { activateMainWindow(); return true }
     func menuNeedsUpdate(_ menu: NSMenu) {
         if menu === extensionsMenu { controller?.updateExtensionsMenu(menu) }
     }

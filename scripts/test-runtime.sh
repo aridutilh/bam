@@ -58,3 +58,19 @@ for test in --web-test --pip-test --interaction-test --auto-pip-test --feature-t
         exit 1
     fi
 done
+
+# Isolated processes/windows: no installed profile or persistent WebKit store.
+BUILD_DIR=${BAM_BUILD_DIR:-${ARK_BUILD_DIR:-${ORBIT_BUILD_DIR:-"$ROOT/.build"}}}
+log="$RUN_DIR/profile-instance-tests.log"
+if ! "$BUILD_DIR/profile-instance-tests" 2>&1 | tee "$log"; then
+    echo 'FAIL: Profile activation runtime exited unsuccessfully' >&2
+    exit 1
+fi
+if ! awk '
+    /^PASS: Profile activation — / { passed++ }
+    /^FAIL:/ { failed = 1 }
+    END { exit !(passed == 1 && !failed) }
+' "$log"; then
+    echo 'FAIL: Profile activation runtime did not emit exactly one successful terminal result' >&2
+    exit 1
+fi
