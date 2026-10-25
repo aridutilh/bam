@@ -440,7 +440,7 @@ struct SidebarExtensionItem {
         let compact = w < 218
         forward.isHidden = compact; back.isHidden = compact
         // Arc/Yab proportions: a 34-point address field under the window
-        // controls, Favorites as a 3-column grid of 46-point tiles, then the
+        // controls, Favorites as a balanced grid of 46-point tiles, then the
         // Space's rows. Extension actions take a row only when installed.
         let fieldTop = ArkMetrics.addressTop, fieldHeight = ArkMetrics.addressHeight
         search.frame = NSRect(x: 8, y: fieldTop, width: max(0, w - 16), height: fieldHeight)
@@ -460,7 +460,7 @@ struct SidebarExtensionItem {
         extensionMenu.setSymbol(hiddenCount > 0 ? "ellipsis.circle" : "puzzlepiece.extension",
             label: hiddenCount > 0 ? "All extensions, including \(hiddenCount) more" : "Extensions")
         let gridTop = hasActions ? actionTop + 38 : fieldTop + fieldHeight + 10
-        let columns = w >= 330 ? 4 : 3
+        let columns = max(1, ArkMetrics.favoriteColumns(count: favorites.count, width: w))
         let gap = ArkMetrics.favoriteGap, tileHeight = ArkMetrics.favoriteHeight
         let favoriteRows = (favorites.count + columns - 1) / columns
         let favoriteHeight = favoriteRows == 0 ? CGFloat.zero : CGFloat(favoriteRows) * tileHeight + CGFloat(favoriteRows - 1) * gap
@@ -982,6 +982,36 @@ enum ArkPalette {
     static let addressHeight: CGFloat = 34
     static let favoriteHeight: CGFloat = 46
     static let favoriteGap: CGFloat = 8
+    /// Narrowest Favorite tile before the grid drops a column (Arc fits four in a ~230pt sidebar).
+    static let favoriteMinimumWidth: CGFloat = 44
+    /// Favorite artwork, as in Arc: 16 points is exactly a 32-pixel site icon on a 2x display.
+    static let favoriteIconSize: CGFloat = 16
+    /// Arc-like balanced grid: as many columns as fit at the minimum tile width, then the fewest rows,
+    /// spread evenly (8 → 4×2, 6 → 3×2, 5 → 3+2 at a typical width), so tiles never shrink below the
+    /// minimum and a short last row never leaves a lone tile under a full one when it can be avoided.
+    static func favoriteColumns(count: Int, width: CGFloat) -> Int {
+        guard count > 0 else { return 0 }
+        let available = max(0, width - 16)
+        let fit = max(1, Int((available + favoriteGap) / (favoriteMinimumWidth + favoriteGap)))
+        let rows = (count + fit - 1) / fit
+        return (count + rows - 1) / rows
+    }
+    /// The artwork's frame in a tile, aspect preserved, never enlarged past `favoriteIconSize`.
+    static func favoriteIconRect(in bounds: NSRect, imageSize: NSSize) -> NSRect {
+        guard imageSize.width > 0, imageSize.height > 0 else { return .zero }
+        let scale = min(favoriteIconSize / imageSize.width, favoriteIconSize / imageSize.height)
+        let size = NSSize(width: imageSize.width * scale, height: imageSize.height * scale)
+        return NSRect(x: bounds.midX - size.width / 2, y: bounds.midY - size.height / 2, width: size.width, height: size.height)
+    }
+    /// Snaps a rect to whole device pixels of the current destination (window or bitmap, any scale), so a
+    /// 32-pixel icon in a 16-point rect at 2x is copied pixel for pixel instead of resampled.
+    static func deviceAligned(_ rect: NSRect, in context: CGContext?) -> NSRect {
+        guard let context, rect.width > 0, rect.height > 0 else { return rect }
+        let device = context.convertToDeviceSpace(rect)
+        let snapped = CGRect(x: device.minX.rounded(), y: device.minY.rounded(),
+                             width: max(1, device.width.rounded()), height: max(1, device.height.rounded()))
+        return context.convertToUserSpace(snapped)
+    }
     static let rowRadius: CGFloat = 9
     /// Leading icon column and the trailing gap a row always keeps.
     static let leadingInset: CGFloat = 36
@@ -1310,18 +1340,22 @@ private final class ArkFavoriteButton: ArkHoverButton {
             ring.lineWidth = 1; ring.stroke()
         }
         if let image, image.size.width > 0, image.size.height > 0 {
-            let scale = min(20 / image.size.width, 20 / image.size.height)
-            let size = NSSize(width: image.size.width * scale, height: image.size.height * scale)
-            image.draw(in: NSRect(x: (bounds.width - size.width) / 2, y: (bounds.height - size.height) / 2,
-                                 width: size.width, height: size.height), from: .zero, operation: .sourceOver,
+            // 16 points, on whole device pixels: a 32px site icon is copied 1:1 at 2x (no upscale, no
+            // half-pixel blur from a fractional tile width); any unavoidable resampling is high quality.
+            let context = NSGraphicsContext.current
+            context?.saveGraphicsState()
+            context?.imageInterpolation = .high
+            let rect = ArkMetrics.deviceAligned(ArkMetrics.favoriteIconRect(in: bounds, imageSize: image.size), in: context?.cgContext)
+            image.draw(in: rect, from: .zero, operation: .sourceOver,
                        fraction: ArkRowInk.iconAlpha(sleeping: item.isSleeping), respectFlipped: true, hints: nil)
+            context?.restoreGraphicsState()
         } else if let mark = item.monogram {
             // Favorites are shared by every Space, so their mark is neutral.
-            ArkMonogram.draw(mark, in: NSRect(x: (bounds.width - 22) / 2, y: (bounds.height - 22) / 2, width: 22, height: 22),
+            ArkMonogram.draw(mark, in: NSRect(x: (bounds.width - 18) / 2, y: (bounds.height - 18) / 2, width: 18, height: 18),
                              disc: ArkMonogram.neutralDisc, alpha: ArkRowInk.iconAlpha(sleeping: item.isSleeping))
         } else {
-            symbol(item.symbol, rect: NSRect(x: (bounds.width - 19) / 2, y: (bounds.height - 19) / 2, width: 19, height: 19),
-                   color: ArkPalette.ink.withAlphaComponent(ArkRowInk.iconAlpha(sleeping: item.isSleeping)), size: 18)
+            symbol(item.symbol, rect: NSRect(x: (bounds.width - 16) / 2, y: (bounds.height - 16) / 2, width: 16, height: 16),
+                   color: ArkPalette.ink.withAlphaComponent(ArkRowInk.iconAlpha(sleeping: item.isSleeping)), size: 15)
         }
         // Only pages put to sleep to save memory get the moon; a saved
         // Favorite that simply hasn't been opened yet looks like any other.
