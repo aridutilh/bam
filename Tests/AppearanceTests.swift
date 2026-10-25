@@ -136,6 +136,14 @@ import AppKit
         require(Monogram.make(title: "team docs", address: "https://docs.example.com/") == "T", "A title's first letter, uppercased")
         require(Monogram.make(title: "(7) Weekly notes", address: "https://x.example/") == "7", "Leading punctuation is skipped")
         require(Monogram.make(title: "🎨 Design", address: "https://x.example/") == "🎨", "A leading emoji is kept as the mark")
+        require(Monogram.make(title: "❤️ Notes", address: "https://x.example/") == "❤️"
+                && Monogram.make(title: "☀️ Weather", address: "https://x.example/") == "☀️",
+                "Text-default emoji made emoji by VS16 are kept whole, not skipped to the next letter")
+        require(Monogram.make(title: "1️⃣ First", address: "https://x.example/") == "1️⃣"
+                && Monogram.make(title: "👩‍💻 Code", address: "https://x.example/") == "👩‍💻",
+                "Keycap and ZWJ emoji sequences are kept whole")
+        require(Monogram.make(title: "1 First", address: "https://x.example/") == "1" && Monogram.make(title: "❤ Notes", address: "https://x.example/") == "N",
+                "A plain digit stays a digit; a bare text-style symbol without VS16 isn't treated as an emoji")
         require(Monogram.make(title: "", address: "https://www.alpha.example/") == "A"
                 && Monogram.make(title: "https://www.alpha.example/", address: "https://www.alpha.example/") == "A"
                 && Monogram.make(title: "beta.example", address: "https://beta.example/") == "B",
