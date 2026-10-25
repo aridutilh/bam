@@ -290,6 +290,11 @@ import QuartzCore
     var spaceManager: SpaceManagementController?
     var savedTabEditor: SavedTabEditorController?
     var arcImporter: ArcImportController?
+    /// Icons carried over from Arc's cache for imported tabs; memory only.
+    let importedTabIcons = ImportedTabIcons()
+    /// Tabs created by an import, which must not reach the network for icons
+    /// until the user opens them. Rebuilt when provenance changes.
+    var importedTabIDsCache: (count: Int, ids: Set<UUID>)?
     var onSpacesChanged: (() -> Void)?
     var saveWork: DispatchWorkItem?
     var sessionWriter: SessionWriter?

@@ -137,6 +137,11 @@ import Foundation
             }
             print("tabs \(report.importedTabs), folders \(report.importedFolders), profiles new \(report.newProfiles.count), easels \(report.easels), live \(report.liveFolders), overflow \(report.favoriteOverflow), unattached \(report.unattachedProfiles)/\(report.unattachedFavorites), invalid \(report.invalidAddresses), missing \(report.missingItems), unknown \(report.unknownItems), depth \(report.depthLimited), refused \(report.refusal != nil)")
             print("max depth \(session.folders.map { session.folderDepth($0.id) }.max() ?? -1), dormant kept \(session.tabs.filter { $0.saved?.kind == .kept && !$0.isUnloaded }.count == 3)")
+            let layout = URL(fileURLWithPath: arguments[2])
+            if let directory = ArcIconImport.cacheDirectory(besideLayout: layout) {
+                let added = ArcIconImport.addedTabs(before: nil, after: session.importLinks)
+                print("icons \(ArcIconImport.loadIcons(for: added, in: directory).count)/\(added.count) imported tabs")
+            } else { print("icons: no cache beside layout") }
             return
         }
         let fixtures = URL(fileURLWithPath: arguments.count > 1 ? arguments[1] : NSTemporaryDirectory())

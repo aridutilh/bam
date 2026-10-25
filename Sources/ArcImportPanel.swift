@@ -55,9 +55,12 @@ import AppKit
         let imported = session
         showActive(); refreshPaletteResults(); onSpacesChanged?()
         let tabs = report.importedTabs
+        let added = ArcIconImport.addedTabs(before: previous.importLinks, after: imported.importLinks)
         let succeed = { [weak self] in
             self?.pageFeedback.show("Imported \(tabs) tab\(tabs == 1 ? "" : "s") from Arc", symbol: "square.and.arrow.down", in: self?.webHost ?? NSView())
             completion(nil)
+            // Only after the layout is safely saved: never for previews, cancels or undone imports.
+            self?.importArcIcons(added, layout: source.sourceURL)
         }
         guard let writer = sessionWriter, !privateMode else { succeed(); return }
         save()
@@ -75,6 +78,26 @@ import AppKit
                 completion("Bam couldn’t save the imported layout, so the import was undone and nothing was added. Check free disk space and try again.")
             } else {
                 completion("Bam couldn’t save to disk. The import was undone in this window, but Bam can’t confirm your tabs are saved — free up disk space before quitting.")
+            }
+        }
+    }
+
+    /// Best-effort: reads Arc's cached icons for the tabs this import added,
+    /// off the main thread, then shows them in place. Memory only; no network,
+    /// no page. Missing or invalid icons leave the normal fallback.
+    func importArcIcons(_ added: [(itemID: String, tabID: UUID)], layout: URL?) {
+        guard !added.isEmpty, let layout, let directory = ArcIconImport.cacheDirectory(besideLayout: layout) else { return }
+        Task.detached(priority: .utility) { [weak self] in
+            let icons = ArcIconImport.loadIcons(for: added, in: directory)
+            guard !icons.isEmpty else { return }
+            await MainActor.run {
+                guard let self, !self.isShuttingDown else { return }
+                for (tabID, image) in icons {
+                    // The tab may have been removed or navigated since; match its imported address.
+                    guard let tab = self.session.tabs.first(where: { $0.id == tabID }) else { continue }
+                    self.importedTabIcons.install(image, for: tabID, address: tab.saved?.address ?? tab.address)
+                }
+                self.sidebar.refreshFavicons(); self.tabSearchResults?.refreshFavicons()
             }
         }
     }
