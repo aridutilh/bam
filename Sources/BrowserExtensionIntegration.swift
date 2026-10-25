@@ -11,6 +11,13 @@ import WebKit
         value.surfaces = { [weak self] in self?.extensionSurfaces(profileID: $0) ?? [] }
         value.surface = { [weak self] profile, id in self?.extensionSurface(profileID: profile, id: id) }
         value.surfaceRevision = { [weak self] _ in self?.extensionTopologyRevision() }
+        // bookmarks.getTree: the engine has already checked the calling context's own profile, the explicit
+        // grant and that this isn't a private host. Read-only snapshot of that profile's saved items; nil
+        // (an error for the extension, never an empty tree) when closing, unknown or over the budget.
+        value.bookmarkSnapshot = { [weak self] profileID in
+            guard let self, !self.isShuttingDown else { return nil }
+            return BookmarkSessionSnapshot.input(from: self.session, profileID: profileID)
+        }
         value.selectTab = { [weak self] id in
             guard let self else { return false }
             if self.session.tabs.contains(where: { $0.id == id }) {
