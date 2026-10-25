@@ -79,6 +79,7 @@ import WebKit
             defer { try? FileManager.default.removeItem(at: folder) }
             var definition = manifest
             definition["manifest_version"] = 3; definition["name"] = "Bam tab metadata \(name)"; definition["version"] = "1.0"
+            definition["description"] = "Original Bam fixture for the tabs metadata facade (\(name))."
             if background != nil { definition["background"] = ["service_worker": "background.js"] }
             try JSONSerialization.data(withJSONObject: definition).write(to: folder.appendingPathComponent("manifest.json"))
             try Data("<!doctype html><meta charset='utf-8'><title>metadata page</title>".utf8).write(to: folder.appendingPathComponent("page.html"))
