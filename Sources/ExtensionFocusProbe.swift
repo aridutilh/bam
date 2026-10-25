@@ -248,7 +248,7 @@ import WebKit
     private var probePageURL: URL?
     private var pageState: [String: Any] = [:]
     /// Native phase in which each page record (`frame:seq`) was first seen: the phase ledger.
-    private var firstSeen: [String: String] = [:]
+    private var ledger = Rules.PhaseLedger()
     private var currentPhase = "setup"
     private var responders: [[String: Any]] = []
     private final class HostMessages: NSObject, WKScriptMessageHandler {
@@ -267,15 +267,13 @@ import WebKit
         guard let text = body["state"] as? String, text.utf8.count <= 200_000, let data = text.data(using: .utf8),
               let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { rejectedHostMessages += 1; return }
         pageState = value
-        // Only records already validated for this run, case and role (bounded, unique identity) enter the phase ledger.
+        // Only records validated for this run, case and role enter the cumulative, capped phase ledger; faults persist.
         guard let probeCase else { return }
-        for key in Rules.validIdentities(fromState: value, run: runToken, case: probeCase) where firstSeen[key] == nil {
-            firstSeen[key] = currentPhase
-        }
+        ledger.ingest(state: value, run: runToken, case: probeCase, phase: currentPhase)
     }
     private func records() -> [Rules.Record] {
         guard let probeCase else { return [] }
-        return Rules.records(fromState: pageState, run: runToken, case: probeCase, firstSeen: firstSeen).records
+        return Rules.records(fromState: pageState, run: runToken, case: probeCase, firstSeen: ledger.firstSeen).records
     }
     private func has(_ frame: String, _ kind: String, phase: String? = nil, _ extra: (Rules.Record) -> Bool = { _ in true }) -> Bool {
         records().contains { $0.frame == frame && $0.kind == kind && (phase == nil || $0.hostPhase == phase) && extra($0) }
@@ -460,10 +458,13 @@ import WebKit
         task?.cancel(); task = nil
         var problems: [String] = []
         if let probeCase {
-            let parsed = Rules.records(fromState: pageState, run: runToken, case: probeCase, firstSeen: firstSeen)
+            let parsed = Rules.records(fromState: pageState, run: runToken, case: probeCase, firstSeen: ledger.firstSeen)
             let evaluation = Rules.evaluate(parsed.records, case: probeCase)
             problems = evaluation.problems
             if parsed.malformed > 0 { problems.append("\(parsed.malformed) malformed page records") }
+            // Ledger faults from any snapshot during the run are permanent and make the measurement incomplete.
+            problems += ledger.faults.map { "phase ledger: \($0)" }
+            observations["phase_ledger_entries"] = ledger.firstSeen.count
             observations["outcome"] = evaluation.outcome
             observations["records"] = parsed.records.map { record -> [String: Any] in
                 record.fields.merging(["host_phase": record.hostPhase ?? "unseen"]) { _, new in new }
@@ -471,12 +472,13 @@ import WebKit
             observations["page_rejected_messages"] = pageState["rejected"] ?? NSNull()
         } else { problems.append("no case") }
         if let reason { problems.insert(reason, at: 0) }
+        if rejectedHostMessages > 0 { problems.append("\(rejectedHostMessages) host messages rejected") }
+        // Assigned only after every validation step, so the JSON lists every reason the summary line uses.
         observations["problems"] = problems
         observations["native_responders"] = responders
         observations["permission_prompts"] = prompts
         observations["host_messages_rejected"] = rejectedHostMessages
         observations["host_world_ready"] = hostReady
-        if rejectedHostMessages > 0 { problems.append("\(rejectedHostMessages) host messages rejected") }
         let measured = problems.isEmpty
         Task { @MainActor in
             let cleanup = await self.cleanUp()

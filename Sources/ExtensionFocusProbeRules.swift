@@ -80,6 +80,35 @@ enum ExtensionFocusProbeRules {
         records(fromState: state, run: run, case: expected, firstSeen: [:]).records.map(\.key)
     }
 
+    /// The native phase ledger across every published snapshot: each validated identity is stamped once with the phase in
+    /// which it was first seen, up to a total cap with no eviction. Faults are permanent (a later good snapshot never
+    /// clears an earlier fault): capacity exceeded, a snapshot that drops an earlier record (the page only appends), a record
+    /// whose identity changes content (kind/time), or a snapshot with malformed records.
+    struct PhaseLedger {
+        let capacity: Int
+        private(set) var firstSeen: [String: String] = [:]
+        private(set) var faults: [String] = []
+        private var fingerprints: [String: String] = [:]
+        init(capacity: Int = ExtensionFocusProbeRules.maximumRecords) { self.capacity = capacity }
+        private mutating func fault(_ message: String) { if !faults.contains(message) { faults.append(message) } }
+        mutating func ingest(state: [String: Any], run: String, case expected: Case, phase: String) {
+            let parsed = ExtensionFocusProbeRules.records(fromState: state, run: run, case: expected, firstSeen: [:])
+            if parsed.malformed > 0 { fault("a snapshot contained malformed records") }
+            let keys = Set(parsed.records.map(\.key))
+            if fingerprints.keys.contains(where: { !keys.contains($0) }) { fault("a snapshot dropped previously seen records") }
+            for record in parsed.records {
+                let fingerprint = "\(record.kind)|\(record.int("t") ?? -1)"
+                if let known = fingerprints[record.key] {
+                    if known != fingerprint { fault("a record identity changed between snapshots") }
+                    continue
+                }
+                guard fingerprints.count < capacity else { fault("phase ledger capacity (\(capacity)) exceeded"); continue }
+                fingerprints[record.key] = fingerprint
+                firstSeen[record.key] = phase
+            }
+        }
+    }
+
     /// Cleanup is clean only when the run's temporary storage and folder are gone **and**, if a fixture was installed, its
     /// removal was confirmed (no timeout, no error, no longer listed or loaded).
     static func cleanupIsClean(_ report: [String: Any], fixtureInstalled: Bool) -> Bool {
@@ -150,11 +179,11 @@ enum ExtensionFocusProbeRules {
             return Evaluation(problems: problems, outcome: outcome)
         }
         outcome["parent_had_focus_at_trigger"] = trigger.bool("hasFocus") ?? NSNull()
-        guard first("parent", "show_sent", { $0.seq > trigger.seq }) != nil else {
-            problems.append("show not sent after the trigger"); return Evaluation(problems: problems, outcome: outcome)
+        guard first("parent", "show_sent", phase: "trigger", { $0.seq > trigger.seq }) != nil else {
+            problems.append("show not sent after the trigger in the trigger phase"); return Evaluation(problems: problems, outcome: outcome)
         }
-        guard let shown = first("child", "show") else {
-            problems.append("child show acknowledgement missing"); return Evaluation(problems: problems, outcome: outcome)
+        guard let shown = first("child", "show", phase: "trigger") else {
+            problems.append("child show acknowledgement missing in the trigger phase"); return Evaluation(problems: problems, outcome: outcome)
         }
         for frame in ["child", "parent"] {
             let all = records.filter { $0.frame == frame && $0.kind == "sample" }
@@ -169,8 +198,9 @@ enum ExtensionFocusProbeRules {
                 if sample.hostPhase != "trigger" { problems.append("\(frame) reading +\(delay)ms received outside the trigger phase") }
             }
         }
-        if probeCase.childTimerFocus, first("child", "focus_attempt", { $0.string("trigger") == "timer-17ms" && $0.seq > shown.seq }) == nil {
-            problems.append("child timer focus attempt not recorded")
+        if probeCase.childTimerFocus,
+           first("child", "focus_attempt", phase: "trigger", { $0.string("trigger") == "timer-17ms" && $0.seq > shown.seq }) == nil {
+            problems.append("child timer focus attempt not recorded in the trigger phase")
         }
         let childSamples = records.filter { $0.frame == "child" && $0.kind == "sample" }
         // First reading per offset only (duplicates are already reported as problems above); never traps.

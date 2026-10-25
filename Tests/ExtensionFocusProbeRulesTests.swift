@@ -94,7 +94,7 @@ import Foundation
         lateSample.samples(phase: "typing"); lateSample.add("child", "focus_attempt", "trigger", ["trigger": "timer-17ms"]); lateSample.type(in: "parent")
         check(lateSample.evaluate().problems.contains { $0.contains("outside the trigger phase") }, "readings received in the typing phase don't count")
         var noAttempt = Run(probeCase: R.Case(frame: .ex, pattern: .p1)); noAttempt.handshake(); noAttempt.trigger(); noAttempt.samples(); noAttempt.type(in: "parent")
-        check(noAttempt.evaluate().problems == ["child timer focus attempt not recorded"], "a timer pattern requires the child's attempt")
+        check(noAttempt.evaluate().problems == ["child timer focus attempt not recorded in the trigger phase"], "a timer pattern requires the child's attempt")
         var p2 = Run(probeCase: R.Case(frame: .ex, pattern: .p2)); p2.handshake(); p2.trigger(); p2.samples(); p2.type(in: "parent")
         check(p2.evaluate().complete && p2.evaluate().outcome["child_window_focus_fired"] as? Bool == false,
               "P2 without a child window focus event is a measured outcome, not missing evidence")
@@ -139,6 +139,20 @@ import Foundation
         check(wrongValue.problems.contains { $0.contains("no trusted child input value") }, "a value without the text is incomplete")
         check(controlRun { run in run.type(in: "child", input: true, value: "bam") }.complete, "all keys on the child input plus a trusted in-phase value is complete")
 
+        // Show, its acknowledgement and the timer attempt must be received in the trigger phase.
+        func shownRun(showPhase: String = "trigger", ackPhase: String = "trigger", attemptPhase: String = "trigger") -> R.Evaluation {
+            var run = Run(probeCase: R.Case(frame: .xo, pattern: .p1)); run.handshake()
+            run.add("parent", "trigger", "trigger", ["key": "f", "trusted": true, "hasFocus": true])
+            run.add("parent", "show_sent", showPhase, ["pattern": "p1", "focusCall": "none"])
+            run.add("child", "show", ackPhase, ["hasFocus": false, "activeIsInput": false])
+            run.samples(); run.add("child", "focus_attempt", attemptPhase, ["trigger": "timer-17ms"]); run.type(in: "parent")
+            return run.evaluate()
+        }
+        check(shownRun().complete, "show, acknowledgement and attempt in the trigger phase are complete")
+        check(shownRun(showPhase: "typing").problems == ["show not sent after the trigger in the trigger phase"], "show_sent seen in another phase doesn't count")
+        check(shownRun(ackPhase: "typing").problems == ["child show acknowledgement missing in the trigger phase"], "a show acknowledgement in another phase doesn't count")
+        check(shownRun(attemptPhase: "typing").problems == ["child timer focus attempt not recorded in the trigger phase"], "a timer attempt in another phase doesn't count")
+
         // Protocol validation: exact integers, unique identities, unique scheduled readings.
         check(R.Record.strictInt(3) == 3 && R.Record.strictInt(NSNumber(value: 3.0)) == 3, "integers and integral doubles are exact")
         check(R.Record.strictInt(NSNumber(value: 1.5)) == nil && R.Record.strictInt(true) == nil && R.Record.strictInt(Double.infinity) == nil
@@ -170,6 +184,45 @@ import Foundation
         fractionalOffset.add("child", "sample", "trigger", ["after_ms": 20.5, "actual_ms": 20, "hasFocus": false, "activeIsInput": false])
         fractionalOffset.add("child", "focus_attempt", "trigger", ["trigger": "timer-17ms"]); fractionalOffset.type(in: "parent")
         check(fractionalOffset.evaluate().problems == ["child reading with an unscheduled or malformed offset"], "a fractional offset is malformed, not rounded")
+
+        // Cumulative phase ledger across snapshots: capped without eviction, faults permanent.
+        let xo = R.Case(frame: .xo, pattern: .p1)
+        func snapshot(_ seqs: ClosedRange<Int>, run: String = "RUN-1", kind: String = "keydown", t: Int? = nil) -> [String: Any] {
+            ["run": run, "case": "xo:p1", "records": seqs.map { seq -> [String: Any] in
+                ["frame": "child", "kind": kind, "seq": seq, "t": t ?? seq, "run": run, "case": "xo:p1", "role": "xo", "key": "x", "trusted": true]
+            }]
+        }
+        var growing = R.PhaseLedger(capacity: 5)
+        growing.ingest(state: snapshot(1...2), run: "RUN-1", case: xo, phase: "setup")
+        growing.ingest(state: snapshot(1...4), run: "RUN-1", case: xo, phase: "trigger")
+        check(growing.faults.isEmpty && growing.firstSeen["child:1"] == "setup" && growing.firstSeen["child:3"] == "trigger",
+              "a growing prefix keeps each record's first phase")
+        var disjoint = R.PhaseLedger(capacity: 5)
+        disjoint.ingest(state: snapshot(1...3), run: "RUN-1", case: xo, phase: "setup")
+        disjoint.ingest(state: snapshot(1...6), run: "RUN-1", case: xo, phase: "trigger")   // individually bounded, cumulatively over
+        check(disjoint.firstSeen.count == 5 && disjoint.firstSeen["child:1"] == "setup" && disjoint.faults.contains("phase ledger capacity (5) exceeded"),
+              "the cap holds without evicting earlier entries, and overflow is a fault")
+        disjoint.ingest(state: snapshot(1...5), run: "RUN-1", case: xo, phase: "typing")
+        check(disjoint.faults.contains("phase ledger capacity (5) exceeded") && disjoint.faults.contains("a snapshot dropped previously seen records") == false,
+              "a later valid snapshot never clears an earlier fault")
+        var dropped = R.PhaseLedger()
+        dropped.ingest(state: snapshot(1...4), run: "RUN-1", case: xo, phase: "setup")
+        dropped.ingest(state: snapshot(3...6), run: "RUN-1", case: xo, phase: "trigger")
+        check(dropped.faults == ["a snapshot dropped previously seen records"], "a snapshot dropping earlier records is a permanent fault")
+        var changed = R.PhaseLedger()
+        changed.ingest(state: snapshot(1...2), run: "RUN-1", case: xo, phase: "setup")
+        changed.ingest(state: snapshot(1...2, t: 99), run: "RUN-1", case: xo, phase: "trigger")
+        check(changed.faults == ["a record identity changed between snapshots"] && changed.firstSeen["child:1"] == "setup",
+              "a changed record identity is a fault; its first phase is kept")
+        var poisoned = R.PhaseLedger()
+        poisoned.ingest(state: snapshot(1...3, run: "OTHER"), run: "RUN-1", case: xo, phase: "setup")
+        poisoned.ingest(state: snapshot(1...3), run: "RUN-1", case: xo, phase: "trigger")
+        check(poisoned.firstSeen["child:1"] == "trigger" && poisoned.faults.isEmpty, "a wrong-run snapshot can't pre-stamp a legitimate record's phase")
+        var malformedSnapshot = R.PhaseLedger()
+        var bad = snapshot(1...2); var badRecords = bad["records"] as! [[String: Any]]; badRecords[1]["seq"] = 1.5; bad["records"] = badRecords
+        malformedSnapshot.ingest(state: bad, run: "RUN-1", case: xo, phase: "setup")
+        malformedSnapshot.ingest(state: snapshot(1...2), run: "RUN-1", case: xo, phase: "trigger")
+        check(malformedSnapshot.faults == ["a snapshot contained malformed records"], "a malformed snapshot is a permanent fault")
 
         // Cleanup: confirmed fixture removal is required.
         let removed: [String: Any] = ["host_temporary_storage_removed": true, "run_directory_removed": true, "fixture_removed": true]
