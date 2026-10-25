@@ -120,11 +120,18 @@ import WebKit
         await measure("regexAlternation", id: 200, condition: "{regexFilter: '/bam-dnr/(alt-one|alt-two)$', resourceTypes: ['xmlhttprequest']}",
                       probes: [("one", "/bam-dnr/alt-one", "GET"), ("two", "/bam-dnr/alt-two", "GET"), ("neither", "/bam-dnr/alt-three", "GET")])
         await measure("postMethod", id: 201, condition: "{urlFilter: '/bam-dnr/post-only', requestMethods: ['post'], resourceTypes: ['xmlhttprequest']}",
-                      probes: [("get", "/bam-dnr/post-only", "GET"), ("post", "/bam-dnr/post-only", "POST")])
+                      // Order and caching controlled: each method first on its own query, then the other method on the
+                      // same query and on a fresh one, plus a POST to an unruled path (expected to reach, 501).
+                      probes: [("getFirst", "/bam-dnr/post-only?g1", "GET"), ("postFresh", "/bam-dnr/post-only?p1", "POST"),
+                               ("getAfterPostSameURL", "/bam-dnr/post-only?p1", "GET"), ("postOtherQuery", "/bam-dnr/post-only?p2", "POST"),
+                               ("unfilteredPost", "/bam-dnr/unruled-post", "POST")])
         await measure("getMethod", id: 202, condition: "{urlFilter: '/bam-dnr/get-only', requestMethods: ['get'], resourceTypes: ['xmlhttprequest']}",
-                      probes: [("get", "/bam-dnr/get-only", "GET"), ("post", "/bam-dnr/get-only", "POST")])
+                      probes: [("postFirst", "/bam-dnr/get-only?p1", "POST"), ("getFresh", "/bam-dnr/get-only?g1", "GET"),
+                               ("postAfterGetSameURL", "/bam-dnr/get-only?g1", "POST"), ("postOtherQuery", "/bam-dnr/get-only?p2", "POST"),
+                               ("unfilteredPost", "/bam-dnr/unruled-post", "POST")])
         await measure("excludedPostMethod", id: 203, condition: "{urlFilter: '/bam-dnr/not-post', excludedRequestMethods: ['post'], resourceTypes: ['xmlhttprequest']}",
-                      probes: [("get", "/bam-dnr/not-post", "GET"), ("post", "/bam-dnr/not-post", "POST")])
+                      probes: [("postFirst", "/bam-dnr/not-post?p1", "POST"), ("getFresh", "/bam-dnr/not-post?g1", "GET"),
+                               ("postAfterGetSameURL", "/bam-dnr/not-post?g1", "POST"), ("unfilteredPost", "/bam-dnr/unruled-post", "POST")])
         await measure("uppercaseMethod", id: 204, condition: "{urlFilter: '/bam-dnr/upper-method', requestMethods: ['POST'], resourceTypes: ['xmlhttprequest']}",
                       probes: [("post", "/bam-dnr/upper-method", "POST")])
         // excludedResourceTypes is not validated by WebKit; excluding every type it knows leaves an empty list.
