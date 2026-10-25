@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased extension-compatibility draft (branch work, after 0.21.3)
+
+- Expose `tabs.detectLanguage`, which Bam had hidden even though its tab adapter and documentation claimed it. Dashlane asks for it (callback form, behind a feature check). The answer follows Chrome: the page’s recognizable text, else its declared `lang`/`Content-Language`, else `und`. It is read from an isolated world, only on pages the extension may access, and never falls back to the user’s own locale. Component checks pass; the canonical-Preview fixture check (callback, promise, missing-tab error) is written but **not yet run**.
+
 ## 0.21.3 unreleased draft — build 44
 
 - Preserve early and late external URL-open requests in duplicate launches through an acknowledged, retryable handoff to the owning profile. Deduplicate transport retries without suppressing intentional repeated opens.
