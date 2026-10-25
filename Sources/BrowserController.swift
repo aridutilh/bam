@@ -762,7 +762,7 @@ import QuartzCore
             sidebar.beginPaging(tabs: sidebarItems(for: target), space: target, direction: spaceDirection(to: target))
         }
         if let tab = session.active {
-            let host = URL(string: tab.address)?.host ?? tab.address
+            let host = tab.addressLabel
             sidebar.setAddress(tab.address, title: tabErrors[tab.id] ?? (tab.isHome ? "Search or enter URL" : host))
             view.window?.title = "\(tab.displayTitle) — Bam"
         }

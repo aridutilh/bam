@@ -78,6 +78,13 @@ struct BrowserTab: Codable, Identifiable, Equatable {
     var isVideoDemo: Bool { address == "orbit://video" }
     /// A row kept in place of an Arc Easel; it has no web page.
     var isArcEasel: Bool { ArcEaselReference.isReference(address) }
+    /// What the address bar shows when it isn't being edited: the site's host,
+    /// or a plain name for Bam's own reference rows. Editing still starts from
+    /// `address`, which is unchanged.
+    var addressLabel: String {
+        if isArcEasel { return "Arc Easel" }
+        return URL(string: address)?.host ?? address
+    }
     var symbol: String {
         if let symbol = saved?.customSymbol { return symbol }
         if isHome { return "sparkle" }

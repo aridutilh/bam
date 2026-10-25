@@ -405,6 +405,9 @@ import Foundation
         let wanderIndex = wandered.tabs.firstIndex { $0.id == payloadRow.id }!
         wandered.tabs[wanderIndex].address = "https://example.invalid/elsewhere"; wandered.tabs[wanderIndex].title = "Some Page Title"
         expect(wandered.tabs[wanderIndex].displayTitle == "Payload Title", "A page's title doesn't replace the Easel's name on its kept row")
+        expect(payloadRow.addressLabel == "Arc Easel" && ArcEaselReference.isReference(payloadRow.address),
+               "The address bar shows a plain name for an Easel row; its reference address is unchanged")
+        expect(wandered.tabs[wanderIndex].addressLabel == "example.invalid", "A row navigated to a page shows that page's host")
         expect(wandered.resetSavedTab(id: payloadRow.id), "Reset accepts an Easel reference")
         expect(wandered.tabs[wanderIndex].address == payloadRow.address && wandered.tabs[wanderIndex].displayTitle == "Payload Title",
                "Reset restores the reference and its name")
