@@ -102,6 +102,8 @@ struct BrowserExtensionPermissionReview {
     var safariImporter = SafariExtensionImport()
     var nativeMessagingPolicy = ExtensionNativeMessaging()
     var nativeHostPrompt: ((BrowserExtensionRecord, ExtensionNativeMessaging.Host) -> Bool)?
+    /// Fixtures turn this off to run an older prepared worker adapter before upgrading it.
+    var refreshesWorkerAdapters = true
     private(set) var records: [BrowserExtensionRecord] = []
     private(set) var lastError: String?
     private(set) var errors: [UUID: String] = [:]
@@ -598,7 +600,7 @@ struct BrowserExtensionPermissionReview {
         // package prepared by an earlier Bam, only when every prepared file still verifies.
         // Vendor scripts, the manifest, grants and extension storage are unchanged. A package
         // that does not verify is left exactly as it was and loads as it did before.
-        if parsed == nil, record.safariBundle == nil {
+        if refreshesWorkerAdapters, parsed == nil, record.safariBundle == nil {
             let package = packageURL(record)
             let refreshed: Bool
             do {
@@ -607,7 +609,9 @@ struct BrowserExtensionPermissionReview {
                     adapterSource: ExtensionCompatibility.workerScript(manifest: Self.manifestForPreparation(package), browserVersion: Self.browserVersion))
             } catch {
                 refreshed = false
-                NSLog("Bam kept the existing worker adapter for extension %@: %@", id.uuidString, error.localizedDescription)
+                // Verification failures write nothing; a failure after the adapter write leaves the
+                // new adapter with old metadata, which the next load completes.
+                NSLog("Bam could not finish refreshing the worker preparation for extension %@: %@", id.uuidString, error.localizedDescription)
             }
             if refreshed {
                 let note = "Updated Bam's service-worker compatibility adapter. Extension scripts are unchanged."

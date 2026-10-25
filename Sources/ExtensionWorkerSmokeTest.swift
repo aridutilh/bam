@@ -320,40 +320,64 @@ import WebKit
         try check(stale.1 != nil, "A replaced worker context retained native bridge authority")
         reloadedA.action(for: nil)?.closePopup(); reloadedB.action(for: nil)?.closePopup()
 
-        // An install prepared by an earlier Bam: after a relaunch (no review) the newer Bam
-        // rewrites only its own worker adapter; storage, grants and vendor scripts stay.
-        let recordB = { (host: BrowserExtensions) in host.records.first { $0.id == idB } }
-        guard let grantsBefore = recordB(host) else { throw Failure(description: "Missing module worker record") }
+        // Installs prepared by an earlier Bam, classic (A) and module (B): first run the older
+        // adapter observably, then relaunch with refresh and require the new adapter to run.
+        // Storage (worker starts), grants and vendor bytes must survive; there is no review.
         host.shutdown()
-        let folderB = host.storageURL.appendingPathComponent(idB.uuidString, isDirectory: true)
-        let packageB = folderB.appendingPathComponent("package", isDirectory: true), backupB = folderB.appendingPathComponent("original-manifest.json")
-        let manifestB = try JSONSerialization.jsonObject(with: Data(contentsOf: packageB.appendingPathComponent("manifest.json"))) as? [String: Any] ?? [:]
-        try check(try ExtensionServiceWorkerPreparation.refreshAdapter(package: packageB, originalManifestURL: backupB,
-                  adapterSource: ExtensionCompatibility.workerScript(manifest: manifestB, browserVersion: "0.0.1-older")), "Could not age the installed worker adapter")
-        let markerB = manifestB[ExtensionServiceWorkerPreparation.markerKey] as? [String: Any] ?? [:]
-        let vendorB = try Data(contentsOf: packageB.appendingPathComponent(markerB["source"] as? String ?? "missing"))
-        let relaunched = BrowserExtensions(storageURL: fixtureRoot.appendingPathComponent("registry", isDirectory: true))
-        defer { relaunched.shutdown() }
-        relaunched.permissionPrompt = { _ in false }
-        let configB2 = WKWebViewConfiguration(); configB2.websiteDataStore = configB.websiteDataStore
-        relaunched.configure(configB2, profileID: profileB)
-        await relaunched.ready(profileID: profileB)
-        guard let contextB2 = relaunched.context(for: idB), let popupB2 = contextB2.action(for: nil)?.popupWebView, let after = recordB(relaunched) else {
-            throw Failure(description: "The relaunched host did not load the module worker: \(relaunched.errors)")
+        let registryURL = fixtureRoot.appendingPathComponent("registry", isDirectory: true)
+        let older = "0.0.1-older"
+        struct Install { let id: UUID; let profile: UUID; let store: WKWebsiteDataStore; let package: URL; let backup: URL; let manifest: [String: Any]; let vendor: Data; let label: String }
+        var installs: [Install] = []
+        for (id, profile, store, label) in [(idA, profileA, configA.websiteDataStore, "classic"), (idB, profileB, configB.websiteDataStore, "module")] {
+            let folder = host.storageURL.appendingPathComponent(id.uuidString, isDirectory: true)
+            let package = folder.appendingPathComponent("package", isDirectory: true), backup = folder.appendingPathComponent("original-manifest.json")
+            let manifest = try JSONSerialization.jsonObject(with: Data(contentsOf: package.appendingPathComponent("manifest.json"))) as? [String: Any] ?? [:]
+            let source = (manifest[ExtensionServiceWorkerPreparation.markerKey] as? [String: Any])?["source"] as? String ?? "missing"
+            try check(try ExtensionServiceWorkerPreparation.refreshAdapter(package: package, originalManifestURL: backup,
+                      adapterSource: ExtensionCompatibility.workerScript(manifest: manifest, browserVersion: older)), "Could not age the \(label) worker adapter")
+            installs.append(Install(id: id, profile: profile, store: store, package: package, backup: backup, manifest: manifest,
+                                    vendor: try Data(contentsOf: package.appendingPathComponent(source)), label: label))
         }
-        popupB2.frame = frame
-        var refreshedProbe: [String: Any]?
-        try await wait("The relaunched worker did not answer") { refreshedProbe = await result(popupB2); return (refreshedProbe?["starts"] as? Int ?? 0) >= 3 }
-        try check(refreshedProbe?["adapterVersion"] as? String == BrowserExtensions.browserVersion,
-                  "The relaunched worker did not run the refreshed adapter: \(refreshedProbe?["adapterVersion"] ?? "nil")")
-        try check(after.permissions == grantsBefore.permissions && after.patterns == grantsBefore.patterns && after.compatibilityGrants == grantsBefore.compatibilityGrants &&
-                  after.compatibilityNote?.contains("Updated Bam's service-worker compatibility adapter.") == true,
-                  "Adapter refresh changed grants or was not disclosed")
-        try check(try Data(contentsOf: packageB.appendingPathComponent(markerB["source"] as? String ?? "missing")) == vendorB &&
-                  ExtensionServiceWorkerPreparation.prepare(package: packageB, originalManifestURL: backupB,
-                    adapterSource: ExtensionCompatibility.workerScript(manifest: manifestB, browserVersion: BrowserExtensions.browserVersion)) == nil,
-                  "Adapter refresh changed vendor bytes or left an unverifiable preparation")
-        contextB2.action(for: nil)?.closePopup()
+        func relaunch(refreshing: Bool, minimumStarts: Int, expectedVersion: String) async throws -> (BrowserExtensions, [UUID: Int], [UUID: BrowserExtensionRecord]) {
+            let relaunched = BrowserExtensions(storageURL: registryURL)
+            relaunched.refreshesWorkerAdapters = refreshing
+            relaunched.permissionPrompt = { _ in false }
+            var starts: [UUID: Int] = [:], records: [UUID: BrowserExtensionRecord] = [:]
+            for install in installs {
+                let configuration = WKWebViewConfiguration(); configuration.websiteDataStore = install.store
+                relaunched.configure(configuration, profileID: install.profile)
+                await relaunched.ready(profileID: install.profile)
+                guard let context = relaunched.context(for: install.id), let popup = context.action(for: nil)?.popupWebView,
+                      let record = relaunched.records.first(where: { $0.id == install.id }) else {
+                    throw Failure(description: "The relaunched host did not load the \(install.label) worker: \(relaunched.errors)")
+                }
+                popup.frame = frame
+                var probe: [String: Any]?
+                try await wait("The relaunched \(install.label) worker did not answer") { probe = await result(popup); return (probe?["starts"] as? Int ?? 0) >= minimumStarts }
+                try check(probe?["adapterVersion"] as? String == expectedVersion,
+                          "The \(install.label) worker ran adapter \(probe?["adapterVersion"] ?? "nil"), expected \(expectedVersion) (refresh \(refreshing ? "on" : "off"))")
+                starts[install.id] = probe?["starts"] as? Int ?? 0; records[install.id] = record
+                context.action(for: nil)?.closePopup()
+            }
+            return (relaunched, starts, records)
+        }
+        let (agedHost, agedStarts, agedRecords) = try await relaunch(refreshing: false, minimumStarts: 3, expectedVersion: older)
+        agedHost.shutdown()
+        let (upgradedHost, upgradedStarts, upgradedRecords) = try await relaunch(refreshing: true, minimumStarts: 4, expectedVersion: BrowserExtensions.browserVersion)
+        defer { upgradedHost.shutdown() }
+        for install in installs {
+            let before = agedRecords[install.id], after = upgradedRecords[install.id]
+            try check((upgradedStarts[install.id] ?? 0) > (agedStarts[install.id] ?? 0), "The \(install.label) worker lost its storage across the upgrade")
+            try check(after?.permissions == before?.permissions && after?.patterns == before?.patterns && after?.compatibilityGrants == before?.compatibilityGrants &&
+                      before?.compatibilityNote?.contains("Updated Bam's service-worker compatibility adapter.") != true &&
+                      after?.compatibilityNote?.contains("Updated Bam's service-worker compatibility adapter.") == true,
+                      "The \(install.label) upgrade changed grants or was not disclosed")
+            let source = (install.manifest[ExtensionServiceWorkerPreparation.markerKey] as? [String: Any])?["source"] as? String ?? "missing"
+            try check(try Data(contentsOf: install.package.appendingPathComponent(source)) == install.vendor &&
+                      ExtensionServiceWorkerPreparation.prepare(package: install.package, originalManifestURL: install.backup,
+                        adapterSource: ExtensionCompatibility.workerScript(manifest: install.manifest, browserVersion: BrowserExtensions.browserVersion)) == nil,
+                      "The \(install.label) upgrade changed vendor bytes or left an unverifiable preparation")
+        }
         return checks
         }
         do {
