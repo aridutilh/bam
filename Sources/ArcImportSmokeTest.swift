@@ -1,5 +1,79 @@
 import AppKit
+import Network
 import WebKit
+
+/// A loopback TCP listener the fixture points every imported tab address at. Any page
+/// load or favicon fetch for an imported tab, in this process or a relaunched child,
+/// would connect here; each connection gets an empty 404 and is counted.
+final class NetworkTripwire: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+    private var lines: [String] = []
+    private var listener: NWListener?
+    private var resumed = false
+    var connections: Int { lock.lock(); defer { lock.unlock() }; return count }
+    var requestLines: [String] { lock.lock(); defer { lock.unlock() }; return lines }
+
+    func start() async throws -> UInt16 {
+        let parameters = NWParameters.tcp
+        parameters.requiredLocalEndpoint = NWEndpoint.hostPort(host: "127.0.0.1", port: .any)
+        let listener = try NWListener(using: parameters)
+        self.listener = listener
+        listener.newConnectionHandler = { [weak self] connection in
+            guard let self else { connection.cancel(); return }
+            self.lock.lock(); self.count += 1; self.lock.unlock()
+            connection.start(queue: .global(qos: .utility))
+            self.readRequestLine(connection, buffer: Data())
+        }
+        return try await withCheckedThrowingContinuation { continuation in
+            listener.stateUpdateHandler = { [weak self] state in
+                guard let self else { return }
+                self.lock.lock(); let first = !self.resumed
+                switch state {
+                case .ready, .failed: self.resumed = true
+                default: break
+                }
+                self.lock.unlock()
+                guard first else { return }
+                switch state {
+                case .ready:
+                    if let port = listener.port?.rawValue { continuation.resume(returning: port) }
+                    else { continuation.resume(throwing: ArcImportSmokeTest.Failure.assertion("Tripwire has no port")) }
+                case .failed(let error): continuation.resume(throwing: error)
+                default: break
+                }
+            }
+            listener.start(queue: .global(qos: .utility))
+        }
+    }
+    /// Accumulates until the request line's CRLF (TCP may split it), at most 4 KiB, then answers 404.
+    private func readRequestLine(_ connection: NWConnection, buffer: Data) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 4096) { [weak self] data, _, complete, error in
+            var buffer = buffer
+            if let data { buffer.append(data) }
+            let lineEnd = buffer.range(of: Data("\r\n".utf8))
+            if lineEnd == nil, !complete, error == nil, buffer.count < 4096 {
+                self?.readRequestLine(connection, buffer: buffer); return
+            }
+            let line = String(decoding: buffer[..<(lineEnd?.lowerBound ?? buffer.endIndex)], as: UTF8.self)
+            if !line.isEmpty { self?.lock.lock(); self?.lines.append(String(line.prefix(160))); self?.lock.unlock() }
+            let reply = Data("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".utf8)
+            connection.send(content: reply, completion: .contentProcessed { _ in connection.cancel() })
+        }
+    }
+    func stop() { listener?.cancel(); listener = nil }
+}
+
+/// A child's stdout, collected as it arrives, bounded to 1 MiB.
+final class ChildOutput: @unchecked Sendable {
+    private let lock = NSLock()
+    private var data = Data()
+    private var ended = false
+    func append(_ chunk: Data) { lock.lock(); if data.count < 1_048_576 { data.append(chunk.prefix(1_048_576 - data.count)) }; lock.unlock() }
+    func end() { lock.lock(); ended = true; lock.unlock() }
+    var isEnded: Bool { lock.lock(); defer { lock.unlock() }; return ended }
+    var text: String { lock.lock(); defer { lock.unlock() }; return String(decoding: data, as: UTF8.self) }
+}
 
 /// File > Import from Arc… end to end in the app under test (`--arc-import-test`).
 /// Drives the real ArcImportController sheet and the asynchronous
@@ -18,7 +92,56 @@ import WebKit
     private let directory = FileManager.default.temporaryDirectory
         .appendingPathComponent("bam-arc-import-\(UUID().uuidString)", isDirectory: true)
     private var sessionFile: URL { directory.appendingPathComponent("session.json") }
-    private static let gammaAddress = "https://board.example.com/g"
+    private static let gammaSourceAddress = "https://board.example.com/g"
+    /// The Gamma address after the tripwire rewrite (set once the listener has a port).
+    private var gammaAddress = ArcImportSmokeTest.gammaSourceAddress
+    private let tripwire = NetworkTripwire()
+    private var childPIDs: [Int32] = []
+    /// The relaunched child this fixture owns while one runs; every exit path stops it first.
+    private var activeChild: Process?
+    /// Overall deadline on the main run loop, then a background hard deadline that still works
+    /// if the main thread stalls (it only exits; it never signals a stored PID).
+    static let parentDeadline: TimeInterval = 420
+    static let parentHardDeadline: TimeInterval = 480
+
+    /// Bounded stop of the owned child: SIGTERM, up to 5 s, then SIGKILL for that PID only,
+    /// up to 3 s more. Returns whether the child is confirmed to have exited.
+    private func stopChild(_ child: Process) async -> Bool {
+        if child.isRunning { child.terminate() }
+        for _ in 0..<50 where child.isRunning { try? await Task.sleep(for: .milliseconds(100)) }
+        if child.isRunning {
+            kill(child.processIdentifier, SIGKILL)
+            for _ in 0..<30 where child.isRunning { try? await Task.sleep(for: .milliseconds(100)) }
+        }
+        let exited = !child.isRunning
+        if exited, activeChild === child { activeChild = nil }
+        return exited
+    }
+    private var tripwirePort: UInt16 = 0
+    /// Points an HTTP(S) address at the tripwire, keeping its host as the first path segment:
+    /// equal addresses stay equal, and every rewritten tab shares one loopback origin.
+    private func tripwireAddress(_ raw: String) -> String {
+        guard let url = URL(string: raw), let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https",
+              let host = url.host else { return raw }
+        return "http://127.0.0.1:\(tripwirePort)/\(host)\(url.path.isEmpty ? "/" : url.path)"
+    }
+    /// The layout copy with every tab's HTTP(S) address on the tripwire. Counts, titles,
+    /// structure and the non-web (file:) address are unchanged.
+    private func pointedAtTripwire(_ data: Data) throws -> Data {
+        guard var root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              var sidebar = root["sidebar"] as? [String: Any], var containers = sidebar["containers"] as? [Any],
+              containers.count > 1, var main = containers[1] as? [String: Any], var items = main["items"] as? [Any] else {
+            throw Failure.assertion("Fixture layout has the local item list")
+        }
+        for index in items.indices {
+            guard var object = items[index] as? [String: Any], var payload = object["data"] as? [String: Any],
+                  var tab = payload["tab"] as? [String: Any], let raw = tab["savedURL"] as? String else { continue }
+            tab["savedURL"] = tripwireAddress(raw)
+            payload["tab"] = tab; object["data"] = payload; items[index] = object
+        }
+        main["items"] = items; containers[1] = main; sidebar["containers"] = containers; root["sidebar"] = sidebar
+        return try JSONSerialization.data(withJSONObject: root)
+    }
     enum Failure: Error { case assertion(String) }
     struct WriteRefused: Error {}
     /// commitArcImport's two failure outcomes: the undo was saved, or it wasn't.
@@ -32,14 +155,250 @@ import WebKit
         var events: [String] { lock.lock(); defer { lock.unlock() }; return entries }
     }
 
+    // MARK: Imported icons (original synthetic PNGs; nothing is fetched)
+
+    /// A relaunch child of this same executable: `--arc-import-test --arc-icon-child <mode> <dir> <expected icons>`.
+    static let childFlag = "--arc-icon-child"
+    private enum IconFile { case valid(Int, Int, Int), oversized, garbage, symlink, missing }
+    /// Fixture tabs (by Arc saved title) and the cache file each gets. Three tabs share
+    /// board.example.com, so their icons must stay distinct per tab, not per origin.
+    private static let iconPlan: [(title: String, file: IconFile, today: Bool)] = [
+        ("Alpha Board", .valid(225, 40, 40), false), ("Beta Board", .valid(40, 190, 60), false),
+        ("Alpha Board copy", .valid(40, 80, 225), false), ("Left Pane", .valid(225, 195, 30), false),
+        ("Home Mail", .valid(205, 40, 200), false), ("Today One", .valid(30, 195, 210), true),
+        ("Deep Page", .oversized, false), ("PR 1", .garbage, false), ("Right Pane", .symlink, false), ("Docs Home", .missing, false),
+    ]
+    private static let gammaItemID = "00000000-0000-4000-8000-999999999999"
+    private static let gammaColor = (240, 140, 20)
+    private struct ExpectedIcon { let itemID: String; let title: String; let color: (Int, Int, Int); let today: Bool }
+
+    private static func png(_ red: Int, _ green: Int, _ blue: Int, size: Int = 32) -> Data? {
+        guard let space = CGColorSpace(name: CGColorSpace.sRGB),
+              let context = CGContext(data: nil, width: size, height: size, bitsPerComponent: 8, bytesPerRow: 0, space: space,
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        context.setFillColor(CGColor(srgbRed: CGFloat(red) / 255, green: CGFloat(green) / 255, blue: CGFloat(blue) / 255, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: size, height: size))
+        context.setFillColor(CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: max(2, size / 8), height: max(2, size / 8)))  // corner mark
+        return context.makeImage().flatMap(ImportedIconDiskCache.pngData)
+    }
+    /// Writes `SidebarItemsFaviconCache` beside a layout copy in `folder`, named as Arc names
+    /// them, and returns the valid icons expected for the base layout (Gamma's file is extra).
+    private func writeIconCache(in folder: URL, source: ArcImport.Source) throws -> [ExpectedIcon] {
+        let fm = FileManager.default
+        let cache = folder.appendingPathComponent(ArcIconImport.cacheDirectoryName, isDirectory: true)
+        try fm.createDirectory(at: cache, withIntermediateDirectories: true)
+        func itemID(_ title: String) throws -> String {
+            let ids = source.nodes.values.compactMap { node -> String? in
+                if case .tab(_, let saved) = node.kind, saved == title { return node.id }
+                return nil
+            }
+            guard ids.count == 1 else { throw Failure.assertion("Fixture has exactly one tab saved as \(title)") }
+            return ids[0]
+        }
+        var expected: [ExpectedIcon] = []
+        for entry in Self.iconPlan {
+            let id = try itemID(entry.title)
+            let file = cache.appendingPathComponent(ArcIconImport.fileName(forItemID: id))
+            switch entry.file {
+            case .valid(let r, let g, let b):
+                guard let data = Self.png(r, g, b) else { throw Failure.assertion("Synthetic PNG encodes") }
+                try data.write(to: file)
+                expected.append(ExpectedIcon(itemID: id, title: entry.title, color: (r, g, b), today: entry.today))
+            case .oversized:
+                guard let data = Self.png(120, 120, 120, size: 300) else { throw Failure.assertion("Oversized PNG encodes") }
+                try data.write(to: file)
+            case .garbage: try Data("not an image".utf8).write(to: file)
+            case .symlink:
+                let outside = folder.appendingPathComponent("outside-icon.png")
+                guard let data = Self.png(250, 250, 250) else { throw Failure.assertion("Symlink target PNG encodes") }
+                try data.write(to: outside)
+                try fm.createSymbolicLink(at: file, withDestinationURL: outside)
+            case .missing: break
+            }
+        }
+        guard let gamma = Self.png(Self.gammaColor.0, Self.gammaColor.1, Self.gammaColor.2) else { throw Failure.assertion("Gamma PNG encodes") }
+        try gamma.write(to: cache.appendingPathComponent(ArcIconImport.fileName(forItemID: Self.gammaItemID)))
+        return expected
+    }
+    /// The centre pixel of an icon as drawn in sRGB.
+    private static func centerColor(_ image: NSImage) -> (Int, Int, Int)? {
+        guard let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil), let space = CGColorSpace(name: CGColorSpace.sRGB) else { return nil }
+        let width = cg.width, height = cg.height
+        var pixels = [UInt8](repeating: 0, count: width * height * 4)
+        let drawn = pixels.withUnsafeMutableBytes { buffer -> Bool in
+            guard let context = CGContext(data: buffer.baseAddress, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width * 4,
+                                          space: space, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
+            context.draw(cg, in: CGRect(x: 0, y: 0, width: width, height: height)); return true
+        }
+        guard drawn else { return nil }
+        let i = ((height / 2) * width + width / 2) * 4
+        return (Int(pixels[i]), Int(pixels[i + 1]), Int(pixels[i + 2]))
+    }
+    private static func matches(_ a: (Int, Int, Int)?, _ b: (Int, Int, Int)) -> Bool {
+        guard let a else { return false }
+        return abs(a.0 - b.0) <= 28 && abs(a.1 - b.1) <= 28 && abs(a.2 - b.2) <= 28
+    }
+    private func tabID(forItem itemID: String, in session: BrowserSession) -> UUID? {
+        guard let link = session.importLinks?["arc:\(itemID)"], link.hasPrefix("tab:") else { return nil }
+        return UUID(uuidString: String(link.dropFirst(4)))
+    }
+    /// What the sidebar would draw for an imported tab (`favicon(forTabID:)`).
+    private func shownColor(_ itemID: String) -> (Int, Int, Int)? {
+        guard let id = tabID(forItem: itemID, in: controller.session), let image = controller.favicon(forTabID: id) else { return nil }
+        return Self.centerColor(image)
+    }
+    /// Every expected icon shows on its own tab, in its own colour.
+    private func requireIcons(_ expected: [ExpectedIcon], _ label: String) throws {
+        for icon in expected {
+            try check(Self.matches(shownColor(icon.itemID), icon.color), "\(label): \(icon.title) shows its own imported icon (\(String(describing: shownColor(icon.itemID))))")
+        }
+    }
+    private static func treeDigest(_ folder: URL) -> String? {
+        let fm = FileManager.default
+        guard let enumerator = fm.enumerator(at: folder, includingPropertiesForKeys: [.isRegularFileKey]) else { return nil }
+        var parts: [String] = []
+        for case let file as URL in enumerator where (try? file.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true {
+            let data = (try? Data(contentsOf: file)) ?? Data()
+            parts.append(String(file.path.dropFirst(folder.path.count)) + ":" + ImportedIconDiskCache.sha256(data))
+        }
+        return parts.sorted().joined(separator: "\n")
+    }
+
+    /// Relaunches this same app executable in a child mode on `folder` and returns its summary.
+    private func launchChild(_ mode: String, folder: URL, expected: Int) async throws -> [String: Any] {
+        guard !finished, activeChild == nil else { throw Failure.assertion("No relaunch starts while the fixture is finishing or another child runs") }
+        let child = Process()
+        child.executableURL = Bundle.main.executableURL
+        child.arguments = ["--arc-import-test", Self.childFlag, mode, folder.path, String(expected)]
+        let output = Pipe(), collected = ChildOutput()
+        output.fileHandleForReading.readabilityHandler = { handle in
+            let chunk = handle.availableData
+            if chunk.isEmpty { collected.end(); handle.readabilityHandler = nil } else { collected.append(chunk) }
+        }
+        child.standardOutput = output
+        try child.run()
+        activeChild = child
+        let deadline = Date().addingTimeInterval(90)
+        while child.isRunning && Date() < deadline && !finished { try await Task.sleep(for: .milliseconds(100)) }
+        // finish() owns the child once the fixture is finishing.
+        guard !finished else { throw Failure.assertion("\(mode) relaunch interrupted by fixture shutdown") }
+        if child.isRunning {
+            let stopped = await stopChild(child)
+            output.fileHandleForReading.readabilityHandler = nil
+            throw Failure.assertion("\(mode) relaunch timed out after 90 s; \(stopped ? "stopped and confirmed exited" : "could not be confirmed stopped")")
+        }
+        activeChild = nil
+        // Bounded drain: the pipe normally reaches EOF at exit; never wait more than 2 s for it.
+        for _ in 0..<40 where !collected.isEnded { try await Task.sleep(for: .milliseconds(50)) }
+        output.fileHandleForReading.readabilityHandler = nil
+        let text = collected.text
+        let lines = text.split(separator: "\n").map(String.init)
+        let pid = child.processIdentifier
+        guard let startIndex = lines.firstIndex(of: "ARC_ICON_CHILD_START mode=\(mode) pid=\(pid)"),
+              let summaryIndex = lines.lastIndex(where: { $0.hasPrefix("ARC_ICON_CHILD ") }), startIndex < summaryIndex,
+              let summary = try JSONSerialization.jsonObject(with: Data(lines[summaryIndex].dropFirst("ARC_ICON_CHILD ".count).utf8)) as? [String: Any] else {
+            throw Failure.assertion("\(mode) relaunch printed no start marker then summary (exit \(child.terminationStatus))")
+        }
+        try check(!child.isRunning && child.terminationReason == .exit && child.terminationStatus == 0 && summary["ok"] as? Bool == true,
+                  "\(mode) relaunch exited cleanly (exit \(child.terminationStatus), error: \(summary["error"] ?? "none"))")
+        try check(summary["pid"] as? Int == Int(pid) && pid != getpid() && summary["mode"] as? String == mode,
+                  "\(mode) summary comes from its own new process (pid \(pid))")
+        childPIDs.append(pid)
+        return summary
+    }
+    private func childColorsMatch(_ summary: [String: Any], _ expected: [ExpectedIcon]) -> Bool {
+        guard let colors = summary["colors"] as? [String: [Int]], colors.count == expected.count else { return false }
+        return expected.allSatisfy { icon in
+            guard let c = colors[icon.itemID], c.count == 3 else { return false }
+            return Self.matches((c[0], c[1], c[2]), icon.color)
+        }
+    }
+
+    /// Child side. `import`: temp controller whose session and icon cache live in `folder`
+    /// (website data and extension host stay private), commits the layout, waits for the
+    /// icons and their disk records. `reload`: a new process loading that session before
+    /// its view loads, so launch-time restore runs. `private`: a fully private controller
+    /// on the same session must restore nothing. Prints one ARC_ICON_CHILD line and exits.
+    private func runChild(mode: String, folder: URL, expected: Int) async {
+        print("ARC_ICON_CHILD_START mode=\(mode) pid=\(getpid())"); fflush(stdout)
+        var summary: [String: Any] = ["mode": mode, "pid": Int(getpid())]
+        do {
+            let sessionURL = folder.appendingPathComponent("session.json")
+            let browser = BrowserController(sessionURL: sessionURL, ephemeral: true)
+            controller = browser
+            // Create the extension host while still private, so it never uses persistent storage.
+            if #available(macOS 15.4, *) { _ = browser.browserExtensions }
+            if mode == "import" {
+                let start = BrowserTab(title: "Start", address: "orbit://newtab", space: 0)
+                browser.session = BrowserSession(tabs: [start], activeID: start.id)
+                browser.privateMode = false
+                browser.sessionWriter = SessionWriter(url: sessionURL)
+            } else {
+                browser.session = SessionFile.load(sessionURL)
+                if mode == "reload" { browser.privateMode = false }  // no writer: reload never saves
+            }
+            window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 600),
+                              styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+            window.title = "Bam Arc icon relaunch (\(mode))"; window.isReleasedWhenClosed = false
+            window.contentViewController = browser  // view load runs restoreImportedIcons
+            window.setContentSize(NSSize(width: 900, height: 600)); window.orderFront(nil)
+            switch mode {
+            case "import":
+                let source = try ArcImport.load(from: folder.appendingPathComponent(ArcImport.sourceFileName))
+                let message = await commitDirectly(source)
+                guard message == nil else { throw Failure.assertion("Child import failed: \(message!)") }
+                try await wait("Child icons installed", timeout: 20) { browser.importedTabIcons.count == expected }
+                let disk = browser.importedIconDisk
+                summary["disk_records"] = browser.importedIconQueue.sync { disk?.recordCount ?? -1 }
+            case "reload":
+                try await wait("Relaunch restores icons", timeout: 20) { browser.importedTabIcons.count == expected }
+            default:
+                try await Task.sleep(for: .milliseconds(1500))
+            }
+            var colors: [String: [Int]] = [:]
+            for (key, value) in browser.session.importLinks ?? [:] where key.hasPrefix("arc:") && value.hasPrefix("tab:") {
+                guard let id = UUID(uuidString: String(value.dropFirst(4))), let image = browser.favicon(forTabID: id),
+                      let c = Self.centerColor(image) else { continue }
+                colors[String(key.dropFirst(4))] = [c.0, c.1, c.2]
+            }
+            summary["icons"] = browser.importedTabIcons.count
+            summary["colors"] = colors
+            summary["imported_pages"] = importedTabIDs(browser.session).intersection(browser.browsers.keys).count
+            summary["ok"] = true
+        } catch {
+            summary["ok"] = false; summary["error"] = String(describing: error)
+        }
+        controller?.prepareToClose(); window?.orderOut(nil)
+        let data = (try? JSONSerialization.data(withJSONObject: summary, options: [.sortedKeys])) ?? Data("{\"ok\":false}".utf8)
+        print("ARC_ICON_CHILD " + (String(data: data, encoding: .utf8) ?? "{\"ok\":false}")); fflush(stdout)
+        exit(summary["ok"] as? Bool == true ? 0 : 1)
+    }
+
     func start() {
-        watchdog = Timer.scheduledTimer(withTimeInterval: 240, repeats: false) { [weak self] _ in
+        let arguments = CommandLine.arguments
+        if let index = arguments.firstIndex(of: Self.childFlag), arguments.count > index + 3, let expected = Int(arguments[index + 3]) {
+            // Off the main run loop, so a child whose main thread stalls still exits on its own.
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 75) {
+                print("ARC_ICON_CHILD {\"ok\":false,\"error\":\"child timeout\"}"); fflush(stdout); exit(1)
+            }
+            Task { @MainActor in await runChild(mode: arguments[index + 1], folder: URL(fileURLWithPath: arguments[index + 2], isDirectory: true), expected: expected) }
+            return
+        }
+        watchdog = Timer.scheduledTimer(withTimeInterval: Self.parentDeadline, repeats: false) { [weak self] _ in
             Task { @MainActor [weak self] in self?.finish(false, "Overall fixture timeout") }
+        }
+        // Last resort if the main thread stalls: exit without signalling anything. A raw PID
+        // could already belong to another process by now; each relaunch child enforces its own
+        // 75 s exit. The temporary folder is left in place rather than removed.
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + Self.parentHardDeadline) {
+            print("FAIL: Arc import — hard deadline reached with the main thread unresponsive; temporary folder left in place")
+            fflush(stdout); exit(1)
         }
         Task { @MainActor in
             do {
                 try await run()
-                finish(true, "\(checks) checks through the real Import from Arc sheet and callbacks: preview/cancel without mutation, options, locked controls while saving, verified success and dismissal, preview-equals-commit counts, one blank landing with and without Today, Spaces/emoji/profiles, nested folders, Splits, per-profile Favorites and overflow, dormancy, verified save and reload, repeat without duplication, unconfirmed and confirmed undo after failed saves, locked sheet during a slow write, incremental re-import")
+                finish(true, "\(checks) checks through the real Import from Arc sheet and callbacks: preview/cancel without mutation, options, locked controls while saving, verified success and dismissal, preview-equals-commit counts, one blank landing with and without Today, Spaces/emoji/profiles, nested folders, Splits, per-profile Favorites and overflow, dormancy, verified save and reload, repeat without duplication, unconfirmed and confirmed undo after failed saves, locked sheet during a slow write, incremental re-import; imported icons from original synthetic cache PNGs (per tab on a shared site, profile-scoped, invalid files fall back, none for previews/cancels/undone imports, no page or fetch) with persistence and isolation verified across relaunched processes")
             } catch { finish(false, String(describing: error)) }
         }
     }
@@ -156,7 +515,7 @@ import WebKit
         projects["childrenIds"] = children + [id]; items[index] = projects
         let gamma: [String: Any] = ["id": id, "childrenIds": [String](), "parentID": projectsID, "title": NSNull(),
                                     "createdAt": 0.0, "isUnread": false, "originatingDevice": "fixture",
-                                    "data": ["tab": ["savedURL": Self.gammaAddress, "savedTitle": "Gamma Board", "timeLastActiveAt": 0.0]]]
+                                    "data": ["tab": ["savedURL": gammaAddress, "savedTitle": "Gamma Board", "timeLastActiveAt": 0.0]]]
         items += [id, gamma]
         main["items"] = items; containers[1] = main; sidebar["containers"] = containers; root["sidebar"] = sidebar
         return try JSONSerialization.data(withJSONObject: root)
@@ -170,12 +529,26 @@ import WebKit
             throw Failure.assertion("Set BAM_TEST_URL to the runtime loopback fixture")
         }
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let (data, response) = try await URLSession.shared.data(from: remote)
+        let (served, response) = try await URLSession.shared.data(from: remote)
         try check((response as? HTTPURLResponse)?.statusCode == 200, "Loopback server serves the repository Arc fixture")
+        // Every imported address points at this listener, so "no page, no fetch" is observed, not assumed.
+        tripwirePort = try await tripwire.start()
+        gammaAddress = tripwireAddress(Self.gammaSourceAddress)
+        let data = try pointedAtTripwire(served)
         let fixture = directory.appendingPathComponent(ArcImport.sourceFileName)
         try data.write(to: fixture)
         let source = try ArcImport.load(from: fixture)
         try check(source.spaces.map(\.title) == ["Work", "Home", "Side"], "Repository fixture is the original synthetic layout")
+        try check(source.nodes.values.contains { if case .tab(let url, _) = $0.kind { return url.hasPrefix("http://127.0.0.1:\(tripwirePort)/") }; return false }
+                  && !source.nodes.values.contains { if case .tab(let url, _) = $0.kind { return url.hasPrefix("https://") }; return false },
+                  "Every web address in the layout copy points at the tripwire")
+        let icons = try writeIconCache(in: directory, source: source)
+        let iconTitles = Set(icons.map(\.title))
+        let rejectedIconItems = try Self.iconPlan.filter { !iconTitles.contains($0.title) }.map { entry -> (String, String) in
+            guard let node = source.nodes.values.first(where: { if case .tab(_, let saved) = $0.kind { return saved == entry.title }; return false })
+            else { throw Failure.assertion("Fixture has \(entry.title)") }
+            return (entry.title, node.id)
+        }
 
         // A browser with one existing loopback tab. Non-persistent stores; a
         // real writer on a temporary file, as TabResourceSmokeTest does.
@@ -219,6 +592,8 @@ import WebKit
         try await waitForDismissal(sheet, "Cancel")
         try check(try layout(controller.session) == originalLayout, "Cancelled import leaves the session unchanged")
         try check(SessionFile.load(sessionFile).importLinks == nil, "Cancelled import writes nothing imported")
+        try await Task.sleep(for: .milliseconds(300))
+        try check(controller.importedTabIcons.count == 0, "Previews and Cancel install no icons")
 
         // 2a. Commit through the sheet with Today excluded.
         sheet = try await presentImporter()
@@ -234,6 +609,29 @@ import WebKit
         try check(!controller.session.tabs.contains { importedTabIDs(controller.session).contains($0.id) && !$0.isSaved },
                   "No Today tab is imported when Today is excluded")
 
+        // Icons for exactly the tabs this import added, read from the synthetic cache after the save.
+        let firstIcons = icons.filter { !$0.today }
+        try await wait("Imported icons appear after the verified save") { controller.importedTabIcons.count == firstIcons.count }
+        try requireIcons(firstIcons, "Import without Today")
+        let sameSite = firstIcons.filter { ["Alpha Board", "Beta Board", "Alpha Board copy"].contains($0.title) }.compactMap { shownColor($0.itemID) }
+        try check(sameSite.count == 3 && !Self.matches(sameSite[0], sameSite[1]) && !Self.matches(sameSite[0], sameSite[2]) && !Self.matches(sameSite[1], sameSite[2]),
+                  "Three tabs on one site keep three distinct icons")
+        for (title, itemID) in rejectedIconItems {
+            try check(tabID(forItem: itemID, in: controller.session) != nil && shownColor(itemID) == nil,
+                      "\(title): an oversized, non-image, symlinked or missing cache file leaves the normal fallback")
+        }
+        if let mail = icons.first(where: { $0.title == "Home Mail" }), let mailID = tabID(forItem: mail.itemID, in: controller.session),
+           let mailTab = controller.session.tabs.first(where: { $0.id == mailID }) {
+            let address = mailTab.saved?.address ?? mailTab.address
+            try check(controller.importedTabIcons.image(for: mailID, address: address, profile: home.profileID) != nil
+                      && controller.importedTabIcons.image(for: mailID, address: address, profile: BrowserProfile.defaultID) == nil,
+                      "An imported icon belongs to the tab's login profile only")
+        } else { throw Failure.assertion("Home Mail was imported") }
+        try check(importedTabIDs(controller.session).isDisjoint(with: controller.browsers.keys), "Showing imported icons creates no page")
+        try check(tripwire.connections == 0, "Import and icon display made no connection to any imported address (\(tripwire.requestLines))")
+        try check(!FileManager.default.fileExists(atPath: directory.appendingPathComponent("ImportedIcons").path),
+                  "A controller that loaded as private keeps imported icons in memory only")
+
         // 2b. Re-import with Today: only Today tabs are added, again landing on one blank tab.
         sheet = try await presentImporter()
         sheet.load(fixture)
@@ -247,6 +645,8 @@ import WebKit
         try check(original.tabs.allSatisfy { tab in session.tabs.contains { $0.id == tab.id && $0.address == tab.address && $0.space == tab.space && $0.saved == tab.saved } },
                   "Existing tabs survive unchanged")
         try check(work.emoji == "💼" && home.emoji == "🏠" && side.emoji == "🧪", "Space emoji preserved")
+        try await wait("The Today re-import adds its own icons") { controller.importedTabIcons.count == icons.count }
+        try requireIcons(icons, "After the Today import")
 
         // Profiles: default Arc profile -> Bam default; custom -> its own new profile.
         try check(work.profileID == BrowserProfile.defaultID && side.profileID == BrowserProfile.defaultID, "Default Arc profile maps to Bam's default")
@@ -302,7 +702,7 @@ import WebKit
         let grown = directory.appendingPathComponent("Grown.json")
         try grownFixture(data).write(to: grown)
         let beforeFailureLayout = try layout(controller.session)
-        let address = Self.gammaAddress
+        let address = gammaAddress
         sheet = try await presentImporter()
         sheet.load(grown)
         try check(sheet.report?.importedTabs == 1 && sheet.report?.spaces.allSatisfy({ !$0.isNew }) == true,
@@ -341,6 +741,9 @@ import WebKit
         try check(FileManager.default.fileExists(atPath: sessionFile.path)
                   && (try layout(SessionFile.load(sessionFile))) == beforeFailureLayout, "The written undo matches the layout before the import")
         try check(try layout(controller.session) == beforeFailureLayout, "The window matches the saved undo")
+        try await Task.sleep(for: .milliseconds(400))
+        try check(controller.importedTabIcons.count == icons.count && tabID(forItem: Self.gammaItemID, in: controller.session) == nil,
+                  "Undone imports install no icons")
 
         // c) A slow but successful write keeps the sheet waiting, locked.
         controller.sessionWriter = SessionWriter(url: sessionFile) { snapshot, url in
@@ -360,6 +763,39 @@ import WebKit
         try check(merged.filter { $0 != "  Gamma Board" } == expected, "Existing imported layout is untouched")
         try check(SessionFile.load(sessionFile).tabs.filter { $0.address == address }.count == 1, "Retry reaches disk")
         try check(importedTabIDs(controller.session).isDisjoint(with: controller.browsers.keys), "Re-imported item is dormant too")
+        try await wait("The re-imported item gets its icon") { controller.importedTabIcons.count == icons.count + 1 }
+        try check(Self.matches(shownColor(Self.gammaItemID), Self.gammaColor), "The re-imported item shows its own icon")
+        try requireIcons(icons, "After the re-import")
+        try check(!FileManager.default.fileExists(atPath: directory.appendingPathComponent("ImportedIcons").path),
+                  "The private controller never wrote an icon cache")
+        try check(tripwire.connections == 0, "Every import, undo and retry made no connection to any imported address (\(tripwire.requestLines))")
+
+        // 6. Relaunch: fresh processes of this same app on an owned temporary session.
+        let persist = directory.appendingPathComponent("relaunch", isDirectory: true)
+        try FileManager.default.createDirectory(at: persist, withIntermediateDirectories: true)
+        try data.write(to: persist.appendingPathComponent(ArcImport.sourceFileName))
+        _ = try writeIconCache(in: persist, source: source)
+        let importChild = try await launchChild("import", folder: persist, expected: icons.count)
+        try check(importChild["icons"] as? Int == icons.count && importChild["disk_records"] as? Int == icons.count && childColorsMatch(importChild, icons)
+                  && importChild["imported_pages"] as? Int == 0, "Import child shows and saves exactly the valid icons, creating no page")
+        let cacheFolder = persist.appendingPathComponent("ImportedIcons", isDirectory: true)
+        try check(FileManager.default.fileExists(atPath: cacheFolder.appendingPathComponent("index.json").path), "Icons persist in the session's own cache")
+        let reloadChild = try await launchChild("reload", folder: persist, expected: icons.count)
+        try check(reloadChild["icons"] as? Int == icons.count && childColorsMatch(reloadChild, icons) && reloadChild["imported_pages"] as? Int == 0,
+                  "A relaunched process restores the same icons for the same tabs and profiles, creating no page")
+        let digest = Self.treeDigest(cacheFolder)
+        let isolated = try await launchChild("private", folder: persist, expected: 0)
+        try check(isolated["icons"] as? Int == 0 && (isolated["colors"] as? [String: [Int]])?.isEmpty == true,
+                  "A private relaunch on the same session shows no saved icons")
+        try check(digest != nil && Self.treeDigest(cacheFolder) == digest, "A private relaunch leaves the icon cache unchanged")
+        try check(Set(childPIDs).count == 3 && !childPIDs.contains(getpid()), "Three distinct relaunched processes, none of them this one")
+        try check(tripwire.connections == 0, "No relaunched process connected to any imported address (\(tripwire.requestLines))")
+
+        // The tripwire is live: a deliberate request is seen, so zero above means no traffic.
+        let probe = URL(string: "http://127.0.0.1:\(tripwirePort)/tripwire-self-test")!
+        let (_, probeResponse) = try await URLSession.shared.data(from: probe)
+        try check((probeResponse as? HTTPURLResponse)?.statusCode == 404, "Tripwire answers a deliberate request")
+        try await wait("Tripwire records the deliberate request") { tripwire.connections == 1 && tripwire.requestLines.contains { $0.contains("/tripwire-self-test") } }
     }
 
     private func finish(_ success: Bool, _ message: String) {
@@ -368,8 +804,22 @@ import WebKit
         if let sheet = importer?.window, let parent = sheet.sheetParent { parent.endSheet(sheet) }
         controller?.sessionWriter = nil; controller?.privateMode = true
         controller?.prepareToClose(); window?.orderOut(nil)
-        try? FileManager.default.removeItem(at: directory)
-        print("\(success ? "PASS" : "FAIL"): Arc import — \(message)"); fflush(stdout)
-        exit(success ? 0 : 1)
+        tripwire.stop()
+        // Any owned relaunch child is stopped and confirmed exited before its folder is removed.
+        Task { @MainActor in
+            var passed = success, detail = message, removeFolder = true
+            if let child = activeChild {
+                let pid = child.processIdentifier
+                if await stopChild(child) {
+                    detail += "; stopped owned relaunch child \(pid) and confirmed it exited before cleanup"
+                } else {
+                    passed = false; removeFolder = false
+                    detail += "; owned relaunch child \(pid) could not be confirmed stopped, so its temporary folder was kept"
+                }
+            }
+            if removeFolder { try? FileManager.default.removeItem(at: directory) }
+            print("\(passed ? "PASS" : "FAIL"): Arc import — \(detail)"); fflush(stdout)
+            exit(passed ? 0 : 1)
+        }
     }
 }
