@@ -248,17 +248,68 @@ import AppKit
             let xs = (0...5).map { ArkRowLayout(width: width, height: 34, depth: $0, listMaxDepth: 5, isFolder: false, showsClose: true).title.minX }
             require(zip(xs, xs.dropFirst()).allSatisfy { $1 - $0 >= 5 }, "Every folder level indents further at \(width)pt: \(xs)")
             let deepest = ArkRowLayout(width: width, height: 34, depth: 5, listMaxDepth: 5, isFolder: false, showsClose: true)
-            require(deepest.title.width >= ArkMetrics.minimumTitleWidth - 0.5, "Deepest title keeps its minimum with the close button showing at \(width)pt")
+            require(deepest.visibleTitleEnd - deepest.title.minX >= ArkMetrics.minimumTitleWidth - 0.5,
+                    "Deepest title keeps its minimum readable width with the close button showing at \(width)pt")
         }
-        // A hidden close button gives its room back to the title.
+        // Trailing fade: the title frame is the same with or without the close
+        // button (no glyph moves on hover); only the visible end moves before it.
         let quiet = ArkRowLayout(width: 240, height: 34, depth: 1, listMaxDepth: 1, isFolder: false, showsClose: false)
         let busy = ArkRowLayout(width: 240, height: 34, depth: 1, listMaxDepth: 1, isFolder: false, showsClose: true)
-        require(quiet.title.width >= busy.title.width + 20 && quiet.title.maxX <= 240 - ArkMetrics.trailingGap + 0.5,
-                "Titles run to the edge when the close button is hidden: \(quiet.title.width) vs \(busy.title.width)")
+        require(quiet.title == busy.title && quiet.title.maxX <= 240 - ArkMetrics.trailingGap + 0.5,
+                "Showing the close button doesn't change the title frame: \(quiet.title) vs \(busy.title)")
+        require(quiet.visibleTitleEnd == quiet.title.maxX && busy.visibleTitleEnd <= busy.close.minX - 4 && busy.visibleTitleEnd < quiet.visibleTitleEnd - 20,
+                "The readable end moves before the close button only while it shows")
+        let folderLayout = ArkRowLayout(width: 240, height: 34, depth: 1, listMaxDepth: 1, isFolder: true, showsClose: true)
+        require(folderLayout.title.maxX <= folderLayout.chevron.minX && folderLayout.visibleTitleEnd == folderLayout.title.maxX,
+                "Folder titles stay before the chevron")
+        require(ArkTitleFade.stops(textWidth: 80, frameWidth: 180, visibleWidth: 120) == nil, "Text that fits gets no fade")
+        let stops = ArkTitleFade.stops(textWidth: 300, frameWidth: 180, visibleWidth: 120)!
+        require(abs(stops.end * 180 - 120) < 0.01 && abs((stops.end - stops.start) * 180 - ArkTitleFade.width) < 0.01
+                && ArkTitleFade.width >= 16 && ArkTitleFade.width <= 20,
+                "A long title fades over 16–20pt ending exactly at the readable end")
         let leafNow = row(table(in: 0), 12)
         let leafTitle = descendants(leafNow).compactMap { $0 as? NSTextField }.first { $0.stringValue == "Deep leaf page title" }!
         let closeShown = descendants(leafNow).first { !$0.isHidden && ["Close tab", "Unload tab"].contains($0.accessibilityLabel() ?? "") }
-        require(closeShown != nil && leafTitle.frame.maxX <= closeShown!.frame.minX, "The selected row's title stops before its close button")
+        let leafMask = leafTitle.layer?.mask as? CAGradientLayer
+        let fadeEndX = leafMask.flatMap { $0.locations?[2] }.map { leafTitle.frame.minX + CGFloat($0.doubleValue) * leafTitle.bounds.width }
+        require(closeShown != nil && leafTitle.lineBreakMode == .byClipping && fadeEndX.map { $0 <= closeShown!.frame.minX } == true,
+                "On the selected row the long title has faded out before its close button (no ellipsis, no overlap)")
+        require(leafNow.accessibilityLabel() == "Deep leaf page title" && leafNow.toolTip?.hasPrefix("Deep leaf page title") == true,
+                "The full title stays in the accessibility label and tooltip")
+        // Hover on a long unselected title: glyphs stay put; only the fade moves.
+        let hoverRow = row(table(in: 0), 11)
+        let hoverTitle = descendants(hoverRow).compactMap { $0 as? NSTextField }.first { $0.stringValue.hasPrefix("Folder level 11") }!
+        @MainActor func fadeEnd(_ title: NSTextField) -> CGFloat? {
+            ((title.layer?.mask as? CAGradientLayer)?.locations?[2]).map { title.frame.minX + CGFloat($0.doubleValue) * title.bounds.width }
+        }
+        let restingFrame = hoverTitle.frame, restingEnd = fadeEnd(hoverTitle)
+        hoverRow.mouseEntered(with: NSEvent.enterExitEvent(with: .mouseEntered, location: .zero, modifierFlags: [], timestamp: 0,
+                                                         windowNumber: window.windowNumber, context: nil, eventNumber: 0, trackingNumber: 0, userData: nil)!)
+        hoverRow.layoutSubtreeIfNeeded()
+        require(hoverTitle.frame == restingFrame && fadeEnd(hoverTitle) == restingEnd,
+                "Hovering a folder (no close button) changes nothing about its title")
+        hoverRow.mouseExited(with: NSEvent.enterExitEvent(with: .mouseExited, location: .zero, modifierFlags: [], timestamp: 0,
+                                                        windowNumber: window.windowNumber, context: nil, eventNumber: 0, trackingNumber: 0, userData: nil)!)
+        let longID = UUID()
+        update(0, nested.dropLast() + [SidebarTabItem(id: longID, title: "A rather long unselected page title that cannot fit", subtitle: "", symbol: "globe",
+                                                      isPinned: true, isActive: false, depth: 1, parentFolderID: folderIDs[0], treeDepth: 12)])
+        let longRow = row(table(in: 0), 12)
+        require(longRow.identifier?.rawValue == "tab-row-\(longID.uuidString)", "The long-title row is materialized")
+        let longTitle = descendants(longRow).compactMap { $0 as? NSTextField }.first { $0.stringValue.hasPrefix("A rather long") }!
+        longRow.layoutSubtreeIfNeeded()
+        let longFrame = longTitle.frame, longEnd = fadeEnd(longTitle)
+        longRow.mouseEntered(with: NSEvent.enterExitEvent(with: .mouseEntered, location: .zero, modifierFlags: [], timestamp: 0,
+                                                        windowNumber: window.windowNumber, context: nil, eventNumber: 0, trackingNumber: 0, userData: nil)!)
+        longRow.layoutSubtreeIfNeeded()
+        let hoverClose = descendants(longRow).first { !$0.isHidden && $0.accessibilityLabel() == "Unload tab" }
+        require(longTitle.frame == longFrame && hoverClose != nil, "Hover shows the close button without moving the title's glyphs")
+        require(longEnd != nil && fadeEnd(longTitle).map { $0 <= hoverClose!.frame.minX && $0 < longEnd! } == true,
+                "On hover the fade moves left to end before the close button")
+        longRow.mouseExited(with: NSEvent.enterExitEvent(with: .mouseExited, location: .zero, modifierFlags: [], timestamp: 0,
+                                                       windowNumber: window.windowNumber, context: nil, eventNumber: 0, trackingNumber: 0, userData: nil)!)
+        longRow.layoutSubtreeIfNeeded()
+        require(longTitle.frame == longFrame && fadeEnd(longTitle) == longEnd, "Leaving hover restores the resting fade")
+        update(0, nested)
 
         // Saved rows that haven't been opened (every fresh import) read at full
         // contrast; only memory-slept pages are quieted, and only slightly.
