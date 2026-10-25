@@ -3,10 +3,18 @@ import AppKit
 /// Register before acquiring: a second launch can request focus while the first
 /// is still constructing its window. Delivery waits for the main run loop.
 @MainActor final class ProfileInstance: NSObject {
-    private static let activation = Notification.Name("com.ari.orbitprototype.activateProfile")
-    private static let acknowledgment = Notification.Name("com.ari.orbitprototype.profileLaunchAccepted")
+    /// Wire format shared by every Bam version that may own or duplicate a
+    /// profile. Older duplicates omit `launch` (and older ones `request`).
+    enum Wire {
+        static let activation = Notification.Name("com.ari.orbitprototype.activateProfile")
+        static let acknowledgment = Notification.Name("com.ari.orbitprototype.profileLaunchAccepted")
+        static let launch = "launch", request = "request", urls = "urls"
+    }
     private let lock = ProfileLock()
     private var identity: String?
+    /// Tags every message this process sends as a duplicate, so the owner can
+    /// tell one launch's focus and URL messages from another launch's.
+    private let launch = UUID()
     var onActivation: (() -> Void)?
     var onOpenURLs: (([URL]) -> Void)?
     private struct Request {
@@ -14,7 +22,7 @@ import AppKit
         let deadline: Date
     }
     private var requests: [UUID: Request] = [:]
-    private var accepted: [UUID: Date] = [:]
+    private var ledger = ProfileHandoffLedger()
     private var timer: Timer?
     private var settleAfter = Date.distantFuture
     private var completed: (() -> Void)?
@@ -31,35 +39,43 @@ import AppKit
         let identity = ProfileLock.identity(for: directory).path
         self.identity = identity
         DistributedNotificationCenter.default().addObserver(self, selector: #selector(activateOwner),
-            name: Self.activation, object: identity, suspensionBehavior: .deliverImmediately)
+            name: Wire.activation, object: identity, suspensionBehavior: .deliverImmediately)
         DistributedNotificationCenter.default().addObserver(self, selector: #selector(acknowledge),
-            name: Self.acknowledgment, object: identity, suspensionBehavior: .deliverImmediately)
+            name: Wire.acknowledgment, object: identity, suspensionBehavior: .deliverImmediately)
         switch try lock.acquire(in: directory) {
         case .acquired: return true
         case .occupied:
-            DistributedNotificationCenter.default().postNotificationName(Self.activation,
-                object: identity, userInfo: nil, deliverImmediately: true)
+            // Unacknowledged early focus, honored by every owner version.
+            // Owners that correlate launches apply it at most once and never
+            // after this launch's URLs have opened.
+            DistributedNotificationCenter.default().postNotificationName(Wire.activation,
+                object: identity, userInfo: [Wire.launch: launch.uuidString], deliverImmediately: true)
             return false
         }
     }
 
     @objc private func activateOwner(_ notification: Notification) {
         guard lock.isHeld, notification.object as? String == identity else { return }
-        guard let rawID = notification.userInfo?["request"] as? String,
-              let requestID = UUID(uuidString: rawID) else { onActivation?(); return }
-        guard let rawURLs = notification.userInfo?["urls"] as? [String] else { return }
+        let info = notification.userInfo
+        let launch = (info?[Wire.launch] as? String).flatMap(UUID.init(uuidString:))
+        let rawID = info?[Wire.request] as? String
+        let requestID = rawID.flatMap(UUID.init(uuidString:))
+        var urls: [URL] = []
+        if requestID != nil {
+            guard let rawURLs = info?[Wire.urls] as? [String] else { return }
+            urls = rawURLs.compactMap(URL.init(string:))
+            guard urls.count == rawURLs.count else { return }
+        }
         // Retries retain the same request ID, while two deliberate opens of
         // the same URL are separate requests and must both be delivered.
-        accepted = accepted.filter { $0.value > Date() }
-        if accepted[requestID] == nil {
-            let urls = rawURLs.compactMap(URL.init(string:))
-            guard urls.count == rawURLs.count, urls.isEmpty || onOpenURLs != nil else { return }
-            accepted[requestID] = Date().addingTimeInterval(60)
-            if !urls.isEmpty { onOpenURLs?(urls) }
-            onActivation?()
-        }
-        DistributedNotificationCenter.default().postNotificationName(Self.acknowledgment,
-            object: identity, userInfo: ["request": rawID], deliverImmediately: true)
+        let decision = ledger.receive(launch: launch, request: requestID, urls: urls, canDeliver: onOpenURLs != nil)
+        // Front the owner first: the URL's Little Bam must end up key and
+        // in front, not behind the main window.
+        if decision.activate { onActivation?() }
+        if !decision.deliver.isEmpty { onOpenURLs?(decision.deliver) }
+        guard decision.acknowledge, let rawID else { return }
+        DistributedNotificationCenter.default().postNotificationName(Wire.acknowledgment,
+            object: identity, userInfo: [Wire.request: rawID], deliverImmediately: true)
     }
 
     /// Keep the duplicate's event loop alive for initial/late launch Apple
@@ -87,13 +103,14 @@ import AppKit
 
     private func send(_ id: UUID) {
         guard let request = requests[id] else { return }
-        DistributedNotificationCenter.default().postNotificationName(Self.activation,
-            object: identity, userInfo: ["request": id.uuidString, "urls": request.urls], deliverImmediately: true)
+        DistributedNotificationCenter.default().postNotificationName(Wire.activation,
+            object: identity, userInfo: [Wire.launch: launch.uuidString, Wire.request: id.uuidString, Wire.urls: request.urls],
+            deliverImmediately: true)
     }
 
     @objc private func acknowledge(_ notification: Notification) {
         guard !lock.isHeld, notification.object as? String == identity,
-              let id = notification.userInfo?["request"] as? String,
+              let id = notification.userInfo?[Wire.request] as? String,
               let uuid = UUID(uuidString: id) else { return }
         requests.removeValue(forKey: uuid)
     }

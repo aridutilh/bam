@@ -36,6 +36,30 @@ import AppKit
         }
         require(false, "Owner did not restore its key window (notifications: \(activations), active: \(NSApp.isActive), key: \(window.isKeyWindow))")
     }
+    /// Mirrors LittleBamController.show: a URL opens its own window and
+    /// makes it key, synchronously, from the owner's URL delivery.
+    func openLittleBam(_ url: URL) -> NSWindow {
+        let little = NSWindow(contentRect: NSRect(x: 160, y: 160, width: 360, height: 220),
+                              styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
+        little.title = "Little Bam fixture — \(url.host ?? "")"
+        little.isReleasedWhenClosed = false
+        little.makeKeyAndOrderFront(nil)
+        return little
+    }
+    func littleBamIsFront(_ little: NSWindow?) -> Bool {
+        guard let little else { return false }
+        return NSApp.isActive && !NSApp.isHidden && NSApp.keyWindow === little && !window.isKeyWindow
+            && NSApp.orderedWindows.first === little
+    }
+    /// The handed-off URL's window must become key and front, and stay so
+    /// after any delayed message of that launch could have arrived.
+    func requireLittleBamFront(_ little: NSWindow?, _ message: String) async throws {
+        let deadline = Date().addingTimeInterval(5)
+        while !littleBamIsFront(little) && Date() < deadline { try await Task.sleep(for: .milliseconds(20)) }
+        require(littleBamIsFront(little), "\(message) (active: \(NSApp.isActive), key: \(NSApp.keyWindow?.title ?? "none"), front: \(NSApp.orderedWindows.first?.title ?? "none"))")
+        try await Task.sleep(for: .milliseconds(700))
+        require(littleBamIsFront(little), "\(message), and stays in front (key: \(NSApp.keyWindow?.title ?? "none"))")
+    }
     func run() async throws {
         instance.onActivation = { [weak self] in
             guard let self else { return }
@@ -81,6 +105,7 @@ import AppKit
         require(activations == 4, "Unrelated preview does not focus the persistent owner")
         let ownerURLs = ExternalURLDelivery()
         var opened: [URL] = []
+        var littles: [NSWindow] = []
         instance.onOpenURLs = { urls in
             // The owner is briefly busy, forcing the duplicate to resend the
             // same request before it can receive an acknowledgment.
@@ -89,19 +114,71 @@ import AppKit
         }
         require(try await launch("--url-launch", directory: base) == 0, "Duplicate waits for acknowledged early and late URL delivery")
         require(opened.isEmpty, "Owner may accept URLs before its browser is ready")
-        ownerURLs.connect { opened.append(contentsOf: $0) }
+        ownerURLs.connect { [weak self] urls in
+            opened.append(contentsOf: urls)
+            for url in urls { if let little = self?.openLittleBam(url) { littles.append(little) } }
+        }
         try await Task.sleep(for: .milliseconds(200))
         require(opened.count == 2, "Retries must not open extra windows")
         require(opened.filter { $0.absoluteString == "https://early.invalid/launch" }.count == 1, "Early launch URL opens exactly once")
         require(opened.filter { $0.absoluteString == "https://late.invalid/launch" }.count == 1, "Late launch URL opens exactly once")
+        try await requireLittleBamFront(littles.last, "URLs queued until the browser is ready open Little Bam in front")
+        // Owner in the background: activation must precede URL delivery so
+        // Little Bam, not the main window, ends up key and in front.
+        NSApp.hide(nil)
+        try await Task.sleep(for: .milliseconds(200))
         require(try await launch("--url-launch", directory: base) == 0, "A later intentional launch may open the same URLs")
         require(opened.count == 4, "Intentional repeat is not mistaken for a transport retry")
         require(opened.filter { $0.absoluteString == "https://early.invalid/launch" }.count == 2, "Same URL in distinct requests opens once per request")
+        try await requireLittleBamFront(littles.last, "Early and late URLs handed to a hidden owner open Little Bam in front of the main window")
+        // The same launch's focus-only messages arrive after its URL opened.
+        NSApp.hide(nil)
+        try await Task.sleep(for: .milliseconds(200))
+        require(try await launch("--reordered-focus", directory: base) == 0, "Reordered same-launch messages are acknowledged")
+        require(opened.count == 5 && opened.last?.absoluteString == "https://reordered.invalid/launch", "Reordered launch URL opens exactly once")
+        try await requireLittleBamFront(littles.last, "Delayed same-launch focus messages cannot front the main window over Little Bam")
+        let beforeIndependent = activations
+        require(try await launch("--contend", directory: base) == 73, "Independent focus-only launch still stands down")
+        try await waitForActivation(beforeIndependent + 1)
+        require(window.isKeyWindow && NSApp.orderedWindows.first === window, "Independent later launch fronts the main window over Little Bam")
         instance.onOpenURLs = nil
         require(try await launch("--url-launch", directory: base) == 3, "Unacknowledged URLs fail instead of silently exiting successfully")
-        print("PASS: Profile activation — \(checks) startup, focus, canceled quit, preview isolation and acknowledged exactly-once early/late URL checks")
+        print("PASS: Profile activation — \(checks) startup, focus, canceled quit, preview isolation and acknowledged exactly-once early/late URL and Little Bam front/key-window checks")
         finish(0)
     }
+}
+
+/// A duplicate whose URL request reaches the owner before its focus-only
+/// messages, which then arrive (and are retried) under the same launch ID.
+@MainActor func reorderedFocusLaunch(directory: URL) -> Never {
+    typealias Wire = ProfileInstance.Wire
+    final class Acknowledged: @unchecked Sendable { var ids: Set<String> = [] } // Main run loop only.
+    let identity = ProfileLock.identity(for: directory).path
+    let launch = UUID().uuidString
+    let center = DistributedNotificationCenter.default()
+    let acknowledged = Acknowledged()
+    let observer = center.addObserver(forName: Wire.acknowledgment, object: identity, queue: nil) { notification in
+        if let id = notification.userInfo?[Wire.request] as? String { acknowledged.ids.insert(id) }
+    }
+    func post(_ info: [String: Any]) {
+        center.postNotificationName(Wire.activation, object: identity, userInfo: info, deliverImmediately: true)
+    }
+    func deliver(_ info: [String: Any], before: () -> Void = {}) {
+        let id = info[Wire.request] as! String
+        let deadline = Date().addingTimeInterval(5)
+        before()
+        while !acknowledged.ids.contains(id) {
+            guard Date() < deadline else { exit(3) }
+            post(info)
+            RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        }
+    }
+    deliver([Wire.launch: launch, Wire.request: UUID().uuidString, Wire.urls: ["https://reordered.invalid/launch"]])
+    deliver([Wire.launch: launch, Wire.request: UUID().uuidString, Wire.urls: [String]()],
+            before: { post([Wire.launch: launch]) })
+    RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+    center.removeObserver(observer)
+    exit(0)
 }
 
 @main enum ProfileInstanceTests {
@@ -109,6 +186,9 @@ import AppKit
         if CommandLine.arguments.count > 2 {
             let instance = ProfileInstance()
             let urls = ExternalURLDelivery()
+            if CommandLine.arguments[1] == "--reordered-focus" {
+                reorderedFocusLaunch(directory: URL(fileURLWithPath: CommandLine.arguments[2]))
+            }
             if CommandLine.arguments[1] == "--url-launch" {
                 urls.receive([URL(string: "https://early.invalid/launch")!])
             }

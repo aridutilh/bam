@@ -3,6 +3,7 @@
 ## 0.21.3 unreleased draft — build 44
 
 - Preserve early and late external URL-open requests in duplicate launches through an acknowledged, retryable handoff to the owning profile. Deduplicate transport retries without suppressing intentional repeated opens.
+- Keep a handed-off URL's Little Bam key and in front: the owner now activates before opening the URL, and tags each duplicate launch's messages with a launch ID so that launch's late or retried focus-only messages cannot bring the main window back over Little Bam. Separate later launches still focus the main window.
 - Consolidate all branch testing into `/Applications/Bam Preview.app`, with `com.ari.bam.preview` and the stable `BamPreview` data namespace. Safely replace older preview bundles, refuse live/unrelated/symlink destinations, serialize installers and roll back failures. Preserve legacy preview data without importing it; never replace the installed Bam through these scripts.
 
 - Restore original Bam construction artwork from the unshipped preview draft. Fresh previews and the isolated persistent preview use it; normal builds retain the production icon. Generate both ICNS packages at build time from authored PNG masters.
