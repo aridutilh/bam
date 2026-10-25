@@ -592,7 +592,7 @@ struct BrowserExtensionPermissionReview {
         // This changes no grants or vendor scripts and never touches signed Safari bundles.
         if parsed == nil, record.safariBundle == nil,
            try ExtensionContentScriptPreparation.refreshBamAdapters(package: packageURL(record)) > 0 {
-            let note = "Updated Bam's content adapter for native WebKit select-picker state. Extension scripts are unchanged."
+            let note = "Updated Bam's content-script adapter (select-picker state, idle callbacks). Extension scripts are unchanged."
             record.compatibilityNote = [record.compatibilityNote, note].compactMap { $0 }.joined(separator: " ")
             if let index = records.firstIndex(where: { $0.id == id }) { records[index].compatibilityNote = record.compatibilityNote; try persist() }
         }
