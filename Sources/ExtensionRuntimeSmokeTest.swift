@@ -38,6 +38,12 @@ import WebKit
                 guard let page = components.url else {
                     throw ExtensionSmokeTest.Failure(description: "Could not construct the local extension test page URL")
                 }
+                if CommandLine.arguments.contains("--extension-favicon-probe") {
+                    // Measurement only: complete negative results are not an Extensions suite pass.
+                    // Its native deadline and cleanup precede the outer runner watchdog.
+                    let probe = await ExtensionFaviconProbe.run(pageURL: page)
+                    fflush(stdout); exit(probe.complete ? 0 : 2)
+                }
                 if CommandLine.arguments.contains("--extension-identity-probe") {
                     // Measurement only, not a suite: the probe owns its 45 s budget, output, cleanup and exit.
                     self.watchdog?.invalidate(); self.watchdog = nil
