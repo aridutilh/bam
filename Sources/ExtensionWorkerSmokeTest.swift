@@ -115,6 +115,7 @@ import WebKit
               };
               return {order:globalThis.fixtureOrder, hasDocument:typeof document !== 'undefined', originalURL:globalThis.fixtureOriginalURL,
                 workerURL:location.href, starts:await started, events:events.slice(), wasm:await wasmResult, disposal,
+                adapterVersion: globalThis.__bamCompatibility?.version || 'missing',
                 idle:await api.idle.queryState(15), permission:await api.notifications.getPermissionLevel()};
             });
             """#
@@ -318,6 +319,41 @@ import WebKit
         let stale = await runtimeA.compatibility.receiveNativeMessage(["kind": "request", "method": "idle.queryState"], context: contextA)
         try check(stale.1 != nil, "A replaced worker context retained native bridge authority")
         reloadedA.action(for: nil)?.closePopup(); reloadedB.action(for: nil)?.closePopup()
+
+        // An install prepared by an earlier Bam: after a relaunch (no review) the newer Bam
+        // rewrites only its own worker adapter; storage, grants and vendor scripts stay.
+        let recordB = { (host: BrowserExtensions) in host.records.first { $0.id == idB } }
+        guard let grantsBefore = recordB(host) else { throw Failure(description: "Missing module worker record") }
+        host.shutdown()
+        let folderB = host.storageURL.appendingPathComponent(idB.uuidString, isDirectory: true)
+        let packageB = folderB.appendingPathComponent("package", isDirectory: true), backupB = folderB.appendingPathComponent("original-manifest.json")
+        let manifestB = try JSONSerialization.jsonObject(with: Data(contentsOf: packageB.appendingPathComponent("manifest.json"))) as? [String: Any] ?? [:]
+        try check(try ExtensionServiceWorkerPreparation.refreshAdapter(package: packageB, originalManifestURL: backupB,
+                  adapterSource: ExtensionCompatibility.workerScript(manifest: manifestB, browserVersion: "0.0.1-older")), "Could not age the installed worker adapter")
+        let markerB = manifestB[ExtensionServiceWorkerPreparation.markerKey] as? [String: Any] ?? [:]
+        let vendorB = try Data(contentsOf: packageB.appendingPathComponent(markerB["source"] as? String ?? "missing"))
+        let relaunched = BrowserExtensions(storageURL: fixtureRoot.appendingPathComponent("registry", isDirectory: true))
+        defer { relaunched.shutdown() }
+        relaunched.permissionPrompt = { _ in false }
+        let configB2 = WKWebViewConfiguration(); configB2.websiteDataStore = configB.websiteDataStore
+        relaunched.configure(configB2, profileID: profileB)
+        await relaunched.ready(profileID: profileB)
+        guard let contextB2 = relaunched.context(for: idB), let popupB2 = contextB2.action(for: nil)?.popupWebView, let after = recordB(relaunched) else {
+            throw Failure(description: "The relaunched host did not load the module worker: \(relaunched.errors)")
+        }
+        popupB2.frame = frame
+        var refreshedProbe: [String: Any]?
+        try await wait("The relaunched worker did not answer") { refreshedProbe = await result(popupB2); return (refreshedProbe?["starts"] as? Int ?? 0) >= 3 }
+        try check(refreshedProbe?["adapterVersion"] as? String == BrowserExtensions.browserVersion,
+                  "The relaunched worker did not run the refreshed adapter: \(refreshedProbe?["adapterVersion"] ?? "nil")")
+        try check(after.permissions == grantsBefore.permissions && after.patterns == grantsBefore.patterns && after.compatibilityGrants == grantsBefore.compatibilityGrants &&
+                  after.compatibilityNote?.contains("Updated Bam's service-worker compatibility adapter.") == true,
+                  "Adapter refresh changed grants or was not disclosed")
+        try check(try Data(contentsOf: packageB.appendingPathComponent(markerB["source"] as? String ?? "missing")) == vendorB &&
+                  ExtensionServiceWorkerPreparation.prepare(package: packageB, originalManifestURL: backupB,
+                    adapterSource: ExtensionCompatibility.workerScript(manifest: manifestB, browserVersion: BrowserExtensions.browserVersion)) == nil,
+                  "Adapter refresh changed vendor bytes or left an unverifiable preparation")
+        contextB2.action(for: nil)?.closePopup()
         return checks
         }
         do {

@@ -198,6 +198,87 @@ import AppKit
         sidebar.updateExtensions([]); sidebar.layoutSubtreeIfNeeded()
         require(descendants(sidebar).allSatisfy { $0.identifier?.rawValue.hasPrefix("extension-action-") != true }, "Removing or switching profiles clears old actions")
         require(descendants(sidebar).first { $0.identifier?.rawValue == "extension-library" }?.isHidden == false, "Empty profiles offer Add extensions directly")
+
+        // Folder rows: deep nesting keeps titles readable at the narrowest width,
+        // and pressing a folder toggles it instead of selecting a page.
+        sidebar.setFrameSize(NSSize(width: 164, height: 720))
+        let folderIDs = (0..<12).map { _ in UUID() }, leaf = UUID()
+        var toggled: [UUID] = []
+        sidebar.onToggleFolder = { toggled.append($0) }
+        let nested = folderIDs.enumerated().map { depth, id in
+            SidebarTabItem(id: id, title: "Folder level \(depth) with a long name", subtitle: "", symbol: "folder", isPinned: true,
+                           isActive: false, depth: depth, isFolder: true, isExpanded: true)
+        } + [SidebarTabItem(id: leaf, title: "Deep leaf page title", subtitle: "https://deep.invalid", symbol: "globe",
+                            isPinned: true, isActive: true, depth: 12, parentFolderID: folderIDs.last)]
+        update(0, nested)
+        let deepTable = table(in: 0)
+        let deepRow = row(deepTable, 12)
+        let deepTitle = descendants(deepRow).compactMap { $0 as? NSTextField }.first { $0.stringValue == "Deep leaf page title" }!
+        require(deepTitle.frame.width >= 60 && deepTitle.frame.minX > 36 && deepTitle.frame.maxX <= deepRow.bounds.width,
+                "Depth-12 title stays readable and still indented at 164pt: \(deepTitle.frame)")
+        let narrowIndent = deepTitle.frame.minX
+        sidebar.setFrameSize(NSSize(width: 228, height: 720)); update(0, nested)
+        let wideTitle = descendants(row(table(in: 0), 12)).compactMap { $0 as? NSTextField }.first { $0.stringValue == "Deep leaf page title" }!
+        require(wideTitle.frame.width >= 64 && wideTitle.frame.minX > narrowIndent, "Wider sidebars restore deeper indentation: \(wideTitle.frame)")
+        let folderRow = row(deepTable, 0)
+        selected.removeAll()
+        _ = folderRow.accessibilityPerformPress()
+        require(toggled == [folderIDs[0]] && selected.isEmpty, "Pressing a folder toggles it and selects nothing")
+        require(folderRow.isAccessibilityDisclosed() && folderRow.isAccessibilityExpanded() && (folderRow.accessibilityValue() as? NSNumber)?.intValue == 1
+                && folderRow.accessibilityRole() == .disclosureTriangle && folderRow.accessibilityLabel()?.hasPrefix("Folder level 0") == true,
+                "Folder is one disclosure control with its name and expanded state")
+        require(descendants(folderRow).filter { $0 !== folderRow && $0.isAccessibilityElement() && !($0 is NSButton) }.isEmpty,
+                "Folder label and icon are not separate accessibility elements")
+        let leafRow = row(table(in: 0), 12)
+        require(leafRow.accessibilityRole() == .button && !leafRow.isAccessibilityDisclosed(), "Tab rows stay buttons without disclosure state")
+        require(deepTable.delegate?.tableView?(deepTable, shouldSelectRow: 0) == false, "Folder rows are not table selections")
+
+        // Keyboard-only: arrows from the selected tab reach folder rows, which
+        // toggle on Return. Events go straight to the views; nothing is posted.
+        @MainActor func key(_ code: UInt16, to view: NSView) {
+            let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber,
+                                         context: nil, characters: code == 36 ? "\r" : "", charactersIgnoringModifiers: code == 36 ? "\r" : "",
+                                         isARepeat: false, keyCode: code)!
+            view.keyDown(with: event)
+        }
+        let keyTable = table(in: 0)
+        keyTable.selectRowIndexes(IndexSet(integer: 12), byExtendingSelection: false)
+        window.makeFirstResponder(keyTable)
+        key(126, to: keyTable)
+        let focusedFolder = window.firstResponder as? NSView
+        require(focusedFolder?.identifier?.rawValue == "tab-row-\(folderIDs[11].uuidString)", "Up arrow from a tab focuses the folder above it")
+        key(126, to: focusedFolder!)
+        require((window.firstResponder as? NSView)?.identifier?.rawValue == "tab-row-\(folderIDs[10].uuidString)", "Up arrow moves between folders")
+        toggled.removeAll()
+        key(36, to: window.firstResponder as! NSView)
+        require(toggled == [folderIDs[10]], "Return toggles the focused folder")
+        key(123, to: window.firstResponder as! NSView)
+        require(toggled == [folderIDs[10], folderIDs[10]], "Left arrow collapses an expanded folder")
+
+        // Native regression: a click expands a folder, the sidebar reloads, and
+        // the folder must still hold focus so Left collapses it again.
+        var tree = [SidebarTabItem(id: folderIDs[0], title: "Projects", subtitle: "", symbol: "folder", isPinned: true, isActive: false,
+                                   isFolder: true, isExpanded: false),
+                    SidebarTabItem(id: leaf, title: "Selected page", subtitle: "", symbol: "globe", isPinned: false, isActive: true)]
+        let child = UUID()
+        sidebar.onToggleFolder = { id in
+            let expanding = !tree[0].isExpanded
+            tree[0].isExpanded = expanding
+            if expanding {
+                tree.insert(SidebarTabItem(id: child, title: "Inside", subtitle: "", symbol: "globe", isPinned: true, isActive: false,
+                                           depth: 1, parentFolderID: id), at: 1)
+            } else { tree.removeAll { $0.id == child } }
+            update(0, tree)
+        }
+        update(0, tree)
+        let projects = row(table(in: 0), 0)
+        projects.mouseDown(with: NSEvent.mouseEvent(with: .leftMouseDown, location: .zero, modifierFlags: [], timestamp: 0,
+                                                     windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!)
+        require(tree.count == 3 && (window.firstResponder as? NSView)?.identifier?.rawValue == "tab-row-\(folderIDs[0].uuidString)",
+                "Clicking a folder expands it and keeps focus on it after the reload")
+        key(123, to: window.firstResponder as! NSView)
+        require(tree.count == 2 && (window.firstResponder as? NSView)?.identifier?.rawValue == "tab-row-\(folderIDs[0].uuidString)",
+                "Left then collapses it and focus stays on the folder")
         print("PASS: \(checks) sidebar virtualization, identity, scrolling, paging and extension action checks")
         window.contentView = nil
     }

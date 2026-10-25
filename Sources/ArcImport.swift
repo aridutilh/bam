@@ -272,12 +272,19 @@ enum ArcImport {
         var importedTabs: Int { spaces.reduce(0) { $0 + $1.keptTabs + $1.todayTabs + $1.favorites } }
         var importedFolders: Int { spaces.reduce(0) { $0 + $1.folders } }
         var isEmpty: Bool { importedTabs == 0 && importedFolders == 0 && !spaces.contains(where: \.isNew) }
+        /// Why nothing would be added, without implying skipped items were imported.
+        var emptyReason: String {
+            if skippedSpaces > 0 { return "Nothing can be added: Bam’s \(BrowserSession.maximumSpaces)-Space limit is reached." }
+            if removedSpaces > 0 && alreadyImported == 0 { return "Nothing new: the Spaces from this layout were removed after an earlier import." }
+            if alreadyImported > 0 { return "Everything in this layout is already in Bam." }
+            return "This layout has no Spaces, tabs or folders Bam can import."
+        }
         /// Plain-language notes about everything not carried over exactly.
         var notices: [String] {
             var lines: [String] = []
             func plural(_ n: Int, _ word: String) -> String { "\(n) \(word)\(n == 1 ? "" : "s")" }
             if alreadyImported > 0 { lines.append("\(plural(alreadyImported, "item")) already imported earlier will be skipped.") }
-            if removedSpaces > 0 { lines.append("\(plural(removedSpaces, "Space")) you removed after an earlier import will stay removed.") }
+            if removedSpaces > 0 { lines.append("\(plural(removedSpaces, "Space")) you removed after an earlier import will stay removed. A removed Space comes back only if Arc has new items for it, holding just those items.") }
             if excludedFavorites > 0 { lines.append("\(plural(excludedFavorites, "Favorite")) of Spaces left out of this import won’t be imported.") }
             if easels > 0 { lines.append("\(plural(easels, "Easel")) can’t be imported; Bam has no Easels.") }
             if liveFolders > 0 { lines.append("\(plural(liveFolders, "live folder")) will be imported as ordinary folders; live updates aren’t supported.") }
@@ -296,6 +303,32 @@ enum ArcImport {
             lines.append("Sign-ins, passwords, history and extensions stay in Arc; this imports your sidebar layout.")
             return lines
         }
+    }
+
+    /// Removes exactly what an import added (`imported` minus `previous`) from
+    /// `current`, keeping anything the user did since. Used when the imported
+    /// session can't be saved. A Space the user has since filled is kept.
+    static func undo(_ imported: BrowserSession, over previous: BrowserSession, in current: BrowserSession) -> BrowserSession {
+        let addedTabs = Set(imported.tabs.map(\.id)).subtracting(previous.tabs.map(\.id))
+        let addedFolders = Set(imported.folders.map(\.id)).subtracting(previous.folders.map(\.id))
+        let addedSpaces = Set(imported.spaces.map(\.id)).subtracting(previous.spaces.map(\.id))
+        let addedProfiles = Set(imported.profiles.map(\.id)).subtracting(previous.profiles.map(\.id))
+        var session = current
+        session.tabs.removeAll { addedTabs.contains($0.id) }
+        session.folders.removeAll { addedFolders.contains($0.id) }
+        session.splits = session.splits?.filter { !addedTabs.contains($0.primaryID) && !addedTabs.contains($0.secondaryID) }
+        let occupied = Set(session.tabs.filter { !$0.isFavorite }.map(\.space))
+        let removableSpaces = addedSpaces.subtracting(occupied)
+        if session.spaces.count > removableSpaces.count {
+            session.spaces.removeAll { removableSpaces.contains($0.id) }
+            for id in removableSpaces { session.rootOrder?[id] = nil }
+        }
+        let referenced = Set(session.spaces.map(\.profileID) + session.tabs.compactMap { $0.isFavorite ? $0.saved?.profileID : nil })
+        session.profiles.removeAll { addedProfiles.contains($0.id) && !referenced.contains($0.id) }
+        session.importLinks = previous.importLinks
+        if session.spaceDefinition(session.space) == nil, let first = session.spaces.first { session.space = first.id }
+        session.sanitize()
+        return session
     }
 
     /// Builds the imported session without touching the input. Preview and
