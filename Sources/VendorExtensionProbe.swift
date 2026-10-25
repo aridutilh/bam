@@ -4,10 +4,14 @@ import WebKit
 /// Bounded, disposable observation of one official vendor extension
 /// (`--vendor-extension-probe`, BAM_VENDOR_CHROME_ID). It installs exactly as a
 /// user would, through Bam's normal Chrome Web Store installer, and requires the
-/// CRX3 publisher signature to verify for that ID. Everything runs in a private
-/// controller: non-persistent website data and temporary extension storage that
-/// is removed at the end. No vendor files are kept, no native companion is
-/// granted, and no account sign-in or vault operation is performed.
+/// CRX3 publisher signature to verify for that ID. By default everything runs in a
+/// private controller: non-persistent website data and temporary extension storage
+/// that is removed at the end. `BAM_VENDOR_PROFILE=normal` (canonical Bam Preview
+/// only) instead uses normal, non-private semantics on a new random profile whose
+/// website store is task-owned and removed by API at the end, with a non-persistent
+/// extension controller configuration; it measures whether the extension really sees
+/// a normal profile and never claims so unmeasured. No vendor files are kept, no
+/// native companion is granted, and no account sign-in or vault operation is performed.
 /// This is an observation, not a compatibility test.
 @MainActor final class VendorExtensionProbe {
     private var watchdog: Timer?
@@ -34,6 +38,52 @@ import WebKit
     private var observations: [String: Any] = ["scope": "official Chrome Web Store CRX, signature verified for the requested ID; fresh private profile and temporary extension storage; no sign-in; no native companion; no compatibility claim"]
     private var blockedNavigations: [[String: Any]] = []
     private var reviewEvents: [[String: Any]] = []
+    /// Opt-in normal-profile mode (`BAM_VENDOR_PROFILE=normal`): this run's own identities,
+    /// directory and isolated website store; nil in today's default private mode.
+    private struct NormalRun {
+        let ids: VendorProbeIsolation.Identities
+        let directory: URL
+        let stores: WebsiteProfileStore
+    }
+    private var normalRun: NormalRun?
+    /// Latest incognito answers per extension document (from VendorProbeIsolation.measurementScript).
+    private var modeMeasurements: [Int: [String: Any]] = [:]
+    private var controllerConfigurationPersistent: Bool?
+    private static var reservedIdentifiers: Set<UUID> { [BrowserProfile.defaultID, PreviewProfile.defaultStoreIdentifier] }
+
+    /// Normal semantics with only task-owned storage: a non-private controller on a new random profile whose
+    /// website data is the run's own persistent store (removed at the end), a non-persistent extension controller
+    /// configuration, and session/library/extension files in the run directory. Nothing is created unless every
+    /// precondition holds; there is no fallback to the default store mapping or to private controller storage.
+    @available(macOS 15.4, *)
+    private func makeNormalController(home: BrowserTab) throws -> BrowserController {
+        guard VendorProbeIsolation.allowsNormalMode(bundleIdentifier: Bundle.main.bundleIdentifier) else {
+            throw BrowserExtensions.failure("Normal-profile mode runs only in canonical Bam Preview (\(VendorProbeIsolation.canonicalPreviewBundleIdentifier))")
+        }
+        guard let ids = VendorProbeIsolation.makeIdentities(reserved: Self.reservedIdentifiers) else {
+            throw BrowserExtensions.failure("Could not generate unreserved identifiers for the run")
+        }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("bam-vendor-normal-\(ids.run.uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        let stores = try WebsiteProfileStore(isolated: [ids.profile: ids.store])
+        normalRun = NormalRun(ids: ids, directory: directory, stores: stores)
+        observations["normal_profile"] = ["run": ids.run.uuidString, "profile": ids.profile.uuidString, "store": ids.store.uuidString]
+        let browser = BrowserController(sessionURL: directory.appendingPathComponent("session.json"), ephemeral: false, profileStores: stores)
+        // The session exists in the new profile before any view or page: one Space, one blank tab.
+        browser.session = BrowserSession(tabs: [home], activeID: home.id,
+                                         spaces: [BrowserSpace(id: 0, name: "Vendor probe", symbol: "puzzlepiece.extension", colorIndex: 0, profileID: ids.profile)],
+                                         profiles: BrowserProfile.defaults + [BrowserProfile(id: ids.profile, name: "Vendor probe")])
+        // The extension host is built now, before any runtime exists, and must not write controller storage.
+        let host = browser.browserExtensions
+        guard !host.isPrivate, BrowserExtensions.usesNonPersistentController(isPrivate: host.isPrivate, storage: host.controllerStorage) else {
+            throw BrowserExtensions.failure("Normal-profile mode needs a non-private host with non-persistent controller storage; this build doesn't select it (no runtime or controller storage was created)")
+        }
+        guard host.storageURL.standardizedFileURL.path.hasPrefix(directory.standardizedFileURL.path + "/"),
+              browser.session.currentProfileID == ids.profile else {
+            throw BrowserExtensions.failure("Normal-profile storage or profile is not the run's own")
+        }
+        return browser
+    }
 
     func start() {
         guard #available(macOS 15.4, *) else {
@@ -140,11 +190,21 @@ import WebKit
         }
         observations["chrome_web_store_id"] = expected
 
-        let sessionURL = FileManager.default.temporaryDirectory.appendingPathComponent("unused-vendor-probe-\(UUID().uuidString).json")
-        let browser = BrowserController(sessionURL: sessionURL, ephemeral: true)
-        browser.automaticallyShowsVideo = false
+        guard let mode = VendorProbeIsolation.mode(env["BAM_VENDOR_PROFILE"]) else {
+            throw BrowserExtensions.failure("BAM_VENDOR_PROFILE must be private (default) or normal")
+        }
+        observations["profile_mode"] = mode.rawValue
         let home = BrowserTab(title: "Vendor observation", address: "orbit://newtab", space: 0)
-        browser.session = BrowserSession(tabs: [home], activeID: home.id)
+        let browser: BrowserController
+        if mode == .normal {
+            browser = try makeNormalController(home: home)
+            observations["scope"] = "official Chrome Web Store CRX, signature verified for the requested ID; normal (non-private) semantics on a new random profile whose website store is task-owned and removed; non-persistent extension controller configuration; run-directory session and extension storage; no sign-in; no native companion; no compatibility claim"
+        } else {
+            let sessionURL = FileManager.default.temporaryDirectory.appendingPathComponent("unused-vendor-probe-\(UUID().uuidString).json")
+            browser = BrowserController(sessionURL: sessionURL, ephemeral: true)
+            browser.session = BrowserSession(tabs: [home], activeID: home.id)
+        }
+        browser.automaticallyShowsVideo = false  // a property set; only the menu toggle writes preferences
         controller = browser
         let main = NSWindow(contentRect: NSRect(x: 120, y: 100, width: 920, height: 680),
                             styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
@@ -297,7 +357,11 @@ import WebKit
                     if let script = env["BAM_VENDOR_BG_PROBE"], !script.isEmpty, sample >= 4 {
                         observations["background_eval"] = await runtime.compatibility.evaluate(script, for: context)
                     }
+                    // Mode validity, measured in the extension's own documents (both modes, for comparison).
+                    if sample >= 2 { recordModeMeasurements(await runtime.compatibility.evaluate(VendorProbeIsolation.measurementScript, for: context)) }
                 }
+                controllerConfigurationPersistent = context.webExtensionController?.configuration.isPersistent
+                observations["controller_configuration_persistent"] = controllerConfigurationPersistent
                 observations["manifest_errors"] = context.webExtension.errors.prefix(20).map(errorDescription)
                 observations["context_error_count"] = context.errors.count
                 if let action = invokedAction ?? context.action(for: nil) {
@@ -422,6 +486,46 @@ import WebKit
         blockedNavigations.append(["operation": operation, "url": sanitizedURL(url)])
     }
 
+    /// Keeps the latest result per extension document; each evaluation returns one JSON string per live document.
+    private func recordModeMeasurements(_ results: [String]) {
+        for (index, text) in results.enumerated() {
+            guard let data = text.data(using: .utf8),
+                  let object = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) as? [String: Any] else { continue }
+            modeMeasurements[index] = object
+        }
+    }
+    /// After the views are released: remove only the run's own website store (bounded, confirmed by the
+    /// store list), then the run directory. Never lists-and-deletes anything else.
+    private func cleanUpNormalRun(_ run: NormalRun, released: @escaping () -> Bool) async -> (clean: Bool, report: [String: Any]) {
+        var report: [String: Any] = [:]
+        var releasedInTime = false
+        for _ in 0..<50 { if released() { releasedInTime = true; break }; try? await Task.sleep(nanoseconds: 100_000_000) }
+        report["controller_released_before_removal"] = releasedInTime
+        run.stores.releaseStores()
+        var storeRemoved = false
+        if run.stores.allowedStoreIdentifiers == [run.ids.store] {
+            let result = await VendorProbeIsolation.removeOwnedStore(
+                run.ids.store, reserved: Self.reservedIdentifiers,
+                remove: { id, done in
+                    Task { @MainActor in WKWebsiteDataStore.remove(forIdentifier: id) { error in done(error.map { Self.sanitize($0.localizedDescription) }) } }
+                },
+                list: { done in Task { @MainActor in WKWebsiteDataStore.fetchAllDataStoreIdentifiers { done($0) } } },
+                timeout: 10, retryDelay: 1)
+            storeRemoved = result.removed
+            report["store_removal"] = ["attempts": result.attempts, "error": result.removalError ?? "none", "timed_out": result.removalTimedOut,
+                                       "confirmed_absent": result.confirmedAbsent, "refused": result.refused ?? "no"]
+        } else {
+            report["store_removal"] = ["refused": "the isolated store allowlist is not exactly the run's store"]
+        }
+        report["store_removed"] = storeRemoved
+        let fm = FileManager.default
+        if fm.fileExists(atPath: run.directory.path) { try? fm.removeItem(at: run.directory) }
+        let directoryClean = !fm.fileExists(atPath: run.directory.path)
+        report["run_directory_remaining"] = !directoryClean
+        report["extension_controller_storage"] = "non-persistent; nothing on disk to remove"
+        return (storeRemoved && directoryClean, report)
+    }
+
     private func finish(_ requested: Bool, reason raw: String) {
         guard !finished else { return }
         finished = true; watchdog?.invalidate(); watchdog = nil
@@ -438,6 +542,24 @@ import WebKit
         observations["pages"] = pages
         observations["permission_reviews"] = reviewEvents
         observations["blocked_external_tab_requests"] = blockedNavigations
+        let samples = modeMeasurements.keys.sorted().compactMap { modeMeasurements[$0] }
+        observations["incognito_measurements"] = samples
+        // Normal mode is only claimed when measured; otherwise it is reported as not normal or unmeasured.
+        var modeValid = true
+        if let run = normalRun {
+            observations["opened_persistent_store_ids"] = run.stores.openedPersistentIdentifiers.map(\.uuidString)
+            observations["unlisted_profile_requests"] = run.stores.unlistedProfileRequests.map(\.uuidString)
+            let verdict = VendorProbeIsolation.verdict(samples.compactMap(VendorProbeIsolation.measurement(from:)),
+                                                       controllerConfigurationPersistent: controllerConfigurationPersistent,
+                                                       openedStores: run.stores.openedPersistentIdentifiers, expectedStore: run.ids.store,
+                                                       refusedProfiles: run.stores.unlistedProfileRequests)
+            switch verdict {
+            case .normal: observations["normal_mode_verdict"] = "normal"
+            case .notNormal(let why): observations["normal_mode_verdict"] = "not normal: \(why)"; modeValid = false
+            case .unmeasured(let why): observations["normal_mode_verdict"] = "unmeasured: \(why)"; modeValid = false
+            }
+        }
+        weak let releasedController = controller
         var temporaryStorage: URL?
         if #available(macOS 15.4, *), let browser = controller {
             let host = browser.browserExtensions
@@ -472,7 +594,7 @@ import WebKit
         if fm.fileExists(atPath: scratch.path) { try? fm.removeItem(at: scratch) }
         let scratchClean = !fm.fileExists(atPath: scratch.path)
         observations["installer_staging_remaining"] = !scratchClean
-        window?.orderOut(nil); window?.close()
+        window?.contentViewController = nil; window?.orderOut(nil); window?.close()
         controller = nil; window = nil
         // "completed" means the full requested observation ran (not merely that
         // the extension initialized) and no vendor files were left behind.
@@ -480,7 +602,19 @@ import WebKit
         if requested && observationCompleted && !(hostStorageClean && scratchClean) {
             reasonText += "; temporary vendor files could not be removed"
         }
-        let success = requested && observationCompleted && hostStorageClean && scratchClean
+        let base = requested && observationCompleted && hostStorageClean && scratchClean
+        guard let run = normalRun else { emit(base, reasonText); return }
+        Task { @MainActor in
+            let cleanup = await self.cleanUpNormalRun(run, released: { releasedController == nil })
+            self.observations["normal_cleanup"] = cleanup.report
+            var text = reasonText
+            if !modeValid { text += "; normal-profile mode not established (\(self.observations["normal_mode_verdict"] ?? "unknown"))" }
+            if !cleanup.clean { text += "; the run's own website store or directory could not be confirmed removed" }
+            self.emit(base && modeValid && cleanup.clean, text)
+        }
+    }
+
+    private func emit(_ success: Bool, _ reasonText: String) {
         let reason = Self.sanitize(reasonText)
         observations["completed"] = success
         observations["reason"] = reason
