@@ -689,6 +689,8 @@ import Darwin
         manifest["version"] = "2.0.0"
         manifest["optional_permissions"] = ["alarms", "cookies"]
         manifest["optional_host_permissions"] = ["http://localhost/*", "https://optional.invalid/*"]
+        // The update requests one new site: the update review must list exactly it, and declining keeps the old version.
+        manifest["host_permissions"] = ["http://127.0.0.1/*", "https://new.invalid/*"]
         try JSONSerialization.data(withJSONObject: manifest).write(to: updateManifest)
         let installedManifest = host.storageURL.appendingPathComponent(extensionID.uuidString).appendingPathComponent("package/manifest.json")
         let originalBytes = try Data(contentsOf: installedManifest)
@@ -705,12 +707,70 @@ import Darwin
             context.setPermissionStatus(.grantedExplicitly, for: removedScope, expirationDate: grantExpiry)
             host.persistPermissions(context)
         }
+        // Site access on the live context through the panel's engine API (after the approved update).
+        func checkSiteAccess() async throws {
+            let ip = URL(string: "http://127.0.0.1/site-access")!, newSite = URL(string: "https://new.invalid/")!
+            let ipPattern = try WKWebExtension.MatchPattern(string: "http://127.0.0.1/*")
+            func granted(_ url: URL) -> Bool {
+                guard let status = host.context(for: extensionID)?.permissionStatus(for: url) else { return false }
+                return status == .grantedExplicitly || status == .grantedImplicitly
+            }
+            func isFinite(_ date: Date?) -> Bool { date.map { $0 < Date.distantFuture.addingTimeInterval(-86_400) } ?? false }
+            func perform(_ snapshot: BrowserExtensionSiteAccessSnapshot, _ change: BrowserExtensionSiteAccessChange) throws -> BrowserExtensionSiteAccessSnapshot {
+                try host.performSiteAccess(id: extensionID, profileID: profile, revision: snapshot.revision, displayed: snapshot.declarations!, change: change)
+            }
+            guard let updated = host.siteAccess(id: extensionID) else { throw ExtensionSmokeTest.Failure(description: "No site access snapshot") }
+            try check(updated.state.mode == .allRequested && updated.declarations?.requested == ["http://127.0.0.1/*", "https://new.invalid/*"] &&
+                updated.pending.isEmpty && granted(ip) && granted(newSite), "Approved update did not grant exactly the reviewed sites: \(updated.state)")
+            try check(isFinite(updated.timed.optional[optionalGranted.string]) && updated.timed.requested.isEmpty,
+                "A time-limited optional grant lost its provenance or date: \(updated.timed)")
+            let withheld = try perform(updated, .choose(.withheld))
+            try check(withheld.state.mode == .withheld && !granted(ip) && !granted(newSite) && withheld.timed.optional[optionalGranted.string] != nil &&
+                host.context(for: extensionID)?.grantedPermissionMatchPatterns[optionalGranted] != nil,
+                "Withholding must remove requested sites from the live extension and keep optional grants")
+            var stale = false
+            do { _ = try perform(updated, .choose(.allRequested)) } catch BrowserExtensionSiteAccessFailure.stale { stale = true }
+            try check(stale && !granted(ip) && host.siteAccess(id: extensionID)?.state.mode == .withheld, "A stale action approved sites")
+            // Current revision but declarations the user never saw (an update between render and click): refused.
+            var unseen = false
+            do { _ = try host.performSiteAccess(id: extensionID, profileID: profile, revision: withheld.revision,
+                                                displayed: .init(requested: ["http://127.0.0.1/*"]), change: .choose(.allRequested)) }
+            catch BrowserExtensionSiteAccessFailure.stale { unseen = true }
+            try check(unseen && !granted(ip) && !granted(newSite), "An action for declarations the user never saw approved sites")
+            var refusal: ExtensionSiteAccess.Refusal?
+            do { _ = try perform(withheld, .addSite(input: "example.com", includeSubdomains: false)) }
+            catch BrowserExtensionSiteAccessFailure.refused(let reason) { refusal = reason }
+            try check(refusal == .notRequested && host.siteAccess(id: extensionID)?.revision == withheld.revision, "An unrequested site was not refused")
+            let listed = try perform(withheld, .addSite(input: "127.0.0.1", includeSubdomains: false))
+            try check(listed.state.mode == .specific(["http://127.0.0.1/*"]) && granted(ip) && !granted(newSite), "Adding a site must grant just that site")
+            try await host.setEnabled(false, id: extensionID); try await host.setEnabled(true, id: extensionID)
+            try check(host.siteAccess(id: extensionID)?.state.mode == .specific(["http://127.0.0.1/*"]) && granted(ip) && !granted(newSite),
+                "Re-enabling must keep the narrower choice, never re-grant every requested site")
+            // An explicit finite expiry on a permanent site constrains it until a fresh approval, across a reload.
+            guard let live = host.context(for: extensionID) else { throw ExtensionSmokeTest.Failure(description: "Re-enable failed") }
+            live.setPermissionStatus(.grantedExplicitly, for: ipPattern, expirationDate: Date(timeIntervalSinceNow: 3_600))
+            host.persistPermissions(live)
+            let shortened = host.siteAccess(id: extensionID)
+            try check(shortened?.state.mode == .withheld && isFinite(shortened?.timed.requested[ipPattern.string]),
+                "A shortened grant must leave the permanent choice as time-limited requested access: \(String(describing: shortened?.state))")
+            try await host.setEnabled(false, id: extensionID); try await host.setEnabled(true, id: extensionID)
+            try check(isFinite(host.context(for: extensionID)?.grantedPermissionMatchPatterns[ipPattern]) && granted(ip),
+                "A reload restored a shortened grant to permanent")
+            guard let reloaded = host.siteAccess(id: extensionID) else { throw ExtensionSmokeTest.Failure(description: "No snapshot after reload") }
+            let ended = try perform(reloaded, .choose(.withheld))
+            try check(ended.timed.requested.isEmpty && !granted(ip), "Withholding must end requested time-limited grants")
+            let restored = try perform(ended, .choose(.allRequested))
+            try check(restored.state.mode == .allRequested && restored.timed.requested.isEmpty && granted(ip) && granted(newSite) &&
+                !isFinite(host.context(for: extensionID)?.grantedPermissionMatchPatterns[ipPattern]),
+                "A fresh All requested approval must grant every requested site permanently")
+        }
         let originalContext = host.context(for: extensionID)!
         seedOptionalPermissions(originalContext)
         let originalRecord = host.items(profileID: profile).first { $0.id == extensionID }!
         let catalog = ExtensionCatalogRecord(source: .local, upstreamID: nil, listingURL: nil, downloadURL: nil,
             publisher: "Bam test fixture", version: "2.0.0", sha256: "", provenance: "Original local fixture", installedAt: Date())
-        host.permissionPrompt = { _ in false }
+        var declinedReview: BrowserExtensionPermissionReview?
+        host.permissionPrompt = { review in declinedReview = review; return false }
         var cancelled = false
         do { try await host.replacePackage(id: extensionID, with: updateFolder, catalog: catalog) }
         catch is BrowserExtensionUpdateCancelled { cancelled = true }
@@ -720,6 +780,10 @@ import Darwin
         try check(try Data(contentsOf: installedManifest) == originalBytes && afterCancel?.version == originalRecord.version &&
             afterCancel?.permissions == originalRecord.permissions && afterCancel?.patterns == originalRecord.patterns && afterCancel?.catalog == originalRecord.catalog,
             "Canceling an update replaced package bytes, grants or provenance")
+        try check(declinedReview?.websites == ["https://new.invalid/*"] && afterCancel?.siteAccess == originalRecord.siteAccess &&
+            afterCancel?.timedOptionalSiteGrants == originalRecord.timedOptionalSiteGrants &&
+            originalContext.permissionStatus(for: URL(string: "https://new.invalid/")!) != .grantedExplicitly,
+            "Declining an update's new site must cancel it and keep the old site access: review=\(declinedReview?.websites ?? [])")
         // The native initializer may finish synchronously for a tiny fixture.
         // Wrap the real parser so user changes happen before its result returns,
         // instead of relying on a queued Task winning an unspecified scheduling race.
@@ -789,7 +853,10 @@ import Darwin
             grantedBeforeUpdate.patterns[optionalGranted.string], grantedBeforeUpdate.deniedPatterns[optionalDenied.string]]
         try check(beforeValues.allSatisfy { $0 != nil && abs($0!.timeIntervalSince(grantExpiry)) < 0.001 },
             "Native fixture did not store its optional grants/denials: \(beforeValues.map { $0?.timeIntervalSince1970 })")
+        var approvedReview: BrowserExtensionPermissionReview?
+        host.permissionPrompt = { review in approvedReview = review; return true }
         try await host.replacePackage(id: extensionID, with: updateFolder, catalog: catalog)
+        try check(approvedReview?.websites == ["https://new.invalid/*"], "The update review must list exactly the new site: \(approvedReview?.websites ?? [])")
         let updatedRecord = host.items(profileID: profile).first { $0.id == extensionID }!
         let afterValues = [updatedRecord.permissions["alarms"], updatedRecord.deniedPermissions["cookies"],
             updatedRecord.patterns[optionalGranted.string], updatedRecord.deniedPatterns[optionalDenied.string]]
@@ -801,6 +868,7 @@ import Darwin
             "Approved update did not activate its final package")
         guard let updatedPopup = host.context(for: extensionID)?.action(for: nil)?.popupWebView else { throw ExtensionSmokeTest.Failure(description: "Updated package has no popup") }
         try await wait("Updated extension still looked for scripts at the staging URL") { (try? await updatedPopup.evaluateJavaScript("document.title")) as? String == "Bam fixture ready" }
+        try await checkSiteAccess()
         try await host.setEnabled(false, id: extensionID)
         controller.refresh()
         try check(actionButton() == nil, "Disabling the extension left a stale sidebar action")

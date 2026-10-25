@@ -30,7 +30,16 @@ struct BrowserExtensionRecord: Codable, Identifiable {
     var packageName: String
     var enabled: Bool = false
     var permissions: [String: Date] = [:]
+    /// The effective host grants, written only by the site-access apply step (a cache of the choice below, never read
+    /// back as authority).
     var patterns: [String: Date] = [:]
+    /// The site-access choice (`ExtensionSiteAccess.State` in its own JSON shape). Plain Data so the record decodes on
+    /// every supported system; nil before site access existed (migrated once at load). Unreadable data refuses the load.
+    var siteAccess: Data? = nil
+    /// Host grants WebKit holds with a finite expiry, by provenance: part of the user's site choice (requested), or
+    /// from the extension's optional requests. Honored until they lapse; never extended or re-dated.
+    var timedSiteGrants: [String: Date]? = nil
+    var timedOptionalSiteGrants: [String: Date]? = nil
     var deniedPermissions: [String: Date] = [:]
     var deniedPatterns: [String: Date] = [:]
     var compatibilityNote: String? = nil
@@ -498,11 +507,24 @@ struct BrowserExtensionPermissionReview {
                   runtime.contexts[id] === oldContext else { throw BrowserExtensionUpdateCancelled(name: before.name) }
         } else { replacement.staticRuleAudit = nil }
         if !Self.supportsNativeCompanion(replacement) || !ext.requestedPermissions.contains(.init(rawValue: "nativeMessaging")) { replacement.nativeHost = nil }
+        // Site access for the new version: the stored choice, narrowed to what it still declares. New requests are
+        // pending and are only granted when the update's review approves them; declining cancels the whole update,
+        // so the old version keeps its access (a broader replacing declaration could otherwise narrow it).
+        let newDeclarations = ExtensionSiteAccess.Declarations(ext)
+        var nextSite: ExtensionSiteAccess.State
+        var priorTimed = Self.timed(before)
+        if let stored = try ExtensionSiteAccessEngine.decode(before.siteAccess) { nextSite = stored }
+        else {
+            let migrated = ExtensionSiteAccessEngine.migrate(patterns: before.patterns, declarations: oldContext.map { ExtensionSiteAccess.Declarations($0.webExtension) } ?? newDeclarations)
+            nextSite = migrated.state; priorTimed = migrated.timed
+        }
+        nextSite = ExtensionSiteAccess.updated(nextSite, to: newDeclarations)
+        let pendingSites = ExtensionSiteAccess.pendingRequests(nextSite, declarations: newDeclarations)
         if before.enabled {
             let requested = Set(ext.requestedPermissions.map(\.rawValue))
             let supported = requested.intersection(Self.supportedPermissions)
             let bridged = ExtensionCompatibility.plan(manifest: ext.manifest).provided.filter { ExtensionCompatibility.bridgedPermissions.contains($0) }
-            let patterns = ext.allRequestedMatchPatterns.map(\.string).sorted()
+            let patterns = pendingSites
             let review = BrowserExtensionPermissionReview(name: replacement.name, profileName: profileName?(before.profileID) ?? "Current profile",
                 permissions: supported.sorted(), websites: patterns, unsupported: requested.subtracting(supported).subtracting(bridged).subtracting(Self.supportsNativeCompanion(replacement) ? ["nativeMessaging"] : []).sorted(),
                 isOptional: false, compatibilityNote: replacement.disclosedNote, bridged: bridged,
@@ -514,11 +536,13 @@ struct BrowserExtensionPermissionReview {
                 replacement.deniedPermissions.removeValue(forKey: permission)
             }
             replacement.compatibilityGrants = Dictionary(uniqueKeysWithValues: bridged.map { ($0, Date.distantFuture) })
-            for pattern in patterns {
-                replacement.patterns[pattern] = .distantFuture
-                replacement.deniedPatterns.removeValue(forKey: pattern)
-            }
+            nextSite = ExtensionSiteAccess.accepting(pendingSites, in: nextSite, declarations: newDeclarations)
+            for pattern in pendingSites { replacement.deniedPatterns.removeValue(forKey: pattern) }
         }
+        let nextTimed = ExtensionSiteAccessEngine.live(priorTimed, declarations: newDeclarations)
+        replacement.siteAccess = ExtensionSiteAccessEngine.encode(nextSite)
+        Self.store(nextTimed, in: &replacement)
+        replacement.patterns = ExtensionSiteAccessEngine.target(nextSite, timed: nextTimed, declarations: newDeclarations)
         // Native permission dialogs run a nested loop. Deletion, disabling and
         // shutdown while reviewing must win over this update.
         guard !stopped, mutationRevisions[id, default: 0] == initialRevision,
@@ -565,6 +589,10 @@ struct BrowserExtensionPermissionReview {
                 restored.deniedPermissions = records[currentIndex].deniedPermissions; restored.deniedPatterns = records[currentIndex].deniedPatterns
                 restored.compatibilityGrants = records[currentIndex].compatibilityGrants
                 restored.nativeHost = records[currentIndex].nativeHost
+                // The newer site choice and time-limited grants (a revoke, narrowing or prompt during the update)
+                // win too, so neither the old package's reload nor a later enable restores older authority.
+                restored.siteAccess = records[currentIndex].siteAccess
+                restored.timedSiteGrants = records[currentIndex].timedSiteGrants; restored.timedOptionalSiteGrants = records[currentIndex].timedOptionalSiteGrants
                 if let oldContext { restored = Self.retainingDeclaredPermissions(restored, for: oldContext.webExtension) }
             }
             // A newer disable/revoke/remove action or shutdown must never be
@@ -646,10 +674,134 @@ struct BrowserExtensionPermissionReview {
         try FileManager.default.removeItem(at: storageURL.appendingPathComponent(record.id.uuidString, isDirectory: true))
         changed()
     }
+    // MARK: Site access (engine API for the Manage Extensions panel; see work/chrome-site-access-engine-handoff.md)
+
+    private static func timed(_ record: BrowserExtensionRecord) -> ExtensionSiteAccessEngine.Timed {
+        .init(requested: record.timedSiteGrants ?? [:], optional: record.timedOptionalSiteGrants ?? [:])
+    }
+    private static func store(_ timed: ExtensionSiteAccessEngine.Timed, in record: inout BrowserExtensionRecord) {
+        record.timedSiteGrants = timed.requested.isEmpty ? nil : timed.requested
+        record.timedOptionalSiteGrants = timed.optional.isEmpty ? nil : timed.optional
+    }
+
+    /// The extension's current site access; declarations are nil while it isn't loaded.
+    func siteAccess(id: UUID) -> BrowserExtensionSiteAccessSnapshot? {
+        guard let record = records.first(where: { $0.id == id }), let state = try? ExtensionSiteAccessEngine.decode(record.siteAccess) ?? .withheld() else { return nil }
+        let context = context(for: id)
+        let declarations = context.map { ExtensionSiteAccess.Declarations($0.webExtension) }
+        let timed = declarations.map { ExtensionSiteAccessEngine.live(Self.timed(record), declarations: $0) } ?? Self.timed(record)
+        let granted = Set((context?.grantedPermissions.keys.map(\.rawValue)) ?? record.permissions.filter { $0.value > Date() }.map(\.key))
+        return BrowserExtensionSiteAccessSnapshot(id: id, profileID: record.profileID, revision: siteAccessRevision(record, context: context),
+                                                  state: state, declarations: declarations, timed: timed,
+                                                  effective: record.patterns.filter { $0.value > Date() }.keys.sorted(), oneTimeAccess: ExtensionSiteAccess.providesOneTimeAccess(grantedPermissions: granted))
+    }
+    /// Everything a displayed snapshot (or an open prompt) depends on. An update, reload, revoke, prompt or other
+    /// change makes it differ.
+    private func siteAccessRevision(_ record: BrowserExtensionRecord, context: WKWebExtensionContext?) -> BrowserExtensionSiteAccessSnapshot.Revision {
+        .init(stored: record.siteAccess, timed: Self.timed(record), patterns: record.patterns, version: record.version, enabled: record.enabled,
+              context: context.map { ObjectIdentifier($0).hashValue }, declarations: context.map { ExtensionSiteAccess.Declarations($0.webExtension) })
+    }
+
+    /// Applies one panel action and returns the authoritative snapshot. The action must name the extension, profile
+    /// and revision of the snapshot the user saw: if anything changed since (an update with new hosts, a reload, a
+    /// prompt), it is refused as `.stale` and nothing is approved. Nothing changes on any failure, including a failed
+    /// save (the live extension and the record both stay as they were).
+    /// `displayed` is what the panel showed when the user acted; it must equal the live declarations.
+    @discardableResult func performSiteAccess(id: UUID, profileID: UUID, revision: BrowserExtensionSiteAccessSnapshot.Revision,
+                                              displayed: ExtensionSiteAccess.Declarations,
+                                              change: BrowserExtensionSiteAccessChange) throws -> BrowserExtensionSiteAccessSnapshot {
+        guard !stopped, let index = records.firstIndex(where: { $0.id == id }), records[index].profileID == profileID else { throw BrowserExtensionSiteAccessFailure.failed("This extension is no longer installed in this profile.") }
+        guard !loading.contains(id), !updating.contains(id) else { throw BrowserExtensionSiteAccessFailure.stale }
+        guard let context = context(for: id) else { throw BrowserExtensionSiteAccessFailure.failed("Enable the extension to change its site access.") }
+        let declarations = ExtensionSiteAccess.Declarations(context.webExtension)
+        guard siteAccessRevision(records[index], context: context) == revision, declarations == displayed else { throw BrowserExtensionSiteAccessFailure.stale }
+        let state: ExtensionSiteAccess.State
+        do { state = try ExtensionSiteAccessEngine.decode(records[index].siteAccess) ?? .withheld() }
+        catch { throw BrowserExtensionSiteAccessFailure.failed(error.localizedDescription) }
+        var next = state
+        switch change {
+        case .choose(.withheld): next = .withheld(optionalGrants: state.optionalGrants)
+        // Approves exactly what the user saw (equal to the live declarations, checked above).
+        case .choose(.allRequested): next = .allRequested(approving: displayed, optionalGrants: state.optionalGrants)
+        case .choose(.specific): throw BrowserExtensionSiteAccessFailure.failed("Add a site to allow it.")
+        case .addSite(let input, let includeSubdomains):
+            // From Withheld or All requested, adding a site starts a list with just that site.
+            let base: ExtensionSiteAccess.Mode = { if case .specific = state.mode { return state.mode }; return .withheld }()
+            switch ExtensionSiteAccess.addSite(input, includeSubdomains: includeSubdomains, to: base, declarations: declarations) {
+            case .failure(let refusal): throw BrowserExtensionSiteAccessFailure.refused(refusal)
+            case .success(let mode):
+                if case .specific(let sites) = mode { next = .specific(sites, optionalGrants: state.optionalGrants) }
+            }
+        case .removeSite(let site):
+            let mode = ExtensionSiteAccess.removeSite(site, from: state.mode)
+            if case .specific(let sites) = mode { next = .specific(sites, optionalGrants: state.optionalGrants) } else { next = .withheld(optionalGrants: state.optionalGrants) }
+        case .acceptPending(let reviewed):
+            next = ExtensionSiteAccess.accepting(reviewed, in: state, declarations: declarations)
+        }
+        let timed = ExtensionSiteAccessEngine.timed(Self.timed(records[index]), after: change)
+        try applySiteAccess(index: index, state: next, timed: timed, declarations: declarations, context: context)
+        guard let snapshot = siteAccess(id: id) else { throw BrowserExtensionSiteAccessFailure.failed("Site access could not be read back.") }
+        return snapshot
+    }
+
+    /// A runtime prompt's view of the extension before it asks: how each item would be recorded (by its site; no
+    /// site or an unreadable state refuses it) and the revision the answer is bound to.
+    func promptDecisions<Item: Hashable>(_ items: [(Item, String?)], for context: WKWebExtensionContext)
+        -> (decisions: [Item: ExtensionSiteAccessEngine.Provenance], revision: BrowserExtensionSiteAccessSnapshot.Revision?) {
+        let index = ownedRecordIndex(for: context)
+        let state = index.flatMap { try? ExtensionSiteAccessEngine.decode(records[$0].siteAccess) ?? .withheld() }
+        let declarations = ExtensionSiteAccess.Declarations(context.webExtension)
+        var result: [Item: ExtensionSiteAccessEngine.Provenance] = [:]
+        for (item, site) in items { result[item] = site.flatMap { site in state.map { ExtensionSiteAccessEngine.promptDecision(site, in: $0, declarations: declarations) } } ?? .refused }
+        return (result, state == nil ? nil : index.map { siteAccessRevision(records[$0], context: context) })
+    }
+
+    /// Records a runtime prompt's approvals with provenance. Only when nothing changed during the dialog (`revision`
+    /// still matches: no revoke, mode change, update or reload) and the choice saved; false grants nothing.
+    func recordSiteApprovals(_ context: WKWebExtensionContext, _ approved: [ExtensionSiteAccessEngine.Provenance], revision: BrowserExtensionSiteAccessSnapshot.Revision?) -> Bool {
+        guard !approved.isEmpty else { return true }
+        guard !stopped, let revision, let index = ownedRecordIndex(for: context), !updating.contains(records[index].id),
+              siteAccessRevision(records[index], context: context) == revision,
+              let state = try? ExtensionSiteAccessEngine.decode(records[index].siteAccess) ?? .withheld() else { return false }
+        let recorded = ExtensionSiteAccessEngine.recording(approved, in: state, timed: Self.timed(records[index]))
+        do { try applySiteAccess(index: index, state: recorded.state, timed: recorded.timed, declarations: .init(context.webExtension), context: context); return true }
+        catch { setError(error, for: records[index].id); return false }
+    }
+
+    /// The only writer of host grants after load: stores the choice, recomputes the effective grants, applies them to
+    /// the live context, persists, and asks for a reload when open pages lost access. A failed save restores the
+    /// record and the live context and throws: nothing is reported as saved that a restart would undo.
+    private func applySiteAccess(index: Int, state: ExtensionSiteAccess.State, timed: ExtensionSiteAccessEngine.Timed,
+                                 declarations: ExtensionSiteAccess.Declarations, context: WKWebExtensionContext?) throws {
+        let previous = records[index]
+        let previousLive = context.map { ($0.grantedPermissionMatchPatterns, $0.deniedPermissionMatchPatterns) }
+        let live = ExtensionSiteAccessEngine.live(timed, declarations: declarations)
+        let target = ExtensionSiteAccessEngine.target(state, timed: live, declarations: declarations)
+        let lost = Set(previous.patterns.keys).subtracting(target.keys)
+        records[index].siteAccess = ExtensionSiteAccessEngine.encode(state)
+        Self.store(live, in: &records[index])
+        records[index].patterns = target
+        for pattern in target.keys { records[index].deniedPatterns.removeValue(forKey: pattern) }
+        if let context {
+            context.deniedPermissionMatchPatterns = Self.matchPatterns(records[index].deniedPatterns)
+            context.grantedPermissionMatchPatterns = Self.matchPatterns(target)
+        }
+        do { try persist() } catch {
+            records[index] = previous
+            if let context, let previousLive { context.deniedPermissionMatchPatterns = previousLive.1; context.grantedPermissionMatchPatterns = previousLive.0 }
+            throw BrowserExtensionSiteAccessFailure.failed("Site access couldn't be saved, so nothing changed. \(error.localizedDescription)")
+        }
+        noteMutation(previous.id, permissions: true)
+        if !lost.isEmpty { onReloadNeeded?(previous.profileID) }
+        changed()
+    }
+
     func revokePermissions(id: UUID) throws {
         guard let i = records.firstIndex(where: { $0.id == id }) else { return }
         noteMutation(id, permissions: true); loadGeneration.removeValue(forKey: id)
         records[i].permissions = [:]; records[i].patterns = [:]; records[i].compatibilityGrants = [:]; records[i].nativeHost = nil
+        // Revoking withholds every site, including optional and time-limited grants.
+        records[i].siteAccess = ExtensionSiteAccessEngine.encode(.withheld()); records[i].timedSiteGrants = nil; records[i].timedOptionalSiteGrants = nil
         if let runtime = runtimes[records[i].profileID], let context = runtime.contexts[id] { runtime.disconnectNative(context); runtime.compatibility.revoke(context) }
         if let context = context(for: id) { context.grantedPermissions = [:]; context.grantedPermissionMatchPatterns = [:] }
         try persist(); onReloadNeeded?(records[i].profileID); changed()
@@ -737,10 +889,22 @@ struct BrowserExtensionPermissionReview {
         var index = initialIndex
         let plan = ExtensionCompatibility.plan(manifest: ext.manifest)
         let bridged = plan.provided.filter { ExtensionCompatibility.bridgedPermissions.contains($0) }
+        // Site access: an install (a freshly parsed package) is approved below; anything else keeps its stored
+        // choice, migrating a record from before site access exists once (never widening, never extending an expiry).
+        let declarations = ExtensionSiteAccess.Declarations(ext)
+        let installing = parsed != nil && records[index].siteAccess == nil
+        var siteState = try ExtensionSiteAccessEngine.decode(records[index].siteAccess)
+        var siteTimed = ExtensionSiteAccessEngine.live(Self.timed(records[index]), declarations: declarations)
+        if siteState == nil && !installing {
+            let migrated = ExtensionSiteAccessEngine.migrate(patterns: records[index].patterns, declarations: declarations)
+            siteState = migrated.state; siteTimed = migrated.timed
+        }
         if review {
             let requested = Set(ext.requestedPermissions.map(\.rawValue))
             let supported = requested.intersection(Self.supportedPermissions)
-            let patterns = ext.allRequestedMatchPatterns.map(\.string).sorted()
+            // An install reviews everything requested; re-enabling reviews only the sites its stored choice grants.
+            let patterns = installing ? declarations.requested
+                : ExtensionSiteAccessEngine.target(siteState ?? .withheld(), timed: siteTimed, declarations: declarations).keys.sorted()
             let details = BrowserExtensionPermissionReview(name: record.name, profileName: profileName?(record.profileID) ?? "Current profile", permissions: supported.sorted(), websites: patterns,
                 unsupported: requested.subtracting(supported).subtracting(bridged).subtracting(Self.supportsNativeCompanion(record) ? ["nativeMessaging"] : []).sorted(), isOptional: false, compatibilityNote: record.disclosedNote, bridged: bridged,
                 nativeCompanionAvailable: Self.supportsNativeCompanion(record) && requested.contains("nativeMessaging"))
@@ -751,8 +915,8 @@ struct BrowserExtensionPermissionReview {
                   let currentIndex = records.firstIndex(where: { $0.id == id && $0.profileID == record.profileID }) else { return }
             index = currentIndex
             records[index].permissions = Dictionary(uniqueKeysWithValues: supported.map { ($0, Date.distantFuture) })
-            records[index].patterns = Dictionary(uniqueKeysWithValues: patterns.map { ($0, Date.distantFuture) })
-            records[index].deniedPermissions = [:]; records[index].deniedPatterns = [:]
+            records[index].deniedPermissions = [:]
+            if installing { siteState = .allRequested(approving: declarations); siteTimed = .init(); records[index].deniedPatterns = [:] }
             records[index].compatibilityGrants = Dictionary(uniqueKeysWithValues: bridged.map { ($0, Date.distantFuture) })
         }
         // Older installs recorded their reviewed shim list but not separate grants.
@@ -763,6 +927,12 @@ struct BrowserExtensionPermissionReview {
             records[index].compatibilityGrants = Dictionary(uniqueKeysWithValues:
                 (canMigrate ? prior.compatibility ?? [] : []).filter { bridged.contains($0) }.map { ($0, Date.distantFuture) })
         }
+        // The only writer of host grants: the choice's patterns plus live time-limited grants.
+        let siteTarget = ExtensionSiteAccessEngine.target(siteState ?? .withheld(), timed: siteTimed, declarations: declarations)
+        records[index].siteAccess = ExtensionSiteAccessEngine.encode(siteState ?? .withheld())
+        Self.store(siteTimed, in: &records[index])
+        records[index].patterns = siteTarget
+        for pattern in siteTarget.keys { records[index].deniedPatterns.removeValue(forKey: pattern) }
         let current = records[index]
         let context = WKWebExtensionContext(for: ext)
         context.uniqueIdentifier = current.contextIdentifier
@@ -808,11 +978,21 @@ struct BrowserExtensionPermissionReview {
         let id = records[i].id
         let before = records[i]
         records[i].permissions = Dictionary(uniqueKeysWithValues: context.grantedPermissions.filter { Self.supportedPermissions.contains($0.key.rawValue) }.map { ($0.key.rawValue, $0.value) })
-        records[i].patterns = Dictionary(uniqueKeysWithValues: context.grantedPermissionMatchPatterns.map { ($0.key.string, $0.value) })
         records[i].deniedPermissions = Dictionary(uniqueKeysWithValues: context.deniedPermissions.map { ($0.key.rawValue, $0.value) })
         records[i].deniedPatterns = Dictionary(uniqueKeysWithValues: context.deniedPermissionMatchPatterns.map { ($0.key.string, $0.value) })
         if !context.hasPermission(.init(rawValue: "nativeMessaging")) { records[i].nativeHost = nil }
-        if before.permissions != records[i].permissions || before.patterns != records[i].patterns || before.deniedPermissions != records[i].deniedPermissions || before.deniedPatterns != records[i].deniedPatterns || before.nativeHost != records[i].nativeHost { noteMutation(id, permissions: true) }
+        // Host grants are not read back as authority. Two WebKit-side changes are honored: a grant WebKit removed
+        // (the extension's permissions.remove, or a lapse) leaves the choice, and a declared grant with a finite expiry
+        // is kept as time-limited with its own date (never extended).
+        if let state = try? ExtensionSiteAccessEngine.decode(records[i].siteAccess) {
+            let live = Dictionary(uniqueKeysWithValues: context.grantedPermissionMatchPatterns.map { ($0.key.string, $0.value) })
+            let reconciled = ExtensionSiteAccessEngine.reconcile(state, timed: Self.timed(records[i]), applied: records[i].patterns,
+                                                                  live: live, declarations: ExtensionSiteAccess.Declarations(context.webExtension))
+            records[i].siteAccess = ExtensionSiteAccessEngine.encode(reconciled.state)
+            Self.store(reconciled.timed, in: &records[i])
+            records[i].patterns = reconciled.target
+        }
+        if before.permissions != records[i].permissions || before.patterns != records[i].patterns || before.siteAccess != records[i].siteAccess || before.timedSiteGrants != records[i].timedSiteGrants || before.timedOptionalSiteGrants != records[i].timedOptionalSiteGrants || before.deniedPermissions != records[i].deniedPermissions || before.deniedPatterns != records[i].deniedPatterns || before.nativeHost != records[i].nativeHost { noteMutation(id, permissions: true) }
         if let runtime = runtimes[records[i].profileID], runtime.approvedNativeHost(context) == nil { runtime.disconnectNative(context) }
         do { try persist() } catch { setError(error, for: id) }
     }
@@ -1267,19 +1447,27 @@ struct BrowserExtensionPermissionReview {
     }
     func webExtensionController(_ controller: WKWebExtensionController, promptForPermissionToAccess urls: Set<URL>, in tab: (any WKWebExtensionTab)?, for context: WKWebExtensionContext, completionHandler: @escaping (Set<URL>, Date?) -> Void) {
         guard authorizes(tab, for: context), let owner else { completionHandler([], nil); return }
-        let eligible = Set(urls.filter { ["http", "https"].contains($0.scheme?.lowercased() ?? "") })
-        let review = BrowserExtensionPermissionReview(name: context.webExtension.displayName ?? "Extension", profileName: owner.profileName?(profileID) ?? "Current profile", permissions: [], websites: eligible.map { $0.absoluteString }.sorted(), unsupported: [], isOptional: true)
-        let granted = !eligible.isEmpty && owner.approve(review) ? eligible : []
+        // Each URL as its site, classified before asking: requested access, an optional grant, or refused.
+        let (decisions, revision) = owner.promptDecisions(urls.map { ($0, ExtensionSiteAccessEngine.site(for: $0)) }, for: context)
+        let offered = urls.filter { decisions[$0].map { $0 != .refused } ?? false }
+        let review = BrowserExtensionPermissionReview(name: context.webExtension.displayName ?? "Extension", profileName: owner.profileName?(profileID) ?? "Current profile", permissions: [], websites: Set(offered.compactMap { ExtensionSiteAccessEngine.site(for: $0) }).sorted(), unsupported: [], isOptional: true)
+        let approved = Set(!offered.isEmpty && owner.approve(review) ? offered : [])
         guard authorizes(tab, for: context) else { completionHandler([], nil); return }
-        for url in urls { context.setPermissionStatus(granted.contains(url) ? .grantedExplicitly : .deniedExplicitly, for: url) }
+        // Bound to the state the dialog was computed from: a revoke, mode change or update meanwhile grants nothing.
+        let granted = owner.recordSiteApprovals(context, approved.compactMap { decisions[$0] }, revision: revision) ? approved : []
+        for url in urls where !granted.contains(url) && !(approved.contains(url)) { context.setPermissionStatus(.deniedExplicitly, for: url) }
         owner.persistPermissions(context); completionHandler(granted, nil)
     }
     func webExtensionController(_ controller: WKWebExtensionController, promptForPermissionMatchPatterns patterns: Set<WKWebExtension.MatchPattern>, in tab: (any WKWebExtensionTab)?, for context: WKWebExtensionContext, completionHandler: @escaping (Set<WKWebExtension.MatchPattern>, Date?) -> Void) {
         guard authorizes(tab, for: context), let owner else { completionHandler([], nil); return }
-        let review = BrowserExtensionPermissionReview(name: context.webExtension.displayName ?? "Extension", profileName: owner.profileName?(profileID) ?? "Current profile", permissions: [], websites: patterns.map(\.string).sorted(), unsupported: [], isOptional: true)
-        let granted = !patterns.isEmpty && owner.approve(review) ? patterns : []
+        let (decisions, revision) = owner.promptDecisions(patterns.map { ($0, Optional($0.string)) }, for: context)
+        let offered = patterns.filter { decisions[$0].map { $0 != .refused } ?? false }
+        let review = BrowserExtensionPermissionReview(name: context.webExtension.displayName ?? "Extension", profileName: owner.profileName?(profileID) ?? "Current profile", permissions: [], websites: offered.map(\.string).sorted(), unsupported: [], isOptional: true)
+        let approved = !offered.isEmpty && owner.approve(review) ? offered : []
         guard authorizes(tab, for: context) else { completionHandler([], nil); return }
-        for pattern in patterns { context.setPermissionStatus(granted.contains(pattern) ? .grantedExplicitly : .deniedExplicitly, for: pattern) }
+        // Bound to the state the dialog was computed from: a revoke, mode change or update meanwhile grants nothing.
+        let granted = owner.recordSiteApprovals(context, approved.compactMap { decisions[$0] }, revision: revision) ? approved : []
+        for pattern in patterns where !granted.contains(pattern) && !approved.contains(pattern) { context.setPermissionStatus(.deniedExplicitly, for: pattern) }
         owner.persistPermissions(context); completionHandler(granted, nil)
     }
     func webExtensionController(_ controller: WKWebExtensionController, presentActionPopup action: WKWebExtension.Action, for context: WKWebExtensionContext, completionHandler: @escaping (Error?) -> Void) {
