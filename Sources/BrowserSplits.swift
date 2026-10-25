@@ -20,6 +20,8 @@ import WebKit
                 canWrapInFolder: !tab.isFavorite && URLInput.extensionURL(tab.address) == nil)
         }
         let visible = snapshot.visibleTabs
+        // Stable indent: from the whole tree, so collapsing the deepest branch doesn't shift rows.
+        let treeDepth = snapshot.keptLayout(in: snapshot.space).map(\.depth).max() ?? 0
         var result = visible.filter(\.isFavorite).map { item($0) }
         var siblings: [BrowserSession.KeptContainer: [UUID]] = [:]
         for entry in snapshot.visibleKeptLayout(in: snapshot.space, revealing: snapshot.activeID) {
@@ -39,6 +41,7 @@ import WebKit
             }
         }
         result += visible.filter { !$0.isSaved }.map { item($0) }
+        for index in result.indices { result[index].treeDepth = treeDepth }
         return result
     }
     func showSplit(_ group: BrowserSplit) {

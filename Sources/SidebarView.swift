@@ -42,6 +42,10 @@ struct SidebarTabItem: Equatable {
     var canNestFolder: Bool = true
     /// Whether a tab can be wrapped in a new folder (it must be keepable).
     var canWrapInFolder: Bool = true
+    /// Deepest level in the Space's whole kept tree, collapsed folders
+    /// included. It sets one indent step for the list that doesn't change
+    /// when a folder opens or closes, so rows never shift sideways.
+    var treeDepth: Int = 0
 }
 
 /// A destination offered by Move to Folder menus.
@@ -581,7 +585,7 @@ struct SidebarExtensionItem {
         defer { if let focusedID { restoreFocus(to: focusedID, near: focusedIndex) } }
         tabs = items
         configureAppearance(space: space, destinations: destinations)
-        let deepest = items.map(\.depth).max() ?? 0
+        let deepest = items.map { max($0.depth, $0.treeDepth) }.max() ?? 0
         if deepest != maxDepth {
             // One indent step for the whole list: every visible row re-lays out.
             maxDepth = deepest
@@ -1438,7 +1442,7 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource {
             setAccessibilityLabel(titleLabel.stringValue)
         }
         if first || old.isActive != item.isActive || old.isFolder != item.isFolder { titleLabel.font = ArkType.rowFont(active: item.isActive, folder: item.isFolder) }
-        if first || old.depth != item.depth { needsLayout = true }
+        if first || old.depth != item.depth || old.isFolder != item.isFolder { needsLayout = true }
         if first || old.isUnloaded != item.isUnloaded || old.isSleeping != item.isSleeping {
             titleLabel.textColor = ArkRowInk.title(sleeping: item.isSleeping)
             iconView.alphaValue = ArkRowInk.iconAlpha(sleeping: item.isSleeping)
@@ -1527,9 +1531,11 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource {
     /// The close button shows on the selected or hovered tab; the title takes
     /// its room back whenever it is hidden.
     private func updateTrailingControls() {
+        // The title's end depends on both trailing controls, so a change to
+        // either (including a reused cell switching tab ↔ folder) re-lays out.
         let hidden = item.isFolder || item.isUnloaded || (!hovered && !item.isActive)
         if closeButton.isHidden != hidden { closeButton.isHidden = hidden; needsLayout = true }
-        chevronView.isHidden = !item.isFolder
+        if chevronView.isHidden != !item.isFolder { chevronView.isHidden = !item.isFolder; needsLayout = true }
     }
     override func draw(_ dirtyRect: NSRect) {
         if window?.firstResponder === self {
