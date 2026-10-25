@@ -135,11 +135,19 @@ import WebKit
             // The offscreen page answers only its own kind, parsing with a DOM API a worker lacks.
             try Data("""
             const stall = new URL(location.href).searchParams.get('stall');
-            if (stall) { const image = new Image(); image.src = 'http://127.0.0.1:' + stall + '/stall.png'; document.documentElement.append(image); }
+            // HTTPS, not HTTP: an extension page is a secure context, so a plain-HTTP image is
+            // blocked as mixed content and would not hold the load. The silent listener accepts
+            // the connection and never answers the TLS handshake, so the image stays pending.
+            let stallState = 'none';
+            if (stall) {
+              const image = new Image(); stallState = 'pending';
+              image.onload = () => { stallState = 'loaded'; }; image.onerror = () => { stallState = 'error'; };
+              image.src = 'https://127.0.0.1:' + stall + '/stall.png'; document.documentElement.append(image);
+            }
             (globalThis.browser || globalThis.chrome).runtime.onMessage.addListener(message => {
               if (message?.kind !== 'offscreen-echo') return undefined;
               const parsed = new DOMParser().parseFromString('<p>' + message.value + '</p>', 'text/html').body.textContent;
-              return Promise.resolve({echo: parsed, path: location.pathname, visible: document.visibilityState});
+              return Promise.resolve({echo: parsed, path: location.pathname, visible: document.visibilityState, stall: stallState, readyState: document.readyState});
             });
             """.utf8).write(to: package.appendingPathComponent("offscreen.js"))
             try Data("<!doctype html><meta charset='utf-8'><title>Offscreen fixture</title><script src='offscreen.js'></script>".utf8).write(to: package.appendingPathComponent("offscreen.html"))
@@ -252,9 +260,16 @@ import WebKit
                 arguments: ["close": close], in: nil, contentWorld: .page) as? [String: Any]
         }
         let stalledReport = await stalledOffscreen(popupA)
-        try check((stalledReport?["echo"] as? [String: Any])?["echo"] as? String == "stalled" && stalledReport?["has"] as? Bool == true &&
-                  runtimeA.compatibility.offscreen.entry(for: contextA.uniqueIdentifier)?.isLoaded == false,
-                  "The stalled offscreen page did not run while its load was pending: \(stalledReport ?? [:])")
+        let stalledEcho = stalledReport?["echo"] as? [String: Any]
+        // The stall must be real before the lifecycle is judged: the page ran, its image request
+        // reached the silent listener, and the image is still pending.
+        try check(stalledEcho?["echo"] as? String == "stalled" && stalledReport?["has"] as? Bool == true,
+                  "The stalled offscreen page did not run or answer: \(stalledReport ?? [:])")
+        try await wait("The stalled offscreen page's request never reached the silent listener: \(stalledReport ?? [:])") { !stalledConnections.isEmpty }
+        try check(stalledEcho?["stall"] as? String == "pending" && stalledEcho?["readyState"] as? String != "complete",
+                  "The stalling image did not stay pending (fixture did not stall): \(stalledReport ?? [:])")
+        try check(runtimeA.compatibility.offscreen.entry(for: contextA.uniqueIdentifier)?.isLoaded == false,
+                  "A document whose load is still pending was reported loaded: \(stalledReport ?? [:])")
         weak var stalledWeb = runtimeA.compatibility.offscreen.currentDocument(for: contextA.uniqueIdentifier)
         let closedStall = await afterClose(popupA, close: true)
         try check(closedStall?["outcome"] as? String == "The offscreen document was closed before it finished loading." && closedStall?["has"] as? Bool == false &&
@@ -265,7 +280,11 @@ import WebKit
                   (recreated?["echo"] as? [String: Any])?["path"] as? String == "/offscreen.html", "Recreating after a cancelled load failed: \(recreated ?? [:])")
         _ = await request(popupA, kind: "offscreen-close")
         // A is still loading when its grants are revoked; B is loaded when B is disabled.
-        _ = await stalledOffscreen(popupA); _ = await request(popupB, kind: "offscreen")
+        // Drop the closed document's silent connections so the new request cannot queue behind them.
+        for connection in stalledConnections { connection.cancel() }
+        stalledConnections.removeAll()
+        let revokeStall = await stalledOffscreen(popupA); _ = await request(popupB, kind: "offscreen")
+        try await wait("The revoke-case stall never reached the silent listener: \(revokeStall ?? [:])") { !stalledConnections.isEmpty }
         try check(runtimeA.compatibility.offscreen.entry(for: contextA.uniqueIdentifier)?.isLoaded == false && runtimeB.compatibility.offscreen.has(contextB.uniqueIdentifier),
                   "Offscreen documents were not reopened for the lifecycle checks")
         weak var revokedWeb = runtimeA.compatibility.offscreen.currentDocument(for: contextA.uniqueIdentifier)
