@@ -27,7 +27,7 @@ enum ExtensionCompatibility {
     }
 
     /// Permissions WebKit's engine does not implement and this layer can stand in for.
-    static let bridgedPermissions: [String] = ["notifications", "idle", "privacy", "management", "downloads", "offscreen"]
+    static let bridgedPermissions: [String] = ["notifications", "idle", "privacy", "management", "downloads", "offscreen", "fontSettings"]
     /// Members the layer always offers when the host namespace exists but the member does not.
     static let runtimeExtras: [String] = ["runtime.getBrowserInfo", "runtime.onSuspend", "runtime.requestUpdateCheck", "runtime.getContexts",
                                           "webNavigation.onCreatedNavigationTarget", "storage.managed", "commands", "action.getUserSettings"]
@@ -380,6 +380,25 @@ enum ExtensionCompatibility {
         define(ns, "hasDocument", call(async () => (await offscreenRequest("hasDocument", null)) === true));
         define(ns, "Reason", Object.freeze(Object.fromEntries(reasons.map((reason) => [reason, reason]))));
         define(api, "offscreen", ns);
+      }
+
+      // fontSettings: the installed font families (Dark Reader's font picker). Bam has no
+      // per-script or default font settings, so reading or changing those rejects.
+      if (provided.has("fontSettings") && !api.fontSettings) {
+        const ns = {};
+        define(ns, "getFontList", call(async () => {
+          const list = await bridge("fontSettings.getFontList", null);
+          return Array.isArray(list) ? list.map((font) => ({ fontId: String(font.fontId), displayName: String(font.displayName) })) : [];
+        }));
+        for (const name of ["getFont", "setFont", "clearFont", "getDefaultFontSize", "setDefaultFontSize", "clearDefaultFontSize", "getDefaultFixedFontSize",
+                            "setDefaultFixedFontSize", "clearDefaultFixedFontSize", "getMinimumFontSize", "setMinimumFontSize", "clearMinimumFontSize"]) {
+          define(ns, name, call(async () => { throw unsupported("fontSettings." + name); }));
+        }
+        for (const name of ["onFontChanged", "onDefaultFontSizeChanged", "onDefaultFixedFontSizeChanged", "onMinimumFontSizeChanged"]) registerEvent(ns, name, "fontSettings." + name);
+        define(ns, "GenericFamily", { STANDARD: "standard", SANSSERIF: "sansserif", SERIF: "serif", FIXED: "fixed", CURSIVE: "cursive", FANTASY: "fantasy", MATH: "math" });
+        define(ns, "LevelOfControl", { NOT_CONTROLLABLE: "not_controllable", CONTROLLED_BY_OTHER_EXTENSIONS: "controlled_by_other_extensions",
+                                      CONTROLLABLE_BY_THIS_EXTENSION: "controllable_by_this_extension", CONTROLLED_BY_THIS_EXTENSION: "controlled_by_this_extension" });
+        define(api, "fontSettings", ns);
       }
 
       // commands: manifest commands are listed; keyboard dispatch is not provided.
@@ -771,6 +790,7 @@ enum ExtensionCompatibility {
     private func handle(method: String, params: [String: Any], context: WKWebExtensionContext, web: WKWebView?) async -> (Any?, String?) {
         let methods = ["idle.queryState": "idle", "notifications.permissionLevel": "notifications", "notifications.create": "notifications",
                        "notifications.clear": "notifications", "downloads.download": "downloads",
+                       "fontSettings.getFontList": "fontSettings",
                        "offscreen.createDocument": "offscreen", "offscreen.closeDocument": "offscreen", "offscreen.hasDocument": "offscreen", "offscreen.contexts": "offscreen"]
         guard let permission = methods[method], permits(permission, for: context) else { return (nil, "This compatibility capability is not available to the extension.") }
         switch method {
@@ -812,6 +832,8 @@ enum ExtensionCompatibility {
             let started = web.map { startDownload?($0, download) == true } ?? (workerDownload?(context, download) == true)
             guard started else { return (nil, "Open a page in this extension's profile to start the download.") }
             return (true, nil)
+        case "fontSettings.getFontList":
+            return (Self.fontList(), nil)
         case "offscreen.createDocument", "offscreen.closeDocument", "offscreen.hasDocument", "offscreen.contexts":
             // Outcomes travel as values so Chrome's exact messages survive WebKit's
             // native-message error wrapping; the adapter rethrows them unchanged.
@@ -855,6 +877,14 @@ enum ExtensionCompatibility {
         for connection in eventConnections[uniqueIdentifier]?.values ?? Dictionary<ObjectIdentifier, EventConnection>().values where connection.events.contains(event) {
             connection.port.sendMessage(["event": event, "args": arguments]) { _ in }
         }
+    }
+
+    /// Installed font families as Chrome lists them: an ID and a localized display name,
+    /// sorted by display name. System-private families (leading ".") are omitted.
+    static func fontList() -> [[String: String]] {
+        NSFontManager.shared.availableFontFamilies.filter { !$0.hasPrefix(".") }
+            .map { ["fontId": $0, "displayName": NSFontManager.shared.localizedName(forFamily: $0, face: nil)] }
+            .sorted { ($0["displayName"] ?? "").localizedStandardCompare($1["displayName"] ?? "") == .orderedAscending }
     }
 
     static func json(_ value: Any) -> String {

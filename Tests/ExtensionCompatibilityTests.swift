@@ -17,7 +17,7 @@ import JavaScriptCore
             guard condition else { throw Failure(message: message) }; checks += 1
         }
         let manifest: [String: Any] = ["manifest_version": 3, "name": "Original Compatibility Fixture", "version": "1.0",
-                                      "permissions": ["notifications", "idle", "downloads"]]
+                                      "permissions": ["notifications", "idle", "downloads", "fontSettings"]]
         let json = String(data: try JSONSerialization.data(withJSONObject: manifest), encoding: .utf8)!
         let js = JSContext()!
         var jsErrors: [String] = []
@@ -179,6 +179,16 @@ import JavaScriptCore
         try check(result.1 == nil && result.0 as? String == "idle", "Authorized native idle query did not use actual inactivity")
         result = await bridge.receiveNativeMessage(["kind": "request", "method": "notifications.create"], context: context)
         try check(result.1 != nil, "A different declared but ungranted namespace bypassed review")
+        let fonts = ["kind": "request", "method": "fontSettings.getFontList"]
+        result = await bridge.receiveNativeMessage(fonts, context: context)
+        try check(result.1 != nil, "An ungranted fontSettings list was returned")
+        bridge.permissionGranted = { candidate, permission in candidate === context && permission == "fontSettings" }
+        result = await bridge.receiveNativeMessage(fonts, context: context)
+        let families = result.0 as? [[String: String]] ?? []
+        let names = families.compactMap { $0["displayName"] }
+        try check(result.1 == nil && families.contains { $0["fontId"] == "Helvetica" } && !families.contains { $0["fontId"]?.hasPrefix(".") == true } &&
+                  names == names.sorted { $0.localizedStandardCompare($1) == .orderedAscending }, "fontSettings.getFontList did not list installed families sorted by name")
+        bridge.permissionGranted = { candidate, permission in candidate === context && permission == "idle" }
         result = await bridge.receiveNativeMessage(["kind": "request", "method": "arbitrary.execute"], context: context)
         try check(result.1 != nil, "Unknown native method was accepted")
         let foreign = WKWebExtensionContext(for: ext)
@@ -235,6 +245,7 @@ import JavaScriptCore
                   if (!document) return Promise.resolve({error: 'No current offscreen document.'});
                   document = null; return Promise.resolve({value: null});
                 case 'offscreen.hasDocument': return Promise.resolve({value: !!document});
+                case 'fontSettings.getFontList': return Promise.resolve([{fontId: 'Fixture Sans', displayName: 'Fixture Sans', extra: 1}]);
                 case 'offscreen.contexts': return Promise.resolve({value: document ? [{contextType: 'OFFSCREEN_DOCUMENT', contextId: 'c1', documentId: 'c1', documentUrl: document,
                   documentOrigin: 'webkit-extension://fixture', tabId: -1, windowId: -1, frameId: 0, incognito: false}] : []});
               }
@@ -288,6 +299,21 @@ import JavaScriptCore
                   "closeDocument, its missing-document error or argument validation failed: \(js.evaluateScript("JSON.stringify(results)")!)")
         try check(js.evaluateScript("requests.filter(function (m) { return m === 'offscreen.createDocument'; }).length === 3")!.toBool(),
                   "Invalid createDocument arguments reached the native side")
+
+        // fontSettings: the native list arrives normalized in both call forms; settings calls reject with lastError.
+        let (fontsJS, fontErrors) = context(permissions: ["fontSettings"])
+        fontsJS.evaluateScript("""
+        (async function () {
+          results.promised = await browser.fontSettings.getFontList();
+          chrome.fontSettings = browser.fontSettings;
+          await new Promise(function (resolve) { chrome.fontSettings.getFontList(function (list) { results.callback = list; resolve(); }); });
+          await new Promise(function (resolve) { chrome.fontSettings.setFont({genericFamily: 'serif', fontId: 'x'}, function () { results.setError = chrome.runtime.lastError && chrome.runtime.lastError.message; resolve(); }); });
+        })();
+        """)
+        try check(fontErrors().isEmpty && fontsJS.evaluateScript("""
+            JSON.stringify(results.promised) === '[{"fontId":"Fixture Sans","displayName":"Fixture Sans"}]' && JSON.stringify(results.callback) === JSON.stringify(results.promised)
+            && results.setError === 'fontSettings.setFont is not available in Bam.' && browser.fontSettings.GenericFamily.SERIF === 'serif'
+            """)!.toBool(), "fontSettings adapter did not normalize the list or reject settings changes: \(fontsJS.evaluateScript("JSON.stringify(results)")!)")
 
         // Undeclared: no namespace, and getContexts keeps its earlier empty, request-free answer.
         let (plain, plainErrors) = context(permissions: ["storage"])

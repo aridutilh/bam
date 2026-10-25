@@ -38,7 +38,7 @@ import WebKit
             if module { background["type"] = "module" }
             let manifest: [String: Any] = ["manifest_version": 3, "name": module ? "Bam module worker fixture" : "Bam classic worker fixture", "version": "1.0", "description": "Original fixture for Bam service-worker runtime tests",
                 "content_security_policy": ["extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"],
-                "background": background, "permissions": ["storage", "idle", "notifications", "offscreen"], "host_permissions": ["http://127.0.0.1/*", "http://localhost/*"],
+                "background": background, "permissions": ["storage", "idle", "notifications", "offscreen", "fontSettings"], "host_permissions": ["http://127.0.0.1/*", "http://localhost/*"],
                 "action": ["default_popup": "popup.html"], "content_scripts": [["matches": ["http://127.0.0.1/*", "http://localhost/*"], "js": ["content.js"], "run_at": "document_end"]]]
             try JSONSerialization.data(withJSONObject: manifest, options: [.sortedKeys]).write(to: package.appendingPathComponent("manifest.json"))
             let dependency = "globalThis.fixtureOrder = [globalThis.__bamCompatibility?.worker === true ? 'adapter' : 'missing-adapter', 'dependency'];\n"
@@ -116,6 +116,7 @@ import WebKit
               return {order:globalThis.fixtureOrder, hasDocument:typeof document !== 'undefined', originalURL:globalThis.fixtureOriginalURL,
                 workerURL:location.href, starts:await started, events:events.slice(), wasm:await wasmResult, disposal,
                 adapterVersion: globalThis.__bamCompatibility?.version || 'missing',
+                fonts: await api.fontSettings.getFontList().then(list => list.filter(font => typeof font.fontId === 'string' && typeof font.displayName === 'string').length, error => 'error: ' + error.message),
                 idle:await api.idle.queryState(15), permission:await api.notifications.getPermissionLevel()};
             });
             """#
@@ -202,6 +203,8 @@ import WebKit
         try check(wasmB["compiled"] as? Int == 42 && wasmB["instantiated"] as? Int == 42, "Module worker packaged Wasm streaming failed: \(wasmB)")
         try check(firstA?["disposal"] as? String == "available" && firstB?["disposal"] as? String == "available",
                   "Worker lacked usable Symbol.dispose/asyncDispose: classic=\(firstA?["disposal"] ?? "nil"), module=\(firstB?["disposal"] ?? "nil")")
+        try check((firstA?["fonts"] as? Int ?? 0) > 0 && (firstB?["fonts"] as? Int ?? 0) > 0,
+                  "fontSettings.getFontList returned no installed families: classic=\(firstA?["fonts"] ?? "nil"), module=\(firstB?["fonts"] ?? "nil")")
         print("Worker Wasm response MIME: classic=\(wasmA["mime"] as? String ?? "missing"), module=\(wasmB["mime"] as? String ?? "missing")")
         guard let popupA = contextA.action(for: nil)?.popupWebView, let popupB = contextB.action(for: nil)?.popupWebView else { throw Failure(description: "Workers have no native action popups") }
         popupA.frame = frame; popupB.frame = frame
