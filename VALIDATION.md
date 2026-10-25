@@ -1,3 +1,11 @@
+## Local 0.23.0 build 47 — acceptance in progress
+
+Source review accepted the verified-ID implementation and notification reinstall correction. Executor checks passed: identity **15**, enumeration **91**, startup **16**, management disclosure **11**, compatibility **77**, and full typecheck. Integrated build, native product regression and real Session Buddy acceptance are pending.
+
+Separate canonical Preview measurements confirmed native Chrome-shaped IDs in pages, workers and registered content scripts, self-messaging and ports, private resource origins, and independent values in two controller namespaces. Across two real processes, both profile values and the legacy UUID control persisted; changing only the resource host retained the Chrome-ID value. These standalone fixtures do not establish product compatibility. WebKit retained zero-byte records after removal; direct empty-key cleanup confirmation is pending. No personal profile was used.
+
+Original focus measurements reproduce a failure with a lazily created extension frame, while a preloaded baseline and isolated hidden styling, shadow root, clipboard policy and editable text controls work. The real Vimium issue remains unresolved; a comparison without Bam's browser-window layer is pending.
+
 ## Release 0.22.1 build 46 — October 25
 
 The release candidate passed `bash build.sh` (production sources at `8422e1f`) and the complete `bash scripts/test-runtime.sh` against canonical Bam Preview. All eleven native suites passed, including Interactions **173**, Features **371**, Extensions **435**, Favicons **85**, Arc import **155**, Profiles **98**, Profile activation **45**, Resources **37** and Automatic PiP **85**, plus WebKit and manual PiP. Release-only changes after the built source are documentation and neutral labels in a component fixture; production source and resources are unchanged. Evidence: task-local `integration-build-morning-sidebar-final.log` and `release-runtime-e1325f5.log`.
