@@ -172,6 +172,31 @@ import Foundation
         manager.close()
         try check(manager.siteAccess == nil, "Closing the manager ends the editor")
 
+        // MARK: Revoke Permissions is transactional: a failed save changes nothing (owned temporary registry only).
+        guard let revokeIndex = host.records.firstIndex(where: { $0.id == mailID }) else { throw Failure(message: "fixture record missing") }
+        let beforeRevoke = host.records[revokeIndex]
+        try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: root.path)   // this test's own directory
+        var revokeFailure: String?
+        do { try host.revokePermissions(id: mailID) } catch BrowserExtensionSiteAccessFailure.failed(let message) { revokeFailure = message }
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: root.path)
+        try check(revokeFailure?.contains("couldn’t be saved, so nothing changed") == true, "A failed revoke save must say nothing changed: \(revokeFailure ?? "no error")")
+        let encoder = JSONEncoder(); encoder.outputFormatting = .sortedKeys
+        try check(try encoder.encode(host.records.first(where: { $0.id == mailID })) == (try encoder.encode(beforeRevoke)), "A failed revoke save must leave the record exactly as it was")
+        try host.revokePermissions(id: mailID)
+        let revokedRecord = host.records.first(where: { $0.id == mailID })
+        try check(revokedRecord?.patterns.isEmpty == true && (try? ExtensionSiteAccessEngine.decode(revokedRecord?.siteAccess))??.mode == .withheld,
+                  "With storage writable again, revoke saves withheld")
+
+        // MARK: A stopped extension's message (restart load failure), with and without a failed disable save.
+        struct Reason: LocalizedError { var errorDescription: String? { "load refused" } }
+        struct SaveFailure: LocalizedError { var errorDescription: String? { "disk full" } }
+        let plain = BrowserExtensions.stoppedMessage(name: "Docs Helper", reason: Reason(), disableSaveError: nil)
+        try check(plain.contains("stopped and couldn’t restart") && plain.contains("load refused") && plain.contains("Enable it again"), "Stopped message: \(plain)")
+        let unsaved = BrowserExtensions.stoppedMessage(name: "Docs Helper", reason: Reason(), disableSaveError: SaveFailure())
+        try check(unsaved.contains("couldn’t save that it’s stopped (disk full)") && unsaved.contains("may load again the next time Bam opens")
+                  && unsaved.contains("saved, reduced site access") && !unsaved.contains("Enable it again in Manage Extensions."),
+                  "A failed disable save is reported, not hidden behind manual-only recovery: \(unsaved)")
+
         // MARK: The engine source is weak (the host owns the manager).
         do {
             let temporary = FakeEngine()

@@ -300,7 +300,10 @@ import UniformTypeIdentifiers
             let next = try source.performSiteAccess(id: binding.extensionID, profileID: binding.profileID, revision: binding.engine.revision,
                                                     displayed: request.displayed, change: Self.change(for: request.action))
             binding.engine = next; binding.displayRevision += 1
-            if let snapshot = binding.snapshot { completion(.success(snapshot)) }
+            // A restart that removed content set up for all sites is said once, in the editor and the status line.
+            let notice = host?.takeSiteAccessNotice(id: binding.extensionID)
+            if let notice { pendingStatus = notice }
+            if var snapshot = binding.snapshot { snapshot.message = notice; completion(.success(snapshot)) }
             else {
                 completion(.failure(.failed(Self.siteAccessGone)))
                 binding.refreshWhileInFlight = true   // not editable any more: the deferred refresh closes the editor
@@ -353,7 +356,10 @@ import UniformTypeIdentifiers
 
     @objc private func revokePermissions() {
         guard let host, let selected = selection, !busy else { return }
-        do { try host.revokePermissions(id: selected.id) } catch { host.setError(error, for: selected.id) }
+        do {
+            try host.revokePermissions(id: selected.id)
+            if let notice = host.takeSiteAccessNotice(id: selected.id) { pendingStatus = notice; updateControls() }
+        } catch { host.setError(error, for: selected.id) }
     }
     @objc private func removeExtension() {
         guard let host, let selected = selection, !busy else { return }

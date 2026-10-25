@@ -795,6 +795,7 @@ struct BrowserExtensionPermissionReview {
     /// The only writer of host grants after load: stores the choice, recomputes the effective grants, applies them to
     /// the live context, persists, and asks for a reload when open pages lost access. A failed save restores the
     /// record and the live context and throws: nothing is reported as saved that a restart would undo.
+    /// Withdrawing any live all-host grant then restarts the extension (see `restartForSiteAccess`).
     private func applySiteAccess(index: Int, state: ExtensionSiteAccess.State, timed: ExtensionSiteAccessEngine.Timed,
                                  declarations: ExtensionSiteAccess.Declarations, context: WKWebExtensionContext?) throws {
         let previous = records[index]
@@ -806,23 +807,9 @@ struct BrowserExtensionPermissionReview {
         Self.store(live, in: &records[index])
         records[index].patterns = target
         for pattern in target.keys { records[index].deniedPatterns.removeValue(forKey: pattern) }
+        var withdrewAllHost = false
         if let context {
-            // Candidate fix (native lifecycle regression: all-host content still injected into fresh documents after a
-            // bulk grant replacement). First reset, one by one through the public per-pattern API, every live grant the
-            // target no longer includes, so WebKit takes its per-pattern removal path for each; then apply the exact
-            // target as before. No denial is added, nothing is widened, and no shared controller script is touched.
-            // Order matters: WebKit coalesces all-host injection under the canonical `*://*/*` key, and removing an
-            // all-host pattern re-adds content for the all-host grants that remain. So specific patterns go first, then
-            // other all-host forms (`<all_urls>`, `https://*/*`, …), and the canonical `*://*/*` strictly last.
-            let kept = Set(target.keys)
-            let withdrawn = context.grantedPermissionMatchPatterns.keys.filter { !kept.contains($0.string) }
-            func removalRank(_ pattern: WKWebExtension.MatchPattern) -> Int {
-                if pattern.string == "*://*/*" { return 2 }
-                return pattern.matchesAllHosts || pattern.matchesAllURLs ? 1 : 0
-            }
-            for pattern in withdrawn.sorted(by: { (removalRank($0), $0.string) < (removalRank($1), $1.string) }) {
-                context.setPermissionStatus(.unknown, for: pattern)
-            }
+            withdrewAllHost = Self.withdraw(from: context, keeping: Set(target.keys))
             context.deniedPermissionMatchPatterns = Self.matchPatterns(records[index].deniedPatterns)
             context.grantedPermissionMatchPatterns = Self.matchPatterns(target)
         }
@@ -832,20 +819,128 @@ struct BrowserExtensionPermissionReview {
             throw BrowserExtensionSiteAccessFailure.failed("Site access couldn't be saved, so nothing changed. \(error.localizedDescription)")
         }
         noteMutation(previous.id, permissions: true)
-        if !lost.isEmpty { onReloadNeeded?(previous.profileID) }
+        // Saved. From here a restart failure never restores the old (broader) grants.
+        let restart = withdrewAllHost ? context.map { restartForSiteAccess(id: previous.id, context: $0) } : nil
+        if !lost.isEmpty, restart?.leavesStaleContent != true { onReloadNeeded?(previous.profileID) }
         changed()
+        if let failure = restart?.failure { throw BrowserExtensionSiteAccessFailure.failed(failure) }
     }
 
+    /// Resets, one by one through the public per-pattern API, every live grant not in `keeping` (specific patterns
+    /// first, other all-host forms next, the canonical `*://*/*` last). Returns whether an all-host grant was among them.
+    /// The caller then applies the exact target in bulk. No denial is added, nothing is widened.
+    private static func withdraw(from context: WKWebExtensionContext, keeping kept: Set<String>) -> Bool {
+        func isAllHost(_ pattern: WKWebExtension.MatchPattern) -> Bool { pattern.matchesAllHosts || pattern.matchesAllURLs }
+        func removalRank(_ pattern: WKWebExtension.MatchPattern) -> Int { pattern.string == "*://*/*" ? 2 : isAllHost(pattern) ? 1 : 0 }
+        let withdrawn = context.grantedPermissionMatchPatterns.keys.filter { !kept.contains($0.string) }
+        for pattern in withdrawn.sorted(by: { (removalRank($0), $0.string) < (removalRank($1), $1.string) }) {
+            context.setPermissionStatus(.unknown, for: pattern)
+        }
+        return withdrawn.contains(where: isAllHost)
+    }
+
+    /// What a site-access restart did, for honest reporting.
+    enum SiteAccessRestart: Equatable {
+        case restarted
+        /// `unload` threw. `stillLoaded`: WebKit still lists the context, so content set up for all sites may still
+        /// reach new pages.
+        case unloadFailed(String, stillLoaded: Bool)
+        /// Unloaded, then `load` threw: the extension is stopped (no content), its saved choice intact; Enable recovers.
+        case loadFailed(String)
+        var leavesStaleContent: Bool { if case .unloadFailed(_, true) = self { return true }; return false }
+        var failure: String? {
+            switch self {
+            case .restarted: return nil
+            case .unloadFailed(let message, _), .loadFailed(let message): return message
+            }
+        }
+    }
+    /// Test seam: a non-nil error makes the restart's `load` fail for that extension. nil in production.
+    static var siteAccessRestartLoadFault: ((UUID) -> Error?)?
+    /// One-shot user-facing notices from a site-access restart (Manage Extensions shows and consumes them).
+    private var siteAccessNotices: [UUID: String] = [:]
+    func takeSiteAccessNotice(id: UUID) -> String? { siteAccessNotices.removeValue(forKey: id) }
+
+    /// The installed WebKit keeps content scripts and style sheets it registered for all-host access after those grants
+    /// are withdrawn (native lifecycle regression: every broad form). Restarting the same context through the public
+    /// controller API clears and re-adds injected content from its current (already saved, narrower) grants.
+    /// Same context object: identifier, base URL, storage, grants and denials are kept exactly; the background
+    /// restarts, and the extension's popup, offscreen documents and open pages end. Other extensions are untouched.
+    /// Ordering mirrors `load(id:)`: compatibility is installed before `controller.load` can start the worker.
+    private func restartForSiteAccess(id: UUID, context: WKWebExtensionContext) -> SiteAccessRestart {
+        guard let index = records.firstIndex(where: { $0.id == id }), let runtime = runtimes[records[index].profileID],
+              runtime.contexts[id] === context else { return .restarted }
+        let name = records[index].name
+        runtime.closePopup(for: context)
+        do { try runtime.controller.unload(context) } catch {
+            if runtime.controller.extensionContexts.contains(context) {
+                let message = "Site access was saved, but \(name) couldn’t be restarted, so pages may still get what it set up for all sites. Disable and enable it, or quit and reopen Bam."
+                setError(Self.failure(message), for: id)
+                return .unloadFailed(message, stillLoaded: true)
+            }
+            // WebKit no longer lists it: treat as stopped, like a failed load.
+            runtime.disconnectNative(context); runtime.compatibility.remove(context); runtime.contexts.removeValue(forKey: id)
+            return stopped(index: index, name: name, reason: error)
+        }
+        runtime.disconnectNative(context); runtime.compatibility.remove(context)
+        runtime.compatibility.install(ExtensionCompatibility.plan(manifest: context.webExtension.manifest), for: context)
+        do {
+            if let fault = Self.siteAccessRestartLoadFault?(id) { throw fault }
+            try runtime.controller.load(context)
+        } catch {
+            runtime.disconnectNative(context); runtime.compatibility.remove(context); runtime.contexts.removeValue(forKey: id)
+            return stopped(index: index, name: name, reason: error)
+        }
+        runtime.reconcile()
+        siteAccessNotices[id] = "Restarted \(name) to remove what it had set up for all sites. Reopen its pages if you need them."
+        return .restarted
+    }
+    /// The extension is unloaded after a restart failure: recorded as disabled with an actionable error; Enable recovers.
+    /// If even that can't be saved, the message says so (the saved, reduced site access still stands).
+    private func stopped(index: Int, name: String, reason: Error) -> SiteAccessRestart {
+        records[index].enabled = false
+        var disableSaveError: Error?
+        do { try persist() } catch { disableSaveError = error }
+        let message = Self.stoppedMessage(name: name, reason: reason, disableSaveError: disableSaveError)
+        setError(Self.failure(message), for: records[index].id)
+        return .loadFailed(message)
+    }
+    /// The user-facing text for a stopped extension. With `disableSaveError`, the record on disk may still say
+    /// enabled, so Bam may load it again at next launch (with its saved, reduced site access).
+    static func stoppedMessage(name: String, reason: Error, disableSaveError: Error?) -> String {
+        let stopped = "\(name) stopped and couldn’t restart after its site access changed (\(reason.localizedDescription))."
+        guard let disableSaveError else { return stopped + " Enable it again in Manage Extensions." }
+        return stopped + " Bam also couldn’t save that it’s stopped (\(disableSaveError.localizedDescription)), so it may load again"
+            + " the next time Bam opens, with its saved, reduced site access. Enable or disable it in Manage Extensions to settle it."
+    }
+
+    /// Transactional: the revoked record is saved first; if that fails, the record is restored and nothing in the
+    /// running extension (native ports, bridge, grants) has been touched. Only after the save are the runtime steps
+    /// and the restart applied, and a restart failure never restores the old grants.
     func revokePermissions(id: UUID) throws {
         guard let i = records.firstIndex(where: { $0.id == id }) else { return }
-        noteMutation(id, permissions: true); loadGeneration.removeValue(forKey: id)
+        let previous = records[i]
         records[i].permissions = [:]; records[i].patterns = [:]; records[i].compatibilityGrants = [:]; records[i].nativeHost = nil
         // Revoking withholds every site, including optional and time-limited grants.
         records[i].siteAccess = ExtensionSiteAccessEngine.encode(.withheld()); records[i].timedSiteGrants = nil; records[i].timedOptionalSiteGrants = nil
         records[i].awaitingFirstReview = nil   // Revoke also cancels a pending first approval: Enable then reviews no sites.
+        do { try persist() } catch {
+            records[i] = previous
+            throw BrowserExtensionSiteAccessFailure.failed("Permissions couldn’t be revoked because the change couldn’t be saved, so nothing changed. \(error.localizedDescription)")
+        }
+        noteMutation(id, permissions: true); loadGeneration.removeValue(forKey: id)
         if let runtime = runtimes[records[i].profileID], let context = runtime.contexts[id] { runtime.disconnectNative(context); runtime.compatibility.revoke(context) }
-        if let context = context(for: id) { context.grantedPermissions = [:]; context.grantedPermissionMatchPatterns = [:] }
-        try persist(); onReloadNeeded?(records[i].profileID); changed()
+        var withdrewAllHost = false
+        let context = context(for: id)
+        if let context {
+            withdrewAllHost = Self.withdraw(from: context, keeping: [])
+            context.grantedPermissions = [:]; context.grantedPermissionMatchPatterns = [:]
+        }
+        // Saved. Same restart rule as a site-access change; failures never restore old grants.
+        let restart = withdrewAllHost ? context.map { restartForSiteAccess(id: id, context: $0) } : nil
+        if restart?.leavesStaleContent != true { onReloadNeeded?(records[i].profileID) }
+        changed()
+        if let failure = restart?.failure { throw BrowserExtensionSiteAccessFailure.failed(failure) }
     }
 
     private func load(_ id: UUID, review: Bool, parsed: WKWebExtension? = nil) async throws {
