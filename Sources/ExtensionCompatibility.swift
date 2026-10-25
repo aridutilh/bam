@@ -402,7 +402,16 @@ enum ExtensionCompatibility {
         const key = (c) => [c.storeId || "", c.domain || "", c.path || "", c.name || "", c.partitionKey ? JSON.stringify(c.partitionKey) : ""].join("\u0000");
         const read = async () => { const map = new Map(); for (const c of (await nativeCookies.getAll({})) || []) map.set(key(c), c); return map; };
         const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
-        const deliver = (info) => { for (const fn of Array.from(listeners)) { try { fn(info); } catch (error) { console.error("[Bam compatibility] cookies.onChanged listener failed", error); } } };
+        // A listener removed during a dispatch is not called afterwards, and a dispatch from an
+        // earlier listener period stops as soon as a callback detaches or re-attaches.
+        const deliver = (info, period) => {
+          for (const fn of Array.from(listeners)) {
+            if (period !== generation) return false;
+            if (!listeners.has(fn)) continue;
+            try { fn(info); } catch (error) { console.error("[Bam compatibility] cookies.onChanged listener failed", error); }
+          }
+          return period === generation;
+        };
         // Delivered cookies are copies, so a listener mutating one cannot change the next comparison.
         const copy = (c) => JSON.parse(JSON.stringify(c));
         const refresh = () => {
@@ -417,15 +426,18 @@ enum ExtensionCompatibility {
             const now = Date.now() / 1000;
             for (const [k, old] of previous) {
               const current = next.get(k);
-              if (!current) deliver({ removed: true, cookie: copy(old), cause: typeof old.expirationDate === "number" && old.expirationDate <= now ? "expired" : "explicit" });
-              else if (!same(old, current)) deliver({ removed: true, cookie: copy(old), cause: "overwrite" });
+              if (!current) { if (!deliver({ removed: true, cookie: copy(old), cause: typeof old.expirationDate === "number" && old.expirationDate <= now ? "expired" : "explicit" }, requested)) return; }
+              else if (!same(old, current)) { if (!deliver({ removed: true, cookie: copy(old), cause: "overwrite" }, requested)) return; }
             }
-            for (const [k, current] of next) { const old = previous.get(k); if (!old || !same(old, current)) deliver({ removed: false, cookie: copy(current), cause: "explicit" }); }
+            for (const [k, current] of next) {
+              const old = previous.get(k);
+              if ((!old || !same(old, current)) && !deliver({ removed: false, cookie: copy(current), cause: "explicit" }, requested)) return;
+            }
           });
           return work;
         };
         const onNative = (info) => {
-          if (info && typeof info === "object") { enginePassesInfo = true; snapshot = null; deliver(info); return; }
+          if (info && typeof info === "object") { enginePassesInfo = true; snapshot = null; deliver(info, generation); return; }
           if (!enginePassesInfo) refresh();
         };
         const bamEvent = {

@@ -303,6 +303,27 @@ import JavaScriptCore
         try check(mutationErrors().isEmpty && mutation.evaluateScript("JSON.stringify(seen) === JSON.stringify([[false,'m','explicit']])")!.toBool(),
                   "A listener's mutation of a delivered cookie produced a spurious change: \(mutation.evaluateScript("JSON.stringify(seen)")!)")
 
+        // Reentrancy: a callback that detaches and re-adds during a two-cookie diff ends that diff, so
+        // the re-added listener gets none of the old period's events; a listener removed mid-dispatch
+        // is not called.
+        let (reentrant, reentrantErrors) = heldCookieContext()
+        reentrant.evaluateScript("""
+            var bSeen = [], cSeen = [];
+            var listenerB = function (n) { bSeen.push(n.cookie.name); };
+            var listenerC = function (n) { cSeen.push(n.cookie.name); };
+            var listenerA = function (n) {
+              seen.push(n.cookie.name);
+              browser.cookies.onChanged.removeListener(listenerA); browser.cookies.onChanged.removeListener(listenerC);
+              browser.cookies.onChanged.addListener(listenerB);
+            };
+            browser.cookies.onChanged.addListener(listenerA); browser.cookies.onChanged.addListener(listenerC);
+            """)
+        reentrant.evaluateScript("release();")
+        reentrant.evaluateScript("jar.push(cookie('one', '1')); jar.push(cookie('two', '2')); fire();")
+        reentrant.evaluateScript("release();")
+        try check(reentrantErrors().isEmpty && reentrant.evaluateScript("seen.length === 1 && bSeen.length === 0 && cSeen.length === 0")!.toBool(),
+                  "A reentrant detach/re-add leaked the old diff to the new listener or called a removed one: \(reentrant.evaluateScript("JSON.stringify([seen, bSeen, cSeen])")!)")
+
         let noCookies = JSContext()!
         noCookies.evaluateScript("var location = {origin: 'webkit-extension://fixture', href: 'x'}, console = {error: function() {}}, performance = {now: function() { return 0; }}; var browser = {runtime: {getURL: function(p) { return 'webkit-extension://fixture' + p; }, getManifest: function() { return {}; }}};")
         noCookies.evaluateScript(ExtensionCompatibility.workerScript(manifest: [:], browserVersion: "test"))
