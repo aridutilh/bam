@@ -81,7 +81,23 @@ import Darwin
         var fixtureAction = sourceDefinition["action"] as! [String: Any]
         fixtureAction["default_icon"] = "action-blue.png"; sourceDefinition["action"] = fixtureAction
         try JSONSerialization.data(withJSONObject: sourceDefinition).write(to: sourceManifest)
+        // A canceled install review, then Enable: the first approval must still review and grant every requested site
+        // (not migrate the never-approved record's empty grants to withheld).
+        var installReviews: [BrowserExtensionPermissionReview] = []
+        host.permissionPrompt = { review in installReviews.append(review); return false }
         let extensionID = try await host.importPackage(at: sourceFixture, profileID: profile)
+        let canceledInstall = host.records.first { $0.id == extensionID }
+        try check(installReviews.map(\.websites) == [["http://127.0.0.1/*"]] && canceledInstall?.enabled == false &&
+            canceledInstall?.awaitingFirstReview == true && canceledInstall?.siteAccess == nil && host.context(for: extensionID) == nil,
+            "A canceled install review must leave the record waiting for its first approval: \(installReviews.map(\.websites))")
+        host.permissionPrompt = { review in installReviews.append(review); return true }
+        try await host.setEnabled(true, id: extensionID)
+        let firstApproval = host.records.first { $0.id == extensionID }
+        try check(installReviews.count == 2 && installReviews[1].websites == ["http://127.0.0.1/*"] && firstApproval?.awaitingFirstReview == nil &&
+            host.siteAccess(id: extensionID)?.state.mode == .allRequested &&
+            host.context(for: extensionID)?.permissionStatus(for: pageURL) == .grantedExplicitly,
+            "Enable after a canceled install must review and grant every requested site: reviewed=\(installReviews.last?.websites ?? []), status=\(String(describing: host.context(for: extensionID)?.permissionStatus(for: pageURL)))")
+        host.permissionPrompt = { _ in true }
         let url = pageURL.appending(queryItems: [URLQueryItem(name: "profile", value: "browser-adapter")])
         guard let id = controller.openProfileTab(url, profileID: profile, active: true), let web = controller.browsers[id] else { throw ExtensionSmokeTest.Failure(description: "Browser adapter did not create its page") }
         try await wait("Browser adapter did not inject extension on first navigation") {

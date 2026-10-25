@@ -38,6 +38,10 @@ struct BrowserExtensionRecord: Codable, Identifiable {
     var siteAccess: Data? = nil
     /// Host grants WebKit holds with a finite expiry, by provenance: part of the user's site choice (requested), or
     /// from the extension's optional requests. Honored until they lapse; never extended or re-dated.
+    /// A new install whose first review hasn't been approved yet (canceled, or still open). Its first approval, at
+    /// install or on a later Enable, grants every requested site. Cleared by that approval or by Revoke Permissions.
+    /// nil for every older record: those keep their stored or migrated choice (a fully revoked one stays revoked).
+    var awaitingFirstReview: Bool? = nil
     var timedSiteGrants: [String: Date]? = nil
     var timedOptionalSiteGrants: [String: Date]? = nil
     var deniedPermissions: [String: Date] = [:]
@@ -388,6 +392,7 @@ struct BrowserExtensionPermissionReview {
             }
             var record = BrowserExtensionRecord(id: id, profileID: profileID, name: ext.displayName ?? "Unnamed extension", version: ext.version ?? "", packageName: name, compatibilityNote: compatibilityNote, catalog: catalog)
             record.runtimeIdentifier = runtimeIdentifier
+            record.awaitingFirstReview = true
             records.append(record)
             try persist()
             do { try await load(id, review: true, parsed: ext) }
@@ -438,8 +443,10 @@ struct BrowserExtensionPermissionReview {
             try Task.checkCancellation()
             guard ext.errors.isEmpty, !stopped else { throw Self.failure(ext.errors.map(\.localizedDescription).joined(separator: "\n")) }
             let note = "Imported the signed Safari WebExtension without modifying its bundle. The containing app must remain installed; add it again after the app updates. Native companion-app features are unavailable in Bam. No Safari account data is imported."
-            records.append(BrowserExtensionRecord(id: id, profileID: profileID, name: ext.displayName ?? bundle.displayName,
-                version: ext.version ?? bundle.version, packageName: "package", compatibilityNote: note, catalog: catalog, safariBundle: bundle))
+            var record = BrowserExtensionRecord(id: id, profileID: profileID, name: ext.displayName ?? bundle.displayName,
+                version: ext.version ?? bundle.version, packageName: "package", compatibilityNote: note, catalog: catalog, safariBundle: bundle)
+            record.awaitingFirstReview = true
+            records.append(record)
             try persist()
             do { try await load(id, review: true, parsed: ext) }
             catch is CancellationError { throw CancellationError() }
@@ -545,10 +552,13 @@ struct BrowserExtensionPermissionReview {
             nextSite = ExtensionSiteAccess.accepting(pendingSites, in: nextSite, declarations: newDeclarations)
             for pattern in pendingSites { replacement.deniedPatterns.removeValue(forKey: pattern) }
         }
-        let nextTimed = ExtensionSiteAccessEngine.live(priorTimed, declarations: newDeclarations)
-        replacement.siteAccess = ExtensionSiteAccessEngine.encode(nextSite)
-        Self.store(nextTimed, in: &replacement)
-        replacement.patterns = ExtensionSiteAccessEngine.target(nextSite, timed: nextTimed, declarations: newDeclarations)
+        // An install still awaiting its first review keeps waiting: its first approval grants the new version's requests.
+        if before.awaitingFirstReview != true {
+            let nextTimed = ExtensionSiteAccessEngine.live(priorTimed, declarations: newDeclarations)
+            replacement.siteAccess = ExtensionSiteAccessEngine.encode(nextSite)
+            Self.store(nextTimed, in: &replacement)
+            replacement.patterns = ExtensionSiteAccessEngine.target(nextSite, timed: nextTimed, declarations: newDeclarations)
+        }
         // Native permission dialogs run a nested loop. Deletion, disabling and
         // shutdown while reviewing must win over this update.
         guard !stopped, mutationRevisions[id, default: 0] == initialRevision,
@@ -813,6 +823,7 @@ struct BrowserExtensionPermissionReview {
         records[i].permissions = [:]; records[i].patterns = [:]; records[i].compatibilityGrants = [:]; records[i].nativeHost = nil
         // Revoking withholds every site, including optional and time-limited grants.
         records[i].siteAccess = ExtensionSiteAccessEngine.encode(.withheld()); records[i].timedSiteGrants = nil; records[i].timedOptionalSiteGrants = nil
+        records[i].awaitingFirstReview = nil   // Revoke also cancels a pending first approval: Enable then reviews no sites.
         if let runtime = runtimes[records[i].profileID], let context = runtime.contexts[id] { runtime.disconnectNative(context); runtime.compatibility.revoke(context) }
         if let context = context(for: id) { context.grantedPermissions = [:]; context.grantedPermissionMatchPatterns = [:] }
         try persist(); onReloadNeeded?(records[i].profileID); changed()
@@ -900,10 +911,11 @@ struct BrowserExtensionPermissionReview {
         var index = initialIndex
         let plan = ExtensionCompatibility.plan(manifest: ext.manifest)
         let bridged = plan.provided.filter { ExtensionCompatibility.bridgedPermissions.contains($0) }
-        // Site access: an install (a freshly parsed package) is approved below; anything else keeps its stored
-        // choice, migrating a record from before site access exists once (never widening, never extending an expiry).
+        // Site access: a new install's first review (at install, or on Enable after a canceled install) approves all
+        // requested sites; anything else keeps its stored choice, migrating a record from before site access exists
+        // once (never widening, never extending an expiry).
         let declarations = ExtensionSiteAccess.Declarations(ext)
-        let installing = parsed != nil && records[index].siteAccess == nil
+        let installing = records[index].awaitingFirstReview == true
         var siteState = try ExtensionSiteAccessEngine.decode(records[index].siteAccess)
         var siteTimed = ExtensionSiteAccessEngine.live(Self.timed(records[index]), declarations: declarations)
         if siteState == nil && !installing {
@@ -927,7 +939,10 @@ struct BrowserExtensionPermissionReview {
             index = currentIndex
             records[index].permissions = Dictionary(uniqueKeysWithValues: supported.map { ($0, Date.distantFuture) })
             records[index].deniedPermissions = [:]
-            if installing { siteState = .allRequested(approving: declarations); siteTimed = .init(); records[index].deniedPatterns = [:] }
+            if installing {
+                siteState = .allRequested(approving: declarations); siteTimed = .init(); records[index].deniedPatterns = [:]
+                records[index].awaitingFirstReview = nil
+            }
             records[index].compatibilityGrants = Dictionary(uniqueKeysWithValues: bridged.map { ($0, Date.distantFuture) })
         }
         // Older installs recorded their reviewed shim list but not separate grants.
