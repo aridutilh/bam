@@ -56,7 +56,7 @@ import WebKit
                 complete = try await read(manifest, directory: runDirectory, released: released, deadline: deadline, output: &output)
                 keepDirectory = !complete
             case .cleanup:
-                complete = try await cleanupOnly(manifest, released: released, deadline: deadline, output: &output)
+                complete = try await cleanupOnly(manifest, directory: runDirectory, released: released, output: &output)
                 keepDirectory = !complete
             }
         } catch let refusal as Refusal {
@@ -180,7 +180,8 @@ import WebKit
         return found
     }
     private static func describe(_ records: [WKWebExtension.DataRecord]) -> [[String: Any]] {
-        records.map { ["id": $0.uniqueIdentifier, "types": $0.containedDataTypes.map(\.rawValue).sorted(), "bytes": $0.totalSizeInBytes] }
+        records.map { ["id": $0.uniqueIdentifier, "types": $0.containedDataTypes.map(\.rawValue).sorted(), "bytes": $0.totalSizeInBytes,
+                       "errors": $0.errors.map(\.localizedDescription)] }
     }
     private static func ok(_ result: [String: Any], equals expected: String) -> Bool { result["ok"] as? Bool == true && result["value"] as? String == expected }
     /// The namespace holds exactly the records this run's write created (no more, no fewer).
@@ -262,7 +263,7 @@ import WebKit
         output["expected"] = ["A": manifest.expectedA, "B": manifest.expectedB, "L": manifest.expectedL]
         output["pageA"] = pageReport ?? NSNull()
         session.unloadAll()
-        let cleaned = try await cleanup(manifest, controllers: [("A", a), ("B", b)], deadline: deadline, output: &output)
+        let cleaned = try await cleanup(manifest, package: package, session: session, released: released, output: &output)
         // Valid transport for every read is required; a value that did not survive is a legitimate measurement.
         let transportOK = ["A", "L", "B", "A new host"].allSatisfy { ((reads[$0] as? [String: Any])?["ok"] as? Bool) == true }
         // Terminal: a reply/message or an explicit error (a semantic negative). Missing, malformed or timed out is not.
@@ -275,36 +276,93 @@ import WebKit
         return transportOK && messaging && output["readFailure"] == nil && cleaned
     }
 
-    private static func cleanupOnly(_ manifest: Manifest, released: ExtensionVerifiedIDProbe.Released, deadline: TimeInterval, output: inout [String: Any]) async throws -> Bool {
+    private static func cleanupOnly(_ manifest: Manifest, directory: URL, released: ExtensionVerifiedIDProbe.Released, output: inout [String: Any]) async throws -> Bool {
         let session = Session()
-        defer { session.controllers.removeAll() }
-        let a = controller("A", manifest.controllerA, session: session, released: released), b = controller("B", manifest.controllerB, session: session, released: released)
-        return try await cleanup(manifest, controllers: [("A", a), ("B", b)], deadline: deadline, output: &output)
+        defer { session.unloadAll(); session.controllers.removeAll() }
+        _ = controller("A", manifest.controllerA, session: session, released: released); _ = controller("B", manifest.controllerB, session: session, released: released)
+        return try await cleanup(manifest, package: directory.appendingPathComponent("package", isDirectory: true), session: session, released: released, output: &output)
     }
 
-    /// Contexts are already unloaded. Only records this run owns are removed; anything else stops cleanup.
-    private static func cleanup(_ manifest: Manifest, controllers: [(String, WKWebExtensionController)], deadline: TimeInterval,
+    /// Cleanup contract (public API reality, upstream WebKit WebExtensionControllerCocoa.mm): getDataRecords lists every
+    /// per-extension storage directory with no size filter, and removeData clears the stored data but keeps the
+    /// directory, recording failures on the data record (`errors`). So owned zero-byte records legitimately remain.
+    /// Clean therefore means, per owned namespace: only this run's records; removeData without record errors; every
+    /// owned context that had data reloads with no storage.local (and storage.sync) keys; after unloading again, a
+    /// second removal and re-query leave only owned, zero-byte, error-free records. Contexts are unloaded on entry.
+    private static func cleanup(_ manifest: Manifest, package: URL, session: Session, released: ExtensionVerifiedIDProbe.Released,
                                 output: inout [String: Any]) async throws -> Bool {
+        let deadline = ProcessInfo.processInfo.systemUptime + budget
+        session.unloadAll()
         var report: [String: Any] = [:], clean = true
-        for (name, controller) in controllers {
+        let hosts: [String: [String: UUID]] = ["A": [manifest.probeID: manifest.hostA, manifest.legacyID: manifest.hostL], "B": [manifest.probeID: manifest.hostB]]
+        func remove(_ found: [WKWebExtension.DataRecord], from controller: WKWebExtensionController, name: String) async throws {
+            _ = try await ExtensionVerifiedIDProbe.bounded(10, by: deadline, "\(name) remove data") {
+                await controller.removeData(ofTypes: WKWebExtensionController.allExtensionDataTypes, from: found); return true
+            }
+        }
+        for (name, controller, store) in session.controllers {
+            var entry: [String: Any] = [:]
             let found = try await records(controller, deadline: deadline, name: name)
+            entry["before"] = describe(found)
             let foreign = found.filter { !manifest.ownedIdentifiers.contains($0.uniqueIdentifier) }
-            guard foreign.isEmpty else {
-                report[name] = ["foreign": describe(foreign), "removed": false]; clean = false; continue
+            guard foreign.isEmpty else { entry["foreign"] = describe(foreign); entry["clean"] = false; report[name] = entry; clean = false; continue }
+            guard !found.isEmpty else { entry["nothingToRemove"] = true; entry["clean"] = true; report[name] = entry; continue }
+            // 1. Remove; WebKit attaches any removal failure to the record itself.
+            try await remove(found, from: controller, name: name)
+            let firstErrors = found.flatMap(\.errors).map(\.localizedDescription)
+            entry["removalErrors"] = firstErrors
+            entry["afterRemoval"] = describe(try await records(controller, deadline: deadline, name: "\(name) after removal"))
+            // 2. Value proof: each owned context that had data reloads and must hold no keys. Only those identifiers, so a
+            //    partial run's namespace gains no new metadata.
+            var proofs: [String: Any] = [:], proofsEmpty = true
+            for id in found.map(\.uniqueIdentifier) {
+                guard let host = hosts[name]?[id] else { proofs[id] = ["ok": false, "error": "no recorded host"]; proofsEmpty = false; continue }
+                do {
+                    let context = try await load(controller, id: id, host: host, package: package, name: "\(name) proof", session: session, released: released, deadline: deadline)
+                    let (view, _) = try await page(context, store: store, name: "\(name) proof", session: session, released: released, deadline: deadline)
+                    let keys = try await storedKeys(view, name: "\(name) proof", deadline: deadline)
+                    proofs[id] = keys
+                    let local = keys["local"] as? [String], sync = keys["sync"]
+                    if keys["ok"] as? Bool != true || local?.isEmpty != true || !((sync as? [String])?.isEmpty == true || sync as? String == "unavailable") { proofsEmpty = false }
+                } catch { proofs[id] = ["ok": false, "error": String(describing: error)]; proofsEmpty = false }
             }
-            if !found.isEmpty {
-                // removeData reports no error; the re-query below is the proof.
-                _ = try await ExtensionVerifiedIDProbe.bounded(10, by: deadline, "\(name) remove data") {
-                    await controller.removeData(ofTypes: WKWebExtensionController.allExtensionDataTypes, from: found); return true
-                }
-            }
-            let remaining = try await records(controller, deadline: deadline, name: "\(name) after removal")
-            report[name] = ["before": describe(found), "after": describe(remaining)]
-            if !remaining.isEmpty { clean = false }
+            session.unloadAll()
+            entry["valueProof"] = proofs
+            // 3. Reloading may recreate metadata: remove again, then re-query.
+            let second = try await records(controller, deadline: deadline, name: "\(name) second")
+            let secondForeign = second.filter { !manifest.ownedIdentifiers.contains($0.uniqueIdentifier) }
+            if secondForeign.isEmpty && !second.isEmpty { try await remove(second, from: controller, name: "\(name) second") }
+            let secondErrors = second.flatMap(\.errors).map(\.localizedDescription)
+            entry["secondRemovalErrors"] = secondErrors
+            let final = try await records(controller, deadline: deadline, name: "\(name) final")
+            entry["final"] = describe(final)
+            let finalOK = final.allSatisfy { manifest.ownedIdentifiers.contains($0.uniqueIdentifier) && $0.totalSizeInBytes == 0 && $0.errors.isEmpty }
+            let ok = firstErrors.isEmpty && proofsEmpty && secondForeign.isEmpty && secondErrors.isEmpty && finalOK
+            entry["clean"] = ok
+            if !ok { clean = false }
+            report[name] = entry
         }
         output["cleanup"] = report
         output["cleanupProvedEmpty"] = clean
+        output["metadataRetained"] = "Owned zero-byte data records may remain: WebKit lists every per-extension storage directory as a record and removeData keeps the directory; public API has no directory removal. Stored values were proved empty by reloading each owned context."
         return clean
+    }
+    /// {ok: true, local: [keys], sync: [keys] | "unavailable"} or {ok: false, stage, error}.
+    private static func storedKeys(_ view: WKWebView, name: String, deadline: TimeInterval) async throws -> [String: Any] {
+        let script = """
+            const api = globalThis.browser || globalThis.chrome;
+            try {
+              const local = Object.keys(await api.storage.local.get(null));
+              const sync = api.storage.sync ? Object.keys(await api.storage.sync.get(null)) : 'unavailable';
+              return {ok: true, local, sync};
+            } catch (error) { return {ok: false, stage: 'script', error: String(error && error.message || error)}; }
+            """
+        let answer: [String: Any]? = try await ExtensionVerifiedIDProbe.bounded(5, by: deadline, "\(name) keys") { [weak view] in
+            guard let view else { return ["ok": false, "stage": "transport", "error": "page released"] }
+            do { return try await view.callAsyncJavaScript(script, arguments: [:], in: nil, contentWorld: .page) as? [String: Any] ?? ["ok": false, "stage": "transport", "error": "non-object reply"] }
+            catch { return ["ok": false, "stage": "transport", "error": String(describing: error)] }
+        }
+        return answer ?? ["ok": false, "stage": "transport", "error": "no reply"]
     }
 }
 
