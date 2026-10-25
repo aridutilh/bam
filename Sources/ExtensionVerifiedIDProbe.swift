@@ -18,6 +18,14 @@ import WebKit
     static let budget: TimeInterval = 70
     struct Failure: Error, CustomStringConvertible { let description: String }
     private final class Once { var done = false }
+    /// The minimal public tab a content-script page needs so WebKit can attribute its messages (sender.tab). Without a
+    /// registered tab WebKit answers content-script sendMessage with "Tab not found", which is a harness gap, not an
+    /// identity result.
+    final class ProbeTab: NSObject, WKWebExtensionTab {
+        weak var view: WKWebView?
+        init(_ view: WKWebView) { self.view = view }
+        func webView(for context: WKWebExtensionContext) -> WKWebView? { view }
+    }
     final class Released {
         var items: [(String, () -> Bool)] = []
         func track(_ name: String, _ object: AnyObject) { weak var weakObject = object; items.append((name, { weakObject == nil })) }
@@ -52,7 +60,7 @@ import WebKit
         // Complete needs every record and a valid transport for every storage call. A semantic negative (for example
         // an absent value) is still a valid measurement; a script or transport error is not.
         let storageKeys = ["storageA", "storageBBefore", "storageBWrite", "storageAAfterB", "reloadSameID", "reloadUUIDControl"]
-        let required = ["pageA", "contentA", "pageB"] + storageKeys
+        let required = ["pageA", "contentA", "pageB", "contentC"] + storageKeys
         let missing = required.filter { record[$0] == nil }
         let invalidTransport = storageKeys.filter { ((record[$0] as? [String: Any])?["ok"] as? Bool) != true }
         let complete = failure == nil && missing.isEmpty && invalidTransport.isEmpty && pending.isEmpty && removed
@@ -72,7 +80,10 @@ import WebKit
         var controllers: [WKWebExtensionController] = [], contexts: [(WKWebExtensionController, WKWebExtensionContext)] = [], views: [WKWebView] = []
         // Each "profile" owns an explicit non-persistent website store; nothing falls back to WKWebsiteDataStore.default().
         var stores: [ObjectIdentifier: WKWebsiteDataStore] = [:]
+        var tabs: [(WKWebExtensionController, ProbeTab)] = []
         defer {
+            for (controller, tab) in tabs { controller.didCloseTab(tab, windowIsClosing: false) }
+            tabs.removeAll()
             for view in views { view.stopLoading() }
             views.removeAll()
             for (controller, context) in contexts where context.isLoaded { try? controller.unload(context) }
@@ -146,11 +157,17 @@ import WebKit
             record["pageA"] = reportA
             record["storageA"] = try await storage(pageA, set: "A", name: "A")
             stage = "content A"
-            let webConfiguration = WKWebViewConfiguration(); webConfiguration.websiteDataStore = try store(of: controllerA); webConfiguration.webExtensionController = controllerA
-            let web = WKWebView(frame: NSRect(x: 0, y: 0, width: 400, height: 300), configuration: webConfiguration)
-            views.append(web); released.track("web page", web)
-            web.load(URLRequest(url: pageURL))
-            record["contentA"] = try await poll(web, key: "bamIdentityContent", name: "content A", deadline: deadline)
+            /// A loopback page registered as a tab with the controller before it loads.
+            func contentPage(_ controller: WKWebExtensionController, name: String) async throws -> [String: Any] {
+                let webConfiguration = WKWebViewConfiguration(); webConfiguration.websiteDataStore = try store(of: controller); webConfiguration.webExtensionController = controller
+                let web = WKWebView(frame: NSRect(x: 0, y: 0, width: 400, height: 300), configuration: webConfiguration)
+                views.append(web); released.track("\(name) web page", web)
+                let tab = ProbeTab(web); tabs.append((controller, tab)); released.track("\(name) tab", tab)
+                controller.didOpenTab(tab)
+                web.load(URLRequest(url: pageURL))
+                return try await poll(web, key: "bamIdentityContent", name: name, deadline: deadline)
+            }
+            record["contentA"] = try await contentPage(controllerA, name: "content A")
 
             stage = "profile B"
             let controllerB = controller("controller B")
@@ -174,13 +191,15 @@ import WebKit
             let (pageC, reportC) = try await page(contextC, name: "page C")
             record["pageC"] = reportC
             record["reloadUUIDControl"] = try await storage(pageC, set: nil, name: "C")
+            // Content-script control under a UUID runtime.id (Bam's current scheme), same registered-tab harness.
+            record["contentC"] = try await contentPage(controllerA, name: "content C")
             stage = "measured"
         } catch {
             failure = String(describing: error)
         }
     }
 
-    private static func poll(_ view: WKWebView, key: String, name: String, deadline: TimeInterval) async throws -> [String: Any] {
+    static func poll(_ view: WKWebView, key: String, name: String, deadline: TimeInterval) async throws -> [String: Any] {
         let until = min(deadline, ProcessInfo.processInfo.systemUptime + 15)
         while ProcessInfo.processInfo.systemUptime < until {
             let text: String? = try await bounded(2, by: until, "\(name) report") { [weak view] in
@@ -192,7 +211,7 @@ import WebKit
         throw Failure(description: "\(name) did not report")
     }
 
-    private static func writePackage(_ package: URL, pageURL: URL) throws {
+    static func writePackage(_ package: URL, pageURL: URL) throws {
         let fm = FileManager.default
         try fm.createDirectory(at: package, withIntermediateDirectories: true)
         let host = "\(pageURL.scheme ?? "http")://\(pageURL.host ?? "127.0.0.1")/*"
