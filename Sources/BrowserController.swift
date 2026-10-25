@@ -5,11 +5,11 @@ import QuartzCore
 /// The slowly shifting spectrum a Prism Space wears. Hues stay dark and
 /// desaturated enough that sidebar text keeps its contrast at every phase.
 @MainActor enum PrismBackground {
-    static func makeLayer() -> CAGradientLayer {
+    static func makeLayer(dark: Bool = true) -> CAGradientLayer {
         let layer = CAGradientLayer()
         layer.startPoint = CGPoint(x: 0.1, y: 1)
         layer.endPoint = CGPoint(x: 0.9, y: 0)
-        let frames = colorFrames()
+        let frames = colorFrames(dark: dark)
         layer.colors = frames[0]
         guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { return layer }
         let cycle = CAKeyframeAnimation(keyPath: "colors")
@@ -20,12 +20,15 @@ import QuartzCore
         layer.add(cycle, forKey: "prism")
         return layer
     }
-    private static func colorFrames() -> [[CGColor]] {
+    private static func colorFrames(dark: Bool) -> [[CGColor]] {
         // A curated hue path (blue → violet → magenta → red → amber → teal)
         // that skips the muddy yellow-green band a plain wheel sweep hits.
+        // Light chrome keeps the same path as pale washes so dark text reads.
         [0.62, 0.75, 0.88, 0.98, 0.08, 0.45].map { (hue: CGFloat) in
-            [NSColor(calibratedHue: hue, saturation: 0.56, brightness: 0.34, alpha: 1).cgColor,
-             NSColor(calibratedHue: fmod(hue + 0.12, 1), saturation: 0.48, brightness: 0.47, alpha: 1).cgColor]
+            dark ? [NSColor(calibratedHue: hue, saturation: 0.56, brightness: 0.34, alpha: 1).cgColor,
+                    NSColor(calibratedHue: fmod(hue + 0.12, 1), saturation: 0.48, brightness: 0.47, alpha: 1).cgColor]
+                 : [NSColor(calibratedHue: hue, saturation: 0.16, brightness: 0.95, alpha: 1).cgColor,
+                    NSColor(calibratedHue: fmod(hue + 0.12, 1), saturation: 0.12, brightness: 0.97, alpha: 1).cgColor]
         }
     }
 }
@@ -43,7 +46,23 @@ import QuartzCore
     /// Fires when the selected Space's appearance needs the window itself to
     /// turn translucent (Clear) or opaque again.
     var onTranslucencyChange: ((Bool) -> Void)?
+    /// Fires after the window's light/dark appearance changes, for layer colors.
+    var onAppearanceChange: (() -> Void)?
     private var prism: CAGradientLayer?
+    private var prismIsDark = true
+    var isDark: Bool { effectiveAppearance.isDarkChrome }
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        needsDisplay = true
+        if let prism, prismIsDark != isDark {
+            // Rebuild the spectrum for the new appearance, keeping its visibility.
+            let hidden = prism.isHidden, opacity = prism.opacity
+            prism.removeFromSuperlayer(); self.prism = nil
+            installPrism(); self.prism?.isHidden = hidden; self.prism?.opacity = opacity
+        }
+        glass?.material = isDark ? .hudWindow : .sidebar
+        onAppearanceChange?()
+    }
     private var glass: NSVisualEffectView?
     override var isFlipped: Bool { true }
     override func layout() {
@@ -67,8 +86,20 @@ import QuartzCore
         [NSColor(srgbRed: 0.19, green: 0.12, blue: 0.30, alpha: 1), NSColor(srgbRed: 0.31, green: 0.15, blue: 0.28, alpha: 1)],
         [NSColor(srgbRed: 0.12, green: 0.12, blue: 0.14, alpha: 1), NSColor(srgbRed: 0.18, green: 0.18, blue: 0.21, alpha: 1)]
     ]
+    /// Light chrome: pale washes of each Space color (Arc/Yab light windows),
+    /// light enough for near-black sidebar text, tinted enough to tell Spaces apart.
+    static let lightPalettes: [[NSColor]] = [
+        [NSColor(srgbRed: 0.89, green: 0.86, blue: 0.96, alpha: 1), NSColor(srgbRed: 0.94, green: 0.89, blue: 0.94, alpha: 1)],
+        [NSColor(srgbRed: 0.87, green: 0.93, blue: 0.89, alpha: 1), NSColor(srgbRed: 0.93, green: 0.93, blue: 0.87, alpha: 1)],
+        [NSColor(srgbRed: 0.86, green: 0.92, blue: 0.96, alpha: 1), NSColor(srgbRed: 0.90, green: 0.89, blue: 0.97, alpha: 1)],
+        [NSColor(srgbRed: 0.97, green: 0.87, blue: 0.90, alpha: 1), NSColor(srgbRed: 0.98, green: 0.91, blue: 0.90, alpha: 1)],
+        [NSColor(srgbRed: 0.97, green: 0.92, blue: 0.84, alpha: 1), NSColor(srgbRed: 0.98, green: 0.94, blue: 0.88, alpha: 1)],
+        [NSColor(srgbRed: 0.88, green: 0.88, blue: 0.90, alpha: 1), NSColor(srgbRed: 0.93, green: 0.93, blue: 0.94, alpha: 1)],
+        [NSColor(srgbRed: 0.90, green: 0.86, blue: 0.97, alpha: 1), NSColor(srgbRed: 0.97, green: 0.87, blue: 0.93, alpha: 1)],
+        [NSColor(srgbRed: 0.94, green: 0.94, blue: 0.96, alpha: 1), NSColor(srgbRed: 0.97, green: 0.97, blue: 0.98, alpha: 1)]
+    ]
     override func draw(_ dirtyRect: NSRect) {
-        let palettes = Self.palettes
+        let palettes = isDark ? Self.palettes : Self.lightPalettes
         func pair(_ index: Int) -> [NSColor] { palettes[min(palettes.count - 1, max(0, index))] }
         var colors = pair(space)
         if let previewSpace {
@@ -103,7 +134,7 @@ import QuartzCore
         if clear, glass == nil {
             wantsLayer = true
             let view = NSVisualEffectView(frame: bounds)
-            view.material = .hudWindow
+            view.material = isDark ? .hudWindow : .sidebar
             view.blendingMode = .behindWindow
             view.state = .active
             view.autoresizingMask = [.width, .height]
@@ -126,7 +157,8 @@ import QuartzCore
         guard prism == nil else { return }
         wantsLayer = true
         // Re-creating per visit also re-samples Reduce Motion.
-        let layer = PrismBackground.makeLayer()
+        prismIsDark = isDark
+        let layer = PrismBackground.makeLayer(dark: prismIsDark)
         layer.frame = bounds
         self.layer?.insertSublayer(layer, at: 0)
         prism = layer
@@ -304,13 +336,15 @@ import QuartzCore
         animator.animationView = root; pagingAnimator.animationView = root
         root.onLayout = { [weak self] in self?.layoutBrowser() }
         root.onTranslucencyChange = { [weak self] clear in self?.windowTranslucent = clear }
+        root.onAppearanceChange = { [weak self] in self?.applyChromeColors() }
         [sidebar, card, handle].forEach(root.addSubview)
-        card.wantsLayer = true; card.layer?.backgroundColor = NSColor(white: 0.10, alpha: 1).cgColor
+        card.wantsLayer = true
         card.layer?.cornerRadius = 10; card.layer?.masksToBounds = true
-        card.layer?.borderWidth = 1; card.layer?.borderColor = NSColor.white.withAlphaComponent(0.09).cgColor
+        card.layer?.borderWidth = 1
         card.addSubview(webHost)
-        progress.wantsLayer = true; progress.layer?.backgroundColor = NSColor(srgbRed: 0.47, green: 0.39, blue: 0.66, alpha: 1).cgColor
+        progress.wantsLayer = true
         card.addSubview(progress)
+        applyChromeColors()
         configureFavicons()
         sidebar.onSelectTab = { [weak self] id in self?.select(id) }
         sidebar.onCloseTab = { [weak self] id in self?.close(id) }
@@ -359,7 +393,7 @@ import QuartzCore
     func applyWindowTranslucency() {
         guard let window = view.window else { return }
         window.isOpaque = !windowTranslucent
-        window.backgroundColor = windowTranslucent ? .clear : NSColor(white: 0.10, alpha: 1)
+        window.backgroundColor = windowTranslucent ? .clear : BrowserChrome.windowBackground
         window.invalidateShadow()
     }
     override func viewDidAppear() { super.viewDidAppear(); applyWindowTranslucency(); layoutBrowser() }
@@ -411,7 +445,7 @@ import QuartzCore
         card.frame = NSRect(x: width + inset, y: inset, width: max(100, w - width - 2 * inset), height: h - 2 * inset)
         // Arc/Yab frame the page with a soft corner and a barely-there edge.
         card.layer?.cornerRadius = 10 * (1 - collapse)
-        card.layer?.borderColor = NSColor.white.withAlphaComponent(0.09 * (1 - collapse)).cgColor
+        card.layer?.borderColor = resolvedCGColor(BrowserChrome.cardEdge, for: card).copy(alpha: (root.isDark ? 0.09 : 0.10) * (1 - collapse))
         applyWindowButtons(collapse: collapse)
         webHost.frame = card.bounds
         if let web = activeWebView, web.superview === webHost { web.frame = webHost.bounds }
@@ -1267,12 +1301,36 @@ import QuartzCore
     private let button = NSButton(title: "Return video to tab", target: nil, action: nil)
     override var isFlipped: Bool { true }
     override init(frame: NSRect) {
-        super.init(frame: frame); wantsLayer = true; layer?.backgroundColor = NSColor(white: 0.12, alpha: 1).cgColor
-        title.textColor = .white; title.font = .systemFont(ofSize: 20, weight: .medium); title.alignment = .center
+        super.init(frame: frame); wantsLayer = true; layer?.backgroundColor = resolvedCGColor(BrowserChrome.pageSurface, for: self)
+        title.textColor = .labelColor; title.font = .systemFont(ofSize: 20, weight: .medium); title.alignment = .center
         button.bezelStyle = .rounded; button.target = self; button.action = #selector(returnClicked)
         addSubview(title); addSubview(button)
     }
     required init?(coder: NSCoder) { fatalError() }
     override func layout() { super.layout(); title.frame = NSRect(x: 20, y: bounds.midY-36, width: bounds.width-40, height: 30); button.frame = NSRect(x: bounds.midX-95, y: bounds.midY+10, width: 190, height: 32) }
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        layer?.backgroundColor = resolvedCGColor(BrowserChrome.pageSurface, for: self)
+    }
     @objc func returnClicked() { returnVideo?() }
+}
+
+/// Window and page-frame colors for both appearances.
+@MainActor enum BrowserChrome {
+    /// Behind the page while it loads, and the blank new-tab surface.
+    static let pageSurface = NSColor.chrome(light: NSColor(white: 0.985, alpha: 1), dark: NSColor(white: 0.10, alpha: 1))
+    static let windowBackground = NSColor.chrome(light: NSColor(white: 0.93, alpha: 1), dark: NSColor(white: 0.10, alpha: 1))
+    static let cardEdge = NSColor.chrome(light: .black, dark: .white)
+    static let progress = NSColor.chrome(light: NSColor(srgbRed: 0.42, green: 0.33, blue: 0.70, alpha: 1),
+                                         dark: NSColor(srgbRed: 0.47, green: 0.39, blue: 0.66, alpha: 1))
+}
+
+@MainActor extension BrowserController {
+    /// Layer-backed chrome stores fixed CGColors; re-resolve them for the current appearance.
+    func applyChromeColors() {
+        card.layer?.backgroundColor = resolvedCGColor(BrowserChrome.pageSurface, for: card)
+        progress.layer?.backgroundColor = resolvedCGColor(BrowserChrome.progress, for: progress)
+        if isViewLoaded { layoutBrowser() }
+        applyWindowTranslucency()
+    }
 }

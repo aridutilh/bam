@@ -255,6 +255,24 @@ import AppKit
         key(123, to: window.firstResponder as! NSView)
         require(toggled == [folderIDs[10], folderIDs[10]], "Left arrow collapses an expanded folder")
 
+        // No table selection (active page is a Favorite; the Space holds only folders):
+        // Down enters at the first folder, Up at the last; nothing is selected as a tab.
+        let onlyFolders = folderIDs.prefix(3).enumerated().map { index, id in
+            SidebarTabItem(id: id, title: "Only folder \(index)", subtitle: "", symbol: "folder", isPinned: true,
+                           isActive: false, isFolder: true, isExpanded: false)
+        } + [SidebarTabItem(id: leaf, title: "Favorite page", subtitle: "", symbol: "star", isPinned: true, isActive: true, isFavorite: true)]
+        update(0, Array(onlyFolders))
+        let folderTable = table(in: 0)
+        prepare(folderTable)
+        require(folderTable.selectedRow == -1, "A Favorite selection leaves the Space list without a selected row")
+        selected.removeAll()
+        window.makeFirstResponder(folderTable); key(125, to: folderTable)
+        require((window.firstResponder as? NSView)?.identifier?.rawValue == "tab-row-\(folderIDs[0].uuidString)" && selected.isEmpty,
+                "Down with no selection focuses the first folder without selecting a tab")
+        window.makeFirstResponder(folderTable); key(126, to: folderTable)
+        require((window.firstResponder as? NSView)?.identifier?.rawValue == "tab-row-\(folderIDs[2].uuidString)" && selected.isEmpty,
+                "Up with no selection focuses the last folder")
+
         // Native regression: a click expands a folder, the sidebar reloads, and
         // the folder must still hold focus so Left collapses it again.
         var tree = [SidebarTabItem(id: folderIDs[0], title: "Projects", subtitle: "", symbol: "folder", isPinned: true, isActive: false,
