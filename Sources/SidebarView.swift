@@ -90,6 +90,8 @@ struct SidebarExtensionItem {
     /// Drag and drop of sidebar rows within the shown Space (target, Space ID).
     var onDrop: ((UUID, BrowserSession.SidebarDropTarget, Int) -> Bool)?
     var canDrop: ((UUID, BrowserSession.SidebarDropTarget, Int) -> Bool)?
+    /// Observes (or, returning false, cancels) a row drag just before it starts.
+    var onRowDragWillBegin: ((UUID) -> Bool)?
     /// A row dropped on a footer Space icon moves there (profile-aware in the controller).
     var onDropOnSpace: ((UUID, Int) -> Bool)?
     var onToggleFolder: ((UUID) -> Void)?
@@ -265,6 +267,7 @@ struct SidebarExtensionItem {
         page.folderTargets = { [weak self] in self?.folderTargets?($0) ?? [] }
         page.drop = { [weak self] in self?.onDrop?($0, $1, $2) ?? false }
         page.canDrop = { [weak self] in self?.canDrop?($0, $1, $2) ?? false }
+        page.rowDragWillBegin = { [weak self] in self?.onRowDragWillBegin?($0) ?? true }
     }
     private func configureFavorites(_ allItems: [SidebarTabItem]) {
         var seen = Set<UUID>()
@@ -504,6 +507,7 @@ struct SidebarExtensionItem {
     var folderTargets: ((UUID) -> [SidebarFolderTarget])?
     var drop: ((UUID, BrowserSession.SidebarDropTarget, Int) -> Bool)?
     var canDrop: ((UUID, BrowserSession.SidebarDropTarget, Int) -> Bool)?
+    var rowDragWillBegin: ((UUID) -> Bool)?
     let heading = ArkSpaceHeading()
     let scroll = SidebarScrollView()
     private let table = SidebarTableView()
@@ -717,6 +721,7 @@ struct SidebarExtensionItem {
         row.ungroupFolder = { [weak self, weak row] in if let id = row?.item.id { self?.ungroupFolder?(id) } }
         row.moveToFolder = { [weak self, weak row] target in if let id = row?.item.id { self?.moveToFolder?(id, target) } }
         row.folderTargets = { [weak self, weak row] in row.flatMap { self?.folderTargets?($0.item.id) } ?? [] }
+        row.willBeginDrag = { [weak self] id in self?.rowDragWillBegin?(id) ?? true }
         row.arrow = { [weak self, weak row] delta in
             guard let self, let row else { return false }
             let index = self.table.row(for: row)
@@ -1301,6 +1306,8 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource {
     var folderTargets: (() -> [SidebarFolderTarget])?
     /// Moves keyboard focus to the neighboring row; returns whether it moved.
     var arrow: ((Int) -> Bool)?
+    /// Called with the pressed row's ID just before a drag session starts; false cancels it.
+    var willBeginDrag: ((UUID) -> Bool)?
     var canMoveEarlier = false
     var canMoveLater = false
     private var currentSpace = 0
@@ -1315,6 +1322,8 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource {
     private var area: NSTrackingArea?
     private var configured = false
     private var dragOrigin: NSPoint?
+    /// The row identity captured at mouse-down; a drag only ever carries this ID.
+    private var pressedID: UUID?
     private var didDrag = false
     init(item: SidebarTabItem) {
         self.item = item
@@ -1345,6 +1354,8 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource {
         if first || old.id != item.id {
             hovered = false; closeButton.hovered = false
             identifier = NSUserInterfaceItemIdentifier("tab-row-\(item.id.uuidString)")
+            // Reused for another row mid-press: abandon that press and any drag it began.
+            dragOrigin = nil; pressedID = nil; didDrag = false
         }
         if first || old.title != item.title { titleLabel.stringValue = item.title.isEmpty ? (item.isFolder ? "Folder" : "New Tab") : item.title; setAccessibilityLabel(item.title) }
         if first || old.isActive != item.isActive || old.isFolder != item.isFolder { titleLabel.font = ArkType.rowFont(active: item.isActive, folder: item.isFolder) }
@@ -1471,16 +1482,19 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource {
         // Folders are not table selections; keep keyboard focus on the row so
         // arrows and Return keep working after a click. Tabs select at once
         // (as before); folders wait for mouse-up so dragging one doesn't toggle it.
-        dragOrigin = convert(event.locationInWindow, from: nil); didDrag = false
+        // Capture what was pressed now: selecting can reload the list and
+        // recycle this view for another row before the drag begins.
+        dragOrigin = convert(event.locationInWindow, from: nil); didDrag = false; pressedID = item.id
         if item.isFolder { window?.makeFirstResponder(self) } else { activate() }
     }
     override func mouseDragged(with event: NSEvent) {
-        guard let origin = dragOrigin, !didDrag else { return }
+        guard let origin = dragOrigin, !didDrag, let source = pressedID, source == item.id else { return }
         let point = convert(event.locationInWindow, from: nil)
         guard hypot(point.x - origin.x, point.y - origin.y) > 4 else { return }
         didDrag = true
+        guard willBeginDrag?(source) ?? true else { return }
         let payload = NSPasteboardItem()
-        payload.setString(item.id.uuidString, forType: .bamSidebarRow)
+        payload.setString(source.uuidString, forType: .bamSidebarRow)
         let dragItem = NSDraggingItem(pasteboardWriter: payload)
         dragItem.setDraggingFrame(bounds, contents: snapshot())
         let session = beginDraggingSession(with: [dragItem], event: event, source: self)
@@ -1488,8 +1502,8 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource {
         session.draggingFormation = .none
     }
     override func mouseUp(with event: NSEvent) {
-        defer { dragOrigin = nil }
-        if item.isFolder, dragOrigin != nil, !didDrag { toggleFolder?() }
+        defer { dragOrigin = nil; pressedID = nil }
+        if item.isFolder, dragOrigin != nil, !didDrag, pressedID == item.id { toggleFolder?() }
     }
     func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation {
         context == .withinApplication ? .move : []

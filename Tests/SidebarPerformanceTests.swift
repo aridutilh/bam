@@ -363,6 +363,56 @@ import AppKit
                 "Dropping commits exactly the validated target")
         board.clearContents(); board.setString("not a row", forType: .string)
         require(validate(1, .on).0 == [] && asked.isEmpty, "Foreign drags are ignored")
+
+        // Regression: mouse-down selects, selection reloads the list (a revealed
+        // child under a collapsed folder disappears), and the pressed view may be
+        // reused for another row. A following drag must never carry another ID.
+        let folder = UUID(), revealed = UUID(), pressed = UUID(), today = UUID()
+        func layout(active: UUID) -> [SidebarTabItem] {
+            var items = [SidebarTabItem(id: folder, title: "Closed", subtitle: "", symbol: "folder", isPinned: true, isActive: false,
+                                        isFolder: true, isExpanded: false)]
+            if active == revealed {
+                items.append(SidebarTabItem(id: revealed, title: "Revealed", subtitle: "", symbol: "globe", isPinned: true, isActive: true,
+                                            depth: 1, parentFolderID: folder))
+            }
+            items.append(SidebarTabItem(id: pressed, title: "Pressed", subtitle: "", symbol: "globe", isPinned: true, isActive: active == pressed))
+            items.append(SidebarTabItem(id: today, title: "Today", subtitle: "", symbol: "globe", isPinned: false, isActive: false))
+            return items
+        }
+        update(0, layout(active: revealed))
+        var started: [UUID] = []
+        sidebar.onRowDragWillBegin = { started.append($0); return false }   // Observe; never start a real session offscreen.
+        sidebar.onSelectTab = { id in update(0, layout(active: id)) }       // Selection reloads synchronously.
+        let pressTable = table(in: 0)
+        let pressedView = row(pressTable, 2)
+        require(pressedView.identifier?.rawValue == "tab-row-\(pressed.uuidString)", "Fixture: row 2 is the pressed tab")
+        pressedView.mouseDown(with: mouse(.leftMouseDown))
+        let drag = NSEvent.mouseEvent(with: .leftMouseDragged, location: NSPoint(x: 40, y: 40), modifierFlags: [], timestamp: 0,
+                                      windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
+        pressedView.mouseDragged(with: drag)
+        require(started.allSatisfy { $0 == pressed }, "A drag only ever carries the pressed row's ID: \(started)")
+        // Force reuse mid-press: in a long list, the pressed view is recycled for
+        // a far row once that row scrolls in (as a reload/scroll during a press can).
+        started.removeAll()
+        let crowd = (0..<600).map { SidebarTabItem(id: UUID(), title: "Crowd \($0)", subtitle: "", symbol: "globe", isPinned: false, isActive: $0 == 0) }
+        sidebar.onSelectTab = { _ in }
+        update(0, crowd)
+        let crowdTable = table(in: 0)
+        let reusedView = row(crowdTable, 2)   // rows 0/1 are the divider-less New Tab and first item
+        let pressedCrowdID = reusedView.identifier?.rawValue
+        reusedView.mouseDown(with: mouse(.leftMouseDown))
+        _ = row(crowdTable, crowdTable.numberOfRows - 1)
+        require(reusedView.identifier?.rawValue != pressedCrowdID, "Fixture: the pressed view now shows another row")
+        reusedView.mouseDragged(with: drag)
+        require(started.isEmpty, "A recycled view abandons the press instead of dragging the row it now shows: \(started)")
+        reusedView.mouseUp(with: mouse(.leftMouseUp))
+        // A plain press-and-drag with no reload drags the pressed row.
+        started.removeAll(); sidebar.onSelectTab = { _ in }
+        let stable = row(table(in: 0), 1)
+        let stableID = stable.identifier?.rawValue
+        stable.mouseDown(with: mouse(.leftMouseDown)); stable.mouseDragged(with: drag)
+        require(started.count == 1 && "tab-row-\(started[0].uuidString)" == stableID, "Without a reload the pressed row is dragged")
+        sidebar.onRowDragWillBegin = nil
         print("PASS: \(checks) sidebar virtualization, identity, scrolling, paging and extension action checks")
         window.contentView = nil
     }
