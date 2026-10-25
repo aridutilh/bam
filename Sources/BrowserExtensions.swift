@@ -142,6 +142,8 @@ struct BrowserExtensionPermissionReview {
     private var manager: ExtensionManagement?
     private var stopped = false
 
+    /// Refusal when an extension's compatibility transport is closed (for example after Revoke Permissions).
+    static let compatibilityTransportUnavailable = "This native application is not available in Bam."
     static let supportedPermissions: Set<String> = ["activeTab", "alarms", "clipboardWrite", "contextMenus", "menus", "cookies", "declarativeNetRequest", "declarativeNetRequestFeedback", "declarativeNetRequestWithHostAccess", "scripting", "storage", "tabs", "unlimitedStorage", "webNavigation", "webRequest"]
     // windows.create/update/remove are implemented through Little Bam windows since 0.17.
     // notifications/downloads/management are absent from WebKit; Bam's compatibility
@@ -1254,7 +1256,7 @@ struct BrowserExtensionPermissionReview {
             sendNative(message, context: context, reply: replyHandler); return
         }
         guard allowsCompatibilityTransport(context), applicationIdentifier == ExtensionCompatibility.nativeApplicationIdentifier else {
-            replyHandler(nil, BrowserExtensions.failure("This native application is not available in Bam.")); return
+            replyHandler(nil, BrowserExtensions.failure(BrowserExtensions.compatibilityTransportUnavailable)); return
         }
         Task { @MainActor in
             let (value, error) = await compatibility.receiveNativeMessage(message, context: context)
@@ -1267,7 +1269,7 @@ struct BrowserExtensionPermissionReview {
             connectNative(port, context: context, completion: completionHandler); return
         }
         guard allowsCompatibilityTransport(context), port.applicationIdentifier == ExtensionCompatibility.nativeApplicationIdentifier else {
-            completionHandler(BrowserExtensions.failure("This native application is not available in Bam.")); return
+            completionHandler(BrowserExtensions.failure(BrowserExtensions.compatibilityTransportUnavailable)); return
         }
         completionHandler(compatibility.connectNativePort(port, context: context))
     }

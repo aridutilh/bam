@@ -566,6 +566,8 @@ import WebKit
         try await wait("Inactivity transition did not cross the worker event port") {
             (await request(popupA)?["events"] as? [[String: String]])?.contains { $0["kind"] == "idle" && $0["value"] == "active" } == true
         }
+        // Across revocation the snapshot hooks must not be read at all, whichever layer refuses first.
+        let snapshotsBeforeRevoke = (snapshotCalls.count, historyCalls.count)
         try host.revokePermissions(id: idA)
         try check(!runtimeA.compatibility.offscreen.has(contextA.uniqueIdentifier) && runtimeB.compatibility.offscreen.has(contextB.uniqueIdentifier),
                   "Revoking one extension did not close only its offscreen document")
@@ -576,15 +578,26 @@ import WebKit
         let revoked = await request(popupA, kind: "revoked")
         host.historyChanged(profileID: profileA, change: .visited(ExtensionHistory.Visit(url: "https://after-revoke.example/", title: "Late", visitedAt: Date())))
         try await Task.sleep(nanoseconds: 500_000_000)
+        // Revoke Permissions removes every grant, which also closes the worker's compatibility transport, so a worker
+        // call may be refused there (before the bridge). Accept exactly that refusal or the bridge's own; anything
+        // else, or any data, fails. The bridge itself must still refuse with its own text when called directly.
+        func refusedAfterRevoke(_ error: Any?, bridgeText: String) -> Bool {
+            guard let text = error as? String else { return false }
+            return text.contains(bridgeText) || text.contains(BrowserExtensions.compatibilityTransportUnavailable)
+        }
         let revokedHistory = await request(popupA, kind: "history")
-        try check((revokedHistory?["error"] as? String)?.contains("not been granted history access") == true &&
-                  (revokedHistory?["events"] as? [[String: Any]])?.contains { $0["url"] as? String == "https://after-revoke.example/" } == false,
-                  "Revoked history access still searched or delivered an event: \(revokedHistory ?? [:])")
+        let revokedHistoryNative = await runtimeA.compatibility.receiveNativeMessage(["kind": "request", "method": "history.search", "params": ["text": ""]], context: contextA)
+        try check(refusedAfterRevoke(revokedHistory?["error"], bridgeText: ExtensionCompatibilityBridge.historyNotGranted) && revokedHistory?["count"] == nil &&
+                  (revokedHistory?["events"] as? [[String: Any]])?.contains { $0["url"] as? String == "https://after-revoke.example/" } == false &&
+                  revokedHistoryNative.0 == nil && revokedHistoryNative.1?.localizedDescription == ExtensionCompatibilityBridge.historyNotGranted,
+                  "Revoked history access searched, delivered an event, or was refused for another reason: \(revokedHistory ?? [:]) bridge=\(String(describing: revokedHistoryNative.1))")
         let revokedMarks = await request(popupA, kind: "bookmarks")
         let revokedMarksNative = await runtimeA.compatibility.receiveNativeMessage(["kind": "request", "method": "bookmarks.getTree"], context: contextA)
-        try check((revokedMarks?["error"] as? String)?.contains("not been granted bookmarks access") == true && revokedMarks?["tree"] == nil &&
-                  revokedMarksNative.0 == nil && revokedMarksNative.1 != nil,
-                  "Revoked bookmarks access still returned a tree: \(revokedMarks ?? [:])")
+        try check(refusedAfterRevoke(revokedMarks?["error"], bridgeText: ExtensionCompatibilityBridge.bookmarksNotGranted) && revokedMarks?["tree"] == nil &&
+                  revokedMarksNative.0 == nil && revokedMarksNative.1?.localizedDescription == ExtensionCompatibilityBridge.bookmarksNotGranted,
+                  "Revoked bookmarks access returned a tree or was refused for another reason: \(revokedMarks ?? [:]) bridge=\(String(describing: revokedMarksNative.1))")
+        try check(snapshotCalls.count == snapshotsBeforeRevoke.0 && historyCalls.count == snapshotsBeforeRevoke.1,
+                  "A revoked extension's request read the bookmarks or history snapshot")
         try check(revokedNative.1 != nil && revoked?["requestDenied"] is String &&
                   (revoked?["events"] as? [[String: String]])?.contains { $0["value"] == revokedID } == false,
                   "Revoked worker grants still allowed native requests or event delivery")
