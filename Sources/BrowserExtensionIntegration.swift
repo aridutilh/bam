@@ -164,13 +164,15 @@ import WebKit
         extensionLoadingChanges.subtract(members.map(\.id))
         for (owner, peek) in peeks {
             guard let web = peek.webView, self.profileID(of: web) == profileID, let id = peekExtensionIDs[owner] else { continue }
+            // Shown after the window's tabs: new extension tabs land before it.
             result.append(BrowserExtensionSurface(id: id, title: web.title ?? "Peek", url: web.url, webView: web, window: viewIfLoaded?.window,
-                isActive: session.activeID == owner && peek.isPresented, isSelected: session.activeID == owner && peek.isPresented, isLoading: web.isLoading))
+                isActive: session.activeID == owner && peek.isPresented, isSelected: session.activeID == owner && peek.isPresented, isLoading: web.isLoading, isPeek: true))
         }
         for (id, little) in littleWindows {
             guard let web = little.webView, self.profileID(of: web) == profileID else { continue }
+            // One page, no tabs: reported to extensions as a popup window, which cannot take new tabs.
             result.append(BrowserExtensionSurface(id: id, title: web.title ?? "Little Bam", url: web.url, webView: web, window: little.window,
-                isActive: true, isSelected: true, isLoading: web.isLoading))
+                isActive: true, isSelected: true, isLoading: web.isLoading, isSinglePage: true))
         }
         return result
     }
