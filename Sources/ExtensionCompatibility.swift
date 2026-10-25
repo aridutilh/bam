@@ -440,27 +440,30 @@ enum ExtensionCompatibility {
           if (info && typeof info === "object") { enginePassesInfo = true; snapshot = null; deliver(info, generation); return; }
           if (!enginePassesInfo) refresh();
         };
-        const bamEvent = {
+        // WebKit's namespace attributes (cookies.onChanged) are native static values that a defined
+        // property cannot replace, but the native event's methods can be overridden on the instance (as
+        // the action.setIcon binding does). Keep the originals for Bam's single native trigger.
+        const nativeAdd = nativeEvent.addListener.bind(nativeEvent), nativeRemove = nativeEvent.removeListener.bind(nativeEvent);
+        const methods = {
           addListener(fn) {
             if (typeof fn !== "function") return;
             listeners.add(fn);
             // A fresh chain per listener period: an old read that never settles cannot stall this one.
-            if (!attached) { attached = true; generation++; snapshot = null; work = Promise.resolve(); nativeEvent.addListener(onNative); refresh(); }
+            if (!attached) { attached = true; generation++; snapshot = null; work = Promise.resolve(); nativeAdd(onNative); refresh(); }
           },
           removeListener(fn) {
             listeners.delete(fn);
-            if (attached && !listeners.size) { attached = false; generation++; nativeEvent.removeListener(onNative); snapshot = null; }
+            if (attached && !listeners.size) { attached = false; generation++; nativeRemove(onNative); snapshot = null; }
           },
           hasListener(fn) { return listeners.has(fn); },
           hasListeners() { return listeners.size > 0; }
         };
-        const cookieProto = Object.getPrototypeOf(nativeCookies);
-        for (const holder of [nativeCookies, cookieProto]) {
-          if (!holder || holder === Object.prototype) continue;
-          try { Object.defineProperty(holder, "onChanged", { value: bamEvent, writable: true, configurable: true, enumerable: true }); } catch (error) {}
-          try { Object.defineProperty(holder, "__bamChangeInfo", { value: true, configurable: true }); } catch (error) {}
+        for (const [name, value] of Object.entries(methods)) {
+          try { Object.defineProperty(nativeEvent, name, { value, writable: true, configurable: true, enumerable: true }); } catch (error) {}
         }
-        compat.cookies = { namespace: nativeCookies, nativeEvent, settled: () => work };
+        try { Object.defineProperty(nativeCookies, "__bamChangeInfo", { value: true, configurable: true }); } catch (error) {}
+        // rawAddListener is a diagnostics seam: fixtures count WebKit's own firings without joining Bam's listeners.
+        compat.cookies = { namespace: nativeCookies, nativeEvent, settled: () => work, intercepting: nativeEvent.addListener === methods.addListener, rawAddListener: nativeAdd };
       }
 
       // fontSettings: the installed font families (Dark Reader's font picker). Bam has no
