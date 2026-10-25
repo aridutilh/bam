@@ -64,6 +64,8 @@ if [ "$VERIFIED" != true ]; then exit 1; fi
 "$BUILD_DIR/model-tests" "$BUILD_DIR"
 "$SWIFTC" "${COMMON[@]}" -parse-as-library "$PROJECT_DIR/Sources/BrowserState.swift" "$PROJECT_DIR/Tests/FolderTests.swift" -o "$BUILD_DIR/folder-tests"
 "$BUILD_DIR/folder-tests" "$BUILD_DIR/folder-fixtures"
+"$SWIFTC" "${COMMON[@]}" -parse-as-library "$PROJECT_DIR/Sources/BrowserState.swift" "$PROJECT_DIR/Sources/ArcImport.swift" "$PROJECT_DIR/Tests/ArcImportTests.swift" -o "$BUILD_DIR/arc-import-tests"
+"$BUILD_DIR/arc-import-tests" "$BUILD_DIR/arc-import-fixtures"
 "$SWIFTC" "${COMMON[@]}" -parse-as-library "$PROJECT_DIR/Sources/BrowserState.swift" "$PROJECT_DIR/Sources/PreviewProfile.swift" "$PROJECT_DIR/Tests/PreviewProfileTests.swift" -o "$BUILD_DIR/preview-profile-tests"
 "$BUILD_DIR/preview-profile-tests"
 python3 -B "$PROJECT_DIR/Tests/PreviewInstallerTests.py"

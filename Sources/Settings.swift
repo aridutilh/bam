@@ -55,6 +55,7 @@ struct SettingsActions {
     var manageSpaces: () -> Void = {}
     var manageExtensions: () -> Void = {}
     var showWelcome: () -> Void = {}
+    var importFromArc: () -> Void = {}
     var openURL: (URL) -> Void = { _ in }
 }
 
@@ -305,7 +306,17 @@ struct SettingsActions {
         keys.add(BamRow(title: "Click a key to change it",
                         detail: "Then press the new shortcut. Escape keeps the old one, Delete restores the default.",
                         control: reset))
-        return [caption("Playback"), playback, caption("Memory"), memory, caption("Keyboard"), keys]
+        let bring = BamCard(frame: .zero)
+        let arc = BamPillButton(title: "Import from Arc…", symbol: "square.and.arrow.down")
+        arc.target = self; arc.action = #selector(importFromArc)
+        bring.add(BamRow(title: "Bring in your Arc sidebar",
+                         detail: "Spaces, folders, kept tabs, Today tabs and Favorites from Arc’s layout file. Pages stay asleep until you open them.",
+                         control: arc))
+        return [caption("Import"), bring, caption("Playback"), playback, caption("Memory"), memory, caption("Keyboard"), keys]
+    }
+    @objc private func importFromArc() {
+        window.orderOut(nil)
+        actions.importFromArc()
     }
     private weak var resetPill: BamPillButton?
     @objc private func resetShortcuts() { ShortcutStore.shared.resetAll() }

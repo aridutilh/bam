@@ -16,7 +16,8 @@ import WebKit
                 symbol: companion == nil ? tab.symbol : "rectangle.split.2x1", isPinned: tab.pinned,
                 isActive: tab.id == snapshot.activeID, isFavorite: tab.isFavorite, isUnloaded: tab.isUnloaded, isSleeping: tab.isSleeping,
                 isSplit: companion != nil, canFavorite: companion == nil && (tab.isFavorite || favoriteCount < BrowserSession.maximumFavorites),
-                depth: depth, parentFolderID: parent, hasEarlierSibling: earlier, hasLaterSibling: later)
+                depth: depth, parentFolderID: parent, hasEarlierSibling: earlier, hasLaterSibling: later,
+                canWrapInFolder: !tab.isFavorite && URLInput.extensionURL(tab.address) == nil)
         }
         let visible = snapshot.visibleTabs
         var result = visible.filter(\.isFavorite).map { item($0) }
@@ -31,7 +32,8 @@ import WebKit
                 result.append(SidebarTabItem(id: folder.id, title: folder.name, subtitle: "", symbol: "folder", isPinned: true,
                     isActive: false, canFavorite: false, depth: entry.depth, isFolder: true, isExpanded: !folder.isCollapsed,
                     parentFolderID: entry.parentID, hasEarlierSibling: earlier, hasLaterSibling: later,
-                    folderTabCount: snapshot.tabIDs(inFolder: folder.id).count))
+                    folderTabCount: snapshot.tabIDs(inFolder: folder.id).count,
+                    canNestFolder: snapshot.canCreateFolder(inside: folder.id)))
             } else if let tab = tabsByID[entry.id] {
                 result.append(item(tab, depth: entry.depth, parent: entry.parentID, earlier: earlier, later: later))
             }

@@ -39,6 +39,10 @@ import AppKit
         actions.manageSpaces = { [weak self] in self?.manageSpaces(nil) }
         actions.manageExtensions = { [weak self] in self?.manageExtensions(nil) }
         actions.showWelcome = showWelcome
+        actions.importFromArc = { [weak self] in
+            self?.view.window?.makeKeyAndOrderFront(nil)
+            self?.importFromArc(nil)
+        }
         actions.openURL = { [weak self] url in
             guard let self, URLInput.directURL(url.absoluteString) != nil else { return }
             self.cancelPaging(); self.dismissAddress()
