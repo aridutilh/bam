@@ -262,47 +262,22 @@ import WebKit
         entry["host_t_ms"] = ms(); entry["host_phase"] = currentPhase
         hostEvents.append(entry)
     }
-    /// A trigger the run requires: a published worker record of a kind, or the trusted input click on the probe button.
-    private enum Trigger: Hashable {
-        case record(String), trustedClick
-        var label: String { switch self { case .record(let kind): return "record:\(kind)"; case .trustedClick: return "input:trusted-click" } }
-    }
-    /// The host-world message for a required trigger, if it arrived (the first matching one).
-    private func triggerEvent(_ trigger: Trigger) -> [String: Any]? {
-        switch trigger {
-        case .record(let kind): return hostEvents.first { $0["event"] as? String == "record" && $0["kind"] as? String == kind }
-        case .trustedClick: return hostEvents.first { $0["event"] as? String == "click" && $0["trusted"] as? Bool == true }
-        }
-    }
-    /// Problems with one required trigger: missing trigger, missing scheduled readings, or readings received in a later
-    /// phase than the trigger (a cross-phase sample is never counted).
-    private func sampleProblems(_ trigger: Trigger) -> [String] {
-        guard let event = triggerEvent(trigger), let id = event["id"] as? String else { return ["\(trigger.label): trigger not reported"] }
-        let phase = event["host_phase"] as? String
-        let samples = hostEvents.filter { $0["event"] as? String == "activation" && $0["id"] as? String == id }
-        var problems: [String] = []
-        for delay in Self.activationDelaysMilliseconds {
-            let matching = samples.filter { ($0["scheduled_ms"] as? NSNumber)?.intValue == delay }
-            if matching.isEmpty { problems.append("\(trigger.label)+\(delay)ms missing") }
-            else if matching.contains(where: { $0["host_phase"] as? String != phase }) { problems.append("\(trigger.label)+\(delay)ms received in another phase") }
-        }
-        return problems
-    }
-    /// Required triggers per phase. The armed acknowledgement is required separately (it gates READY).
-    private static let phaseTriggers: [String: [Trigger]] = ["baseline": [.record("baseline")], "page_click": [.trustedClick, .record("click")],
-                                                             "toolbar": [.record("toolbar")]]
-    /// Waits (native sampling continues) until the phase's required triggers and all their readings have arrived, or the
-    /// deadline passes; the phase does not advance earlier.
+    private typealias Evidence = ExtensionGestureProbeRules
+    /// Waits (native sampling continues) until the phase's required triggers, received in this phase, and all their
+    /// readings have arrived in this phase, or the deadline passes; the phase does not advance earlier.
     private func waitForSamples(_ phase: String, extra: TimeInterval = 1.5) async throws -> [String] {
-        let triggers = Self.phaseTriggers[phase] ?? []
+        let delays = Self.activationDelaysMilliseconds
         let deadline = ProcessInfo.processInfo.systemUptime + Self.samplingWindowSeconds + extra
-        _ = try await poll(until: deadline) { triggers.allSatisfy { self.sampleProblems($0).isEmpty } }
-        return triggers.flatMap(sampleProblems)
+        _ = try await poll(until: deadline) { Evidence.phaseSampleProblems(phase, in: self.hostEvents, delays: delays).isEmpty }
+        return Evidence.phaseSampleProblems(phase, in: hostEvents, delays: delays)
     }
-    /// Every required trigger of the measured phases, with every reading's scheduled, in-page actual and native receipt times.
+    /// Every required trigger of the measured phases (looked up in its own phase), with every reading's scheduled,
+    /// in-page actual and native receipt times. Triggers in other phases (early or extra clicks) stay in `host_events`.
     private func sampleLedger(_ phases: [String]) -> [[String: Any]] {
-        phases.flatMap { phase in (Self.phaseTriggers[phase] ?? []).map { trigger -> [String: Any] in
-            guard let event = triggerEvent(trigger), let id = event["id"] as? String else { return ["phase": phase, "trigger": trigger.label, "reported": false] }
+        phases.flatMap { phase in (Evidence.phaseTriggers[phase] ?? []).map { trigger -> [String: Any] in
+            guard let event = Evidence.triggerEvent(trigger, phase: phase, in: hostEvents), let id = event["id"] as? String else {
+                return ["phase": phase, "trigger": trigger.label, "reported_in_phase": false]
+            }
             let readings = hostEvents.filter { $0["event"] as? String == "activation" && $0["id"] as? String == id }.map { sample -> [String: Any] in
                 ["scheduled_ms": sample["scheduled_ms"] ?? NSNull(), "actual_ms": sample["actual_ms"] ?? NSNull(),
                  "host_t_ms": sample["host_t_ms"] ?? NSNull(), "host_phase": sample["host_phase"] ?? NSNull(), "activation": sample["activation"] ?? NSNull()]
@@ -520,7 +495,7 @@ import WebKit
         browser.select(opened)
         // READY needs both the page state and the host world's armed acknowledgement.
         guard try await poll(until: ProcessInfo.processInfo.systemUptime + 3, {
-            self.pageResults["armed"] as? Bool == true && self.hostEvents.contains { $0["event"] as? String == "armed" }
+            self.pageResults["armed"] as? Bool == true && Evidence.armedAcknowledged(in: self.hostEvents)
         }) else {
             throw BrowserExtensions.failure("The probe button did not arm (no armed acknowledgement)")
         }
@@ -569,7 +544,7 @@ import WebKit
         let requested = ["install", "baseline", "page_click"] + (toolbar == .off ? [] : ["toolbar"])
         // Each measured phase already required its triggers and in-phase readings; the armed acknowledgement too.
         let phasesMeasured = requested.allSatisfy { phases[$0] == "done" || ExtensionGestureProbeRules.isMeasured(phases[$0]) }
-        let complete = phasesMeasured && hostEventsDropped == 0 && hostEvents.contains { $0["event"] as? String == "armed" }
+        let complete = phasesMeasured && hostEventsDropped == 0 && Evidence.armedAcknowledged(in: hostEvents)
         finish(complete: complete, reason: complete ? "every requested phase, required trigger and in-phase host-world reading measured"
                : "phases: \(phases); dropped host events: \(hostEventsDropped)")
     }
@@ -592,9 +567,13 @@ import WebKit
         observations["host_messages_rejected"] = rejectedHostMessages
         observations["host_world_ready"] = hostReady
         let ledgerPhases = ["baseline", "page_click", "toolbar"].filter { phases[$0] != nil && phases[$0] != "off" }
-        observations["host_sample_problems"] = ledgerPhases.flatMap { (Self.phaseTriggers[$0] ?? []).flatMap(sampleProblems) }
+        observations["host_sample_problems"] = ledgerPhases.flatMap { Evidence.phaseSampleProblems($0, in: hostEvents, delays: Self.activationDelaysMilliseconds) }
+        // Extra triggers (early, untrusted or repeated clicks) are kept as observations only, with their received phase.
+        observations["host_extra_clicks"] = hostEvents.filter { $0["event"] as? String == "click" }.filter { event in
+            Evidence.triggerEvent(.trustedClick, phase: "page_click", in: hostEvents).map { ($0["id"] as? String) != (event["id"] as? String) } ?? true
+        }.map { ["id": $0["id"] ?? NSNull(), "trusted": $0["trusted"] ?? NSNull(), "host_phase": $0["host_phase"] ?? NSNull()] as [String: Any] }
         observations["host_sample_ledger"] = sampleLedger(ledgerPhases)
-        observations["host_armed_acknowledged"] = hostEvents.contains { $0["event"] as? String == "armed" }
+        observations["host_armed_acknowledged"] = Evidence.armedAcknowledged(in: hostEvents)
         if let context = measuredContext {
             observations["optional_permission_status_after"] = context.permissionStatus(for: WKWebExtension.Permission(rawValue: Self.optionalPermission)).rawValue
         }

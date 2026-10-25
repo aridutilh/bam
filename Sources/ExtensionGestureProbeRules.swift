@@ -85,6 +85,67 @@ enum ExtensionGestureProbeRules {
     }
     static func isMeasured(_ verdict: String?) -> Bool { verdict?.hasPrefix("measured") == true }
 
+    // MARK: Host-world evidence (passive observer messages, as the probe logs them with host_phase / host_t_ms)
+
+    /// A trigger a phase requires: a published worker record of a kind, or the trusted input click on the probe button.
+    enum HostTrigger: Hashable {
+        case record(String), trustedClick
+        var label: String { switch self { case .record(let kind): return "record:\(kind)"; case .trustedClick: return "input:trusted-click" } }
+    }
+    /// Required triggers per phase. The armed acknowledgement is required separately (it gates READY).
+    static let phaseTriggers: [String: [HostTrigger]] = ["baseline": [.record("baseline")], "page_click": [.trustedClick, .record("click")],
+                                                         "toolbar": [.record("toolbar")]]
+    private static func isNumber(_ value: Any?) -> Bool {
+        guard let value, value is NSNumber else { return false }
+        return CFGetTypeID(value as CFTypeRef) != CFBooleanGetTypeID()
+    }
+    private static func isBool(_ value: Any?) -> Bool {
+        guard let value else { return false }
+        return CFGetTypeID(value as CFTypeRef) == CFBooleanGetTypeID()
+    }
+    /// The trigger message for `trigger` received **in `phase`** (the first such). A matching event received in any other
+    /// phase (for example an early trusted click during baseline) never satisfies this phase.
+    static func triggerEvent(_ trigger: HostTrigger, phase: String, in events: [[String: Any]]) -> [String: Any]? {
+        events.first { event in
+            guard event["host_phase"] as? String == phase else { return false }
+            switch trigger {
+            case .record(let kind): return event["event"] as? String == "record" && event["kind"] as? String == kind
+            case .trustedClick: return event["event"] as? String == "click" && event["trusted"] as? Bool == true && isBool(event["trusted"])
+            }
+        }
+    }
+    /// Problems with one required trigger in `phase`: trigger missing (in this phase) or malformed, or any scheduled
+    /// reading missing, malformed, or received outside `phase`.
+    static func sampleProblems(_ trigger: HostTrigger, phase: String, in events: [[String: Any]], delays: [Int]) -> [String] {
+        guard let event = triggerEvent(trigger, phase: phase, in: events), let id = event["id"] as? String, !id.isEmpty else {
+            return ["\(trigger.label): trigger not reported in \(phase)"]
+        }
+        guard isNumber(event["perf"]), isNumber(event["wall"]), isNumber(event["host_t_ms"]) else { return ["\(trigger.label): trigger timestamps malformed"] }
+        let samples = events.filter { $0["event"] as? String == "activation" && $0["id"] as? String == id }
+        var problems: [String] = []
+        for delay in delays {
+            let matching = samples.filter { ($0["scheduled_ms"] as? NSNumber)?.intValue == delay && isNumber($0["scheduled_ms"]) }
+            guard !matching.isEmpty else { problems.append("\(trigger.label)+\(delay)ms missing"); continue }
+            if matching.contains(where: { $0["host_phase"] as? String != phase }) {
+                problems.append("\(trigger.label)+\(delay)ms received outside \(phase)"); continue
+            }
+            let wellFormed = matching.allSatisfy { sample in
+                guard isNumber(sample["actual_ms"]), isNumber(sample["host_t_ms"]), let activation = sample["activation"] as? [String: Any] else { return false }
+                return isBool(activation["isActive"]) && isBool(activation["hasBeenActive"])
+            }
+            if !wellFormed { problems.append("\(trigger.label)+\(delay)ms malformed") }
+        }
+        return problems
+    }
+    /// All problems for a phase's required triggers.
+    static func phaseSampleProblems(_ phase: String, in events: [[String: Any]], delays: [Int]) -> [String] {
+        (phaseTriggers[phase] ?? []).flatMap { sampleProblems($0, phase: phase, in: events, delays: delays) }
+    }
+    /// The armed acknowledgement must have arrived (it is received during baseline, before READY).
+    static func armedAcknowledged(in events: [[String: Any]]) -> Bool {
+        events.contains { $0["event"] as? String == "armed" && isNumber($0["perf"]) && isNumber($0["host_t_ms"]) }
+    }
+
     /// Bam's MV3 worker preparation adds its internal `nativeMessaging` transport to the private copy; the install
     /// review lists it as unsupported, and approving the review never grants it (that transport is a separate grant).
     static let toleratedUnsupported: Set<String> = ["nativeMessaging"]
