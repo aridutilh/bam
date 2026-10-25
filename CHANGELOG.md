@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.18.0 draft — build 36
+
+- Add an extension library (Manage Extensions ▸ Add from Store or Link): paste a Chrome Web Store, Firefox Add-ons or direct package link, or search Firefox Add-ons by name. Each product is listed once with every build Bam knows about, its publisher, source, permissions and the reason Bam recommends a build; a different build can be picked. Packages are verified before unpacking (Mozilla’s published SHA-256 for Firefox Add-ons files; every RSA publisher proof and the derived ID for Chrome Web Store CRX3 files; direct links are marked unverified), then go through the existing permission review. The manager shows source, publisher and verification per extension.
+- Add Check for Update: asks the installed build’s own source for a newer version and replaces the package in place after confirmation, keeping the extension’s identifier, storage and grants. Bam never switches an extension between stores.
+- Add a compatibility layer for extension pages (HTML background, popup and options): `notifications` (macOS User Notifications with click/button/dismiss events), `idle`, read-only `privacy`, self-only `management`, `downloads` through Bam’s download coordinator, `commands`, empty `storage.managed`, and missing members of `runtime`, `webNavigation` and `action`. Installed only for extensions that request those permissions and disclosed in the review as “Provided by Bam’s compatibility layer (limited)”. WebKit’s namespace wrappers are weakly cached, so the layer holds them; this made 1Password’s startup deterministic.
+- Implement `windows.create`/`remove`/`update` (as Little Bam windows), `tabs.detectLanguage`, `tabs.captureVisibleTab`, tab zoom and history navigation for extensions, and send the Safari user-agent suffix from extension pages so background fetches of sites match tabs (vidIQ now renders its YouTube overlay).
+- Vendor probes on fresh private profiles without sign-in: Dashlane injects into a loopback login form, vidIQ renders on a YouTube watch page, 1Password initializes and opens its welcome page. Sign-in, unlock and autofill remain untested; see [extension notes](docs/extensions.md).
+
 ## 0.17.0 prerelease — build 35
 
 - Make the Keyboard section of Settings ▸ General editable: each keycap is a recorder. Click it, press a chord, and the menu item takes that key equivalent at once (New Tab, Open Location, Toggle Sidebar, Next and Previous Space, Keep/Unkeep Tab, Settings). Escape keeps the old chord, Delete restores the default, a chord another command already owns is refused with a red flash, and a “Reset all” pill returns every command to its default. Custom chords persist in UserDefaults; fresh previews never save them.
