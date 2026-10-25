@@ -400,8 +400,10 @@ extension ExtensionSiteAccessSmokeTest {
         expect((withheld["js"] ?? "").isEmpty && (withheld["css"] ?? "").isEmpty, "after the restart, A's content still reaches a new document: \(withheld) \(state(subject))")
         expect(withheld["other"] == "js", "the unrelated extension stopped marking new documents: \(withheld)")
         host.reconcile()
+        // A concrete runtime and tab adapter are required: a missing one must not pass as "access denied".
         let tabAccess = runtime?.tabs[tabID].map { subjectContext.hasAccess(to: page, in: $0) }
-        expect(!subjectContext.hasAccess(to: page) && tabAccess != true, "A still has access after withholding (global \(subjectContext.hasAccess(to: page)), tab \(String(describing: tabAccess)))")
+        expect(runtime != nil && tabAccess != nil, "no runtime or tab adapter to check A's tab access (runtime \(runtime != nil), tab \(String(describing: tabAccess)))")
+        expect(!subjectContext.hasAccess(to: page) && tabAccess == false, "A still has access after withholding (global \(subjectContext.hasAccess(to: page)), tab \(String(describing: tabAccess)))")
         let afterRestart = try await storage(subject)
         expect(afterRestart.survivor == token, "A's storage.local didn't survive the restart: \(afterRestart.survivor)")
         let subjectStartsAfter = try await starts(subject, atLeast: subjectStartsBefore + 1)
@@ -440,14 +442,25 @@ extension ExtensionSiteAccessSmokeTest {
                "a failed restart didn't leave A unloaded and disabled with an error \(state(subject))")
         expect(host.siteAccess(id: subject)?.state.mode == .withheld, "the saved (withheld) choice wasn't kept after the failed restart \(state(subject))")
         let stopped = try await reload(tabID, after: afterRevokeAllow["document"])
-        expect((stopped["js"] ?? "").isEmpty, "a stopped A still marks new documents: \(stopped)")
+        expect((stopped["js"] ?? "").isEmpty && (stopped["css"] ?? "").isEmpty, "a stopped A still marks new documents (JS or CSS): \(stopped)")
         host.permissionPrompt = { _ in true }
         try await host.setEnabled(true, id: subject)
         expect(host.context(for: subject)?.isLoaded == true && host.siteAccess(id: subject)?.state.mode == .withheld,
                "Enable didn't recover A with its saved choice \(state(subject))")
+        // Before re-allowing, the recovered context must have no effective access (global and this exact tab) and
+        // must not mark a new document: a stored withheld state alone could hide accidental broad access.
+        host.reconcile()
+        let recoveredContext = host.context(for: subject)
+        let recoveredGlobal = recoveredContext?.hasAccess(to: page)
+        let recoveredTab = recoveredContext.flatMap { context in runtime?.tabs[tabID].map { context.hasAccess(to: page, in: $0) } }
+        expect(recoveredGlobal == false && recoveredTab == false,
+               "after Enable, A has access or can't be checked before re-allowing (global \(String(describing: recoveredGlobal)), tab \(String(describing: recoveredTab))) \(state(subject))")
+        let recoveredWithheld = try await reload(tabID, after: stopped["document"])
+        expect((recoveredWithheld["js"] ?? "").isEmpty && (recoveredWithheld["css"] ?? "").isEmpty,
+               "after Enable (still withheld), A marks a new document (JS or CSS): \(recoveredWithheld) \(state(subject))")
         try allow(subject)
-        let recovered = try await reload(tabID, after: stopped["document"])
-        expect(recovered["js"] == "js", "after Enable and re-allowing, A doesn't mark: \(recovered) \(state(subject))")
+        let recovered = try await reload(tabID, after: recoveredWithheld["document"])
+        expect(recovered["js"] == "js" && recovered["css"] == "injected", "after Enable and re-allowing, A doesn't mark with both JS and CSS: \(recovered) \(state(subject))")
 
         let tabsJSON = "{\"before\":\(tabsBefore),\"after\":\(tabsAfter)}"
         print("BAM_SITE_ACCESS_RESTART {\"findings\":\(findings.count),\"tab_ids\":\(tabsJSON),\"subject_starts\":[\(subjectStartsBefore),\(subjectStartsAfter)],\"other_starts\":[\(otherStartsBefore),\(otherStartsAfter)],\"prompts\":\(prompts)}"); fflush(stdout)
