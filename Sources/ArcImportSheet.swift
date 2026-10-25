@@ -72,9 +72,25 @@ import UniformTypeIdentifiers
         sourceLabel.font = .systemFont(ofSize: 12); sourceLabel.setAccessibilityLabel("Layout file")
         sourceLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         chooseButton.target = self; chooseButton.action = #selector(choose); chooseButton.bezelStyle = .rounded
-        let sourceRow = NSStackView(views: [sourceLabel, chooseButton]); sourceRow.orientation = .horizontal; sourceRow.spacing = 10
-        // A long file path truncates in the middle; it must not hold the sheet wider than its minimum.
-        sourceRow.setClippingResistancePriority(.defaultLow, for: .horizontal)
+        // The path takes only the width left after Choose File… and truncates in
+        // the middle; the button always keeps its full width at the trailing edge.
+        // (A stack view here would clip the button instead of shrinking the label.)
+        let sourceRow = NSView()
+        for view in [sourceLabel, chooseButton] as [NSView] { view.translatesAutoresizingMaskIntoConstraints = false; sourceRow.addSubview(view) }
+        sourceLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        sourceLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        chooseButton.setContentCompressionResistancePriority(.required, for: .horizontal)
+        chooseButton.setContentHuggingPriority(.required, for: .horizontal)
+        NSLayoutConstraint.activate([
+            sourceLabel.leadingAnchor.constraint(equalTo: sourceRow.leadingAnchor),
+            sourceLabel.trailingAnchor.constraint(lessThanOrEqualTo: chooseButton.leadingAnchor, constant: -10),
+            chooseButton.trailingAnchor.constraint(equalTo: sourceRow.trailingAnchor),
+            sourceLabel.centerYAnchor.constraint(equalTo: sourceRow.centerYAnchor),
+            chooseButton.centerYAnchor.constraint(equalTo: sourceRow.centerYAnchor),
+            chooseButton.topAnchor.constraint(greaterThanOrEqualTo: sourceRow.topAnchor),
+            chooseButton.bottomAnchor.constraint(lessThanOrEqualTo: sourceRow.bottomAnchor),
+            sourceRow.heightAnchor.constraint(equalTo: chooseButton.heightAnchor)
+        ])
         let header = NSStackView(views: [title, intro, sourceRow])
         header.orientation = .vertical; header.alignment = .leading; header.spacing = 8; header.setCustomSpacing(4, after: title)
         // Body (scrolls)
@@ -193,6 +209,16 @@ import UniformTypeIdentifiers
             ? "No Spaces selected. Select a Space to import, or bring in Favorites from other Arc profiles."
             : "No Spaces selected. Select at least one Space to import."
     }
+    /// Why nothing would be added. With some Spaces left out, it speaks about
+    /// the selected Spaces, not the whole layout.
+    private func emptyHeadline(_ report: ArcImport.Report) -> String {
+        guard !excludedSpaceIDs.isEmpty, report.skippedSpaces == 0 else { return report.emptyReason }
+        if report.removedSpaces > 0 && report.alreadyImported == 0 {
+            return "Nothing new: the selected Spaces were removed after an earlier import."
+        }
+        if report.alreadyImported > 0 { return "Everything Bam supports in the selected Spaces is already in Bam." }
+        return "The selected Spaces have nothing Bam can import."
+    }
     private func rebuildSpaceRows() {
         spacesList.arrangedSubviews.forEach { $0.removeFromSuperview() }
         spaceBoxes = [:]; spaceDetails = [:]
@@ -267,7 +293,7 @@ import UniformTypeIdentifiers
         let newSpaces = report.spaces.filter(\.isNew).count
         let hint = emptySelectionHint
         let headline = hint != nil ? "No Spaces selected"
-            : report.isEmpty ? report.emptyReason
+            : report.isEmpty ? emptyHeadline(report)
             : "\(report.importedTabs) tab\(report.importedTabs == 1 ? "" : "s") and \(report.importedFolders) folder\(report.importedFolders == 1 ? "" : "s")"
                 + (newSpaces > 0 ? " into \(newSpaces) new Space\(newSpaces == 1 ? "" : "s")" : "")
         add(label(headline, size: 14, weight: .semibold))

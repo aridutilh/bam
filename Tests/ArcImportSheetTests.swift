@@ -142,6 +142,65 @@ import AppKit
             require(pickerWindow.contentView!.bounds.contains(picker.importButton.convert(picker.importButton.bounds, to: nil)),
                     "Import stays visible with Space rows at \(size)")
         }
+        // Repeat import of a subset (native manual check): the empty headline
+        // speaks about the selected Spaces, not the whole layout.
+        let homeID = ids[1]
+        var homeOnly = ArcImport.Options(); homeOnly.spaceIDs = [homeID]
+        let afterHome = ArcImport.apply(source, to: .fresh(), options: homeOnly).session
+        let repeatSheet = ArcImportController()
+        repeatSheet.preview = { source, options in ArcImport.apply(source, to: afterHome, options: options).report }
+        repeatSheet.load(fixture)
+        @MainActor func headlineText(_ sheet: ArcImportController) -> String? {
+            ((sheet.body.arrangedSubviews.first as? NSStackView)?.arrangedSubviews.first as? NSTextField)?.stringValue
+        }
+        require(repeatSheet.importButton.isEnabled && repeatSheet.report?.isEmpty == false, "With every Space selected, the not-yet-imported Spaces are offered")
+        for id in ids where id != homeID { repeatSheet.setSpace(id, included: false) }
+        require(!repeatSheet.importButton.isEnabled && repeatSheet.report?.isEmpty == true && (repeatSheet.report?.alreadyImported ?? 0) > 0
+                && headlineText(repeatSheet) == "Everything Bam supports in the selected Spaces is already in Bam.",
+                "A subset repeat says the selected Spaces are already in Bam: \(headlineText(repeatSheet) ?? "nil")")
+        let afterAll = ArcImport.apply(source, to: .fresh(), options: ArcImport.Options()).session
+        let fullRepeat = ArcImportController()
+        fullRepeat.preview = { source, options in ArcImport.apply(source, to: afterAll, options: options).report }
+        fullRepeat.load(fixture)
+        require(headlineText(fullRepeat) == "All supported sidebar items in this layout are already in Bam.",
+                "A full repeat keeps the whole-layout wording")
+
+        // Header with a long layout path (native 0636 finding): Choose File… stays
+        // fully visible at its natural width; the path truncates before it.
+        var longDir = workDir
+        for part in ["a-deliberately-long-folder-name-for-the-header-test", "another-nested-folder", "fixtures-theme-visual-copy"] {
+            longDir.appendPathComponent(part, isDirectory: true)
+        }
+        try? FileManager.default.createDirectory(at: longDir, withIntermediateDirectories: true)
+        let longPath = longDir.appendingPathComponent("StorableSidebar.json")
+        try? FileManager.default.removeItem(at: longPath)
+        try! FileManager.default.copyItem(at: fixture, to: longPath)
+        let header = ArcImportController()
+        header.preview = { source, options in ArcImport.apply(source, to: BrowserSession.fresh(), options: options).report }
+        let headerWindow = header.window!
+        // Native order: the sheet is laid out at its default size first, then the layout file loads.
+        headerWindow.contentView!.layoutSubtreeIfNeeded()
+        header.load(longPath)
+        for size in [NSSize(width: 580, height: 560), ArcImportController.minimumSize, NSSize(width: 580, height: 560), NSSize(width: 900, height: 700)] {
+            if headerWindow.contentView!.bounds.size != size { headerWindow.setContentSize(size) }
+            headerWindow.contentView!.layoutSubtreeIfNeeded()
+            let content = headerWindow.contentView!.bounds
+            let row = header.chooseButton.superview!, headerStack = row.superview!
+            let headerFrame = headerStack.convert(headerStack.bounds, to: nil), rowFrame = row.convert(row.bounds, to: nil)
+            let button = header.chooseButton.superview!.convert(header.chooseButton.alignmentRect(forFrame: header.chooseButton.frame), to: nil)
+            let path = header.sourceLabel.superview!.convert(header.sourceLabel.alignmentRect(forFrame: header.sourceLabel.frame), to: nil)
+            require(abs(content.width - size.width) < 0.5, "Header test runs at \(size)")
+            require(content.contains(button) && button.maxX <= headerFrame.maxX + 0.5 && button.maxX <= rowFrame.maxX + 0.5
+                    && button.width >= header.chooseButton.intrinsicContentSize.width - 1,
+                    "Choose File… is fully visible at its natural width at \(size): \(button) in header \(headerFrame)")
+            require(path.minX >= headerFrame.minX - 0.5 && path.maxX <= button.minX - 9.5 && path.width > 40,
+                    "The path ends before the button with a gap, inside the header, at \(size): path \(path) button \(button)")
+            if size.width <= 580 {
+                require(path.width < header.sourceLabel.intrinsicContentSize.width - 1 && header.sourceLabel.lineBreakMode == .byTruncatingMiddle,
+                        "A long path truncates in the middle rather than pushing the button out at \(size)")
+            }
+        }
+
         // Commit carries the selection.
         var committed: ArcImport.Options?
         picker.onCommit = { _, options, done in committed = options; done(nil) }
