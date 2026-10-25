@@ -302,7 +302,11 @@ import Security
             "artworkUrl100": "https://images.example/safari.png"]
         let safariCandidate = SafariAppStoreSource.candidate(from: safariRecord)!
         try check(safariCandidate.source == .safariAppStore && !safariCandidate.canInstallInBam && safariCandidate.downloadURL == nil &&
-                  safariCandidate.compatibilityNote?.contains("cannot be added directly to Bam") == true, "App Store results explicitly require a Safari handoff instead of claiming Bam installation")
+                  safariCandidate.compatibilityNote?.contains("installed through the App Store") == true, "App Store results without an exact containing-app identity cannot be imported")
+        safariRecord["bundleId"] = "com.example.safari-fixture"
+        let importableSafari = SafariAppStoreSource.candidate(from: safariRecord)!
+        try check(importableSafari.canInstallInBam && importableSafari.applicationBundleIdentifier == "com.example.safari-fixture" && importableSafari.downloadURL == nil,
+                  "Safari imports preserve the exact Apple catalog app identity without inventing a package download")
         safariRecord["trackId"] = 1234; safariRecord["trackName"] = "Photo Tool"; safariRecord["description"] = "Edits photos"
         try check(SafariAppStoreSource.candidate(from: safariRecord) == nil, "Ordinary Mac apps are excluded from extension search")
         safariRecord["trackName"] = "Fixture for Safari"; safariRecord["description"] = "A Safari extension"

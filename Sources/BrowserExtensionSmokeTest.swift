@@ -77,6 +77,38 @@ import WebKit
         try await wait("Clicking the sidebar action did not show WebKit's actual popup") { tabAction.popupPopover?.isShown == true }
         try check(tabAction.popupPopover?.behavior == .transient, "Extension popup cannot dismiss on outside click")
         try check(liveRuntime.popupAnchor == nil && liveRuntime.popupTabID == nil && liveRuntime.popupContextID == nil, "Presented popup retained a reusable invocation anchor")
+        // Inspect the displayed popover's actual hierarchy. Reading popupWebView
+        // alone can create a replacement and hide a discarded presentation.
+        func presentedWeb(_ popover: NSPopover) -> WKWebView? {
+            guard popover.isShown, let root = popover.contentViewController?.view, let popupWindow = root.window else { return nil }
+            return descendants(root).compactMap { $0 as? WKWebView }.first { $0.window === popupWindow }
+        }
+        guard let firstPopover = tabAction.popupPopover else { throw ExtensionSmokeTest.Failure(description: "Initial action has no presented popover") }
+        try await wait("Initial presented popup did not contain live extension HTML") {
+            guard let web = presentedWeb(firstPopover) else { return false }
+            return (try? await web.evaluateJavaScript("document.title")) as? String == "Bam fixture ready"
+        }
+        for cycle in 1...2 {
+            guard let shown = tabAction.popupPopover, let popupWindow = shown.contentViewController?.view.window else { throw ExtensionSmokeTest.Failure(description: "Popup lost its window before dismissal") }
+            if cycle == 1 {
+                guard let escape = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                    windowNumber: popupWindow.windowNumber, context: nil, characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}", isARepeat: false, keyCode: 53) else {
+                    throw ExtensionSmokeTest.Failure(description: "Could not create popup Escape event")
+                }
+                popupWindow.sendEvent(escape)
+            } else { shown.performClose(nil) }
+            try await wait("Popup did not dismiss before reopen \(cycle)") { !shown.isShown }
+            guard let currentButton = actionButton() else { throw ExtensionSmokeTest.Failure(description: "Extension shelf disappeared between popup openings") }
+            currentButton.performClick(nil)
+            try await wait("Reopened popup \(cycle) is empty or has no live extension document") {
+                guard let shown = tabAction.popupPopover, let web = presentedWeb(shown) else { return false }
+                return (try? await web.evaluateJavaScript("document.title")) as? String == "Bam fixture ready"
+            }
+            guard let reopened = tabAction.popupPopover, let liveWeb = presentedWeb(reopened) else { throw ExtensionSmokeTest.Failure(description: "Reopened popup detached its web view") }
+            try check(reopened !== shown, "WebKit did not create a fresh popover after closing the previous one")
+            let answer = try await liveWeb.callAsyncJavaScript("return (await browser.runtime.sendMessage({kind:'ping',via:'reopened'})).pong;", arguments: [:], contentWorld: .page)
+            try check(answer as? String == "reopened", "Reopened popup cannot communicate with its background")
+        }
         tabAction.closePopup()
         controller.setSidebar(false)
         try await wait("Sidebar did not finish collapsing around the extension shelf") { controller.sidebar.isHidden }

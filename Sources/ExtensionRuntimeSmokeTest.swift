@@ -40,8 +40,10 @@ import WebKit
                 }
                 let isolatedChecks = try await ExtensionSmokeTest.run(fixtureURL: fixture, pageURL: page)
                 let integratedChecks = try await BrowserExtensionSmokeTest.run(fixtureURL: fixture, pageURL: page)
+                let workerChecks = try await ExtensionWorkerSmokeTest.run(pageURL: page)
+                let safariChecks = try await SafariExtensionSmokeTest.run(pageURL: page)
                 let bridgeChecks = try await ExtensionBridgeCapabilityProbe.run()
-                let checks = isolatedChecks + integratedChecks + bridgeChecks
+                let checks = isolatedChecks + integratedChecks + workerChecks + safariChecks + bridgeChecks
                 self.finish(true, "\(checks)")
             } catch { self.finish(false, String(describing: error)) }
         }

@@ -4,18 +4,20 @@ import WebKit
 import UserNotifications
 
 /// Bam's disclosed compatibility layer for WebExtension APIs that WebKit does not
-/// provide. It never replaces a native WebKit API: every namespace is defined only
+/// provide. WebExtension namespaces are defined only
 /// when `browser.<name>` is absent in the extension's own pages (background,
-/// popup, options and other extension-origin documents). Content scripts and
-/// service workers are not reached; a build with an HTML background page is the
-/// one Bam can help.
+/// popup, options and other extension-origin documents). Prepared service workers
+/// use the same adapter with a restricted native-message transport.
+/// A separate own-resource WASM MIME adapter delegates compilation to the native
+/// WebAssembly APIs, preserving their validation and CSP enforcement.
 ///
 /// The layer is honest about limits. Shimmed APIs return conservative values
-/// (idle "active", privacy settings "not controllable", no managed storage, no
+/// (privacy settings "not controllable", no managed storage, no
 /// commands) or reject with a clear error. Notifications, idle state and
 /// downloads cross into native code through an authenticated message bridge.
 @available(macOS 15.4, *)
 enum ExtensionCompatibility {
+    static let nativeApplicationIdentifier = "com.ari.bam.compatibility"
     struct Plan: Codable, Equatable {
         /// Namespaces or members the layer defines when absent, in manifest order.
         var provided: [String] = []
@@ -53,7 +55,23 @@ enum ExtensionCompatibility {
         let provided = (try? JSONSerialization.data(withJSONObject: plan.provided)).flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
         return source
             .replacingOccurrences(of: "__ORIGIN__", with: javaScriptString(origin))
+            .replacingOccurrences(of: "__WORKER__", with: "false")
+            .replacingOccurrences(of: "__WASM_ADAPTER__", with: ExtensionWasmCompatibility.source)
             .replacingOccurrences(of: "__BRIDGE__", with: javaScriptString(bridge))
+            .replacingOccurrences(of: "__PROVIDED__", with: provided)
+            .replacingOccurrences(of: "__VERSION__", with: javaScriptString(browserVersion))
+    }
+
+    /// The package preparer loads this adapter before the unchanged worker entry.
+    /// It performs no asynchronous initialization or lifecycle keepalive polling.
+    static func workerScript(manifest: [String: Any], browserVersion: String) -> String {
+        let provided = (try? JSONSerialization.data(withJSONObject: plan(manifest: manifest).provided))
+            .flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
+        return source
+            .replacingOccurrences(of: "__ORIGIN__", with: "api.runtime.getURL('/').replace(/\\/$/, '')")
+            .replacingOccurrences(of: "__WORKER__", with: "true")
+            .replacingOccurrences(of: "__WASM_ADAPTER__", with: ExtensionWasmCompatibility.source)
+            .replacingOccurrences(of: "__BRIDGE__", with: javaScriptString(nativeApplicationIdentifier))
             .replacingOccurrences(of: "__PROVIDED__", with: provided)
             .replacingOccurrences(of: "__VERSION__", with: javaScriptString(browserVersion))
     }
@@ -64,15 +82,22 @@ enum ExtensionCompatibility {
         return String(text.dropFirst().dropLast())
     }
 
-    // The script is original. It installs nothing over an existing WebKit API.
+    // The original adapter leaves native WebExtension APIs intact. The explicitly
+    // scoped WASM adapter delegates byte compilation to the native engine.
     private static let source = #"""
     (() => {
-      if (location.origin !== __ORIGIN__) return;
       const api = globalThis.browser || globalThis.chrome;
       if (!api || typeof api !== "object" || api.__bamCompatibility) return;
+      if (location.origin !== __ORIGIN__) return;
+      __WASM_ADAPTER__
+      const isWorker = __WORKER__;
+      const nativeSend = isWorker && api.runtime && typeof api.runtime.sendNativeMessage === "function" ? api.runtime.sendNativeMessage.bind(api.runtime) : null;
+      const nativeConnect = isWorker && api.runtime && typeof api.runtime.connectNative === "function" ? api.runtime.connectNative.bind(api.runtime) : null;
+      const sendNative = (body) => nativeSend ? Promise.resolve(nativeSend(__BRIDGE__, body)) : Promise.reject(new Error("Bam's worker compatibility transport is unavailable."));
       try { install(); } catch (error) {
         console.error("[Bam compatibility] layer failed to install", error);
-        try { globalThis.webkit.messageHandlers[__BRIDGE__].postMessage({ kind: "scriptError", url: location.href, message: String(error && error.message || error), stack: String(error && error.stack || "").slice(0, 1200) }); } catch (inner) {}
+        const body = { kind: "scriptError", url: location.href, message: String(error && error.message || error), stack: String(error && error.stack || "").slice(0, 1200) };
+        try { if (isWorker) sendNative(body).catch(() => {}); else globalThis.webkit.messageHandlers[__BRIDGE__].postMessage(body); } catch (inner) {}
       }
       function install() {
       const provided = new Set(__PROVIDED__);
@@ -80,12 +105,33 @@ enum ExtensionCompatibility {
       const version = __VERSION__;
       const pending = new Map();
       let nextRequest = 1;
+      let eventPort = null;
+      const nativeEvents = new Set(["notifications.onClosed", "notifications.onClicked", "notifications.onButtonClicked", "notifications.onShown", "idle.onStateChanged"]);
+      const subscribe = (name) => {
+        if (!isWorker || !nativeEvents.has(name)) return;
+        if (!nativeConnect) throw unsupported("Worker event delivery");
+        if (!eventPort) {
+          eventPort = nativeConnect(bridgeName);
+          const port = eventPort;
+          port.onMessage.addListener((message) => {
+            if (port === eventPort && message && typeof message.event === "string") compat.dispatch(message.event, message.args);
+          });
+          port.onDisconnect.addListener(() => { if (eventPort === port) eventPort = null; });
+        }
+        eventPort.postMessage({ kind: "subscribe", event: name });
+      };
       const define = (target, name, value) => Object.defineProperty(target, name, { value, writable: true, configurable: true, enumerable: true });
       const event = (name) => {
         const listeners = new Set();
         const e = {
-          addListener(fn) { if (typeof fn === "function") listeners.add(fn); },
-          removeListener(fn) { listeners.delete(fn); },
+          addListener(fn) { if (typeof fn === "function") { listeners.add(fn); subscribe(name); } },
+          removeListener(fn) {
+            listeners.delete(fn);
+            if (isWorker && eventPort && nativeEvents.has(name) && !listeners.size) {
+              eventPort.postMessage({ kind: "unsubscribe", event: name });
+              if (![...nativeEvents].some((key) => compat.events[key] && compat.events[key].hasListeners())) { const port = eventPort; eventPort = null; port.disconnect(); }
+            }
+          },
           hasListener(fn) { return listeners.has(fn); },
           hasListeners() { return listeners.size > 0; }
         };
@@ -102,7 +148,7 @@ enum ExtensionCompatibility {
                      (error) => { console.error("[Bam compatibility]", error); try { callback(); } catch (inner) { console.error(inner); } });
         return undefined;
       };
-      const bridge = (method, params) => new Promise((resolve, reject) => {
+      const bridge = (method, params) => isWorker ? sendNative({ kind: "request", method, params: params === undefined ? null : params }) : new Promise((resolve, reject) => {
         const handler = globalThis.webkit && globalThis.webkit.messageHandlers && globalThis.webkit.messageHandlers[bridgeName];
         if (!handler) { reject(unsupported(method)); return; }
         const id = nextRequest++;
@@ -111,11 +157,14 @@ enum ExtensionCompatibility {
         catch (error) { pending.delete(id); reject(error); }
       });
       const notify = (kind, detail) => {
+        if (isWorker) { try { sendNative({ kind, ...detail }).catch(() => {}); } catch (error) {} return; }
         const handler = globalThis.webkit && globalThis.webkit.messageHandlers && globalThis.webkit.messageHandlers[bridgeName];
         if (handler) { try { handler.postMessage({ kind, ...detail }); } catch (error) {} }
       };
       const compat = {
         version,
+        worker: isWorker,
+        unavailable: isWorker ? ["notifications.onPermissionLevelChanged", "notifications.onShowSettings", "downloads events"] : [],
         events: {},
         resolve(id, value, error) {
           const entry = pending.get(id); if (!entry) return; pending.delete(id);
@@ -141,7 +190,7 @@ enum ExtensionCompatibility {
                             contextMessage: options.contextMessage ? String(options.contextMessage) : "",
                             buttons: Array.isArray(options.buttons) ? options.buttons.slice(0, 2).map((b) => String((b && b.title) || "")) : [] };
           ids.set(id, { ...options });
-          try { await bridge("notifications.create", payload); } catch (error) { /* in-memory only */ }
+          try { await bridge("notifications.create", payload); } catch (error) { if (isWorker) { ids.delete(id); throw error; } /* documents retain the existing in-memory fallback */ }
           return id;
         };
         define(ns, "create", call(create));
@@ -149,21 +198,23 @@ enum ExtensionCompatibility {
         define(ns, "clear", call(async (id) => { const existed = ids.delete(id); if (existed) { try { await bridge("notifications.clear", { id }); } catch (error) {} } return existed; }));
         define(ns, "getAll", call(async () => { const all = {}; for (const id of ids.keys()) all[id] = true; return all; }));
         define(ns, "getPermissionLevel", call(async () => (await bridge("notifications.permissionLevel", null).catch(() => "denied"))));
-        for (const name of ["onClosed", "onClicked", "onButtonClicked", "onPermissionLevelChanged", "onShowSettings", "onShown"]) registerEvent(ns, name, "notifications." + name);
-        const original = compat.events["notifications.onClosed"].__bamDispatch;
-        Object.defineProperty(compat.events["notifications.onClosed"], "__bamDispatch", { value: (id, byUser) => { ids.delete(id); original(id, byUser); }, enumerable: false, writable: true, configurable: true });
+        {
+          for (const name of ["onClosed", "onClicked", "onButtonClicked", "onPermissionLevelChanged", "onShowSettings", "onShown"]) registerEvent(ns, name, "notifications." + name);
+          const original = compat.events["notifications.onClosed"].__bamDispatch;
+          Object.defineProperty(compat.events["notifications.onClosed"], "__bamDispatch", { value: (id, byUser) => { ids.delete(id); original(id, byUser); }, enumerable: false, writable: true, configurable: true });
+        }
         define(ns, "TemplateType", { BASIC: "basic", IMAGE: "image", LIST: "list", PROGRESS: "progress" });
         define(ns, "PermissionLevel", { GRANTED: "granted", DENIED: "denied" });
         define(api, "notifications", ns);
       }
 
-      // idle: real inactivity comes from the native side; otherwise "active".
+      // idle: real inactivity and transitions come from the native side.
       if (provided.has("idle") && !api.idle) {
         const ns = {};
         let interval = 60;
         define(ns, "queryState", call(async (seconds) => {
           const threshold = Math.max(15, Number(seconds) || interval);
-          try { return await bridge("idle.queryState", { threshold }); } catch (error) { return "active"; }
+          return await bridge("idle.queryState", { threshold });
         }));
         define(ns, "setDetectionInterval", (seconds) => { interval = Math.max(15, Number(seconds) || 60); notify("idle.interval", { interval }); });
         define(ns, "getAutoLockDelay", call(async () => 0));
@@ -239,7 +290,7 @@ enum ExtensionCompatibility {
         define(ns, "pause", call(async () => { throw unsupported("downloads.pause"); }));
         define(ns, "resume", call(async () => { throw unsupported("downloads.resume"); }));
         define(ns, "setShelfEnabled", () => {});
-        for (const name of ["onCreated", "onErased", "onChanged", "onDeterminingFilename"]) registerEvent(ns, name, "downloads." + name);
+        if (!isWorker) for (const name of ["onCreated", "onErased", "onChanged", "onDeterminingFilename"]) registerEvent(ns, name, "downloads." + name);
         define(ns, "State", { IN_PROGRESS: "in_progress", INTERRUPTED: "interrupted", COMPLETE: "complete" });
         define(ns, "InterruptReason", {});
         define(api, "downloads", ns);
@@ -257,6 +308,7 @@ enum ExtensionCompatibility {
       }
 
       // storage.managed: no enterprise policy store exists; reads are empty.
+      let managedStorage = null;
       if (provided.has("storage.managed") && api.storage && !api.storage.managed) {
         const ns = {};
         define(ns, "get", call(async (keys) => {
@@ -267,7 +319,7 @@ enum ExtensionCompatibility {
         define(ns, "getKeys", call(async () => []));
         for (const op of ["set", "remove", "clear"]) define(ns, op, call(async () => { throw new Error("storage.managed is read-only."); }));
         registerEvent(ns, "onChanged", "storage.managed.onChanged");
-        define(api.storage, "managed", ns);
+        managedStorage = ns;
       }
 
       // Members added to WebKit's own namespaces. WebKit can hand the page a
@@ -299,6 +351,9 @@ enum ExtensionCompatibility {
         return !missing;
       };
       compat.reapplied = []; compat.held = held;
+      // Keep WebKit's weakly cached storage wrapper alive just like runtime and
+      // webNavigation, and share the same managed object/event across wrappers.
+      if (managedStorage) extend("storage", "managed", () => managedStorage);
       if (provided.has("runtime.getBrowserInfo")) extend("runtime", "getBrowserInfo", () => call(async () => ({ name: "Bam", vendor: "Bam", version, buildID: "" })));
       if (provided.has("runtime.onSuspend")) for (const name of ["onSuspend", "onSuspendCanceled", "onRestartRequired"]) extend("runtime", name, extensionEvent("runtime", name));
       if (provided.has("runtime.requestUpdateCheck")) extend("runtime", "requestUpdateCheck", () => call(async () => { const value = ["no_update", { version: String(manifest().version || "") }]; value.__bamSpread = true; return value; }));
@@ -312,7 +367,7 @@ enum ExtensionCompatibility {
         for (const ns of ["action", "browserAction"]) extend(ns, "getUserSettings", () => call(async () => ({ isOnToolbar: false })));
       }
       applyExtensions();
-      {
+      if (!isWorker) {
         const started = performance.now();
         const tick = () => {
           applyExtensions();
@@ -327,7 +382,7 @@ enum ExtensionCompatibility {
       }
       Object.defineProperty(api, "__bamCompatibility", { value: compat, enumerable: false, configurable: false });
       Object.defineProperty(globalThis, "__bamCompatibility", { value: compat, enumerable: false, configurable: false });
-      notify("hello", { url: location.href, provided: Array.from(provided), namespaces: Object.getOwnPropertyNames(api).filter(k => k !== "__bamCompatibility").join(","), webNavigation: typeof api.webNavigation, ready: document.readyState });
+      notify("hello", { url: location.href, provided: Array.from(provided), namespaces: Object.getOwnPropertyNames(api).filter(k => k !== "__bamCompatibility").join(","), webNavigation: typeof api.webNavigation, ready: isWorker ? "worker" : document.readyState });
       }
     })();
     """#
@@ -344,6 +399,15 @@ enum ExtensionCompatibility {
     private weak var dataStore: WKWebsiteDataStore?
     private weak var contentController: WKUserContentController?
     private var scripts: [String: WKUserScript] = [:]
+    private struct Registration { weak var context: WKWebExtensionContext?; let plan: ExtensionCompatibility.Plan }
+    private struct EventConnection { let port: WKWebExtension.MessagePort; var events: Set<String> = [] }
+    private var registrations: [String: Registration] = [:]
+    private var eventConnections: [String: [ObjectIdentifier: EventConnection]] = [:]
+    private var idleIntervals: [String: Double] = [:]
+    private var idleStates: [String: String] = [:]
+    private var idleTimer: Timer?
+    /// Injectable clock for deterministic inactivity tests; production reads real input inactivity.
+    var idleSeconds: () -> TimeInterval = { CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: CGEventType(rawValue: ~0)!) }
     /// The extension document that registered last for each loaded context, by
     /// unique identifier: popups come and go, the background page persists.
     /// A frame that ran the layer. Replies and events are evaluated in that
@@ -369,10 +433,15 @@ enum ExtensionCompatibility {
     }
     /// Supplied by the host: start a download from an extension document.
     var startDownload: ((WKWebView, Download) -> Bool)?
+    /// The host may resolve a live page belonging to this exact worker context.
+    var workerDownload: ((WKWebExtensionContext, Download) -> Bool)?
+    /// Live, persisted review grants supplied by the owner. Unknown WebKit
+    /// permission names are never inferred to be approved from API availability.
+    var permissionGranted: ((WKWebExtensionContext, String) -> Bool)?
     /// Supplied by the host: the identifier for notifications posted on behalf of an extension.
     var notificationIdentifier: ((String) -> String?)?
     /// Returns a delivery error, or nil when the notification was posted natively.
-    var postNotification: ((String, String, String, [String]) async -> String?)?
+    var postNotification: ((String, String, String, [String], @MainActor () -> Bool) async -> String?)?
     var isNotificationDeliveryAvailable: (() -> Bool)?
     let browserVersion: String
 
@@ -385,6 +454,7 @@ enum ExtensionCompatibility {
 
     func install(_ plan: ExtensionCompatibility.Plan, for context: WKWebExtensionContext) {
         guard !plan.isEmpty, let contentController else { return }
+        registrations[context.uniqueIdentifier] = Registration(context: context, plan: plan)
         let script = WKUserScript(source: ExtensionCompatibility.script(baseURL: context.baseURL, bridge: handlerName, plan: plan, browserVersion: browserVersion),
                                   injectionTime: .atDocumentStart, forMainFrameOnly: false, in: .page)
         scripts[context.uniqueIdentifier] = script
@@ -392,14 +462,119 @@ enum ExtensionCompatibility {
     }
     func remove(_ context: WKWebExtensionContext) {
         documents.removeValue(forKey: context.uniqueIdentifier)
+        registrations.removeValue(forKey: context.uniqueIdentifier)
+        let ports = eventConnections.removeValue(forKey: context.uniqueIdentifier)?.values.map(\.port) ?? []
+        for port in ports { port.disconnect() }
+        idleIntervals.removeValue(forKey: context.uniqueIdentifier); idleStates.removeValue(forKey: context.uniqueIdentifier)
+        updateIdleTimer()
         guard scripts.removeValue(forKey: context.uniqueIdentifier) != nil, let contentController else { return }
         contentController.removeAllUserScripts()
         for script in scripts.values { contentController.addUserScript(script) }
     }
     func shutdown() {
+        idleTimer?.invalidate(); idleTimer = nil
+        let ports = eventConnections.values.flatMap { $0.values.map(\.port) }
+        eventConnections.removeAll(); registrations.removeAll(); idleIntervals.removeAll(); idleStates.removeAll()
+        for port in ports { port.disconnect() }
         contentController?.removeScriptMessageHandler(forName: handlerName, contentWorld: .page)
         contentController?.removeAllUserScripts()
         scripts.removeAll(); documents.removeAll()
+    }
+
+    private func ownsRegisteredContext(_ context: WKWebExtensionContext) -> Bool {
+        guard let controller else { return false }
+        return context.isLoaded && context.webExtensionController === controller &&
+            registrations[context.uniqueIdentifier]?.context === context && controller.extensionContext(for: context.baseURL) === context
+    }
+    private func permits(_ namespace: String, for context: WKWebExtensionContext) -> Bool {
+        guard ownsRegisteredContext(context), registrations[context.uniqueIdentifier]?.plan.provided.contains(namespace) == true,
+              permissionGranted?(context, namespace) == true else { return false }
+        // Optional shim capabilities are not silently granted. They need a future
+        // explicit permission store/review flow before becoming available.
+        return (context.webExtension.manifest["permissions"] as? [String] ?? []).contains(namespace)
+    }
+    private static let eventPermissions = ["notifications.onClosed": "notifications", "notifications.onClicked": "notifications",
+        "notifications.onButtonClicked": "notifications", "notifications.onShown": "notifications", "idle.onStateChanged": "idle"]
+    private static func bridgeError(_ message: String) -> NSError {
+        NSError(domain: "Bam.ExtensionCompatibility", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
+    }
+
+    /// Called only for the Bam application identifier by the runtime delegate.
+    /// Context identity is supplied by WebKit, never by an untrusted message field.
+    func receiveNativeMessage(_ message: Any, context: WKWebExtensionContext) async -> (Any?, Error?) {
+        guard ownsRegisteredContext(context), let body = message as? [String: Any],
+              JSONSerialization.isValidJSONObject(body), let bytes = try? JSONSerialization.data(withJSONObject: body), bytes.count <= 65_536,
+              let kind = body["kind"] as? String else { return (nil, Self.bridgeError("Invalid or inactive compatibility request.")) }
+        switch kind {
+        case "hello":
+            if let url = body["url"] as? String, let parsed = URL(string: url), BrowserExtensions.isExtensionURL(parsed, ownedBy: context),
+               (helloURLs[context.uniqueIdentifier]?.count ?? 0) < 20 {
+                helloURLs[context.uniqueIdentifier, default: []].append("\(url) ready=worker")
+            }
+            return (true, nil)
+        case "scriptError":
+            if (scriptErrors[context.uniqueIdentifier]?.count ?? 0) < 10 {
+                scriptErrors[context.uniqueIdentifier, default: []].append(String((body["message"] as? String ?? "Worker compatibility error").prefix(1_200)))
+            }
+            return (true, nil)
+        case "idle.interval":
+            guard permits("idle", for: context) else { return (nil, Self.bridgeError("The extension has not declared idle access.")) }
+            setIdleInterval((body["interval"] as? Double) ?? 60, for: context)
+            return (true, nil)
+        case "request":
+            guard let method = body["method"] as? String else { return (nil, Self.bridgeError("A compatibility method is required.")) }
+            let (value, error) = await handle(method: method, params: body["params"] as? [String: Any] ?? [:], context: context, web: nil)
+            return (value, error.map(Self.bridgeError))
+        default: return (nil, Self.bridgeError("Unknown compatibility request."))
+        }
+    }
+
+    /// A native port exists only while extension code subscribes to real events.
+    func connectNativePort(_ port: WKWebExtension.MessagePort, context: WKWebExtensionContext) -> Error? {
+        guard ownsRegisteredContext(context), port.applicationIdentifier == ExtensionCompatibility.nativeApplicationIdentifier else {
+            return Self.bridgeError("This compatibility connection is not authorized.")
+        }
+        let key = context.uniqueIdentifier, identifier = ObjectIdentifier(port)
+        eventConnections[key, default: [:]][identifier] = EventConnection(port: port)
+        port.messageHandler = { [weak self, weak context, weak port] message, error in
+            guard let self, let context, let port, error == nil, self.ownsRegisteredContext(context),
+                  let body = message as? [String: Any], let kind = body["kind"] as? String,
+                  let event = body["event"] as? String, let permission = Self.eventPermissions[event], self.permits(permission, for: context) else {
+                port?.disconnect(throwing: Self.bridgeError("This event subscription is not authorized.")); return
+            }
+            guard var connection = self.eventConnections[key]?[identifier] else { return }
+            if kind == "subscribe" {
+                connection.events.insert(event)
+                if event == "idle.onStateChanged" { self.setIdleInterval(self.idleIntervals[key] ?? 60, for: context) }
+            } else if kind == "unsubscribe" { connection.events.remove(event) }
+            else { port.disconnect(throwing: Self.bridgeError("Unknown event subscription.")); return }
+            self.eventConnections[key]?[identifier] = connection
+        }
+        port.disconnectHandler = { [weak self] _ in
+            self?.eventConnections[key]?.removeValue(forKey: identifier)
+        }
+        return nil
+    }
+    private func setIdleInterval(_ interval: Double, for context: WKWebExtensionContext) {
+        let seconds = interval.isFinite ? min(86_400, max(15, interval)) : 60
+        idleIntervals[context.uniqueIdentifier] = seconds
+        if idleStates[context.uniqueIdentifier] == nil { idleStates[context.uniqueIdentifier] = idleSeconds() >= seconds ? "idle" : "active" }
+        updateIdleTimer()
+    }
+    private func updateIdleTimer() {
+        if idleIntervals.isEmpty { idleTimer?.invalidate(); idleTimer = nil; return }
+        guard idleTimer == nil else { return }
+        idleTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in self?.pollIdle() }
+        }
+    }
+    func pollIdle() {
+        let elapsed = idleSeconds()
+        for (key, threshold) in idleIntervals {
+            guard let context = registrations[key]?.context, permits("idle", for: context) else { continue }
+            let state = elapsed >= threshold ? "idle" : "active"
+            if idleStates[key] != state { idleStates[key] = state; dispatch("idle.onStateChanged", [state], to: key) }
+        }
     }
 
     /// The owning context for a message, or nil when any part of its provenance fails.
@@ -415,7 +590,7 @@ enum ExtensionCompatibility {
               BrowserExtensions.isExtensionURL(url, ownedBy: context),
               message.frameInfo.securityOrigin.protocol == context.baseURL.scheme,
               message.frameInfo.securityOrigin.host == context.baseURL.host,
-              scripts[context.uniqueIdentifier] != nil else { return nil }
+              ownsRegisteredContext(context) else { return nil }
         return context
     }
 
@@ -430,6 +605,7 @@ enum ExtensionCompatibility {
             list.removeAll { $0.web === web && $0.frame.isMainFrame == frame.isMainFrame && $0.frame.request.url == frame.request.url }
             list.append(Document(web: web, frame: frame))
             documents[key] = list
+            if permits("idle", for: context) { setIdleInterval(idleIntervals[key] ?? 60, for: context) }
             if let url = body["url"] as? String, (helloURLs[key]?.count ?? 0) < 20 {
                 helloURLs[key, default: []].append("\(url) ready=\(body["ready"] as? String ?? "?") webNavigation=\(body["webNavigation"] as? String ?? "?") namespaces=\(body["namespaces"] as? String ?? "?")")
             }
@@ -446,15 +622,20 @@ enum ExtensionCompatibility {
                 guard let web else { return }
                 self.reply(web, frame: frame, id: id, value: value, error: error)
             }
+        case "idle.interval":
+            if permits("idle", for: context) { setIdleInterval((body["interval"] as? Double) ?? 60, for: context) }
         default: break
         }
     }
 
     private func handle(method: String, params: [String: Any], context: WKWebExtensionContext, web: WKWebView?) async -> (Any?, String?) {
+        let methods = ["idle.queryState": "idle", "notifications.permissionLevel": "notifications", "notifications.create": "notifications",
+                       "notifications.clear": "notifications", "downloads.download": "downloads"]
+        guard let permission = methods[method], permits(permission, for: context) else { return (nil, "This compatibility capability is not available to the extension.") }
         switch method {
         case "idle.queryState":
             let threshold = max(15, (params["threshold"] as? Double) ?? 60)
-            let idle = CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: CGEventType(rawValue: ~0)!)
+            let idle = idleSeconds()
             return (idle >= threshold ? "idle" : "active", nil)
         case "notifications.permissionLevel":
             return (isNotificationDeliveryAvailable?() == true ? "granted" : "denied", nil)
@@ -464,7 +645,13 @@ enum ExtensionCompatibility {
             let buttons = params["buttons"] as? [String] ?? []
             let identifier = Self.notificationIdentifier(context: context, id: id)
             notificationOwners[identifier] = context.uniqueIdentifier
-            if let failure = await post(identifier, title.isEmpty ? (context.webExtension.displayName ?? "Extension") : title, message, buttons) { return (nil, failure) }
+            if let failure = await post(identifier, title.isEmpty ? (context.webExtension.displayName ?? "Extension") : title, message, buttons, { [weak self, weak context] in
+                guard let self, let context else { return false }
+                return self.permits("notifications", for: context)
+            }) {
+                notificationOwners.removeValue(forKey: identifier)
+                return (nil, failure)
+            }
             dispatch("notifications.onShown", [id], to: context.uniqueIdentifier)
             return (true, nil)
         case "notifications.clear":
@@ -478,10 +665,11 @@ enum ExtensionCompatibility {
             }
             return (true, nil)
         case "downloads.download":
-            guard let web, let id = params["id"] as? Int, let raw = params["url"] as? String, let url = URL(string: raw),
+            guard let id = params["id"] as? Int, let raw = params["url"] as? String, let url = URL(string: raw),
                   ["http", "https"].contains(url.scheme?.lowercased() ?? "") else { return (nil, "Only HTTP(S) URLs can be downloaded through Bam.") }
             let download = Download(id: id, url: url, filename: params["filename"] as? String ?? "", saveAs: params["saveAs"] as? Bool ?? false)
-            guard startDownload?(web, download) == true else { return (nil, "Bam could not start this download.") }
+            let started = web.map { startDownload?($0, download) == true } ?? (workerDownload?(context, download) == true)
+            guard started else { return (nil, "Open a page in this extension's profile to start the download.") }
             return (true, nil)
         default:
             return (nil, "Unknown compatibility request.")
@@ -495,9 +683,14 @@ enum ExtensionCompatibility {
 
     /// Delivers an event to every live document of one extension.
     func dispatch(_ event: String, _ arguments: [Any], to uniqueIdentifier: String) {
+        guard let context = registrations[uniqueIdentifier]?.context,
+              let permission = Self.eventPermissions[event], permits(permission, for: context) else { return }
         let script = "globalThis.__bamCompatibility && globalThis.__bamCompatibility.dispatch(\(Self.json(event)), \(Self.json(arguments)));"
         documents[uniqueIdentifier]?.removeAll { !$0.isLive }
         for document in documents[uniqueIdentifier] ?? [] { document.web?.evaluateJavaScript(script, in: document.frame, in: .page) { _ in } }
+        for connection in eventConnections[uniqueIdentifier]?.values ?? Dictionary<ObjectIdentifier, EventConnection>().values where connection.events.contains(event) {
+            connection.port.sendMessage(["event": event, "args": arguments]) { _ in }
+        }
     }
 
     static func json(_ value: Any) -> String {
@@ -566,12 +759,15 @@ enum ExtensionCompatibility {
         }
     }
     var isAvailable: Bool { ExtensionCompatibilityBridge.canUseNotificationCenter && authorization != false }
-    func post(identifier: String, title: String, body: String, buttons: [String]) async -> String? {
+    func post(identifier: String, title: String, body: String, buttons: [String], isAuthorized: @MainActor () -> Bool) async -> String? {
+        let revoked = "The extension no longer has permission to post notifications."
+        guard isAuthorized() else { return revoked }
         guard ExtensionCompatibilityBridge.canUseNotificationCenter else { return "Notifications need the installed Bam app." }
         let center = UNUserNotificationCenter.current()
         if authorization == nil {
             authorization = (try? await center.requestAuthorization(options: [.alert, .sound])) ?? false
         }
+        guard isAuthorized() else { return revoked }
         guard authorization == true else { return "Notifications are not allowed for Bam in System Settings." }
         let content = UNMutableNotificationContent()
         content.title = title; content.body = body
@@ -579,10 +775,18 @@ enum ExtensionCompatibility {
             let actions = buttons.enumerated().map { UNNotificationAction(identifier: "bam-button-\($0.offset)", title: $0.element.isEmpty ? "Open" : $0.element, options: [.foreground]) }
             let category = UNNotificationCategory(identifier: "bam-extension-\(identifier)", actions: actions, intentIdentifiers: [])
             let existing = await center.notificationCategories()
+            guard isAuthorized() else { return revoked }
             center.setNotificationCategories(existing.union([category]))
             content.categoryIdentifier = category.identifier
         }
+        guard isAuthorized() else { return revoked }
         do { try await center.add(UNNotificationRequest(identifier: identifier, content: content, trigger: nil)) } catch { return error.localizedDescription }
+        guard isAuthorized() else {
+            center.removeDeliveredNotifications(withIdentifiers: [identifier])
+            center.removePendingNotificationRequests(withIdentifiers: [identifier])
+            forget(identifier)
+            return revoked
+        }
         return nil
     }
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse, withCompletionHandler completionHandler: @escaping () -> Void) {

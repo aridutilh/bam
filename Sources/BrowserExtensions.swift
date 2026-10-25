@@ -32,8 +32,12 @@ struct BrowserExtensionRecord: Codable, Identifiable {
     var compatibilityNote: String? = nil
     /// Requested permissions Bam's compatibility layer stands in for; nil before 0.17.
     var compatibility: [String]? = nil
+    /// Reviewed Bam-provided permissions, tracked separately from WebKit's APIs.
+    var compatibilityGrants: [String: Date]? = nil
     /// Where the package came from and how it was verified; nil for folder imports.
     var catalog: ExtensionCatalogRecord? = nil
+    /// Signed Safari WebExtension provenance; its private .appex remains unmodified.
+    var safariBundle: SafariExtensionBundle? = nil
 }
 
 /// Lightweight native action state for visible chrome. Reading it never opens a popup.
@@ -92,6 +96,7 @@ struct BrowserExtensionPermissionReview {
     /// Native parser dependency; tests can hold its completion across an explicit
     /// user mutation without assuming WebKit's async initializer suspends.
     var packageParser: @MainActor (URL) async throws -> WKWebExtension = { try await WKWebExtension(resourceBaseURL: $0) }
+    var safariImporter = SafariExtensionImport()
     private(set) var records: [BrowserExtensionRecord] = []
     private(set) var lastError: String?
     private(set) var errors: [UUID: String] = [:]
@@ -296,12 +301,51 @@ struct BrowserExtensionPermissionReview {
         }
     }
 
-    /// Both disclosed adaptations of the private copy: MV2 background page, then
-    /// the content-script messaging adapter. Extension JavaScript is never edited.
+    /// Disclosed adaptations of the private copy. Original extension scripts stay byte-identical.
     static func preparePackage(_ package: URL, originalManifestURL: URL) throws -> String? {
-        let notes = [try ExtensionPackagePreparation.prepare(package: package, originalManifestURL: originalManifestURL),
+        var notes = [try ExtensionPackagePreparation.prepare(package: package, originalManifestURL: originalManifestURL),
                      try ExtensionContentScriptPreparation.prepare(package: package, originalManifestURL: originalManifestURL)].compactMap { $0 }
+        let manifest = try manifestForPreparation(package)
+        if let note = try ExtensionServiceWorkerPreparation.prepare(package: package, originalManifestURL: originalManifestURL,
+            adapterSource: ExtensionCompatibility.workerScript(manifest: manifest, browserVersion: browserVersion)) { notes.append(note) }
         return notes.isEmpty ? nil : notes.joined(separator: " ")
+    }
+    private static func manifestForPreparation(_ package: URL) throws -> [String: Any] {
+        let url = package.appendingPathComponent("manifest.json")
+        let metadata = try url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+        guard metadata.isRegularFile == true, metadata.isSymbolicLink != true else { throw failure("The extension manifest must be a regular file.") }
+        let handle = try FileHandle(forReadingFrom: url); defer { try? handle.close() }
+        let data = try handle.read(upToCount: ExtensionPackagePreparation.maximumManifestBytes + 1) ?? Data()
+        guard data.count <= ExtensionPackagePreparation.maximumManifestBytes,
+              let manifest = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw failure("Invalid or oversized extension manifest.") }
+        return manifest
+    }
+
+    /// Import the signed WebExtension in an installed Safari app, without copying
+    /// its accounts or changing the app/extension signature.
+    @discardableResult func importSafariBundle(_ bundle: SafariExtensionBundle, profileID: UUID, catalog: ExtensionCatalogRecord? = nil) async throws -> UUID {
+        try Task.checkCancellation()
+        guard runtimes[profileID] != nil else { throw Self.failure("Open this profile before installing an extension.") }
+        let id = UUID(), folder = storageURL.appendingPathComponent(id.uuidString, isDirectory: true)
+        let package = folder.appendingPathComponent("package", isDirectory: true)
+        try FileManager.default.createDirectory(at: package, withIntermediateDirectories: true)
+        do {
+            let snapshot = try safariImporter.snapshot(bundle, to: package.appendingPathComponent("Extension.appex", isDirectory: true))
+            guard let appExtension = Bundle(url: snapshot) else { throw Self.failure("The Safari extension bundle could not be opened.") }
+            let ext = try await WKWebExtension(appExtensionBundle: appExtension)
+            try Task.checkCancellation()
+            guard ext.errors.isEmpty, !stopped else { throw Self.failure(ext.errors.map(\.localizedDescription).joined(separator: "\n")) }
+            let note = "Imported the signed Safari WebExtension without modifying its bundle. The containing app must remain installed; add it again after the app updates. Native companion-app features are unavailable in Bam. No Safari account data is imported."
+            records.append(BrowserExtensionRecord(id: id, profileID: profileID, name: ext.displayName ?? bundle.displayName,
+                version: ext.version ?? bundle.version, packageName: "package", compatibilityNote: note, catalog: catalog, safariBundle: bundle))
+            try persist()
+            do { try await load(id, review: true, parsed: ext) }
+            catch is CancellationError { throw CancellationError() }
+            catch { setError(error, for: id) }
+            changed(); return id
+        } catch {
+            records.removeAll { $0.id == id }; try? FileManager.default.removeItem(at: folder); try? persist(); throw error
+        }
     }
 
     func noteUpdateCheck(id: UUID, available: String?) {
@@ -312,15 +356,16 @@ struct BrowserExtensionPermissionReview {
 
     /// Swaps the private package in place so the extension keeps its identifier,
     /// WebKit storage, grants and profile. The previous package is restored on failure.
-    func replacePackage(id: UUID, with source: URL, catalog: ExtensionCatalogRecord) async throws {
+    func replacePackage(id: UUID, with source: URL, catalog: ExtensionCatalogRecord, safariBundle: SafariExtensionBundle? = nil) async throws {
         guard let before = records.first(where: { $0.id == id }), let runtime = runtimes[before.profileID],
               !loading.contains(id), !updating.contains(id) else { throw Self.failure("This extension is not ready to update.") }
+        guard (before.safariBundle == nil) == (safariBundle == nil) else { throw Self.failure("An update must use the installed extension's original package type.") }
         updating.insert(id); defer { updating.remove(id) }
         let initialRevision = mutationRevisions[id, default: 0]
         let initialPermissionRevision = permissionRevisions[id, default: 0]
         let oldContext = runtime.contexts[id]
         try Task.checkCancellation()
-        try Self.validatePackageSize(source)
+        if let safariBundle { try safariImporter.validate(safariBundle) } else { try Self.validatePackageSize(source) }
         let folder = storageURL.appendingPathComponent(id.uuidString, isDirectory: true)
         let package = folder.appendingPathComponent(before.packageName)
         let token = UUID().uuidString
@@ -329,14 +374,26 @@ struct BrowserExtensionPermissionReview {
         let previous = folder.appendingPathComponent("package-previous-" + token)
         let previousManifest = folder.appendingPathComponent("original-manifest-previous-" + token + ".json")
         let originalManifest = folder.appendingPathComponent("original-manifest.json")
+        let incomingWorker = incomingManifest.appendingPathExtension("worker-preparation.json")
+        let previousWorker = previousManifest.appendingPathExtension("worker-preparation.json")
+        let originalWorker = originalManifest.appendingPathExtension("worker-preparation.json")
         let fm = FileManager.default
-        defer { try? fm.removeItem(at: incoming); try? fm.removeItem(at: incomingManifest) }
+        defer { try? fm.removeItem(at: incoming); try? fm.removeItem(at: incomingManifest); try? fm.removeItem(at: incomingWorker) }
         // Prepare and review before touching the running extension. Cancel must
         // preserve its package, loaded context, permissions and signed-in storage.
-        try fm.copyItem(at: source, to: incoming)
-        try Self.validatePackageSize(incoming)
-        let note = try Self.preparePackage(incoming, originalManifestURL: incomingManifest)
-        let ext = try await packageParser(incoming)
+        let note: String?, ext: WKWebExtension
+        if let safariBundle {
+            try fm.createDirectory(at: incoming, withIntermediateDirectories: true)
+            let snapshot = try safariImporter.snapshot(safariBundle, to: incoming.appendingPathComponent("Extension.appex", isDirectory: true))
+            guard let bundle = Bundle(url: snapshot) else { throw Self.failure("The Safari extension bundle could not be opened.") }
+            ext = try await WKWebExtension(appExtensionBundle: bundle)
+            note = "Updated the signed Safari WebExtension without modifying its bundle. The containing app must remain installed. Native companion-app features are unavailable in Bam."
+        } else {
+            try fm.copyItem(at: source, to: incoming)
+            try Self.validatePackageSize(incoming)
+            note = try Self.preparePackage(incoming, originalManifestURL: incomingManifest)
+            ext = try await packageParser(incoming)
+        }
         try Task.checkCancellation()
         guard !stopped, mutationRevisions[id, default: 0] == initialRevision,
               runtime.contexts[id] === oldContext else { throw BrowserExtensionUpdateCancelled(name: before.name) }
@@ -344,6 +401,7 @@ struct BrowserExtensionPermissionReview {
         var replacement = Self.retainingDeclaredPermissions(before, for: ext)
         replacement.name = ext.displayName ?? before.name; replacement.version = ext.version ?? ""
         replacement.compatibilityNote = note; replacement.catalog = catalog
+        replacement.safariBundle = safariBundle
         if before.enabled {
             let requested = Set(ext.requestedPermissions.map(\.rawValue))
             let supported = requested.intersection(Self.supportedPermissions)
@@ -358,6 +416,7 @@ struct BrowserExtensionPermissionReview {
                 replacement.permissions[permission] = .distantFuture
                 replacement.deniedPermissions.removeValue(forKey: permission)
             }
+            replacement.compatibilityGrants = Dictionary(uniqueKeysWithValues: bridged.map { ($0, Date.distantFuture) })
             for pattern in patterns {
                 replacement.patterns[pattern] = .distantFuture
                 replacement.deniedPatterns.removeValue(forKey: pattern)
@@ -371,6 +430,7 @@ struct BrowserExtensionPermissionReview {
             throw BrowserExtensionUpdateCancelled(name: before.name)
         }
         var unloaded = false, movedPackage = false, movedManifest = false, installedManifest = false
+        var movedWorker = false, installedWorker = false
         do {
             if let oldContext {
                 runtime.closePopup(for: oldContext); try runtime.controller.unload(oldContext)
@@ -378,8 +438,10 @@ struct BrowserExtensionPermissionReview {
             }
             try fm.moveItem(at: package, to: previous); movedPackage = true
             if fm.fileExists(atPath: originalManifest.path) { try fm.moveItem(at: originalManifest, to: previousManifest); movedManifest = true }
+            if fm.fileExists(atPath: originalWorker.path) { try fm.moveItem(at: originalWorker, to: previousWorker); movedWorker = true }
             try fm.moveItem(at: incoming, to: package)
             if fm.fileExists(atPath: incomingManifest.path) { try fm.moveItem(at: incomingManifest, to: originalManifest); installedManifest = true }
+            if fm.fileExists(atPath: incomingWorker.path) { try fm.moveItem(at: incomingWorker, to: originalWorker); installedWorker = true }
             records[index] = replacement
             try persist()
             if before.enabled {
@@ -390,7 +452,7 @@ struct BrowserExtensionPermissionReview {
                 guard !stopped, mutationRevisions[id, default: 0] == initialRevision else { throw BrowserExtensionUpdateCancelled(name: before.name) }
                 guard runtime.contexts[id] != nil else { throw Self.failure("The updated extension could not be activated.") }
             }
-            try? fm.removeItem(at: previous); try? fm.removeItem(at: previousManifest)
+            try? fm.removeItem(at: previous); try? fm.removeItem(at: previousManifest); try? fm.removeItem(at: previousWorker)
             errors.removeValue(forKey: id)
             if before.enabled { onReloadNeeded?(before.profileID) }
             changed()
@@ -404,6 +466,7 @@ struct BrowserExtensionPermissionReview {
             if permissionRevisions[id, default: 0] != initialPermissionRevision {
                 restored.permissions = records[currentIndex].permissions; restored.patterns = records[currentIndex].patterns
                 restored.deniedPermissions = records[currentIndex].deniedPermissions; restored.deniedPatterns = records[currentIndex].deniedPatterns
+                restored.compatibilityGrants = records[currentIndex].compatibilityGrants
                 if let oldContext { restored = Self.retainingDeclaredPermissions(restored, for: oldContext.webExtension) }
             }
             // A newer disable/revoke/remove action or shutdown must never be
@@ -416,11 +479,16 @@ struct BrowserExtensionPermissionReview {
             if movedPackage { try? fm.removeItem(at: package); try? fm.moveItem(at: previous, to: package) }
             if installedManifest { try? fm.removeItem(at: originalManifest) }
             if movedManifest { try? fm.moveItem(at: previousManifest, to: originalManifest) }
+            if installedWorker { try? fm.removeItem(at: originalWorker) }
+            if movedWorker { try? fm.moveItem(at: previousWorker, to: originalWorker) }
             records[currentIndex] = restored
             try? persist()
             if unloaded && restored.enabled && !interrupted {
                 do { try await load(id, review: false) }
-                catch { setError(error, for: id) }
+                catch {
+                    if let index = records.firstIndex(where: { $0.id == id }) { records[index].enabled = false; try? persist() }
+                    setError(error, for: id)
+                }
             }
             changed()
             throw error
@@ -436,6 +504,7 @@ struct BrowserExtensionPermissionReview {
         let now = Date()
         result.permissions = record.permissions.filter { declared.contains($0.key) && supportedPermissions.contains($0.key) && $0.value > now }
         result.deniedPermissions = record.deniedPermissions.filter { declared.contains($0.key) && $0.value > now }
+        result.compatibilityGrants = record.compatibilityGrants?.filter { declared.contains($0.key) && $0.value > now }
         func validPatterns(_ values: [String: Date]) -> [String: Date] {
             values.filter { key, expiry in
                 guard expiry > now, let retained = try? WKWebExtension.MatchPattern(string: key) else { return false }
@@ -482,19 +551,43 @@ struct BrowserExtensionPermissionReview {
     func revokePermissions(id: UUID) throws {
         guard let i = records.firstIndex(where: { $0.id == id }) else { return }
         noteMutation(id, permissions: true); loadGeneration.removeValue(forKey: id)
-        records[i].permissions = [:]; records[i].patterns = [:]
+        records[i].permissions = [:]; records[i].patterns = [:]; records[i].compatibilityGrants = [:]
         if let context = context(for: id) { context.grantedPermissions = [:]; context.grantedPermissionMatchPatterns = [:] }
         try persist(); onReloadNeeded?(records[i].profileID); changed()
     }
 
     private func load(_ id: UUID, review: Bool, parsed: WKWebExtension? = nil) async throws {
         try Task.checkCancellation()
-        guard !loading.contains(id), let record = records.first(where: { $0.id == id }), let runtime = runtimes[record.profileID] else { return }
+        guard !loading.contains(id), let stored = records.first(where: { $0.id == id }), let runtime = runtimes[stored.profileID] else { return }
+        var record = stored
         if runtime.contexts[id] != nil { return }
         let token = UUID(); loadGeneration[id] = token
         loading.insert(id); defer { loading.remove(id); if loadGeneration[id] == token { loadGeneration.removeValue(forKey: id) } }
+        // Older disabled worker installs gain the adapter only when explicitly
+        // re-enabled and reviewed. Do not silently rewrite a running extension.
+        if review, parsed == nil, record.safariBundle == nil {
+            let package = packageURL(record)
+            let manifest = try Self.manifestForPreparation(package)
+            if !ExtensionServiceWorkerPreparation.isPrepared(manifest: manifest),
+               (manifest["background"] as? [String: Any])?["service_worker"] != nil,
+               let note = try ExtensionServiceWorkerPreparation.prepare(package: package,
+                    originalManifestURL: package.deletingLastPathComponent().appendingPathComponent("original-manifest.json"),
+                    adapterSource: ExtensionCompatibility.workerScript(manifest: manifest, browserVersion: Self.browserVersion)) {
+                record.compatibilityNote = [record.compatibilityNote, note].compactMap { $0 }.joined(separator: " ")
+                if let index = records.firstIndex(where: { $0.id == id }) { records[index].compatibilityNote = record.compatibilityNote; try persist() }
+            }
+        }
         let ext: WKWebExtension
-        if let parsed { ext = parsed } else { ext = try await packageParser(packageURL(record)) }
+        if let safari = record.safariBundle {
+            try safariImporter.validate(safari)
+            let snapshot = packageURL(record).appendingPathComponent("Extension.appex", isDirectory: true)
+            try safariImporter.validateSnapshot(at: snapshot, original: safari)
+            if let parsed { ext = parsed }
+            else {
+                guard let bundle = Bundle(url: snapshot) else { throw Self.failure("The Safari extension snapshot is missing.") }
+                ext = try await WKWebExtension(appExtensionBundle: bundle)
+            }
+        } else if let parsed { ext = parsed } else { ext = try await packageParser(packageURL(record)) }
         try Task.checkCancellation()
         guard ext.errors.isEmpty else { throw Self.failure(ext.errors.map(\.localizedDescription).joined(separator: "\n")) }
         guard !stopped, loadGeneration[id] == token, let initialIndex = records.firstIndex(where: { $0.id == id }), review || records[initialIndex].enabled else { return }
@@ -516,6 +609,15 @@ struct BrowserExtensionPermissionReview {
             records[index].permissions = Dictionary(uniqueKeysWithValues: supported.map { ($0, Date.distantFuture) })
             records[index].patterns = Dictionary(uniqueKeysWithValues: patterns.map { ($0, Date.distantFuture) })
             records[index].deniedPermissions = [:]; records[index].deniedPatterns = [:]
+            records[index].compatibilityGrants = Dictionary(uniqueKeysWithValues: bridged.map { ($0, Date.distantFuture) })
+        }
+        // Older installs recorded their reviewed shim list but not separate grants.
+        // A fully revoked record must never regain access during migration.
+        if records[index].compatibilityGrants == nil {
+            let prior = records[index]
+            let canMigrate = prior.enabled && (!prior.permissions.isEmpty || !prior.patterns.isEmpty)
+            records[index].compatibilityGrants = Dictionary(uniqueKeysWithValues:
+                (canMigrate ? prior.compatibility ?? [] : []).filter { bridged.contains($0) }.map { ($0, Date.distantFuture) })
         }
         let current = records[index]
         let context = WKWebExtensionContext(for: ext)
@@ -524,6 +626,10 @@ struct BrowserExtensionPermissionReview {
         context.unsupportedAPIs = Self.unsupportedAPIs
         context.hasAccessToPrivateData = isPrivate
         context.grantedPermissions = Dictionary(uniqueKeysWithValues: current.permissions.filter { Self.supportedPermissions.contains($0.key) }.map { (WKWebExtension.Permission(rawValue: $0.key), $0.value) })
+        if current.safariBundle == nil && ExtensionServiceWorkerPreparation.isPrepared(manifest: ext.manifest) {
+            context.unsupportedAPIs.subtract(["browser.runtime.sendNativeMessage", "browser.runtime.connectNative"])
+            context.grantedPermissions[.init(rawValue: "nativeMessaging")] = .distantFuture
+        }
         context.grantedPermissionMatchPatterns = Self.matchPatterns(current.patterns)
         context.deniedPermissions = Dictionary(uniqueKeysWithValues: current.deniedPermissions.map { (WKWebExtension.Permission(rawValue: $0.key), $0.value) })
         context.deniedPermissionMatchPatterns = Self.matchPatterns(current.deniedPatterns)
@@ -549,7 +655,7 @@ struct BrowserExtensionPermissionReview {
     func persistPermissions(_ context: WKWebExtensionContext) {
         guard let id = UUID(uuidString: context.uniqueIdentifier), let i = records.firstIndex(where: { $0.id == id }) else { return }
         let before = records[i]
-        records[i].permissions = Dictionary(uniqueKeysWithValues: context.grantedPermissions.map { ($0.key.rawValue, $0.value) })
+        records[i].permissions = Dictionary(uniqueKeysWithValues: context.grantedPermissions.filter { Self.supportedPermissions.contains($0.key.rawValue) }.map { ($0.key.rawValue, $0.value) })
         records[i].patterns = Dictionary(uniqueKeysWithValues: context.grantedPermissionMatchPatterns.map { ($0.key.string, $0.value) })
         records[i].deniedPermissions = Dictionary(uniqueKeysWithValues: context.deniedPermissions.map { ($0.key.rawValue, $0.value) })
         records[i].deniedPatterns = Dictionary(uniqueKeysWithValues: context.deniedPermissionMatchPatterns.map { ($0.key.string, $0.value) })
@@ -630,6 +736,7 @@ struct BrowserExtensionPermissionReview {
     var popupContextID: String?
     private var activePopupTabID: UUID?
     private var activePopup: WKWebExtension.Action?
+    private var activePopupPopover: NSPopover?
     private var lastFocusedWindow: ObjectIdentifier?
     private var reportedActiveTabs: [ObjectIdentifier: UUID] = [:]
     private var observers: [NSObjectProtocol] = []
@@ -657,8 +764,19 @@ struct BrowserExtensionPermissionReview {
         super.init(); controller.delegate = self
         ExtensionNotificationCenter.shared.register(compatibility)
         compatibility.isNotificationDeliveryAvailable = { ExtensionNotificationCenter.shared.isAvailable }
-        compatibility.postNotification = { identifier, title, body, buttons in await ExtensionNotificationCenter.shared.post(identifier: identifier, title: title, body: body, buttons: buttons) }
+        compatibility.postNotification = { identifier, title, body, buttons, isAuthorized in
+            await ExtensionNotificationCenter.shared.post(identifier: identifier, title: title, body: body, buttons: buttons, isAuthorized: isAuthorized)
+        }
         compatibility.startDownload = { [weak self] web, download in self?.owner?.startDownload?(web, download.url, download.filename) == true }
+        compatibility.workerDownload = { [weak self] context, download in
+            guard let self, self.owns(context), let web = self.currentSurfaces().first(where: { $0.isActive })?.webView else { return false }
+            return self.owner?.startDownload?(web, download.url, download.filename) == true
+        }
+        compatibility.permissionGranted = { [weak self] context, permission in
+            guard let self, self.owns(context), let id = UUID(uuidString: context.uniqueIdentifier),
+                  let record = self.owner?.records.first(where: { $0.id == id && $0.profileID == self.profileID && $0.enabled }) else { return false }
+            return (record.compatibilityGrants?[permission] ?? .distantPast) > Date()
+        }
         let names: [Notification.Name] = [WKWebExtensionContext.errorsDidUpdateNotification,
             WKWebExtensionContext.permissionsWereGrantedNotification, WKWebExtensionContext.permissionsWereDeniedNotification,
             WKWebExtensionContext.grantedPermissionsWereRemovedNotification, WKWebExtensionContext.deniedPermissionsWereRemovedNotification,
@@ -677,12 +795,23 @@ struct BrowserExtensionPermissionReview {
                 }
             })
         }
+        // WebKit owns the popover delegate and disposes its web view on close.
+        // Track the presented popover, not just the reusable extension action:
+        // a delayed notification from its old popup must not clear a new one.
+        observers.append(NotificationCenter.default.addObserver(forName: NSPopover.didCloseNotification, object: nil, queue: .main) { [weak self] notification in
+            Task { @MainActor [weak self] in
+                guard let self, let closed = notification.object as? NSPopover,
+                      self.activePopupPopover === closed else { return }
+                self.clearPopupPresentation()
+            }
+        })
     }
     deinit { for observer in observers { NotificationCenter.default.removeObserver(observer) } }
+    private func clearPopupPresentation() { activePopup = nil; activePopupPopover = nil; activePopupTabID = nil }
     func shutdown() { compatibility.shutdown(); ExtensionNotificationCenter.shared.unregister(compatibility) }
     func closePopup(for context: WKWebExtensionContext) {
         if popupContextID == context.uniqueIdentifier { popupAnchor = nil; popupTabID = nil; popupContextID = nil }
-        if activePopup?.webExtensionContext === context { activePopup?.closePopup(); activePopup = nil; activePopupTabID = nil }
+        if let action = activePopup, action.webExtensionContext === context { clearPopupPresentation(); action.closePopup() }
         context.action(for: nil)?.closePopup()
     }
     func owns(_ context: WKWebExtensionContext) -> Bool { context.webExtensionController === controller }
@@ -763,7 +892,7 @@ struct BrowserExtensionPermissionReview {
         // or tab-specific action floating over a different page or login profile.
         if let action = activePopup, let id = (action.associatedTab as? BrowserExtensionTab)?.id ?? activePopupTabID,
            fresh[id]?.isActive != true || fresh[id]?.url != snapshots[id]?.url {
-            action.closePopup(); activePopup = nil; activePopupTabID = nil; popupAnchor = nil; popupTabID = nil; popupContextID = nil
+            clearPopupPresentation(); action.closePopup(); popupAnchor = nil; popupTabID = nil; popupContextID = nil
         }
         let old = snapshots, previousWindowKeys = Set(windows.keys)
         for id in orderedIDs where fresh[id] == nil { if let tab = tabs[id] { controller.didCloseTab(tab) }; tabs.removeValue(forKey: id) }
@@ -874,7 +1003,10 @@ struct BrowserExtensionPermissionReview {
               anchor.window === surface.window, anchor.window?.isVisible == true else {
             completionHandler(BrowserExtensions.failure("Open a page in this profile to show its extension popup.")); return
         }
-        activePopup?.closePopup(); activePopup = action; activePopupTabID = surface.id
+        // Closing this same WK action would destroy the freshly loaded popup
+        // that WebKit is asking us to present, leaving an empty gray popover.
+        if let previous = activePopup, previous !== action { clearPopupPresentation(); previous.closePopup() }
+        activePopup = action; activePopupPopover = popup; activePopupTabID = surface.id
         popup.behavior = .transient
         // A real toolbar button is the anchor; large menu fallback surfaces use
         // their top-right corner. Never reposition the popup over unrelated chrome.
@@ -885,10 +1017,25 @@ struct BrowserExtensionPermissionReview {
     }
     func webExtensionController(_ controller: WKWebExtensionController, didUpdate action: WKWebExtension.Action, forExtensionContext context: WKWebExtensionContext) { if owns(context) { owner?.changed() } }
     func webExtensionController(_ controller: WKWebExtensionController, sendMessage message: Any, toApplicationWithIdentifier applicationIdentifier: String?, for context: WKWebExtensionContext, replyHandler: @escaping (Any?, Error?) -> Void) {
-        replyHandler(nil, BrowserExtensions.failure("Native messaging is not supported by Bam."))
+        guard controller === self.controller, allowsCompatibilityTransport(context), applicationIdentifier == ExtensionCompatibility.nativeApplicationIdentifier else {
+            replyHandler(nil, BrowserExtensions.failure("This native application is not available in Bam.")); return
+        }
+        Task { @MainActor in
+            let (value, error) = await compatibility.receiveNativeMessage(message, context: context)
+            replyHandler(value, error)
+        }
     }
     func webExtensionController(_ controller: WKWebExtensionController, connectUsing port: WKWebExtension.MessagePort, for context: WKWebExtensionContext, completionHandler: @escaping (Error?) -> Void) {
-        completionHandler(BrowserExtensions.failure("Native messaging is not supported by Bam."))
+        guard controller === self.controller, allowsCompatibilityTransport(context), port.applicationIdentifier == ExtensionCompatibility.nativeApplicationIdentifier else {
+            completionHandler(BrowserExtensions.failure("This native application is not available in Bam.")); return
+        }
+        completionHandler(compatibility.connectNativePort(port, context: context))
+    }
+    private func allowsCompatibilityTransport(_ context: WKWebExtensionContext) -> Bool {
+        guard owns(context), context.hasPermission(.init(rawValue: "nativeMessaging")),
+              ExtensionServiceWorkerPreparation.isPrepared(manifest: context.webExtension.manifest),
+              let id = UUID(uuidString: context.uniqueIdentifier), let record = owner?.records.first(where: { $0.id == id }) else { return false }
+        return record.safariBundle == nil
     }
     func webExtensionController(_ controller: WKWebExtensionController, openOptionsPageFor context: WKWebExtensionContext, completionHandler: @escaping (Error?) -> Void) {
         guard owns(context), let url = context.optionsPageURL, BrowserExtensions.isExtensionURL(url, ownedBy: context),

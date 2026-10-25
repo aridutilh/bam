@@ -90,6 +90,7 @@ import AppKit
         if listings.isEmpty { hasSearched = false }
     }
     func windowDidResignKey(_ notification: Notification) { buildPicker.dismissChoices(restoreFocus: false) }
+    func windowDidBecomeKey(_ notification: Notification) { updateControls() }
     func refreshInstalledState() {
         let row = table.selectedRow
         table.reloadData()
@@ -127,13 +128,15 @@ import AppKit
         detailsButton.isEnabled = !installing; listingButton.isEnabled = !installing && candidate.listingURL != nil
         sourceLabel.stringValue = candidate.canInstallInBam ? "Install from" : "Available for Safari"
         let record = installed(candidate)
-        if record?.enabled != true, let blocker = ExtensionBuildResolver.installationBlocker(candidate) {
-            installButton.title = "Choose Firefox above"; installButton.isEnabled = false
-            compatibility.stringValue = blocker
-        } else if let record {
-            installButton.title = record.enabled ? "Added to Bam ✓" : "Enable in Bam"
-            installButton.isEnabled = !installing && !record.enabled
+        if let record {
+            installButton.title = candidate.source == .safariAppStore ? "Manage app extensions" : record.enabled ? "Added to Bam ✓" : "Enable in Bam"
+            installButton.isEnabled = !installing && (candidate.source == .safariAppStore || !record.enabled)
             compatibility.stringValue = record.enabled ? "Enabled in \(host?.profileName?(profileID) ?? "this profile"). Click its icon below Bam’s address bar to open it." : "Added to this profile. Enable it to review permissions and start using it."
+        } else if candidate.source == .safariAppStore {
+            let installed = ExtensionInstaller.installedSafariApplication(for: candidate) != nil
+            installButton.title = installed ? "Add to Bam" : "Get from App Store ↗"
+            installButton.isEnabled = !installing && (installed || candidate.listingURL != nil)
+            compatibility.stringValue = installed ? "Add this app’s signed WebExtension to Bam. You’ll review permissions first. Native companion-app features are unavailable." : "Install the containing app from the App Store, then return here to add its WebExtension to Bam. Native companion-app features are unavailable."
         } else if !candidate.canInstallInBam {
             installButton.title = "View in App Store ↗"; installButton.isEnabled = !installing && candidate.listingURL != nil
             compatibility.stringValue = candidate.compatibilityNote ?? "This Safari app installs through the App Store. It cannot be added directly to Bam. Choose a Chrome or Firefox source above when available."
@@ -214,7 +217,7 @@ import AppKit
         if let url = candidate.listingURL { lines.append(url.absoluteString) }
         let permissions = candidate.permissions.filter { !AMOSource.isHostPattern($0) }
         let sites = candidate.hostPermissions + candidate.permissions.filter { AMOSource.isHostPattern($0) }
-        let unknownPermissions = candidate.canInstallInBam ? "Shown during installation review." : "Review access in the App Store and Safari. Bam does not install this app."
+        let unknownPermissions = candidate.source == .safariAppStore ? "Shown when Bam reviews the installed app’s WebExtension." : "Shown during installation review."
         lines += ["", "Permissions", permissions.isEmpty ? unknownPermissions : permissions.joined(separator: ", "), "", "Website access"]
         lines += sites.isEmpty ? [unknownPermissions] : sites
         lines += ["", "Compatibility"] + (ExtensionBuildResolver.recommend([candidate])?.1 ?? listing.reasons)
@@ -226,6 +229,9 @@ import AppKit
     }
     @objc private func install() {
         guard let candidate = selectedCandidate, let host, !installing else { return }
+        if candidate.source == .safariAppStore && ExtensionInstaller.installedSafariApplication(for: candidate) == nil {
+            openListing(); status.stringValue = "After installing the app, return to this window and choose Add to Bam."; return
+        }
         guard candidate.canInstallInBam else { openListing(); return }
         let profile = profileID
         installing = true

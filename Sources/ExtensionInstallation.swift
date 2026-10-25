@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 
 /// Provenance kept with an installed extension so the manager can show where a
 /// package came from, how it was verified and which upstream build it tracks.
@@ -45,20 +46,13 @@ enum ExtensionBuildResolver {
     /// Dated observations from Bam's own vendor probes, keyed by upstream ID.
     /// They are evidence for ordering, never a compatibility promise.
     static let observations: [String: String] = [
-        "jetpack-extension@dashlane.com": "2026-10-24: background runs, welcome popup and options page render, field icons inject into a login form.",
-        "fdjamakpfbbddfjaooikfcpapjohcfmg": "2026-10-24 (earlier draft): MV3 service worker build reported runtime.connect without listeners; welcome flow not reached.",
+        "jetpack-extension@dashlane.com": "2026-10-24: background runs, welcome popup and options page render, and content scripts annotate a login form.",
+        "fdjamakpfbbddfjaooikfcpapjohcfmg": "2026-10-24: Chrome worker, welcome popup and form annotations run; three runtime.connect startup errors remain. Sign-in and autofill are unverified.",
         "{d634138d-c276-4fc8-924b-40a0ea21d284}": "2026-10-24: background initializes and renders the welcome/permissions page with the compatibility layer. Desktop-app integration is unavailable.",
-        "aeblfdkhhhdcdjpifhhbdiojplfjncoa": "2026-10-24: MV3 service worker build (Chrome 140+) cannot receive Bam's compatibility layer; requires notifications and nativeMessaging.",
+        "aeblfdkhhhdcdjpifhhbdiojplfjncoa": "2026-10-24: Chrome service worker initializes and opens the welcome page. Desktop-app integration is unavailable; account workflows are unverified.",
         "firefox@vid.io": "2026-10-24: popup renders and the YouTube overlay injects with the content-script messaging adapter.",
-        "pachckjkecffpdphbpmfolblodfkgbhl": "2026-10-24: MV3 service worker build; same content scripts as the Firefox build; untested in Bam.",
+        "pachckjkecffpdphbpmfolblodfkgbhl": "2026-10-24: Chrome service worker and welcome popup initialize; the YouTube overlay appears in a signed-out probe.",
     ]
-
-    static func installationBlocker(_ candidate: ExtensionBuildCandidate) -> String? {
-        guard candidate.source == .chromeWebStore,
-              let id = candidate.upstreamID,
-              ["fdjamakpfbbddfjaooikfcpapjohcfmg", "aeblfdkhhhdcdjpifhhbdiojplfjncoa"].contains(id) else { return nil }
-        return "This Chrome build cannot finish setup in Bam yet. Choose the recommended Firefox build to use this extension."
-    }
 
     static func recommend(_ candidates: [ExtensionBuildCandidate]) -> (ExtensionBuildCandidate, [String])? {
         guard !candidates.isEmpty else { return nil }
@@ -66,8 +60,8 @@ enum ExtensionBuildResolver {
         func score(_ c: ExtensionBuildCandidate) -> Int {
             var s = c.canInstallInBam ? 0 : -1000
             let needsLayer = !Set(c.permissions).intersection(ExtensionCompatibility.bridgedPermissions).isEmpty
-            // A service worker background cannot be reached by Bam's compatibility layer.
-            if c.backgroundKind == .serviceWorker { s -= needsLayer ? 40 : 5 }
+            // Prefer the broader tested page-build coverage while worker support matures.
+            if c.backgroundKind == .serviceWorker { s -= needsLayer ? 5 : 2 }
             if c.backgroundKind == .page || c.backgroundKind == .scripts { s += 10 }
             if c.permissions.contains("nativeMessaging") { s -= 3 }
             if c.source == .amo { s += 2 }  // published hash, no product-version gate
@@ -83,7 +77,7 @@ enum ExtensionBuildResolver {
         }
         let pick = ranked[0]
         if pick.backgroundKind == .serviceWorker {
-            reasons.append("This build runs its background as a service worker, which Bam's compatibility layer cannot reach.")
+            reasons.append("This build uses a service worker. Bam prepares its background to provide a limited compatibility layer.")
         } else if pick.backgroundKind != nil {
             reasons.append("HTML background page: Bam's compatibility layer can stand in for missing APIs.")
         }
@@ -149,6 +143,41 @@ enum ExtensionBuildResolver {
         }
     }
 
+    static func installedSafariApplication(for candidate: ExtensionBuildCandidate) -> URL? {
+        guard candidate.source == .safariAppStore, let id = candidate.applicationBundleIdentifier, !id.isEmpty else { return nil }
+        return NSWorkspace.shared.urlForApplication(withBundleIdentifier: id)
+    }
+
+    private func safariBundle(for candidate: ExtensionBuildCandidate, existing: BrowserExtensionRecord? = nil) throws -> SafariExtensionBundle {
+        guard let host, let app = Self.installedSafariApplication(for: candidate), let appID = candidate.applicationBundleIdentifier else {
+            throw BrowserExtensions.failure("Install this app from the App Store, then return to Bam and choose Add to Bam.")
+        }
+        let bundles = try host.safariImporter.inspect(applicationURL: app, expectedApplicationBundleIdentifier: appID)
+        if let identity = existing?.safariBundle?.extensionBundleIdentifier {
+            guard let bundle = bundles.first(where: { $0.extensionBundleIdentifier == identity }) else { throw BrowserExtensions.failure("The installed app no longer contains this Safari WebExtension.") }
+            return bundle
+        }
+        guard !bundles.isEmpty else { throw BrowserExtensions.failure("This app contains no Safari WebExtension that Bam can load. Legacy Safari App Extensions and standalone content blockers use a different format.") }
+        if bundles.count == 1 { return bundles[0] }
+        let alert = NSAlert(); alert.messageText = "Choose an extension from \(candidate.name)"
+        alert.informativeText = "The app includes more than one WebExtension. You’ll review its permissions next."
+        let picker = ExtensionStorePicker(frame: NSRect(x: 0, y: 0, width: 440, height: 44))
+        let icon = NSImage(systemSymbolName: "puzzlepiece.extension", accessibilityDescription: nil) ?? NSImage()
+        picker.configure(bundles.map { .init(title: $0.displayName, detail: $0.extensionBundleIdentifier, image: icon) }, selected: 0, enabled: true)
+        alert.accessoryView = picker; alert.addButton(withTitle: "Continue"); alert.addButton(withTitle: "Cancel")
+        defer { picker.dismissChoices(restoreFocus: false) }
+        guard alert.runModal() == .alertFirstButtonReturn else { throw CancellationError() }
+        return bundles[picker.indexOfSelectedItem]
+    }
+
+    private func safariCatalog(_ candidate: ExtensionBuildCandidate, bundle: SafariExtensionBundle, previous: ExtensionCatalogRecord? = nil) -> ExtensionCatalogRecord {
+        let now = Date()
+        return ExtensionCatalogRecord(source: .safariAppStore, upstreamID: candidate.upstreamID, listingURL: candidate.listingURL,
+            publisher: candidate.publisher, version: bundle.version, sha256: "",
+            provenance: "Mac App Store signed containing app and Safari WebExtension verified; team \(bundle.teamIdentifier), extension code hash \(bundle.extensionCodeHash). Bundle copied without modification.",
+            installedAt: previous?.installedAt ?? now, updatedAt: previous == nil ? nil : now, lastUpdateCheck: now)
+    }
+
     /// Groups candidates into product listings by catalog identity.
     static func group(_ candidates: [ExtensionBuildCandidate]) -> [ExtensionProductListing] {
         var listings: [ExtensionProductListing] = []
@@ -187,9 +216,23 @@ enum ExtensionBuildResolver {
         try Task.checkCancellation()
         guard let host else { throw BrowserExtensions.failure("The browser is closing.") }
         guard !isBusy else { throw BrowserExtensions.failure("Another extension installation is in progress.") }
-        guard candidate.canInstallInBam else { throw BrowserExtensions.failure("Safari apps are distributed through the App Store. Choose a Chrome or Firefox build to install in Bam.") }
-        if let blocker = ExtensionBuildResolver.installationBlocker(candidate) { throw BrowserExtensions.failure(blocker) }
+        guard candidate.canInstallInBam else { throw BrowserExtensions.failure("This listing does not provide an installable package or a verified containing-app identity.") }
         isBusy = true; defer { isBusy = false }
+        if candidate.source == .safariAppStore {
+            statusChanged?("Verifying the installed Safari app…")
+            let bundle = try safariBundle(for: candidate)
+            let existing = host.items(profileID: profileID).first { $0.catalog?.source == .safariAppStore && $0.catalog?.upstreamID == candidate.upstreamID && $0.safariBundle?.extensionBundleIdentifier == bundle.extensionBundleIdentifier }
+            try Task.checkCancellation()
+            let catalog = safariCatalog(candidate, bundle: bundle, previous: existing?.catalog)
+            if let existing {
+                if existing.safariBundle != bundle {
+                    try await host.replacePackage(id: existing.id, with: bundle.appexURL, catalog: catalog, safariBundle: bundle)
+                }
+                if host.items(profileID: profileID).first(where: { $0.id == existing.id })?.enabled != true { try await host.setEnabled(true, id: existing.id) }
+                return existing.id
+            }
+            return try await host.importSafariBundle(bundle, profileID: profileID, catalog: catalog)
+        }
         if let record = installedRecord(for: candidate, profileID: profileID) {
             if !record.enabled { try await host.setEnabled(true, id: record.id) }
             return record.id
@@ -240,11 +283,24 @@ enum ExtensionBuildResolver {
         switch catalog.source {
         case .amo: candidate = try await amo.addon(id)
         case .chromeWebStore: candidate = try await chromeWebStore.candidate(for: id)
-        case .directPackage, .local, .safariAppStore: return nil
+        case .safariAppStore:
+            let candidate = try await catalogSearchSafariCandidate(id)
+            let bundle = try safariBundle(for: candidate, existing: record)
+            guard bundle != record.safariBundle else { host?.noteUpdateCheck(id: record.id, available: nil); return nil }
+            var installed = candidate; installed.version = bundle.version
+            host?.noteUpdateCheck(id: record.id, available: bundle.version)
+            return installed
+        case .directPackage, .local: return nil
         }
         let current = record.version.isEmpty ? catalog.version : record.version
         host?.noteUpdateCheck(id: record.id, available: ExtensionBuildResolver.compareVersions(candidate.version, current) == .orderedDescending ? candidate.version : nil)
         return ExtensionBuildResolver.compareVersions(candidate.version, current) == .orderedDescending ? candidate : nil
+    }
+
+    private func catalogSearchSafariCandidate(_ id: String) async throws -> ExtensionBuildCandidate {
+        let result = try await catalog.resolve(.safariAppStore(id: id))
+        guard let candidate = result.candidates.first(where: { $0.source == .safariAppStore && $0.upstreamID == id }) else { throw BrowserExtensions.failure("The Safari app listing is unavailable.") }
+        return candidate
     }
 
     /// Replaces the package in place, keeping the extension's identifier, storage,
@@ -256,6 +312,12 @@ enum ExtensionBuildResolver {
         }
         guard !isBusy else { throw BrowserExtensions.failure("Another extension installation is in progress.") }
         isBusy = true; defer { isBusy = false }
+        if candidate.source == .safariAppStore {
+            let bundle = try safariBundle(for: candidate, existing: record)
+            try Task.checkCancellation()
+            try await host.replacePackage(id: record.id, with: bundle.appexURL, catalog: safariCatalog(candidate, bundle: bundle, previous: catalog), safariBundle: bundle)
+            return
+        }
         let staging = FileManager.default.temporaryDirectory.appendingPathComponent("bam-extension-update-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: staging) }

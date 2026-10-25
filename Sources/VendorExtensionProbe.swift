@@ -41,14 +41,15 @@ import WebKit
     }
     /// BAM_VENDOR_SITE opens one ordinary HTTP(S) page in the profile so content
     /// scripts can run; BAM_VENDOR_SITE_PROBE is an optional JavaScript expression
-    /// evaluated there (the default counts nodes that carry the extension's name).
+    /// evaluated there. BAM_VENDOR_MARKER selects the actual DOM marker; the default
+    /// uses the full display name and is only a heuristic, especially for localized names.
     private static func siteURL(_ env: [String: String]) -> URL? {
         guard let raw = env["BAM_VENDOR_SITE"], let url = URL(string: raw), ["http", "https"].contains(url.scheme?.lowercased() ?? "") else { return nil }
         return url
     }
     private static func siteProbeScript(_ env: [String: String], extensionName: String) -> String {
         if let custom = env["BAM_VENDOR_SITE_PROBE"], !custom.isEmpty { return custom }
-        let needle = extensionName.lowercased().replacingOccurrences(of: #"[^a-z0-9]"#, with: "", options: .regularExpression)
+        let needle = (env["BAM_VENDOR_MARKER"] ?? extensionName).lowercased().replacingOccurrences(of: #"[^a-z0-9]"#, with: "", options: .regularExpression)
         func encoded(_ value: String) -> String { String((try? String(data: JSONSerialization.data(withJSONObject: [value]), encoding: .utf8)).flatMap { $0.dropFirst().dropLast() } ?? "\"\"") }
         return """
         (() => {
@@ -59,13 +60,13 @@ import WebKit
             for (const el of root.querySelectorAll("*")) {
               total++;
               const sig = (el.tagName + " " + el.id + " " + (typeof el.className === "string" ? el.className : "") + " " + Array.from(el.attributes).map(a => a.name + "=" + a.value).join(" ")).toLowerCase();
-              if (sig.includes(needle) || sig.includes(alt)) named++;
+              if (needle && (sig.includes(needle) || sig.includes(alt))) named++;
               if (el.tagName === "IFRAME" && (el.src || "").startsWith("webkit-extension://")) extensionFrames++;
               if (el.shadowRoot) { shadows++; visit(el.shadowRoot); }
             }
           };
           visit(document);
-          return { readyState: document.readyState, title: document.title.slice(0, 120), total, named, shadows, extensionFrames,
+          return { marker: needle, readyState: document.readyState, title: document.title.slice(0, 120), total, named, shadows, extensionFrames,
                    inputs: document.querySelectorAll("input").length };
         })()
         """
@@ -148,7 +149,7 @@ import WebKit
         observations["extension_name"] = context.webExtension.displayName ?? ""
         observations["has_background"] = context.webExtension.hasBackgroundContent
         observations["granted_permissions"] = context.grantedPermissions.keys.map(\.rawValue).sorted()
-        observations["unsupported_api_policy"] = BrowserExtensions.unsupportedAPIs.sorted()
+        observations["unsupported_api_policy"] = context.unsupportedAPIs.sorted()
         observations["compatibility_layer"] = host.items(profileID: profile).first(where: { $0.id == id })?.compatibility ?? []
         let siteURL = Self.siteURL(env)
         var siteTabID: UUID?

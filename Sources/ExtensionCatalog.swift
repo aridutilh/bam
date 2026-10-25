@@ -99,10 +99,12 @@ struct ExtensionBuildCandidate: Sendable, Equatable, Codable {
     var iconURL: URL? = nil
     var summary: String? = nil
     var compatibilityNote: String? = nil
+    /// Exact containing-app identity from Apple's catalog, used for Safari imports.
+    var applicationBundleIdentifier: String? = nil
 
     /// Chrome candidates are resolved to current package URLs only when installed.
-    /// App Store apps need their containing app and are not installable by this pipeline.
-    var canInstallInBam: Bool { source != .safariAppStore && (downloadURL != nil || source == .chromeWebStore) }
+    /// Safari imports use an installed, verified containing app rather than a package URL.
+    var canInstallInBam: Bool { source == .safariAppStore ? applicationBundleIdentifier != nil : (downloadURL != nil || source == .chromeWebStore) }
 
     /// A candidate for a pasted package URL; name and version are filled from the manifest after download.
     static func direct(_ url: URL) -> ExtensionBuildCandidate {
@@ -480,9 +482,9 @@ struct ChromeWebStoreSource: Sendable {
     static func compatibilityNote(for id: String) -> String? {
         switch id.lowercased() {
         case "fdjamakpfbbddfjaooikfcpapjohcfmg":
-            return "Dashlane's Chrome build has not passed Bam's setup checks. Choose the recommended Firefox build to use Dashlane in Bam."
+            return "Dashlane's Chrome build opens its welcome popup and annotates login forms in Bam. Startup connection errors remain; sign-in and autofill are unverified."
         case "aeblfdkhhhdcdjpifhhbdiojplfjncoa":
-            return "1Password's Chrome build has not passed Bam's setup checks. Choose the recommended Firefox build to use 1Password in Bam."
+            return "1Password's Chrome build reaches its welcome page in Bam. Desktop-app integration is unavailable; sign-in and autofill are unverified."
         default: return nil
         }
     }
@@ -679,7 +681,7 @@ enum ExtensionKnownProducts {
 /// tested signed-app-extension import route.
 struct SafariAppStoreSource: Sendable {
     let client: any ExtensionHTTPClient
-    static let availabilityNote = "This is an App Store app for Safari. It cannot be added directly to Bam yet. Choose another source to use this extension in Bam."
+    static let availabilityNote = "Bam can add the signed WebExtension from this app after it is installed through the App Store. Native companion-app features are unavailable; Safari account data is not imported."
 
     static func searchURL(for query: String) -> URL {
         var components = URLComponents(string: "https://itunes.apple.com/search")!
@@ -713,7 +715,8 @@ struct SafariAppStoreSource: Sendable {
             publisher: object["sellerName"] as? String ?? object["artistName"] as? String ?? "",
             version: object["version"] as? String ?? "", homepage: (object["sellerUrl"] as? String).flatMap(URL.init(string:)),
             listingURL: url, iconURL: (object["artworkUrl100"] as? String).flatMap(URL.init(string:)),
-            summary: description.components(separatedBy: "\n").first, compatibilityNote: availabilityNote)
+            summary: description.components(separatedBy: "\n").first, compatibilityNote: availabilityNote,
+            applicationBundleIdentifier: object["bundleId"] as? String)
     }
     func search(_ query: String) async throws -> [ExtensionBuildCandidate] {
         try await records(at: Self.searchURL(for: query)).compactMap { Self.candidate(from: $0) }

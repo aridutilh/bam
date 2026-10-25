@@ -106,20 +106,17 @@ import WebKit
         let reviewCount = reviewed.count
         let repeatedInstall = try await installer.install(catalogCandidate, profileID: profileA)
         try check(repeatedInstall == extensionA && host.items(profileID: profileA).count == 1 && reviewed.count == reviewCount, "Adding an enabled extension repeated its download or permission review")
-        let blockedChrome = ExtensionBuildCandidate(source: .chromeWebStore, upstreamID: "fdjamakpfbbddfjaooikfcpapjohcfmg", name: "Dashlane", publisher: "Dashlane", version: "", downloadURL: nil)
-        var rejectedKnownBlocker = false
-        do { _ = try await installer.install(blockedChrome, profileID: profileA) }
-        catch { rejectedKnownBlocker = error.localizedDescription.contains("Firefox") }
-        try check(rejectedKnownBlocker && host.items(profileID: profileA).count == 1, "A known-broken Chrome build was downloaded or silently installed")
         guard let contextA = host.context(for: extensionA) else { throw Failure(description: "Extension A did not load: \(host.lastError ?? "unknown")") }
-        try check(contextA.hasPermission(.storage) && !contextA.hasPermission(.nativeMessaging), "Unsupported permission was granted or approved storage was omitted")
+        try check(contextA.hasPermission(.storage) && contextA.hasPermission(.nativeMessaging) &&
+            ExtensionServiceWorkerPreparation.isPrepared(manifest: contextA.webExtension.manifest), "Approved storage or the prepared worker's internal transport was omitted")
         webA.load(URLRequest(url: urlA)); webB.load(URLRequest(url: urlB))
         try await wait("Content script/background/storage did not run in profile A") { await result(webA)?["token"] as? String == "profile-A" }
         try await wait("MV3 runtime.connect handshake did not return profile A storage") { await javascript(webA, "document.documentElement.dataset.bamExtensionPort") as? String == "profile-A" }
         try await wait("Profile B page did not finish loading") { await javascript(webB, "document.body.dataset.bamFixtureToken") as? String == "profile-B" }
         try check(await result(webB) == nil, "Extension enabled only in A injected into B")
         let resultA = await result(webA)
-        try check(resultA?["nativeMessagingExposed"] as? Bool == false, "Unsupported native messaging appeared available")
+        try check(resultA?["nativeMessagingExposed"] as? Bool == true && resultA?["externalNativeDenied"] as? Bool == true,
+                  "The worker's internal transport was missing or allowed an external native application")
         let urlsA = resultA?["urls"] as? [String] ?? []
         try check(urlsA == [urlA.absoluteString], "Extension A enumerated a page from another profile: \(urlsA)")
         guard let runtimeA = configA.webExtensionController?.delegate as? BrowserExtensionRuntime,

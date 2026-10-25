@@ -5,6 +5,14 @@
 - Hide the window's close, minimize and zoom buttons together with the sidebar, as Arc does: they fade out over the last 80 points of the collapse, so a collapsed sidebar leaves the page alone in the window, and they return as the sidebar slides back in.
 - Retire the “A little space” start page. An empty tab is now a plain dark surface titled “New tab” (the address bar still reads “Search or enter URL”), and the History ▸ Home command (⇧⌘H) that navigated to it is gone. Existing tabs on that page keep working and simply show the blank surface.
 
+## 0.20.0 draft — build 39
+
+- Fix empty extension popups on reopening: track the displayed popover and preserve the new web view when WebKit reuses an action. Add repeated dismissal/reopen checks with rendered HTML and background messaging.
+- Extend Bam’s disclosed compatibility layer to classic and module service workers, including native requests and notification/idle events. Preserve classic worker URLs, module import URLs and original source bytes; check current profile, context and permission grants on every native operation. External native apps remain unavailable.
+- Add Safari WebExtension import from an installed, verified Mac App Store containing app. Review permissions in Bam, keep the signed bundle intact, revalidate it on load and refresh it after app updates. New acquisitions still open Apple’s App Store; legacy Safari extension formats and native companion features remain unsupported.
+- Adapt packaged WebAssembly streaming when WebKit supplies the wrong MIME type, retaining native compilation and CSP checks. Retain the managed-storage namespace wrapper so worker initialization does not lose its added members.
+- Add original native worker and Safari fixtures plus component coverage for preparation, signature/snapshot checks, grants, events, Wasm and lifecycle behavior. Vendor account workflows still require separate validation.
+
 ## 0.19.1 draft — build 38
 
 - Give the extension store selector and its opened choices Bam’s card surfaces, type, red selection and focus styling. Support keyboard selection, with Escape and outside-click dismissal leaving the current choice unchanged.
