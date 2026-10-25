@@ -23,6 +23,8 @@ import UniformTypeIdentifiers
     private var busy = false
     /// A one-shot message shown by the next refresh instead of the generic guidance.
     private var pendingStatus: String?
+    /// The selection whose details the status area shows; its scroll position is kept while text and selection stay.
+    private var statusSelectionID: UUID?
 
     init(host: BrowserExtensions) {
         self.host = host
@@ -111,8 +113,14 @@ import UniformTypeIdentifiers
         // A message or error leads; the selected extension's full disclosure always follows it, so a persistent
         // error never hides the static-rule warning the row points to.
         let headline = pendingStatus ?? selected.flatMap { host?.errors[$0.id] } ?? (selected == nil ? host?.lastError : nil)
-        status.string = Self.statusText(headline: headline, details: selected.flatMap(Self.details), guidance: guidance)
-        status.scrollToBeginningOfDocument(nil)
+        // Refreshes (badges, loads, other extensions' changes) run this often: keep the reader's place unless the
+        // selection or the text itself changed, and start at the top only then.
+        let text = Self.statusText(headline: headline, details: selected.flatMap(Self.details), guidance: guidance)
+        if text != status.string || selected?.id != statusSelectionID {
+            if text != status.string { status.string = text }
+            status.scrollToBeginningOfDocument(nil)
+            statusSelectionID = selected?.id
+        }
         pendingStatus = nil
         statusScroll.toolTip = guidance
     }

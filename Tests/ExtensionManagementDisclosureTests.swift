@@ -55,6 +55,22 @@ import Foundation
         let withError = manager.status.string
         try check(withError.hasPrefix("Fixture context error that stays until fixed.") && withError.contains(note) && withError.contains(preparation),
                   "A persistent error hid the disclosure: \(withError.prefix(200))")
+        // Refreshes keep the reader's place; a different text or selection starts at the top.
+        func offset() -> CGFloat { manager.statusScroll.contentView.bounds.origin.y }
+        func scrollDown() {
+            manager.statusScroll.contentView.scroll(to: NSPoint(x: 0, y: 30)); manager.statusScroll.reflectScrolledClipView(manager.statusScroll.contentView)
+        }
+        scrollDown()
+        let scrolled = offset()
+        manager.refresh(); manager.refresh()
+        try check(scrolled == 30 && offset() == 30 && manager.status.string == withError, "A refresh with unchanged details moved the scroll position: \(scrolled) → \(offset())")
+        host.setError(NSError(domain: "Fixture", code: 2, userInfo: [NSLocalizedDescriptionKey: "A different context error."]), for: audited)
+        manager.refresh()
+        try check(offset() == 0 && manager.status.string.hasPrefix("A different context error."), "Changed details did not start at the top: \(offset())")
+        scrollDown()
+        if let other = manager.items(for: legacy) { manager.table.selectRowIndexes(IndexSet(integer: other), byExtendingSelection: false) }
+        manager.refresh()
+        try check(offset() == 0, "A different selection kept the previous scroll position: \(offset())")
         func rowText(_ id: UUID) -> String {
             guard let index = manager.items(for: id), let cell = manager.tableView(manager.table, viewFor: nil, row: index),
                   let label = cell.subviews.first as? NSTextField else { return "" }
