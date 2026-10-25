@@ -24,7 +24,7 @@ import Darwin
         }
     }
     static func run(fixtureURL: URL, pageURL: URL) async throws -> Int {
-        var checks = try await ExtensionSiteAccessSmokeTest.run(pageURL: pageURL)
+        var checks = 0
         func check(_ condition: Bool, _ message: String) throws {
             guard condition else { throw ExtensionSmokeTest.Failure(description: message) }; checks += 1
         }
@@ -1111,8 +1111,27 @@ import Darwin
         withExtendedLifetime(contentController) {}
         recordLifecycle("after-3-disable-reenable-cycles", retiredPopovers: retiredPopovers.filter { $0.value != nil }.count,
             retiredWebViews: retiredWebViews.filter { $0.value != nil }.count, retiredContexts: retiredContexts.filter { $0.value != nil }.count)
-        // Chrome tabs metadata facade: its own profile and original fixture extensions (see the file's header).
-        checks += try await ExtensionTabMetadataSmokeTest.run(controller: controller, host: host, pageURL: pageURL)
+        // Independent fixtures both run, so a failure in one does not hide the other. Any failure still fails the suite.
+        var compatibilityFailures: [String] = []
+        do {
+            let passed = try await ExtensionTabMetadataSmokeTest.run(controller: controller, host: host, pageURL: pageURL)
+            checks += passed
+            print("BAM_TAB_METADATA_PASS \(passed) checks"); fflush(stdout)
+        } catch {
+            compatibilityFailures.append("Tab metadata: \(error)")
+            print("BAM_TAB_METADATA_FAIL \(error)"); fflush(stdout)
+        }
+        do {
+            let passed = try await ExtensionSiteAccessSmokeTest.run(pageURL: pageURL)
+            checks += passed
+            print("BAM_SITE_ACCESS_PASS \(passed) checks"); fflush(stdout)
+        } catch {
+            compatibilityFailures.append("Site access: \(error)")
+            print("BAM_SITE_ACCESS_FAIL \(error)"); fflush(stdout)
+        }
+        if !compatibilityFailures.isEmpty {
+            throw ExtensionSmokeTest.Failure(description: compatibilityFailures.joined(separator: "\n"))
+        }
         return checks
     }
 }
