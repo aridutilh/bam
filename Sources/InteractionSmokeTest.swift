@@ -731,12 +731,19 @@ import WebKit
     }
     private func testVerticalTabList() {
         selectSpaceImmediately(0)
-        // Only local, ephemeral tab metadata is added. Inactive pages are not
-        // loaded; enough rows are needed to test actual vertical overflow.
-        controller.session.tabs.append(contentsOf: (1...36).map {
-            BrowserTab(title: "Vertical fixture \($0)", address: "orbit://newtab", space: 0)
-        })
+        // Only local, ephemeral tab metadata is added; enough listed rows are needed to test actual vertical
+        // overflow. They are dormant web pages on the reserved .invalid domain (never resolves, and inactive tabs
+        // are never loaded). Blank New Tab placeholders no longer get sidebar rows (b11ccba), so they can't be used.
+        let verticalFixtures = (1...36).map {
+            BrowserTab(title: "Vertical fixture \($0)", address: "https://vertical-fixture.invalid/\($0)", space: 0)
+        }
+        controller.session.tabs.append(contentsOf: verticalFixtures)
         controller.refresh()
+        controller.view.layoutSubtreeIfNeeded()
+        let fixtureTable = descendantScroll(in: controller.sidebar)?.documentView as? NSTableView
+        guard check(fixtureTable != nil, "Missing native tab-list table for the vertical fixtures"),
+              check(fixtureTable!.numberOfRows >= verticalFixtures.count, "Vertical fixtures are not listed as sidebar rows: \(fixtureTable!.numberOfRows)"),
+              check(verticalFixtures.allSatisfy { controller.browsers[$0.id] == nil }, "Vertical fixture pages were loaded") else { return }
         for width: CGFloat in [164, 228, 500] {
             controller.session.sidebarWidth = Double(width)
             controller.displayedWidth = width
