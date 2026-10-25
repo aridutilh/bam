@@ -23,6 +23,17 @@ struct ClosedRecord: Codable, Identifiable, Equatable {
     var onOpenURL: ((String) -> Void)?
     var onRestoreClosed: ((ClosedRecord) -> Void)?
     var onStorageError: ((String) -> Void)?
+    /// A genuine change to in-memory history, for extension history events. Never sent at startup load.
+    enum HistoryChange: Equatable {
+        /// `recordVisit` accepted this visit (a new entry or a coalesced revisit, as it now stands). Sent even if
+        /// the following asynchronous write later fails: it describes in-memory history, not durability.
+        case visited(BrowserHistoryEntry)
+        /// The same visit trimmed these entries past the history limit (their addresses, oldest last).
+        case trimmed(addresses: [String])
+        /// `clearHistory()` committed successfully. A failed clear rolls back and sends nothing.
+        case cleared
+    }
+    var onHistoryChange: ((HistoryChange) -> Void)?
     var profileName: String?
     let storageURL: URL?
     private var loadFailure: String?
@@ -85,18 +96,25 @@ struct ClosedRecord: Codable, Identifiable, Equatable {
         let address = url.absoluteString
         let title = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard canMutate() else { return }
+        var trimmed: [String] = []
         if history.first?.address == address {
             // Only consecutive visits coalesce; earlier visits stay visible.
             history[0].title = title.isEmpty ? (url.host ?? address) : title
             history[0].visitedAt = Date()
         } else {
             history.insert(BrowserHistoryEntry(title: title.isEmpty ? (url.host ?? address) : title, address: address), at: 0)
-            if history.count > Self.historyLimit { history.removeLast(history.count - Self.historyLimit) }
+            if history.count > Self.historyLimit {
+                trimmed = history[Self.historyLimit...].map(\.address)
+                history.removeLast(history.count - Self.historyLimit)
+            }
         }
         // Encoding and disk replacement happen on the ordered worker. Keep an
         // accepted visit in memory if storage fails, and retry on a visit/flush.
         writer?.enqueue(snapshot)
         reloadWindows()
+        // Accepted into in-memory history (as search sees it); the write's outcome is not implied.
+        onHistoryChange?(.visited(history[0]))
+        if !trimmed.isEmpty { onHistoryChange?(.trimmed(addresses: trimmed)) }
     }
 
     func recordClosed(tabs: [BrowserTab], split: Bool) {
@@ -121,7 +139,11 @@ struct ClosedRecord: Codable, Identifiable, Equatable {
     }
 
     // Low-level mutations; the native window's Clear buttons confirm first.
-    @discardableResult func clearHistory() -> Bool { commit { history.removeAll() } }
+    @discardableResult func clearHistory() -> Bool {
+        guard commit({ history.removeAll() }) else { return false }
+        onHistoryChange?(.cleared)
+        return true
+    }
     @discardableResult func clearArchive() -> Bool { commit { closedRecords.removeAll() } }
 
     func searchHistory(_ query: String) -> [BrowserHistoryEntry] {
