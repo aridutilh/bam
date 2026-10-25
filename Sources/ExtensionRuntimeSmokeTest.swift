@@ -38,6 +38,12 @@ import WebKit
                 guard let page = components.url else {
                     throw ExtensionSmokeTest.Failure(description: "Could not construct the local extension test page URL")
                 }
+                if CommandLine.arguments.contains("--extension-verified-id-probe") {
+                    // Measurement only, not a suite: prints EXTENSION_VERIFIED_ID_PROBE and MEASUREMENT, never a PASS/FAIL
+                    // Extensions line. Exit 0 = complete measurement, 2 = incomplete. The runner watchdog stays last resort.
+                    let probe = await ExtensionVerifiedIDProbe.run(pageURL: page)
+                    fflush(stdout); exit(probe.complete ? 0 : 2)
+                }
                 if CommandLine.arguments.contains("--extension-favicon-probe") {
                     // Measurement only: complete negative results are not an Extensions suite pass.
                     // Its native deadline and cleanup precede the outer runner watchdog.
