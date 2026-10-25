@@ -87,35 +87,56 @@ import WebKit
         try check(removed == "ok", "updateDynamicRules could not remove the rule: \(removed)")
         try await wait("Removing the dynamic rule did not stop blocking") { await outcome(webA, "/bam-dnr/dynamic-blocked").hasPrefix("reached") }
 
-        // Gap-plan edge cases: measured only. Each rule is added alone and removed again.
+        // Gap-plan edge cases: measured only. Each edge rule is added together with a sentinel block rule on
+        // its own path in one atomic update; probes run only once the sentinel blocks (that update is compiled),
+        // so a "reached" result means the edge rule really did not match. Removal waits for the sentinel to clear.
         var edges: [String: Any] = [:]
-        func measure(_ label: String, rule: String, probes: [(String, String, String)]) async {
-            let result = await dnr("await browser.declarativeNetRequest.updateDynamicRules({addRules: [\(rule)]}); return 'ok';")
-            var observed: [String: String] = ["add": result]
-            if result == "ok" { try? await Task.sleep(nanoseconds: 1_000_000_000) }
-            for (name, path, method) in probes { observed[name] = await outcome(webA, path, method: method) }
-            _ = await dnr("await browser.declarativeNetRequest.updateDynamicRules({removeRuleIds: [200, 201, 202, 203, 204, 205, 206, 207]}); return 'ok';")
+        func measure(_ label: String, id: Int, condition: String, probes: [(String, String, String)]) async {
+            let sentinelPath = "/bam-dnr/sentinel-\(id)"
+            let rules = "[{id: \(id), priority: 1, action: {type: 'block'}, condition: \(condition)}, {id: \(id + 1000), priority: 1, action: {type: 'block'}, condition: {urlFilter: '\(sentinelPath)', resourceTypes: ['xmlhttprequest']}}]"
+            let result = await dnr("await browser.declarativeNetRequest.updateDynamicRules({addRules: \(rules)}); return 'ok';")
+            var observed: [String: Any] = ["add": result]
+            if result == "ok" {
+                let started = ProcessInfo.processInfo.systemUptime
+                var active = false
+                while !active && ProcessInfo.processInfo.systemUptime - started < 8 {
+                    active = await outcome(webA, sentinelPath) == "blocked"
+                    if !active { try? await Task.sleep(nanoseconds: 100_000_000) }
+                }
+                observed["sentinelActive"] = active
+                observed["activeAfterMs"] = Int((ProcessInfo.processInfo.systemUptime - started) * 1000)
+                if active { for (name, path, method) in probes { observed[name] = await outcome(webA, path, method: method) } }
+                _ = await dnr("await browser.declarativeNetRequest.updateDynamicRules({removeRuleIds: [\(id), \(id + 1000)]}); return 'ok';")
+                let removing = ProcessInfo.processInfo.systemUptime
+                var cleared = false
+                while !cleared && ProcessInfo.processInfo.systemUptime - removing < 8 {
+                    cleared = await outcome(webA, sentinelPath).hasPrefix("reached")
+                    if !cleared { try? await Task.sleep(nanoseconds: 100_000_000) }
+                }
+                observed["removed"] = cleared
+            }
             edges[label] = observed
         }
-        await measure("regexAlternation", rule: "{id: 200, priority: 1, action: {type: 'block'}, condition: {regexFilter: '/bam-dnr/(alt-one|alt-two)$', resourceTypes: ['xmlhttprequest']}}",
+        await measure("regexAlternation", id: 200, condition: "{regexFilter: '/bam-dnr/(alt-one|alt-two)$', resourceTypes: ['xmlhttprequest']}",
                       probes: [("one", "/bam-dnr/alt-one", "GET"), ("two", "/bam-dnr/alt-two", "GET"), ("neither", "/bam-dnr/alt-three", "GET")])
-        await measure("requestMethods", rule: "{id: 201, priority: 1, action: {type: 'block'}, condition: {urlFilter: '/bam-dnr/post-only', requestMethods: ['post'], resourceTypes: ['xmlhttprequest']}}",
+        await measure("postMethod", id: 201, condition: "{urlFilter: '/bam-dnr/post-only', requestMethods: ['post'], resourceTypes: ['xmlhttprequest']}",
                       probes: [("get", "/bam-dnr/post-only", "GET"), ("post", "/bam-dnr/post-only", "POST")])
-        await measure("unknownResourceType", rule: "{id: 202, priority: 1, action: {type: 'block'}, condition: {urlFilter: '/bam-dnr/webtransport-mixed', resourceTypes: ['xmlhttprequest', 'webtransport']}}",
-                      probes: [("xhr", "/bam-dnr/webtransport-mixed", "GET")])
-        // Broadening checks from WebKit's rule translation: excludedResourceTypes is not validated, and an
-        // exclusion covering every type WebKit knows leaves an empty resource-type list.
-        let knownTypes = "['font', 'image', 'main_frame', 'media', 'other', 'ping', 'script', 'stylesheet', 'sub_frame', 'websocket', 'xmlhttprequest']"
-        await measure("excludesAllKnownTypes", rule: "{id: 203, priority: 1, action: {type: 'block'}, condition: {urlFilter: '/bam-dnr/excluded-all', excludedResourceTypes: \(knownTypes)}}",
-                      probes: [("xhr", "/bam-dnr/excluded-all", "GET")])
-        await measure("excludesUnknownOnly", rule: "{id: 204, priority: 1, action: {type: 'block'}, condition: {urlFilter: '/bam-dnr/excluded-unknown', excludedResourceTypes: ['webtransport']}}",
-                      probes: [("xhr", "/bam-dnr/excluded-unknown", "GET")])
-        await measure("imagePlusUnknown", rule: "{id: 205, priority: 1, action: {type: 'block'}, condition: {urlFilter: '/bam-dnr/image-only', resourceTypes: ['image', 'webtransport']}}",
-                      probes: [("xhr", "/bam-dnr/image-only", "GET")])
-        await measure("uppercaseMethod", rule: "{id: 206, priority: 1, action: {type: 'block'}, condition: {urlFilter: '/bam-dnr/upper-method', requestMethods: ['POST'], resourceTypes: ['xmlhttprequest']}}",
-                      probes: [("post", "/bam-dnr/upper-method", "POST")])
-        await measure("getMethod", rule: "{id: 207, priority: 1, action: {type: 'block'}, condition: {urlFilter: '/bam-dnr/get-only', requestMethods: ['get'], resourceTypes: ['xmlhttprequest']}}",
+        await measure("getMethod", id: 202, condition: "{urlFilter: '/bam-dnr/get-only', requestMethods: ['get'], resourceTypes: ['xmlhttprequest']}",
                       probes: [("get", "/bam-dnr/get-only", "GET"), ("post", "/bam-dnr/get-only", "POST")])
+        await measure("excludedPostMethod", id: 203, condition: "{urlFilter: '/bam-dnr/not-post', excludedRequestMethods: ['post'], resourceTypes: ['xmlhttprequest']}",
+                      probes: [("get", "/bam-dnr/not-post", "GET"), ("post", "/bam-dnr/not-post", "POST")])
+        await measure("uppercaseMethod", id: 204, condition: "{urlFilter: '/bam-dnr/upper-method', requestMethods: ['POST'], resourceTypes: ['xmlhttprequest']}",
+                      probes: [("post", "/bam-dnr/upper-method", "POST")])
+        // excludedResourceTypes is not validated by WebKit; excluding every type it knows leaves an empty list.
+        let knownTypes = "['font', 'image', 'main_frame', 'media', 'other', 'ping', 'script', 'stylesheet', 'sub_frame', 'websocket', 'xmlhttprequest']"
+        await measure("excludesAllKnownTypes", id: 205, condition: "{urlFilter: '/bam-dnr/excluded-all', excludedResourceTypes: \(knownTypes)}",
+                      probes: [("xhr", "/bam-dnr/excluded-all", "GET")])
+        await measure("excludesUnknownOnly", id: 206, condition: "{urlFilter: '/bam-dnr/excluded-unknown', excludedResourceTypes: ['webtransport']}",
+                      probes: [("xhr", "/bam-dnr/excluded-unknown", "GET")])
+        await measure("imagePlusUnknown", id: 207, condition: "{urlFilter: '/bam-dnr/image-only', resourceTypes: ['image', 'webtransport']}",
+                      probes: [("xhr", "/bam-dnr/image-only", "GET")])
+        await measure("unknownWithXHR", id: 208, condition: "{urlFilter: '/bam-dnr/webtransport-mixed', resourceTypes: ['xmlhttprequest', 'webtransport']}",
+                      probes: [("xhr", "/bam-dnr/webtransport-mixed", "GET")])
         let edgeJSON = (try? JSONSerialization.data(withJSONObject: edges, options: [.sortedKeys])).flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
         print("EXTENSION_DNR edges=\(edgeJSON) macOS=\(ProcessInfo.processInfo.operatingSystemVersionString)"); fflush(stdout)
 

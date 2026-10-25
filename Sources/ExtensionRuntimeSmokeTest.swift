@@ -12,7 +12,7 @@ import WebKit
             print("SKIP: Extensions — macOS 15.4 or later is required")
             fflush(stdout); exit(0)
         }
-        watchdog = Timer.scheduledTimer(withTimeInterval: 180, repeats: false) { [weak self] _ in
+        watchdog = Timer.scheduledTimer(withTimeInterval: 300, repeats: false) { [weak self] _ in
             Task { @MainActor [weak self] in self?.finish(false, "Overall fixture timeout") }
         }
         task = Task { @MainActor [weak self] in
