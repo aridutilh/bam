@@ -147,6 +147,26 @@ import JavaScriptCore
         require(Rules.missing(noAlias) == ["messaging.alias"], "A missing message outcome is reported")
         require(!Rules.isMeasured(nil) && !Rules.isMeasured(["error": "x"]), "Nothing or an error object is never measured")
 
+        // Review of 3aebee2 — 1: a timed-out message is not a definite outcome.
+        var aliasTimedOut = complete
+        aliasTimedOut["messaging"] = ["implicit": ["outcome": "resolved"], "nativeID": ["outcome": "rejected", "error": "x"], "alias": ["outcome": "timed out"]]
+        require(Rules.missing(aliasTimedOut) == ["messaging.alias"], "A timed-out message makes the run incomplete")
+        // 2: every required chrome read must succeed; a failed (missing) read is not "observed".
+        var oneReadFailed = plain, ownEntry = plain["ownGetter"] as! [String: Any], delayed = ownEntry["delayed"] as! [String: Any]
+        delayed.removeValue(forKey: "freshChrome"); ownEntry["delayed"] = delayed; oneReadFailed["ownGetter"] = ownEntry
+        require(Rules.read(plain).ownGetterObserved == true && Rules.read(oneReadFailed).ownGetterObserved == false,
+                "One failed fresh-chrome read means the own getter isn't reported as observed")
+        // `browser` absent is not applicable; when present, its reads are required too.
+        require(Rules.read(plain).browserPresent == false && Rules.summary(Rules.read(plain))["browser_namespace"] as? String == "absent (not applicable)",
+                "An absent browser namespace is reported as not applicable")
+        var withBrowser = plain; var types = plain["types"] as! [String: Any]; types["browser"] = "object"; withBrowser["types"] = types
+        require(Rules.read(withBrowser).ownGetterObserved == false, "With a browser namespace, its missing reads count against 'observed'")
+        // 3: native calls through the facade include a successful getManifest.
+        var manifestFailed = plain, facadeEntry = plain["facade"] as! [String: Any], calls = facadeEntry["nativeCalls"] as! [String: Any]
+        calls["manifestName"] = ["error": "TypeError: receiver"]; facadeEntry["nativeCalls"] = calls; manifestFailed["facade"] = facadeEntry
+        require(Rules.read(plain).facadeNativeCallsWork == true && Rules.read(manifestFailed).facadeNativeCallsWork == false,
+                "A failed getManifest means native calls through the facade don't all work")
+
         // The worker and page scripts parse; the worker answers sender and measure messages.
         let worker = JSContext()!
         var workerError: String?

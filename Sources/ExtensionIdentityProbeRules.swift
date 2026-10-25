@@ -221,6 +221,8 @@ enum ExtensionIdentityProbeRules {
     /// One scope's evidence, read without claiming compatibility.
     struct ScopeReading: Equatable {
         var nativeIDIsUUID: Bool?
+        /// Whether the scope has a `browser` namespace; when it doesn't, its reads are not applicable.
+        var browserPresent: Bool?
         /// The alias was seen on every read of A (same object, fresh chrome, fresh browser, after a delay).
         var ownGetterObserved: Bool?
         var ownGetterDefinedButIgnored: Bool?
@@ -236,11 +238,18 @@ enum ExtensionIdentityProbeRules {
         var reading = ScopeReading()
         let alias = scope["alias"] as? String
         reading.nativeIDIsUUID = (scope["native"] as? [String: Any])?["idIsUUID"] as? Bool
+        // `browser` is checked only when the scope has one; otherwise it's not applicable (never a pass by omission).
+        let hasBrowser = (scope["types"] as? [String: Any])?["browser"] as? String == "object"
+        reading.browserPresent = hasBrowser
         if let own = scope["ownGetter"] as? [String: Any] {
             let defined = own["defined"] as? Bool ?? false
-            let reads = [own["immediate"], own["delayed"]].compactMap { $0 as? [String: Any] }
-            let values = reads.flatMap { [$0["sameObject"], $0["freshChrome"], $0["freshBrowser"]] }.compactMap { $0 as? String }
-            let observed = defined && !values.isEmpty && values.allSatisfy { $0 == alias }
+            // Every required read must have happened and returned the alias: a failed or missing read is not observed.
+            let reads = [own["immediate"], own["delayed"]].map { $0 as? [String: Any] }
+            let required = reads.flatMap { read -> [Any?] in
+                guard let read else { return [nil] }
+                return [read["sameObject"], read["freshChrome"]] + (hasBrowser ? [read["freshBrowser"]] : [])
+            }
+            let observed = defined && required.allSatisfy { ($0 as? String) == alias }
             reading.ownGetterObserved = observed
             reading.ownGetterDefinedButIgnored = defined && !observed
             reading.restored = own["restored"] as? Bool
@@ -252,7 +261,9 @@ enum ExtensionIdentityProbeRules {
             let seen = [immediate?["globalChrome"], immediate?["bareChrome"], delayed?["globalChrome"], delayed?["bareChrome"]].map { $0 as? String }
             reading.facadeObserved = installed && seen.allSatisfy { $0 == alias }
             if let calls = facade["nativeCalls"] as? [String: Any] {
-                reading.facadeNativeCallsWork = calls["getURLMatchesNative"] as? Bool == true && calls["storageRoundTrip"] as? Bool == true
+                let manifest = (calls["manifestName"] as? [String: Any])?["value"] as? String
+                reading.facadeNativeCallsWork = calls["getURLMatchesNative"] as? Bool == true && manifest == fixtureName
+                    && calls["storageRoundTrip"] as? Bool == true
                     && calls["listenerAdded"] as? Bool == true && calls["listenerRemoved"] as? Bool == true
             }
             reading.restored = (reading.restored ?? true) && facade["restored"] as? Bool == true
@@ -280,8 +291,12 @@ enum ExtensionIdentityProbeRules {
         let worker = result["worker"] as? [String: Any]
         if worker?["outcome"] as? String != "resolved" || !isMeasured(worker?["value"] as? [String: Any]) { missing.append("worker") }
         let messaging = result["messaging"] as? [String: Any]
-        for key in ["implicit", "nativeID", "alias"] where (messaging?[key] as? [String: Any])?["outcome"] as? String == nil {
-            missing.append("messaging.\(key)")
+        // Definite means it resolved, rejected or threw; a timeout is not an outcome.
+        let definite: Set<String> = ["resolved", "rejected", "threw"]
+        for key in ["implicit", "nativeID", "alias"] {
+            guard let outcome = (messaging?[key] as? [String: Any])?["outcome"] as? String, definite.contains(outcome) else {
+                missing.append("messaging.\(key)"); continue
+            }
         }
         return missing
     }
@@ -289,6 +304,7 @@ enum ExtensionIdentityProbeRules {
     static func summary(_ reading: ScopeReading) -> [String: Any] {
         func value(_ flag: Bool?) -> Any { flag.map { $0 as Any } ?? "not measured" }
         return ["native_id_is_uuid": value(reading.nativeIDIsUUID), "own_getter_observed": value(reading.ownGetterObserved),
+                "browser_namespace": reading.browserPresent.map { $0 ? "present (checked)" : "absent (not applicable)" } ?? "not measured",
                 "own_getter_defined_but_ignored": value(reading.ownGetterDefinedButIgnored), "facade_installed": value(reading.facadeInstalled),
                 "facade_observed": value(reading.facadeObserved), "facade_native_calls_work": value(reading.facadeNativeCallsWork),
                 "overrides_restored": value(reading.restored)]
