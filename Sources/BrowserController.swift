@@ -224,6 +224,16 @@ import QuartzCore
     var faviconRefreshWork: DispatchWorkItem?
     var faviconDiscoveryWork: [UUID: DispatchWorkItem] = [:]
     var faviconDocumentGenerations: [UUID: UUID] = [:]
+    /// Fixture seam (default on, normal behavior unchanged): when false, Bam runs no document favicon discovery script
+    /// in any page, and pending discovery work and in-flight generations are dropped. Measurement fixtures that must
+    /// not evaluate page JavaScript set it before loading their page.
+    var documentFaviconDiscoveryEnabled = true {
+        didSet {
+            guard !documentFaviconDiscoveryEnabled else { return }
+            faviconDiscoveryWork.values.forEach { $0.cancel() }; faviconDiscoveryWork.removeAll()
+            faviconDocumentGenerations.removeAll()
+        }
+    }
     var profileLibraries: [UUID: BrowserLibrary] = [:]
     var library: BrowserLibrary { library(for: commandProfileID) }
     var confirmProfileChange: ((String) -> Bool)?
