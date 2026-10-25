@@ -5,6 +5,11 @@
 - Hide the window's close, minimize and zoom buttons together with the sidebar, as Arc does: they fade out over the last 80 points of the collapse, so a collapsed sidebar leaves the page alone in the window, and they return as the sidebar slides back in.
 - Retire the “A little space” start page. An empty tab is now a plain dark surface titled “New tab” (the address bar still reads “Search or enter URL”), and the History ▸ Home command (⇧⌘H) that navigated to it is gone. Existing tabs on that page keep working and simply show the blank surface.
 
+## 0.19.1 draft — build 38
+
+- Give the extension store selector and its opened choices Bam’s card surfaces, type, red selection and focus styling. Support keyboard selection, with Escape and outside-click dismissal leaving the current choice unchanged.
+- Add more space around extension icons and store badges, with wider row insets and taller results.
+
 ## 0.19.0 draft — build 37
 
 - Search Chrome Web Store, Firefox Add-ons and Safari Mac App Store sources inside one Bam extension library, with product icons, store marks, publisher, recommended source and permissions/details on demand. Exact known-product store identities combine Dashlane, 1Password, vidIQ and Bitwarden; unrelated products are kept separate. Individual source failures are shown without discarding successful results. Safari apps are App Store handoffs, and known-blocked Chrome Dashlane/1Password builds direct users to Firefox.
