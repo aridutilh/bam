@@ -209,6 +209,16 @@ import UniformTypeIdentifiers
             ? "No Spaces selected. Select a Space to import, or bring in Favorites from other Arc profiles."
             : "No Spaces selected. Select at least one Space to import."
     }
+    /// Why nothing would be added. With some Spaces left out, it speaks about
+    /// the selected Spaces, not the whole layout.
+    private func emptyHeadline(_ report: ArcImport.Report) -> String {
+        guard !excludedSpaceIDs.isEmpty, report.skippedSpaces == 0 else { return report.emptyReason }
+        if report.removedSpaces > 0 && report.alreadyImported == 0 {
+            return "Nothing new: the selected Spaces were removed after an earlier import."
+        }
+        if report.alreadyImported > 0 { return "Everything Bam supports in the selected Spaces is already in Bam." }
+        return "The selected Spaces have nothing Bam can import."
+    }
     private func rebuildSpaceRows() {
         spacesList.arrangedSubviews.forEach { $0.removeFromSuperview() }
         spaceBoxes = [:]; spaceDetails = [:]
@@ -283,7 +293,7 @@ import UniformTypeIdentifiers
         let newSpaces = report.spaces.filter(\.isNew).count
         let hint = emptySelectionHint
         let headline = hint != nil ? "No Spaces selected"
-            : report.isEmpty ? report.emptyReason
+            : report.isEmpty ? emptyHeadline(report)
             : "\(report.importedTabs) tab\(report.importedTabs == 1 ? "" : "s") and \(report.importedFolders) folder\(report.importedFolders == 1 ? "" : "s")"
                 + (newSpaces > 0 ? " into \(newSpaces) new Space\(newSpaces == 1 ? "" : "s")" : "")
         add(label(headline, size: 14, weight: .semibold))

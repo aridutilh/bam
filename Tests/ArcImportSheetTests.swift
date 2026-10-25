@@ -142,6 +142,29 @@ import AppKit
             require(pickerWindow.contentView!.bounds.contains(picker.importButton.convert(picker.importButton.bounds, to: nil)),
                     "Import stays visible with Space rows at \(size)")
         }
+        // Repeat import of a subset (native manual check): the empty headline
+        // speaks about the selected Spaces, not the whole layout.
+        let homeID = ids[1]
+        var homeOnly = ArcImport.Options(); homeOnly.spaceIDs = [homeID]
+        let afterHome = ArcImport.apply(source, to: .fresh(), options: homeOnly).session
+        let repeatSheet = ArcImportController()
+        repeatSheet.preview = { source, options in ArcImport.apply(source, to: afterHome, options: options).report }
+        repeatSheet.load(fixture)
+        @MainActor func headlineText(_ sheet: ArcImportController) -> String? {
+            ((sheet.body.arrangedSubviews.first as? NSStackView)?.arrangedSubviews.first as? NSTextField)?.stringValue
+        }
+        require(repeatSheet.importButton.isEnabled && repeatSheet.report?.isEmpty == false, "With every Space selected, the not-yet-imported Spaces are offered")
+        for id in ids where id != homeID { repeatSheet.setSpace(id, included: false) }
+        require(!repeatSheet.importButton.isEnabled && repeatSheet.report?.isEmpty == true && (repeatSheet.report?.alreadyImported ?? 0) > 0
+                && headlineText(repeatSheet) == "Everything Bam supports in the selected Spaces is already in Bam.",
+                "A subset repeat says the selected Spaces are already in Bam: \(headlineText(repeatSheet) ?? "nil")")
+        let afterAll = ArcImport.apply(source, to: .fresh(), options: ArcImport.Options()).session
+        let fullRepeat = ArcImportController()
+        fullRepeat.preview = { source, options in ArcImport.apply(source, to: afterAll, options: options).report }
+        fullRepeat.load(fixture)
+        require(headlineText(fullRepeat) == "All supported sidebar items in this layout are already in Bam.",
+                "A full repeat keeps the whole-layout wording")
+
         // Header with a long layout path (native 0636 finding): Choose File… stays
         // fully visible at its natural width; the path truncates before it.
         var longDir = workDir
