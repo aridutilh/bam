@@ -1,8 +1,14 @@
 import AppKit
 import WebKit
 
-/// Bounded, disposable observation of an explicitly supplied vendor package.
-/// This is not a compatibility test: no account sign-in or vault operation is performed.
+/// Bounded, disposable observation of one official vendor extension
+/// (`--vendor-extension-probe`, BAM_VENDOR_CHROME_ID). It installs exactly as a
+/// user would, through Bam's normal Chrome Web Store installer, and requires the
+/// CRX3 publisher signature to verify for that ID. Everything runs in a private
+/// controller: non-persistent website data and temporary extension storage that
+/// is removed at the end. No vendor files are kept, no native companion is
+/// granted, and no account sign-in or vault operation is performed.
+/// This is an observation, not a compatibility test.
 @MainActor final class VendorExtensionProbe {
     private var watchdog: Timer?
     private var task: Task<Void, Never>?
@@ -11,8 +17,21 @@ import WebKit
     private var extensionID: UUID?
     private var initialized = false
     private var finished = false
+    /// Set once a deadline has cancelled the run and is waiting for it to unwind.
+    private var expiring = false
+    /// Set when the run task has fully returned, so every cleanup in the
+    /// installation path (including the installer's staging-folder removal) ran.
+    private var runEnded = false
+    /// The installer's staging parent for this run only (downloaded archive and
+    /// unpacked package). Created and removed by the probe; nothing else is touched.
+    private let scratch = FileManager.default.temporaryDirectory
+        .appendingPathComponent("bam-vendor-probe-\(UUID().uuidString)", isDirectory: true)
+    private var preparationStarted = ProcessInfo.processInfo.systemUptime
+    private var observationStarted: TimeInterval?
+    /// True only when the full requested observation period ran.
+    private var observationCompleted = false
     private var pages: [String: [String: Any]] = [:]
-    private var observations: [String: Any] = ["scope": "fresh private profile; no sign-in; no compatibility claim"]
+    private var observations: [String: Any] = ["scope": "official Chrome Web Store CRX, signature verified for the requested ID; fresh private profile and temporary extension storage; no sign-in; no native companion; no compatibility claim"]
     private var blockedNavigations: [[String: Any]] = []
     private var reviewEvents: [[String: Any]] = []
 
@@ -21,23 +40,60 @@ import WebKit
             finish(false, reason: "WKWebExtension requires macOS 15.4 or later")
             return
         }
-        let timer = Timer(timeInterval: Self.observationSeconds + 5, repeats: false) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                self.finish(self.initialized, reason: "Overall observation deadline reached")
-            }
-        }
-        watchdog = timer; RunLoop.main.add(timer, forMode: .common)
+        // Store lookup, download, verification and installation have their own
+        // deadline; the observation deadline is armed only when observation begins.
+        preparationStarted = ProcessInfo.processInfo.systemUptime
+        arm(Self.preparationSeconds, reason: "Preparation deadline reached before observation began")
         task = Task { @MainActor [weak self] in
             guard let self else { return }
             do { try await self.run() }
-            catch { self.finish(false, reason: error.localizedDescription) }
+            catch {
+                // A deadline that cancelled the run reports once the run has unwound.
+                if !self.expiring { self.finish(false, reason: self.errorDescription(error)) }
+            }
+            self.runEnded = true
         }
     }
 
     /// BAM_VENDOR_SECONDS bounds the observation (default 19, at most 120).
     static var observationSeconds: TimeInterval {
         min(120, max(5, Double(ProcessInfo.processInfo.environment["BAM_VENDOR_SECONDS"] ?? "") ?? 19))
+    }
+    /// BAM_VENDOR_PREPARE_SECONDS bounds resolution, download, verification and
+    /// installation (default 90, 15–300), separately from the observation.
+    static var preparationSeconds: TimeInterval {
+        min(300, max(15, Double(ProcessInfo.processInfo.environment["BAM_VENDOR_PREPARE_SECONDS"] ?? "") ?? 90))
+    }
+    /// How long a deadline waits for the cancelled run to unwind before exiting.
+    static let cancellationGrace: TimeInterval = 15
+
+    private func arm(_ seconds: TimeInterval, reason: String) {
+        watchdog?.invalidate()
+        let timer = Timer(timeInterval: seconds, repeats: false) { [weak self] _ in
+            Task { @MainActor [weak self] in self?.expire(reason) }
+        }
+        watchdog = timer; RunLoop.main.add(timer, forMode: .common)
+    }
+    /// A deadline cancels the run, then waits (bounded) for it to return so the
+    /// installer's own cleanup, including removal of its staging folder, completes
+    /// before the process exits. Whether it did is reported, never assumed.
+    private func expire(_ reason: String) {
+        guard !finished, !expiring else { return }
+        expiring = true
+        observations["deadline"] = reason
+        task?.cancel()
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let limit = ProcessInfo.processInfo.systemUptime + Self.cancellationGrace
+            while !self.runEnded && ProcessInfo.processInfo.systemUptime < limit {
+                try? await Task.sleep(nanoseconds: 50_000_000)
+            }
+            self.observations["cancelled_run_unwound"] = self.runEnded
+            let detail = self.runEnded ? "" : "; the cancelled run did not return within \(Int(Self.cancellationGrace)) s, so installer cleanup is unconfirmed"
+            // A deadline never counts as completing the requested observation;
+            // the phase fields show how far the run got.
+            self.finish(false, reason: reason + detail)
+        }
     }
     /// BAM_VENDOR_SITE opens one ordinary HTTP(S) page in the profile so content
     /// scripts can run; BAM_VENDOR_SITE_PROBE is an optional JavaScript expression
@@ -75,22 +131,14 @@ import WebKit
     @available(macOS 15.4, *)
     private func run() async throws {
         let env = ProcessInfo.processInfo.environment
-        guard let raw = env["BAM_VENDOR_EXTENSION"], raw.hasPrefix("/") else {
-            throw BrowserExtensions.failure("Set BAM_VENDOR_EXTENSION to an absolute unpacked package directory")
+        // The only intake is Bam's normal store installation: the official
+        // Chrome Web Store CRX, whose publisher signature must verify for
+        // exactly this ID. No unpacked or locally supplied vendor folders.
+        guard let expected = env["BAM_VENDOR_CHROME_ID"]?.trimmingCharacters(in: .whitespaces).lowercased(),
+              expected.range(of: "^[a-p]{32}$", options: .regularExpression) != nil else {
+            throw BrowserExtensions.failure("Set BAM_VENDOR_CHROME_ID to a 32-letter Chrome Web Store extension ID")
         }
-        let package = URL(fileURLWithPath: raw, isDirectory: true)
-        let metadata = try package.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
-        guard metadata.isDirectory == true, metadata.isSymbolicLink != true else {
-            throw BrowserExtensions.failure("BAM_VENDOR_EXTENSION must be a real unpacked directory")
-        }
-        let manifestData = try Data(contentsOf: package.appendingPathComponent("manifest.json"))
-        guard manifestData.count < 1_048_576,
-              let manifest = try JSONSerialization.jsonObject(with: manifestData) as? [String: Any] else {
-            throw BrowserExtensions.failure("Invalid or oversized manifest")
-        }
-        observations["manifest_version"] = manifest["manifest_version"]
-        observations["package_version"] = manifest["version"]
-        observations["package_directory"] = package.lastPathComponent
+        observations["chrome_web_store_id"] = expected
 
         let sessionURL = FileManager.default.temporaryDirectory.appendingPathComponent("unused-vendor-probe-\(UUID().uuidString).json")
         let browser = BrowserController(sessionURL: sessionURL, ephemeral: true)
@@ -139,12 +187,34 @@ import WebKit
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = browser.profileStores.store(for: profile)
         host.configure(configuration, profileID: profile)
-        let id = try await host.importPackage(at: package, profileID: profile)
-        guard !finished else { return }
-        extensionID = id
-        guard let context = host.context(for: id) else {
-            throw BrowserExtensions.failure(host.errors[id] ?? host.lastError ?? "The host imported the manifest but did not load an extension context")
+        let installer = host.installer
+        try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: false)
+        installer.stagingRoot = scratch
+        let listing = try await installer.chromeWebStore.candidate(for: expected)
+        guard listing.source == .chromeWebStore, listing.upstreamID == expected else {
+            throw BrowserExtensions.failure("The Chrome Web Store did not resolve \(expected) to that listing")
         }
+        let id = try await installer.install(listing, profileID: profile)
+        try Task.checkCancellation()
+        guard !finished, !expiring else { return }
+        extensionID = id
+        guard let record = host.items(profileID: profile).first(where: { $0.id == id }), let origin = record.catalog,
+              origin.source == .chromeWebStore, origin.upstreamID == expected, origin.verifiedChromeExtensionID == expected else {
+            throw BrowserExtensions.failure("The installed package is not a CRX3 publisher-signature-verified build of \(expected)")
+        }
+        observations["provenance"] = origin.provenance
+        observations["package_version"] = record.version
+        observations["package_sha256"] = origin.sha256
+        observations["installed_into_temporary_storage"] = host.storageURL.path.hasPrefix(FileManager.default.temporaryDirectory.path)
+        guard record.nativeHost == nil else { throw BrowserExtensions.failure("A native companion was granted during installation") }
+        observations["native_companion_granted"] = false
+        guard let context = host.context(for: id) else {
+            throw BrowserExtensions.failure(host.errors[id] ?? host.lastError ?? "The host installed the package but did not load an extension context")
+        }
+        let manifest = context.webExtension.manifest
+        let package = host.storageURL.appendingPathComponent(record.id.uuidString, isDirectory: true).appendingPathComponent(record.packageName, isDirectory: true)
+        observations["manifest_version"] = manifest["manifest_version"]
+        observations["requests_native_messaging"] = (manifest["permissions"] as? [String] ?? []).contains("nativeMessaging")
         initialized = true
         observations["extension_name"] = context.webExtension.displayName ?? ""
         observations["has_background"] = context.webExtension.hasBackgroundContent
@@ -161,14 +231,20 @@ import WebKit
                 self.observations["background_load_callback"] = error.map { self.errorDescription($0) } ?? "completed"
             }
         }
+        // Preparation is over: the requested observation budget starts now, with
+        // its own backstop deadline, independent of how long installation took.
         let started = ProcessInfo.processInfo.systemUptime
+        observationStarted = started
+        observations["preparation_seconds"] = (started - preparationStarted).rounded()
+        let budget = Self.observationSeconds
+        observations["observation_requested_seconds"] = budget
+        arm(budget + 10, reason: "Observation backstop deadline reached")
         var actionInvoked = false, fallbackOpened = false, lastSample = -1
         var invokedAction: WKWebExtension.Action?
         observations["action_invoked"] = false
         observations["action_popup_presented"] = false
         func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
-        let budget = Self.observationSeconds
-        while !finished && ProcessInfo.processInfo.systemUptime - started < budget {
+        while !finished && !expiring && ProcessInfo.processInfo.systemUptime - started < budget {
             let elapsed = ProcessInfo.processInfo.systemUptime - started
             if siteTabID == nil, let siteURL, elapsed >= 1 {
                 siteTabID = browser.openProfileTab(siteURL, profileID: profile, active: true)
@@ -241,8 +317,9 @@ import WebKit
             }
             try await Task.sleep(nanoseconds: 100_000_000)
         }
-        observations["observation_seconds"] = ProcessInfo.processInfo.systemUptime - started
-        finish(true, reason: "Bounded package observation completed; functionality is not certified")
+        guard !finished, !expiring else { return }
+        observationCompleted = true
+        finish(true, reason: "Requested observation period completed; functionality is not certified")
     }
 
     private func localPage(_ path: String, base: URL, package: URL) -> URL? {
@@ -310,38 +387,109 @@ import WebKit
     }
     private func errorDescription(_ error: Error) -> String {
         let ns = error as NSError
-        // URL queries/fragments can contain sign-in state. The probe only reports bounded descriptions.
-        let text = ns.localizedDescription.replacingOccurrences(of: #"([A-Za-z][A-Za-z0-9+.-]*://[^\s?#]+)[?#][^\s]*"#,
-                                                               with: "$1[redacted]", options: .regularExpression)
-        return String("\(ns.domain) \(ns.code): \(text)".prefix(1500))
+        return Self.sanitize("\(ns.domain) \(ns.code): \(ns.localizedDescription)")
+    }
+    /// The one sanitizer for every string the probe prints. URL user-info,
+    /// queries and fragments can carry sign-in state, so they are removed from
+    /// anything URL-shaped, and length is bounded. Nothing else is redacted.
+    nonisolated static func sanitize(_ text: String, limit: Int = 1500) -> String {
+        var clean = text.replacingOccurrences(of: #"([A-Za-z][A-Za-z0-9+.-]*://)[^\s/?#@]+@"#, with: "$1", options: .regularExpression)
+        clean = clean.replacingOccurrences(of: #"([A-Za-z][A-Za-z0-9+.-]*://[^\s?#]+)[?#][^\s"'<>]*"#, with: "$1[redacted]", options: .regularExpression)
+        return clean.count > limit ? String(clean.prefix(limit)) + "…" : clean
+    }
+    /// Applies `sanitize` to every string inside a JSON-like value, dictionary
+    /// keys included (custom probes may key results by URL). Keys are bounded to
+    /// 200 characters. If two keys sanitize to the same text, original keys are
+    /// taken in sorted order: the first keeps it and later ones get " [2]", " [3]"…
+    nonisolated static func scrub(_ value: Any) -> Any {
+        switch value {
+        case let text as String: return sanitize(text)
+        case let object as [String: Any]:
+            var result: [String: Any] = [:]
+            for key in object.keys.sorted() {
+                let base = sanitize(key, limit: 200)
+                var clean = base, ordinal = 2
+                while result[clean] != nil { clean = "\(base) [\(ordinal)]"; ordinal += 1 }
+                result[clean] = scrub(object[key]!)
+            }
+            return result
+        case let list as [Any]: return list.map(scrub)
+        default: return value
+        }
     }
     private func recordBlocked(_ url: URL, operation: String) {
         guard blockedNavigations.count < 20 else { return }
         blockedNavigations.append(["operation": operation, "url": sanitizedURL(url)])
     }
 
-    private func finish(_ success: Bool, reason: String) {
+    private func finish(_ requested: Bool, reason raw: String) {
         guard !finished else { return }
         finished = true; watchdog?.invalidate(); watchdog = nil
         task?.cancel(); task = nil
-        observations["completed"] = success
-        observations["reason"] = reason
+        observations["phases"] = ["installed_and_initialized": initialized, "observation_started": observationStarted != nil,
+                                  "observation_completed": observationCompleted]
+        if let observationStarted {
+            observations["observation_elapsed_seconds"] = (ProcessInfo.processInfo.systemUptime - observationStarted).rounded()
+        }
+        let env = ProcessInfo.processInfo.environment
+        if env["BAM_VENDOR_SITE_PROBE"]?.isEmpty == false || env["BAM_VENDOR_BG_PROBE"]?.isEmpty == false {
+            observations["custom_probe_outputs"] = "BAM_VENDOR_SITE_PROBE / BAM_VENDOR_BG_PROBE results are operator-controlled; only URL user-info, queries and fragments are stripped"
+        }
         observations["pages"] = pages
         observations["permission_reviews"] = reviewEvents
         observations["blocked_external_tab_requests"] = blockedNavigations
-        if #available(macOS 15.4, *), let browser = controller, let id = extensionID {
+        var temporaryStorage: URL?
+        if #available(macOS 15.4, *), let browser = controller {
             let host = browser.browserExtensions
-            if let context = host.context(for: id) {
-                observations["context_errors"] = context.errors.prefix(20).map(errorDescription)
-                observations["context_error_count"] = context.errors.count
+            temporaryStorage = host.storageURL
+            if let id = extensionID {
+                if let context = host.context(for: id) {
+                    observations["context_errors"] = context.errors.prefix(20).map(errorDescription)
+                    observations["context_error_count"] = context.errors.count
+                }
+                observations["host_error"] = (host.errors[id] ?? host.lastError).map { Self.sanitize($0) }
+                observations["native_companion_granted"] = host.items(profileID: browser.session.currentProfileID).first { $0.id == id }?.nativeHost != nil
             }
-            observations["host_error"] = host.errors[id] ?? host.lastError
         }
         controller?.prepareToClose(persistSession: false)
+        let fm = FileManager.default
+        // The private host deletes its temporary package storage on shutdown;
+        // confirm that, and remove only that folder if teardown did not.
+        var hostStorageClean = true
+        if let storage = temporaryStorage, storage.path.hasPrefix(fm.temporaryDirectory.path) {
+            let leftover = fm.fileExists(atPath: storage.path)
+            if leftover { try? fm.removeItem(at: storage) }
+            observations["temporary_storage_removed_by_host"] = !leftover
+            hostStorageClean = !fm.fileExists(atPath: storage.path)
+            observations["temporary_storage_remaining"] = !hostStorageClean
+        }
+        // The installer stages downloads and unpacked packages only inside this
+        // run's scratch folder. Whatever it left there after returning (or after
+        // a cancelled run unwound) is reported, then only this folder is removed.
+        let stagedLeft = (try? fm.contentsOfDirectory(atPath: scratch.path)) ?? []
+        observations["installer_staging_entries_left"] = stagedLeft.count
+        observations["installer_staging_removed_by_installer"] = stagedLeft.isEmpty
+        if fm.fileExists(atPath: scratch.path) { try? fm.removeItem(at: scratch) }
+        let scratchClean = !fm.fileExists(atPath: scratch.path)
+        observations["installer_staging_remaining"] = !scratchClean
         window?.orderOut(nil); window?.close()
         controller = nil; window = nil
-        if let data = try? JSONSerialization.data(withJSONObject: observations, options: [.sortedKeys]),
+        // "completed" means the full requested observation ran (not merely that
+        // the extension initialized) and no vendor files were left behind.
+        var reasonText = raw
+        if requested && observationCompleted && !(hostStorageClean && scratchClean) {
+            reasonText += "; temporary vendor files could not be removed"
+        }
+        let success = requested && observationCompleted && hostStorageClean && scratchClean
+        let reason = Self.sanitize(reasonText)
+        observations["completed"] = success
+        observations["reason"] = reason
+        // Single output boundary: every string printed passes through `sanitize`.
+        let printable = Self.scrub(observations)
+        if JSONSerialization.isValidJSONObject(printable),
+           let data = try? JSONSerialization.data(withJSONObject: printable, options: [.sortedKeys]),
            let output = String(data: data, encoding: .utf8) { print("VENDOR_OBSERVATIONS \(output)") }
+        else { print("VENDOR_OBSERVATIONS {\"completed\":false,\"reason\":\"observations were not serializable\"}") }
         print("PROBE \(success ? "completed" : "failed"): \(reason)")
         fflush(stdout); exit(success ? 0 : 1)
     }
