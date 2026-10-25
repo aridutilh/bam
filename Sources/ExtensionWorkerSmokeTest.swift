@@ -51,6 +51,9 @@ import WebKit
             // cookies.onChanged as Chrome extensions use it: the listener reads changeInfo fields.
             const cookieEvents = [];
             chrome.cookies.onChanged.addListener(info => cookieEvents.push({type: typeof info, removed: info?.removed, name: info?.cookie?.name, cause: info?.cause}));
+            // Diagnostics only (never delivered to the fixture's listener): raw firings of WebKit's own event.
+            const nativeCookieFires = [];
+            globalThis.__bamCompatibility?.cookies?.nativeEvent?.addListener((...args) => nativeCookieFires.push(args.length));
             // A class whose dispose key is computed at load, as wasm-bindgen and TypeScript `using` emit.
             class FixtureResource { [Symbol.dispose]() { return 'released'; } }
             const disposal = typeof Symbol.dispose === 'symbol' && typeof Symbol.asyncDispose === 'symbol' &&
@@ -77,6 +80,16 @@ import WebKit
               catch (error) { return String(error); }
             };
             api.runtime.onMessage.addListener(async message => {
+              if (message?.kind === 'cookie-diagnostics') {
+                const describe = async details => { try { const list = await chrome.cookies.getAll(details); return {count: list.length, hasFixture: list.some(c => c.name === 'bam-fixture-cookie')}; } catch (error) { return 'error: ' + String(error?.message || error); } };
+                const proto = Object.getPrototypeOf(chrome.cookies), descriptor = proto && Object.getOwnPropertyDescriptor(proto, 'onChanged');
+                return {events: cookieEvents.slice(), nativeFires: nativeCookieFires.slice(), adapterInstalled: !!globalThis.__bamCompatibility?.cookies,
+                  sameEvent: chrome.cookies.onChanged === browser.cookies.onChanged, sameNamespace: chrome.cookies === browser.cookies,
+                  marker: !!chrome.cookies.__bamChangeInfo, prototypeIsObject: proto === Object.prototype,
+                  prototypeDescriptor: descriptor ? {configurable: descriptor.configurable, hasValue: 'value' in descriptor, hasGetter: typeof descriptor.get === 'function'} : null,
+                  ownDescriptor: !!Object.getOwnPropertyDescriptor(chrome.cookies, 'onChanged'),
+                  getAllEmpty: await describe({}), getAllURL: await describe({url: 'http://127.0.0.1/'}), getAllDomain: await describe({domain: '127.0.0.1'})};
+              }
               if (!message || !['probe','denials','revoked','offscreen','offscreen-close','offscreen-stall','offscreen-after-close'].includes(message.kind)) return undefined;
               if (message.kind === 'offscreen-stall') {
                 // The page's script runs, then its load stalls on a loopback request that never answers.
@@ -337,8 +350,19 @@ import WebKit
         let fixtureCookie = HTTPCookie(properties: [.name: "bam-fixture-cookie", .value: "1", .domain: "127.0.0.1", .path: "/"])!
         await configA.websiteDataStore.httpCookieStore.setCookie(fixtureCookie)
         func cookieEvents(_ popup: WKWebView) async -> [[String: Any]] { await request(popup)?["cookieEvents"] as? [[String: Any]] ?? [] }
-        try await wait("Setting a cookie did not reach the worker's cookies.onChanged as changeInfo") {
-            await cookieEvents(popupA).contains { $0["name"] as? String == "bam-fixture-cookie" && $0["removed"] as? Bool == false && $0["cause"] as? String == "explicit" }
+        func cookieDiagnostics() async -> String {
+            let value = await request(popupA, kind: "cookie-diagnostics") ?? [:]
+            return (try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])).flatMap { String(data: $0, encoding: .utf8) } ?? "\(value)"
+        }
+        do {
+            try await wait("Setting a cookie did not reach the worker's cookies.onChanged as changeInfo") {
+                await cookieEvents(popupA).contains { $0["name"] as? String == "bam-fixture-cookie" && $0["removed"] as? Bool == false && $0["cause"] as? String == "explicit" }
+            }
+        } catch {
+            let storeHas = await configA.websiteDataStore.httpCookieStore.allCookies().contains { $0.name == "bam-fixture-cookie" }
+            let diagnostics = await cookieDiagnostics()
+            print("EXTENSION_COOKIE_DIAGNOSTICS storeHasCookie=\(storeHas) worker=\(diagnostics)"); fflush(stdout)
+            throw Failure(description: "Setting a cookie did not reach the worker's cookies.onChanged as changeInfo (storeHasCookie=\(storeHas)): \(diagnostics)")
         }
         await configA.websiteDataStore.httpCookieStore.deleteCookie(fixtureCookie)
         try await wait("Deleting a cookie did not reach the worker's cookies.onChanged as changeInfo") {
