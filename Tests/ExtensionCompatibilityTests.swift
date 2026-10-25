@@ -369,6 +369,114 @@ import JavaScriptCore
         nativeLifecycle.evaluateScript(ExtensionCompatibility.workerScript(manifest: [:], browserVersion: "test"))
         try check(nativeLifecycle.evaluateScript("browser.runtime.onUpdateAvailable === engineEvent")!.toBool(), "An engine-provided onUpdateAvailable was replaced")
 
+        // windows.onBoundsChanged: native signals only; payloads are WebKit's own getAll windows, diffed in order.
+        let bounds = JSContext()!
+        var boundsErrors: [String] = []
+        bounds.exceptionHandler = { _, error in boundsErrors.append(error?.toString() ?? "JavaScript error") }
+        bounds.evaluateScript("""
+            var location = {origin: 'webkit-extension://fixture', href: 'webkit-extension://fixture/worker.js'}, logged = [], console = {error: function (m) { logged.push(String(m)); }}, performance = {now: function() { return 0; }};
+            // A read either waits for the test (reads) or takes the next planned answer, in getAll order.
+            var reads = [], planned = [], getAllCalls = [], portLog = [];
+            function Runtime() {}
+            Runtime.prototype.getURL = function (p) { return 'webkit-extension://fixture' + p; }; Runtime.prototype.getManifest = function () { return {}; };
+            Runtime.prototype.sendNativeMessage = function () { return Promise.resolve(true); };
+            Runtime.prototype.connectNative = function () { return {postMessage: function (m) { portLog.push(m.kind + ':' + m.event); }, onMessage: {addListener: function () {}},
+              onDisconnect: {addListener: function () {}}, disconnect: function () { portLog.push('disconnect'); }}; };
+            function Windows() {}
+            Windows.prototype.getAll = function (query) {
+              getAllCalls.push(JSON.stringify(query));
+              if (planned.length) { var answer = planned.shift(); return answer.error ? Promise.reject(answer.error) : Promise.resolve(answer.list); }
+              return new Promise(function (resolve, reject) { reads.push({resolve: resolve, reject: reject}); });
+            };
+            var browser = {runtime: new Runtime(), windows: new Windows()}, chrome = {runtime: browser.runtime, windows: browser.windows};
+            function win(id, left, width) { return {id: id, left: left, top: 20, width: width, height: 600, focused: false, state: 'normal', type: 'normal'}; }
+            function signal() { __bamCompatibility.dispatch('windows.onBoundsChanged', []); }
+            function settle(list) { if (reads.length) reads.shift().resolve(list); else planned.push({list: list}); }
+            function fail(error) { if (reads.length) reads.shift().reject(error); else planned.push({error: error}); }
+            var got = [];
+            function first(w) { got.push('first:' + w.id + ':' + w.left + ':' + w.width); w.left = -1; }
+            """)
+        bounds.evaluateScript(ExtensionCompatibility.workerScript(manifest: [:], browserVersion: "test"))
+        // Registration at startup (Session Buddy) takes the baseline; a signal during the baseline read waits for it.
+        bounds.evaluateScript("""
+            var shared = chrome.windows.onBoundsChanged === browser.windows.onBoundsChanged && Windows.prototype.onBoundsChanged === chrome.windows.onBoundsChanged;
+            chrome.windows.onBoundsChanged.addListener(first);
+            signal();
+            """)
+        // Microtasks have drained: only the baseline read has started; the signal's read waits behind it.
+        bounds.evaluateScript("var baselineCalls = getAllCalls.length, waitedForBaseline = reads.length === 1;")
+        bounds.evaluateScript("settle([win(1, 0, 800), win(2, 900, 500)]);")
+        bounds.evaluateScript("var afterBaseline = getAllCalls.length; settle([win(1, 40, 800), win(2, 900, 500), win(3, 0, 300)]);")
+        try check(boundsErrors.isEmpty && bounds.evaluateScript("""
+            shared && baselineCalls === 1 && getAllCalls[0] === '{"populate":false}' && waitedForBaseline && afterBaseline === 2
+            && JSON.stringify(got) === '["first:1:40:800"]' && portLog[0] === 'subscribe:windows.onBoundsChanged'
+            """)!.toBool(), "Baseline/signal ordering or the first change were wrong: \(bounds.evaluateScript("JSON.stringify([got, getAllCalls, portLog, waitedForBaseline])")!) \(boundsErrors)")
+        // Unchanged windows are silent; signals queued back to back report a change once, with the final bounds.
+        bounds.evaluateScript("got = []; signal(); settle([win(1, 40, 800), win(2, 900, 500)]);")
+        bounds.evaluateScript("signal(); signal(); settle([win(1, 40, 1000), win(2, 900, 500)]);")
+        bounds.evaluateScript("settle([win(1, 40, 1000), win(2, 900, 500)]);")
+        try check(bounds.evaluateScript("JSON.stringify(got) === '[\"first:1:40:1000\"]' && reads.length === 0 && planned.length === 0")!.toBool(),
+                  "Unchanged reads were reported or coalesced signals reported twice: \(bounds.evaluateScript("JSON.stringify(got)")!)")
+        // Each listener gets its own copy; a throwing listener does not stop the others.
+        bounds.evaluateScript("""
+            got = []; var seen = [];
+            function thrower(w) { seen.push(w); throw new Error('vendor listener failure'); }
+            function second(w) { seen.push(w); got.push('second:' + w.left); }
+            chrome.windows.onBoundsChanged.addListener(thrower); chrome.windows.onBoundsChanged.addListener(second);
+            signal(); settle([win(1, 70, 1000), win(2, 900, 500)]);
+            """)
+        try check(bounds.evaluateScript("JSON.stringify(got) === '[\"first:1:70:1000\",\"second:70\"]' && seen[0] !== seen[1] && logged.some(function (m) { return m.indexOf('listener failed') >= 0; })")!.toBool(),
+                  "Listener isolation or per-listener copies failed: \(bounds.evaluateScript("JSON.stringify([got, logged])")!)")
+        // Removing every listener ends the period: a pending read is discarded and the worker unsubscribes.
+        bounds.evaluateScript("got = []; signal();")
+        bounds.evaluateScript("""
+            var pendingAtDetach = reads.length === 1;
+            [first, thrower, second].forEach(function (fn) { chrome.windows.onBoundsChanged.removeListener(fn); });
+            settle([win(1, 300, 1000), win(2, 900, 500)]);
+            """)
+        try check(bounds.evaluateScript("pendingAtDetach && got.length === 0 && planned.length === 0 && !chrome.windows.onBoundsChanged.hasListeners() && portLog.indexOf('unsubscribe:windows.onBoundsChanged') >= 0 && portLog[portLog.length - 1] === 'disconnect'")!.toBool(),
+                  "A read pending at detach delivered, or the worker stayed subscribed: \(bounds.evaluateScript("JSON.stringify([got, portLog])")!)")
+        // Re-adding takes a fresh baseline (differences from the old period are not reported). A listener that
+        // removes itself mid-delivery ends the period: the second changed window is not delivered.
+        bounds.evaluateScript("""
+            function once(w) { got.push('once:' + w.id); chrome.windows.onBoundsChanged.removeListener(once); }
+            chrome.windows.onBoundsChanged.addListener(once);
+            settle([win(1, 500, 1000), win(2, 900, 500)]);
+            signal(); settle([win(1, 510, 1000), win(2, 910, 500)]);
+            """)
+        try check(bounds.evaluateScript("JSON.stringify(got) === '[\"once:1\"]' && reads.length === 0 && planned.length === 0")!.toBool(),
+                  "Re-baselining or reentrant removal was wrong: \(bounds.evaluateScript("JSON.stringify(got)")!)")
+        // A failed baseline read invents nothing: the next read becomes the baseline, later changes report.
+        bounds.evaluateScript("""
+            got = []; chrome.windows.onBoundsChanged.addListener(first);
+            fail(new Error('getAll failed'));
+            signal(); settle([win(1, 600, 1000)]);
+            signal(); settle([win(1, 620, 1000)]);
+            """)
+        try check(bounds.evaluateScript("JSON.stringify(got) === '[\"first:1:620:1000\"]' && planned.length === 0 && logged.some(function (m) { return m.indexOf('read failed') >= 0; })")!.toBool() && boundsErrors.isEmpty,
+                  "A failed baseline invented or missed a change: \(bounds.evaluateScript("JSON.stringify(got)")!) \(boundsErrors)")
+        // Topology refresh (a window opened elsewhere while window 1 is mid-resize): never reports, keeps window 1's
+        // committed geometry, adds window 4, drops window 2. The next committed read reports window 1's final bounds
+        // and window 4's first real move.
+        bounds.evaluateScript("""
+            got = [];
+            __bamCompatibility.dispatch('windows.onBoundsChanged', ['topology']); settle([win(1, 999, 1234), win(4, 10, 300)]);
+            """)
+        bounds.evaluateScript("var afterTopology = got.length; var topologyBaseline = JSON.stringify(__bamCompatibility.windowsBounds.baseline);")
+        bounds.evaluateScript("signal(); settle([win(1, 640, 1000), win(4, 15, 300)]);")
+        try check(bounds.evaluateScript("afterTopology === 0 && topologyBaseline === '[1,4]' && JSON.stringify(got) === '[\"first:1:640:1000\",\"first:4:15:300\"]'")!.toBool(),
+                  "A topology refresh reported, overwrote committed geometry, or lost the new window: \(bounds.evaluateScript("JSON.stringify([afterTopology, topologyBaseline, got])")!)")
+
+        // An engine-provided event is kept; without a windows namespace nothing is defined.
+        let engineBounds = JSContext()!
+        engineBounds.evaluateScript("""
+            var location = {origin: 'webkit-extension://fixture', href: 'x'}, console = {error: function() {}}, performance = {now: function() { return 0; }};
+            var engineEvent = {addListener: function () {}};
+            var browser = {runtime: {getURL: function (p) { return 'webkit-extension://fixture' + p; }, getManifest: function () { return {}; }}, windows: {getAll: function () {}, onBoundsChanged: engineEvent}};
+            """)
+        engineBounds.evaluateScript(ExtensionCompatibility.workerScript(manifest: [:], browserVersion: "test"))
+        try check(engineBounds.evaluateScript("browser.windows.onBoundsChanged === engineEvent")!.toBool(), "An engine-provided windows.onBoundsChanged was replaced")
+
         // declarativeNetRequest guard: unsafe added rules are refused before WebKit; valid calls pass through untouched.
         let guardJS = JSContext()!
         var guardErrors: [String] = []

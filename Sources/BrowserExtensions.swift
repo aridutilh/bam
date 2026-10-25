@@ -904,6 +904,7 @@ struct BrowserExtensionPermissionReview {
         // WebKit owns the popover delegate and disposes its web view on close.
         // Track the presented popover, not just the reusable extension action:
         // a delayed notification from its old popup must not clear a new one.
+        observeWindowGeometry()
         observers.append(NotificationCenter.default.addObserver(forName: NSPopover.didCloseNotification, object: nil, queue: .main) { [weak self] notification in
             Task { @MainActor [weak self] in
                 guard let self, let closed = notification.object as? NSPopover,
@@ -913,9 +914,53 @@ struct BrowserExtensionPermissionReview {
         })
     }
     deinit { for observer in observers { NotificationCenter.default.removeObserver(observer) } }
+
+    // windows.onBoundsChanged: a committed move or resize of a window this profile exposes (its own `windows`
+    // map, so other profiles' and unexposed windows never signal) signals this profile's contexts. Live
+    // resizes are ignored until they end; moves and programmatic resizes settle for boundsSettleDelay with no
+    // further change. Because the adapter compares every window it reads, a signal is held while any window
+    // of this profile is in a live resize or a mouse button is down, so no read sees uncommitted bounds.
+    static let boundsSettleDelay: TimeInterval = 0.3
+    /// AppKit's live-resize state. Replaceable only so the canonical fixture can hold a window mid-resize
+    /// without input injection; a real pointer drag remains a separate root check.
+    var isInLiveResize: (NSWindow) -> Bool = { $0.inLiveResize }
+    private var boundsGenerations: [ObjectIdentifier: Int] = [:]
+    /// Signals sent (fixture diagnostics only).
+    private(set) var boundsSignalCount = 0
+    func observeWindowGeometry() {
+        for name in [NSWindow.didMoveNotification, NSWindow.didResizeNotification, NSWindow.didEndLiveResizeNotification] {
+            observers.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] notification in
+                let window = notification.object as? NSWindow, isResize = notification.name == NSWindow.didResizeNotification
+                Task { @MainActor [weak self, weak window] in
+                    guard let self, let window else { return }
+                    self.windowGeometryChanged(window, liveResizeStep: isResize && self.isInLiveResize(window))
+                }
+            })
+        }
+    }
+    func windowGeometryChanged(_ window: NSWindow, liveResizeStep: Bool) {
+        let key = ObjectIdentifier(window)
+        guard !liveResizeStep, windows[key]?.native === window else { return }
+        let generation = (boundsGenerations[key] ?? 0) + 1
+        boundsGenerations[key] = generation
+        scheduleBoundsSignal(key, generation: generation, window: window)
+    }
+    private func scheduleBoundsSignal(_ key: ObjectIdentifier, generation: Int, window: NSWindow) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.boundsSettleDelay) { [weak self, weak window] in
+            Task { @MainActor [weak self, weak window] in
+                guard let self, let window, self.boundsGenerations[key] == generation, self.windows[key]?.native === window else { return }
+                if NSEvent.pressedMouseButtons & 1 != 0 || self.windows.values.contains(where: { $0.native.map(self.isInLiveResize) == true }) {
+                    self.scheduleBoundsSignal(key, generation: generation, window: window); return
+                }
+                self.boundsGenerations.removeValue(forKey: key)
+                self.boundsSignalCount += 1
+                self.compatibility.signalWindowBoundsChanged()
+            }
+        }
+    }
     private func clearPopupPresentation() { activePopup = nil; activePopupPopover = nil; activePopupTabID = nil }
     var nativeSessions: [UUID: BrowserExtensionNativeSession] = [:]
-    func shutdown() { disconnectAllNative(); compatibility.shutdown(); ExtensionNotificationCenter.shared.unregister(compatibility) }
+    func shutdown() { boundsGenerations.removeAll(); disconnectAllNative(); compatibility.shutdown(); ExtensionNotificationCenter.shared.unregister(compatibility) }
     func closePopup(for context: WKWebExtensionContext) {
         if popupContextID == context.uniqueIdentifier { popupAnchor = nil; popupTabID = nil; popupContextID = nil }
         if let action = activePopup, action.webExtensionContext === context { clearPopupPresentation(); action.closePopup() }
@@ -1006,9 +1051,10 @@ struct BrowserExtensionPermissionReview {
         snapshots = fresh; orderedIDs = ids
         let neededWindows = Set(supplied.map(windowKey))
         for key in Array(windows.keys) where !neededWindows.contains(key) { if let window = windows.removeValue(forKey: key) { controller.didCloseWindow(window) } }
+        var openedWindow = false
         for item in supplied {
             let key = windowKey(item)
-            if windows[key] == nil { let window = BrowserExtensionWindow(runtime: self, key: key, native: item.window); windows[key] = window; controller.didOpenWindow(window) }
+            if windows[key] == nil { let window = BrowserExtensionWindow(runtime: self, key: key, native: item.window); windows[key] = window; controller.didOpenWindow(window); openedWindow = true }
             if tabs[item.id] == nil { let tab = BrowserExtensionTab(runtime: self, id: item.id); tabs[item.id] = tab; controller.didOpenTab(tab) }
             else if let previous = old[item.id], let tab = tabs[item.id] {
                 var properties: WKWebExtension.TabChangedProperties = []
@@ -1019,6 +1065,9 @@ struct BrowserExtensionPermissionReview {
                 if !properties.isEmpty { controller.didChangeTabProperties(properties, for: tab) }
             }
         }
+        // A new window joins windows.onBoundsChanged baselines: the adapter re-reads and remembers it without
+        // reporting (it reports only differences), so the window's first committed move is not missed.
+        if openedWindow { compatibility.signalWindowBoundsChanged(topologyOnly: true) }
         reportedActiveTabs = reportedActiveTabs.filter { windows[$0.key] != nil }
         let activeMembers = Dictionary(grouping: currentSurfaces(), by: windowKey)
         for (key, window) in windows {
