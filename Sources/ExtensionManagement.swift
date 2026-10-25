@@ -300,7 +300,7 @@ import UniformTypeIdentifiers
             let next = try source.performSiteAccess(id: binding.extensionID, profileID: binding.profileID, revision: binding.engine.revision,
                                                     displayed: request.displayed, change: Self.change(for: request.action))
             binding.engine = next; binding.displayRevision += 1
-            // A restart that removed content set up for all sites is said once, in the editor and the status line.
+            // A restart that applied a website access change is said once, in the editor and the status line.
             let notice = host?.takeSiteAccessNotice(id: binding.extensionID)
             if let notice { pendingStatus = notice }
             if var snapshot = binding.snapshot { snapshot.message = notice; completion(.success(snapshot)) }

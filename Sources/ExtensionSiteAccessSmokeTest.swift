@@ -226,7 +226,7 @@ enum ExtensionSiteAccessSmokeTest {
     }
 }
 
-// MARK: - Restart candidate acceptance (all-host withdrawal restarts the extension)
+// MARK: - Restart candidate acceptance (withdrawing a live host grant restarts the extension)
 
 @MainActor @available(macOS 15.4, *)
 extension ExtensionSiteAccessSmokeTest {
@@ -261,8 +261,8 @@ extension ExtensionSiteAccessSmokeTest {
             try JSONSerialization.data(withJSONObject: manifest, options: .sortedKeys).write(to: folder.appendingPathComponent("manifest.json"))
             try Data("document.documentElement.dataset.\(marker) = 'js';\n".utf8).write(to: folder.appendingPathComponent("marker.js"))
             if css { try Data("html { \(cssProperty): injected; }\n".utf8).write(to: folder.appendingPathComponent("marker.css")) }
-            // Counts every start of the background (initial and after a restart).
-            try Data("chrome.storage.local.get('starts').then(v => chrome.storage.local.set({starts: (v.starts || 0) + 1}));\n".utf8)
+            // Counts every evaluation of the background script (initial and after a restart), with a per-evaluation nonce.
+            try Data("const run = crypto.randomUUID(); chrome.storage.local.get('starts').then(v => chrome.storage.local.set({starts: (v.starts || 0) + 1, lastRun: run}));\n".utf8)
                 .write(to: folder.appendingPathComponent("background.js"))
             try Data("<!doctype html><meta charset='utf-8'><title>restart fixture page</title>".utf8).write(to: folder.appendingPathComponent("page.html"))
             return folder
@@ -316,27 +316,48 @@ extension ExtensionSiteAccessSmokeTest {
             }
             throw fail("the extension page did not load")
         }
+        /// Navigates a fixture extension page away from the extension origin so it stops being one of its pages
+        /// (no longer a client of its background), before the caller drops it. WKWebView has no public close.
+        func release(_ web: WKWebView) async {
+            web.loadHTMLString("", baseURL: nil)
+            let deadline = ProcessInfo.processInfo.systemUptime + 5
+            while ProcessInfo.processInfo.systemUptime < deadline, web.isLoading || web.url?.scheme == host.context(for: subject)?.baseURL.scheme {
+                try? await Task.sleep(nanoseconds: 40_000_000)
+            }
+        }
         func storage(_ id: UUID) async throws -> (starts: Int, survivor: String, tabs: [Int]) {
             let web = try await extensionPage(id)
-            guard let value = await evaluate(web, """
+            let value = await evaluate(web, """
                 const v = await browser.storage.local.get(['starts', 'survivor']);
                 const tabs = (await browser.tabs.query({})).map(t => t.id).sort((a, b) => a - b);
                 return JSON.stringify({starts: v.starts || 0, survivor: v.survivor || '', tabs});
-                """) else { throw fail("could not read the extension's storage") }
+                """)
+            await release(web)
+            guard let value else { throw fail("could not read the extension's storage") }
             return ((value["starts"] as? Int) ?? 0, (value["survivor"] as? String) ?? "", (value["tabs"] as? [Int]) ?? [])
         }
-        /// Waits for the background start counter to reach at least `minimum` (starting the background if needed).
-        func starts(_ id: UUID, atLeast minimum: Int) async throws -> Int {
-            host.context(for: id)?.loadBackgroundContent { _ in }
+        /// One background measurement: asks WebKit to load the background and records its own completion result
+        /// (or that it never completed), the start counter, and the context's state and errors.
+        struct Background { var starts = 0; var load = "pending"; var loaded = false; var errors: [String] = [] }
+        /// Waits up to 15 s for the start counter to reach at least `minimum`. Never throws on a timeout: the caller
+        /// asserts, and the rest of the suite still runs.
+        func background(_ id: UUID, atLeast minimum: Int) async throws -> Background {
+            var result = Background()
+            let context = host.context(for: id)
+            if let context {
+                context.loadBackgroundContent { error in result.load = error.map { "error: \($0.localizedDescription)" } ?? "ok" }
+            } else { result.load = "no context" }
             let deadline = ProcessInfo.processInfo.systemUptime + 15
-            var last = 0
             while ProcessInfo.processInfo.systemUptime < deadline {
-                last = try await storage(id).starts
-                if last >= minimum { return last }
+                result.starts = try await storage(id).starts
+                if result.starts >= minimum, result.load != "pending" { break }
                 try await Task.sleep(nanoseconds: 100_000_000)
             }
-            throw fail("background start counter stayed at \(last), expected at least \(minimum)")
+            result.loaded = context?.isLoaded ?? false
+            result.errors = context?.errors.map(\.localizedDescription) ?? []
+            return result
         }
+        func describe(_ value: Background) -> String { "[starts=\(value.starts) loadBackgroundContent=\(value.load) loaded=\(value.loaded) errors=\(value.errors)]" }
         func document(_ tabID: UUID, after previous: String?, expected: URL) async throws -> [String: String] {
             let deadline = ProcessInfo.processInfo.systemUptime + 15
             var last: [String: String] = [:]
@@ -385,12 +406,17 @@ extension ExtensionSiteAccessSmokeTest {
         let token = UUID().uuidString
         let writer = try await extensionPage(subject)
         _ = await evaluate(writer, "await browser.storage.local.set({survivor: '\(token)'}); return JSON.stringify({ok: true});")
-        let subjectStartsBefore = try await starts(subject, atLeast: 1)
-        let otherStartsBefore = try await starts(other, atLeast: 1)
+        await release(writer)   // no fixture-held extension page across the first restart
+        let subjectBefore = try await background(subject, atLeast: 1)
+        let otherBefore = try await background(other, atLeast: 1)
+        let subjectStartsBefore = subjectBefore.starts, otherStartsBefore = otherBefore.starts
+        guard subjectStartsBefore >= 1, otherStartsBefore >= 1 else {
+            throw fail("the backgrounds never started: A \(describe(subjectBefore)), B \(describe(otherBefore))")
+        }
         let tabsBefore = try await storage(subject).tabs
         _ = host.takeSiteAccessNotice(id: subject)
 
-        // MARK: 2. Withhold A (all-host withdrawal): restart, same context, A's content gone, B untouched.
+        // MARK: 2. Withhold A (withdraws its all-host grants): restart, same context, A's content gone, B untouched.
         try withhold(subject)
         let notice = host.takeSiteAccessNotice(id: subject)
         expect(notice?.contains("Restarted") == true, "withholding all-host access didn't report a restart \(state(subject))")
@@ -406,14 +432,16 @@ extension ExtensionSiteAccessSmokeTest {
         expect(!subjectContext.hasAccess(to: page) && tabAccess == false, "A still has access after withholding (global \(subjectContext.hasAccess(to: page)), tab \(String(describing: tabAccess)))")
         let afterRestart = try await storage(subject)
         expect(afterRestart.survivor == token, "A's storage.local didn't survive the restart: \(afterRestart.survivor)")
-        let subjectStartsAfter = try await starts(subject, atLeast: subjectStartsBefore + 1)
-        expect(subjectStartsAfter == subjectStartsBefore + 1, "A's background started \(subjectStartsAfter - subjectStartsBefore) times across the restart, expected 1")
+        let subjectAfter = try await background(subject, atLeast: subjectStartsBefore + 1)
+        let subjectStartsAfter = subjectAfter.starts
+        expect(subjectStartsAfter == subjectStartsBefore + 1,
+               "A's background started \(subjectStartsAfter - subjectStartsBefore) times across the restart, expected 1 \(describe(subjectAfter)) \(state(subject))")
         let otherStartsAfter = try await storage(other).starts
         expect(otherStartsAfter == otherStartsBefore, "the unrelated extension's background restarted (\(otherStartsBefore) → \(otherStartsAfter))")
         let tabsAfter = try await storage(subject).tabs
         expect(!tabsAfter.isEmpty, "A sees no tabs after the restart")
 
-        // MARK: 3. Allow again: A marks again, no restart (nothing all-host withdrawn).
+        // MARK: 3. Allow again: A marks again, no restart (nothing withdrawn).
         try allow(subject)
         expect(host.takeSiteAccessNotice(id: subject) == nil, "re-allowing restarted A")
         let reallowed = try await reload(tabID, after: withheld["document"])
@@ -421,12 +449,19 @@ extension ExtensionSiteAccessSmokeTest {
         let startsAfterAllow = try await storage(subject).starts
         expect(startsAfterAllow == subjectStartsAfter, "re-allowing restarted A's background (\(subjectStartsAfter) → \(startsAfterAllow))")
 
-        // MARK: 4. Revoke Permissions: same restart effect.
+        // MARK: 4. Revoke Permissions: same restart effect. A fixture extension page is held open across it, to
+        // measure (not assert) whether an open extension page keeps the old background from starting again.
+        let held = try await extensionPage(subject)
+        let startsBeforeRevoke = try await storage(subject).starts
         try host.revokePermissions(id: subject)
         expect(host.takeSiteAccessNotice(id: subject)?.contains("Restarted") == true, "Revoke Permissions didn't restart A \(state(subject))")
         let revoked = try await reload(tabID, after: reallowed["document"])
         expect((revoked["js"] ?? "").isEmpty && (revoked["css"] ?? "").isEmpty, "after Revoke Permissions, A's content still reaches a new document: \(revoked) \(state(subject))")
         expect(!subjectContext.hasAccess(to: page), "A still has access after Revoke Permissions \(state(subject))")
+        let heldAfterRevoke = try await background(subject, atLeast: startsBeforeRevoke + 1)
+        let heldPage = await evaluate(held, "try { const v = await browser.storage.local.get('starts'); return JSON.stringify({read: String(v.starts)}); } catch (e) { return JSON.stringify({read: 'error: ' + e.message}); }")
+        await release(held)
+        let heldJSON = "{\"starts_delta\":\(heldAfterRevoke.starts - startsBeforeRevoke),\"load\":\"\(heldAfterRevoke.load)\",\"held_page_read\":\"\((heldPage?["read"] as? String) ?? "no result")\"}"
         try allow(subject)
         let afterRevokeAllow = try await reload(tabID, after: revoked["document"])
         expect(afterRevokeAllow["js"] == "js", "re-allowing after Revoke Permissions didn't restore A: \(afterRevokeAllow) \(state(subject))")
@@ -463,7 +498,7 @@ extension ExtensionSiteAccessSmokeTest {
         expect(recovered["js"] == "js" && recovered["css"] == "injected", "after Enable and re-allowing, A doesn't mark with both JS and CSS: \(recovered) \(state(subject))")
 
         let tabsJSON = "{\"before\":\(tabsBefore),\"after\":\(tabsAfter)}"
-        print("BAM_SITE_ACCESS_RESTART {\"findings\":\(findings.count),\"tab_ids\":\(tabsJSON),\"subject_starts\":[\(subjectStartsBefore),\(subjectStartsAfter)],\"other_starts\":[\(otherStartsBefore),\(otherStartsAfter)],\"prompts\":\(prompts)}"); fflush(stdout)
+        print("BAM_SITE_ACCESS_RESTART {\"findings\":\(findings.count),\"tab_ids\":\(tabsJSON),\"subject_starts\":[\(subjectStartsBefore),\(subjectStartsAfter)],\"subject_load\":\"\(subjectAfter.load)\",\"subject_errors\":\(subjectAfter.errors.count),\"held_page_revoke\":\(heldJSON),\"other_starts\":[\(otherStartsBefore),\(otherStartsAfter)],\"prompts\":\(prompts)}"); fflush(stdout)
         return (checks, findings)
     }
 }
