@@ -96,6 +96,13 @@ import Foundation
         require(inputB.favorites.map(\.id) == [favB.id] && inputB.spaces.map(\.id) == [other] && inputB.folders.map(\.id) == [otherFolder.id],
                 "Profile B: its Favorite, Space and folder only")
         require(BookmarkSessionSnapshot.input(from: session, profileID: UUID()) == nil, "An unknown profile gives nil (an error, not an empty tree)")
+        // The hook's entry point (review of f6b2106): nothing while closing or mid profile change.
+        let hook = { (closing: Bool, switching: Bool) in
+            BookmarkSessionSnapshot.input(from: session, profileID: profileA, isShuttingDown: closing, isApplyingProfileChange: switching)
+        }
+        require(hook(false, false) == input, "In a steady state the hook returns the profile's snapshot")
+        require(hook(false, true) == nil, "While a profile change is being applied the hook returns nil (an error, not a mid-transition tree)")
+        require(hook(true, false) == nil && hook(true, true) == nil, "While closing the hook returns nil")
 
         // Limits before traversal: over the model's input budget, nothing is collected.
         var huge = session

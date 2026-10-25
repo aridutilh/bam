@@ -15,6 +15,13 @@ import Foundation
 /// - Returns nil when the profile is unknown or the budget is exceeded, so the extension gets an error,
 ///   never an empty or partial tree.
 enum BookmarkSessionSnapshot {
+    /// The integration hook's entry point: nil while the controller is closing or applying a profile change
+    /// (the session may be mid-transition between profiles), otherwise the snapshot below.
+    static func input(from session: BrowserSession, profileID: UUID, isShuttingDown: Bool, isApplyingProfileChange: Bool) -> ExtensionBookmarkTree.Input? {
+        guard !isShuttingDown, !isApplyingProfileChange else { return nil }
+        return input(from: session, profileID: profileID)
+    }
+
     static func input(from session: BrowserSession, profileID: UUID) -> ExtensionBookmarkTree.Input? {
         guard session.profiles.contains(where: { $0.id == profileID }) else { return nil }
         let spaces = session.spaces.filter { $0.profileID == profileID }
