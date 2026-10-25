@@ -508,6 +508,126 @@ import Darwin
             try check(pinnedTab() == nil && controller.session.currentProfileID == other, "The pinned fixture tab outlived its cleanup")
             host.reconcile()
         }
+        // tabs.create with an index before the end inserts the tab exactly there (in session order, which extensions
+        // see), including a pinned one; later tabs shift by one without onMoved, and the window's place is unchanged.
+        do {
+            func indexedPage(_ query: String) -> URL {
+                var components = URLComponents(url: url, resolvingAgainstBaseURL: false)!
+                components.path = "/next.html"; components.query = query
+                return components.url!
+            }
+            let firstURL = indexedPage("index-first"), middleURL = indexedPage("index-middle"), endURL = indexedPage("index-end")
+            let sameURL = indexedPage("index-same"), betweenURL = indexedPage("index-between"), clampURL = indexedPage("index-clamp")
+            let place = (space: controller.session.space, profile: controller.session.currentProfileID, active: controller.session.activeID)
+            func placeKept() -> Bool {
+                controller.session.space == place.space && controller.session.currentProfileID == place.profile && controller.session.activeID == place.active
+            }
+            let tabCount = controller.session.tabs.count
+            let text = try await popup.callAsyncJavaScript("""
+                const [win] = await browser.windows.getAll({windowTypes: ['normal'], populate: true});
+                let moved = 0; const onMoved = () => { moved += 1; };
+                const created = {}; const onCreated = (tab) => { created[tab.id] = {index: tab.index, pinned: tab.pinned}; };
+                browser.tabs.onMoved.addListener(onMoved); browser.tabs.onCreated.addListener(onCreated);
+                try {
+                  const ordered = async () => (await browser.tabs.query({windowId: win.id})).sort((a, b) => a.index - b.index).map(tab => tab.id);
+                  const before = await ordered();
+                  const first = await browser.tabs.create({windowId: win.id, index: 0, url: first_, active: false});
+                  const middle = await browser.tabs.create({windowId: win.id, index: 1, url: middle_, active: false, pinned: true});
+                  const after = await ordered();
+                  const end = await browser.tabs.create({windowId: win.id, index: after.length, url: end_, active: false});
+                  // Two tabs with one URL: an insertion is anchored to the tab at that index, not to a URL.
+                  const sameA = await browser.tabs.create({windowId: win.id, url: same_, active: false});
+                  const sameB = await browser.tabs.create({windowId: win.id, url: same_, active: false});
+                  const between = await browser.tabs.create({windowId: win.id, index: (await browser.tabs.get(sameB.id)).index, url: between_, active: false});
+                  const sameOrder = await ordered();
+                  // An index past the end (no Peek) clamps to an append.
+                  const count = sameOrder.length;
+                  const clamp = await browser.tabs.create({windowId: win.id, index: count + 50, url: clamp_, active: false});
+                  await new Promise(resolve => setTimeout(resolve, 300));
+                  const final = await ordered();
+                  return JSON.stringify({before, after, moved, created, final, sameOrder,
+                    first: {id: first.id, index: first.index, read: (await browser.tabs.get(first.id)).index},
+                    middle: {id: middle.id, index: middle.index, pinned: middle.pinned, read: (await browser.tabs.get(middle.id)).index},
+                    end: {id: end.id, index: end.index, expected: after.length},
+                    same: {a: sameA.id, b: sameB.id, between: between.id},
+                    clamp: {id: clamp.id, index: clamp.index, expected: count}});
+                } finally { browser.tabs.onMoved.removeListener(onMoved); browser.tabs.onCreated.removeListener(onCreated); }
+                """, arguments: ["first_": firstURL.absoluteString, "middle_": middleURL.absoluteString, "end_": endURL.absoluteString,
+                                 "same_": sameURL.absoluteString, "between_": betweenURL.absoluteString, "clamp_": clampURL.absoluteString], contentWorld: .page) as? String
+            guard let data = text?.data(using: .utf8), let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let first = value["first"] as? [String: Any], let middle = value["middle"] as? [String: Any], let end = value["end"] as? [String: Any],
+                  let same = value["same"] as? [String: Any], let clamp = value["clamp"] as? [String: Any],
+                  let before = value["before"] as? [Int], let after = value["after"] as? [Int], let sameOrder = value["sameOrder"] as? [Int],
+                  let created = value["created"] as? [String: [String: Any]],
+                  let firstJS = first["id"] as? Int, let middleJS = middle["id"] as? Int,
+                  let sameA = same["a"] as? Int, let sameB = same["b"] as? Int, let betweenJS = same["between"] as? Int else {
+                throw ExtensionSmokeTest.Failure(description: "Indexed tabs.create probe returned \(text ?? "nil")")
+            }
+            try check(first["index"] as? Int == 0 && first["read"] as? Int == 0 && middle["index"] as? Int == 1 && middle["read"] as? Int == 1
+                      && middle["pinned"] as? Bool == true && after == [firstJS, middleJS] + before,
+                      "An indexed tabs.create was not placed, read back or shifted exactly: \(value)")
+            // onCreated reports the tab already in place (and already pinned), never a transient end position.
+            try check(created[String(firstJS)]?["index"] as? Int == 0 && created[String(firstJS)]?["pinned"] as? Bool == false
+                      && created[String(middleJS)]?["index"] as? Int == 1 && created[String(middleJS)]?["pinned"] as? Bool == true,
+                      "tabs.onCreated did not report an inserted tab's final index and pinned state: \(created)")
+            try check(end["index"] as? Int == end["expected"] as? Int && value["moved"] as? Int == 0,
+                      "An append landed elsewhere, or an insertion fired onMoved: \(value)")
+            try check(Array(sameOrder.suffix(3)) == [sameA, betweenJS, sameB],
+                      "An insertion before one of two same-URL tabs landed by URL rather than before that tab: \(sameOrder)")
+            try check(clamp["index"] as? Int == clamp["expected"] as? Int && (value["final"] as? [Int])?.last == clamp["id"] as? Int,
+                      "An index past the end did not clamp to an append: \(value)")
+            func bamID(_ address: URL) -> UUID? { controller.session.tabs.first(where: { $0.address == address.absoluteString })?.id }
+            let sameIDs = controller.session.tabs.filter { $0.address == sameURL.absoluteString }.map(\.id)
+            guard let firstID = bamID(firstURL), let middleID = bamID(middleURL), let endID = bamID(endURL),
+                  let betweenID = bamID(betweenURL), let clampID = bamID(clampURL), sameIDs.count == 2 else {
+                throw ExtensionSmokeTest.Failure(description: "Indexed tabs were not created in Bam")
+            }
+            let members = controller.session.tabs.filter { controller.session.profileID(for: $0) == profile }.map(\.id)
+            let middleTab = controller.session.tabs.first { $0.id == middleID }
+            try check(Array(members.prefix(2)) == [firstID, middleID] && Array(members.suffix(4)) == [sameIDs[0], betweenID, sameIDs[1], clampID]
+                      && members.contains(endID) && controller.session.tabs.count == tabCount + 7,
+                      "Bam's session order does not match the indices extensions were given, or an extra tab appeared")
+            try check(middleTab?.saved?.kind == .kept && middleTab?.folderID == nil
+                      && controller.session.tabs.first(where: { $0.id == firstID })?.saved == nil,
+                      "An indexed pinned tab was not kept at its Space's root, or an ordinary one was kept")
+            try check(placeKept() && host.createsTabBefore == nil && !host.createsKeptTab,
+                      "Indexed background creation moved the window's Space, profile or selection, or left placement intent behind")
+            _ = controller.session.setRetention(id: middleID, kind: nil)
+            for id in [firstID, middleID, endID, betweenID, clampID] + sameIDs { _ = host.closeTab?(id) }
+            controller.refresh(); host.reconcile()
+            try check(controller.session.tabs.count == tabCount, "Indexed fixture tabs outlived their cleanup")
+
+            // Insertion into a profile whose target Space is empty: selecting it synthesizes a blank tab, which the
+            // new tab replaces; the anchor (in that profile's other Space) keeps its place right after the new tab.
+            // A foreign-profile anchor is refused before anything changes.
+            guard let emptyProfile = controller.session.createProfile(name: "Indexed empty"),
+                  let emptySpace = controller.session.createSpace(name: "Indexed empty", symbol: "briefcase", colorIndex: 3, profileID: emptyProfile),
+                  let anchorSpace = controller.session.createSpace(name: "Indexed anchor", symbol: "briefcase", colorIndex: 4, profileID: emptyProfile) else {
+                throw ExtensionSmokeTest.Failure(description: "Could not create the empty-Space insertion fixture")
+            }
+            let anchorTab = BrowserTab(title: "Anchor", address: indexedPage("index-anchor").absoluteString, space: anchorSpace)
+            controller.session.tabs.append(anchorTab)
+            let foreignAnchor = controller.session.tabs.first { controller.session.profileID(for: $0) == profile }!.id
+            let beforeForeign = controller.session.tabs.count
+            try check(host.createTab(indexedPage("index-foreign"), profileID: emptyProfile, active: false, kept: false, before: foreignAnchor) == nil
+                      && controller.session.tabs.count == beforeForeign && controller.session.tabs.allSatisfy({ $0.space != emptySpace }) && placeKept(),
+                      "An anchor from another profile was not refused before anything changed")
+            let insertedURL = indexedPage("index-into-empty")
+            guard let inserted = host.createTab(insertedURL, profileID: emptyProfile, active: false, kept: false, before: anchorTab.id) else {
+                throw ExtensionSmokeTest.Failure(description: "Insertion into an empty target Space was refused")
+            }
+            let emptyMembers = controller.session.tabs.filter { $0.space == emptySpace }
+            let profileOrder = controller.session.tabs.filter { controller.session.profileID(for: $0) == emptyProfile }.map(\.id)
+            try check(emptyMembers.map(\.id) == [inserted] && emptyMembers.first?.address == insertedURL.absoluteString
+                      && profileOrder == [inserted, anchorTab.id] && controller.session.tabs.first(where: { $0.id == anchorTab.id })?.space == anchorSpace
+                      && controller.session.lastSelectedTabIDsBySpace?[emptySpace] == inserted && placeKept() && host.createsTabBefore == nil,
+                      "Insertion into an empty Space left its blank tab, misplaced the tab or anchor, or moved the window: \(emptyMembers.map(\.address))")
+            _ = host.closeTab?(inserted)
+            controller.session.tabs.removeAll { $0.id == anchorTab.id }
+            try check(controller.session.deleteSpace(id: emptySpace, movingTabsTo: place.space) && controller.session.deleteSpace(id: anchorSpace, movingTabsTo: place.space)
+                      && !controller.session.tabs.contains { $0.id == inserted } && placeKept(), "The empty-Space insertion fixture was not cleaned up")
+            controller.refresh(); host.reconcile()
+        }
         // Measurement, not a pass/fail: idle-callback availability in the three page-side worlds
         // (Proton Pass and uBOL page scripts call requestIdleCallback without a feature check).
         let idlePage = (try? await controller.browsers[id]?.evaluateJavaScript("typeof requestIdleCallback + ',' + typeof cancelIdleCallback")) as? String ?? "unknown"

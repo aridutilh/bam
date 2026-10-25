@@ -17,10 +17,16 @@ import WebKit
     }
     /// `kept` creates a Bam kept tab at the root of the profile's Space (an extension's pinned tab): it is
     /// kept in the same step it is added, before anything refreshes or publishes it, and never a Favorite.
-    @discardableResult func openProfileTab(_ url: URL, profileID: UUID, active: Bool, kept: Bool = false) -> UUID? {
+    /// `before` (an extension's `tabs.create` index) places the new tab immediately before that tab of the same
+    /// profile in session order, which is the order extensions see; only the order changes, never the anchor's Space,
+    /// section, folder or split. Placed in the same step it is added, before anything refreshes or publishes it.
+    @discardableResult func openProfileTab(_ url: URL, profileID: UUID, active: Bool, kept: Bool = false, before anchor: UUID? = nil) -> UUID? {
         guard URLInput.directURL(url.absoluteString) != nil || allowsExtensionPage(url, profileID: profileID) else { return nil }
         // Refuse before anything changes, so a refused pinned request leaves no ordinary tab behind.
         if kept, ExtensionPinnedPolicy.creationRefusal(url: url, pinned: true) != nil { return nil }
+        if let anchor {
+            guard let tab = session.tabs.first(where: { $0.id == anchor }), session.profileID(for: tab) == profileID else { return nil }
+        }
         let previousSpace = session.space, previousTab = session.activeID
         let existing = Set(session.tabs.map(\.id))
         guard selectSpace(forProfile: profileID) else { return nil }
@@ -34,6 +40,11 @@ import WebKit
             refresh(); return nil
         }
         discardFallback()
+        // The new tab was appended, so it sits after the anchor: move it to just before it.
+        if let anchor, let from = session.tabs.firstIndex(where: { $0.id == id }),
+           let to = session.tabs.firstIndex(where: { $0.id == anchor }), to < from {
+            var tabs = session.tabs; tabs.insert(tabs.remove(at: from), at: to); session.tabs = tabs
+        }
         if active { select(id); view.window?.makeKeyAndOrderFront(nil) }
         else {
             session.changeSpace(previousSpace); session.select(previousTab)

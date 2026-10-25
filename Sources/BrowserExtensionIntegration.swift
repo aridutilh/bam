@@ -74,8 +74,9 @@ import WebKit
             return true
         }
         value.createTab = { [weak self, weak value] url, profile, active in
-            self?.openProfileTab(url, profileID: profile, active: active, kept: value?.createsKeptTab == true)
+            self?.openProfileTab(url, profileID: profile, active: active, kept: value?.createsKeptTab == true, before: value?.createsTabBefore)
         }
+        value.placesTabsBeforeAnchor = true
         value.setTabPinned = { [weak self] id, profile, pinned in
             // nil is success: never coalesce it into a refusal.
             guard let self else { return "This tab cannot be pinned or unpinned." }

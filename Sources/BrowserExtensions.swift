@@ -118,8 +118,14 @@ struct BrowserExtensionPermissionReview {
     /// same step, before anything can publish it as ordinary. A pinned request travels through the same
     /// `createTab` hook, so whatever wraps or gates that hook (a fixture's allowed addresses) still applies.
     private(set) var createsKeptTab = false
-    func createTab(_ url: URL, profileID: UUID, active: Bool, kept: Bool) -> UUID? {
-        createsKeptTab = kept; defer { createsKeptTab = false }
+    /// Like `createsKeptTab`: set only while `createTab` runs for `tabs.create` with an index before the end.
+    /// The browser places the new tab immediately before this tab, in the same step it is added.
+    private(set) var createsTabBefore: UUID?
+    /// True for a host whose `createTab` honors `createsTabBefore`. Others refuse insertion before creating anything.
+    var placesTabsBeforeAnchor = false
+    func createTab(_ url: URL, profileID: UUID, active: Bool, kept: Bool, before anchor: UUID? = nil) -> UUID? {
+        createsKeptTab = kept; createsTabBefore = anchor
+        defer { createsKeptTab = false; createsTabBefore = nil }
         return createTab?(url, profileID, active)
     }
     /// `tabs.update({pinned})` for one tab of a profile (tab, profile, pinned): nil when the tab now has the
@@ -1394,19 +1400,30 @@ struct BrowserExtensionPermissionReview {
             return singlePageWindows.contains(window.key) ? .singlePage : .browser
         }
         // A new tab lands after this profile's tabs in the window, before any exposed Peek.
-        let members = (targetWindow ?? nil).map { window in currentSurfaces().filter { windowKey($0) == window.key } } ?? []
+        func windowTabs() -> [BrowserExtensionSurface] {
+            (targetWindow ?? nil).map { window in currentSurfaces().filter { windowKey($0) == window.key && !$0.isPeek } } ?? []
+        }
+        var tabsInWindow = windowTabs()
+        let canInsert = owner?.placesTabsBeforeAnchor == true
+        // An insertion is resolved against the live order: publish pending changes first, so the tab the extension
+        // indexed is the one now at that index.
+        if owns(context), canInsert, target == .browser, ExtensionWindowTargeting.insertionAnchor(index: configuration.index, landing: tabsInWindow.count) != nil {
+            reconcile(); tabsInWindow = windowTabs()
+        }
+        let landing = tabsInWindow.count
         if owns(context), let refusal = ExtensionWindowTargeting.tabCreation(target: target, index: configuration.index,
-                landing: members.filter { !$0.isPeek }.count, windowTabCount: (targetWindow ?? nil).map { tabIDs(in: $0.key).count } ?? 0) {
+                landing: landing, windowTabCount: (targetWindow ?? nil).map { tabIDs(in: $0.key).count } ?? 0, canInsert: canInsert) {
             completionHandler(nil, BrowserExtensions.failure(refusal)); return
         }
-        // Pinned means a Bam kept tab (never a Favorite), at the end like any other new tab.
+        let anchor = ExtensionWindowTargeting.insertionAnchor(index: configuration.index, landing: landing).map { tabsInWindow[$0].id }
+        // Pinned means a Bam kept tab (never a Favorite), placed at the requested index like any other new tab.
         let pinned = configuration.shouldBePinned
         if owns(context), let url = configuration.url, let refusal = ExtensionPinnedPolicy.creationRefusal(url: url, pinned: pinned) {
             completionHandler(nil, BrowserExtensions.failure(refusal)); return
         }
         guard owns(context), let url = configuration.url, (["http", "https"].contains(url.scheme?.lowercased() ?? "") || BrowserExtensions.isExtensionURL(url, ownedBy: context)),
               !configuration.shouldBeMuted, !configuration.shouldReaderModeBeActive,
-              let id = owner?.createTab(url, profileID: profileID, active: configuration.shouldBeActive, kept: pinned) else {
+              let id = owner?.createTab(url, profileID: profileID, active: configuration.shouldBeActive, kept: pinned, before: anchor) else {
             completionHandler(nil, BrowserExtensions.failure("Bam can open ordinary HTTP/HTTPS pages or this extension’s own pages in this profile only.")); return
         }
         // A host that did not keep the tab must not leave an ordinary one behind a pinned request.
@@ -1414,6 +1431,14 @@ struct BrowserExtensionPermissionReview {
         if pinned, currentSurface(id)?.isPinned != true {
             _ = owner?.closeTab?(id)
             completionHandler(nil, BrowserExtensions.failure("Bam could not keep the new tab, so it was not opened.")); return
+        }
+        // An inserted tab must report exactly the requested index; reconcile adopts this live order.
+        // Otherwise it is removed (unkept first, so nothing is left behind) before any extension hears of it.
+        if anchor != nil, let window = targetWindow ?? nil,
+           (owner?.surfaces?(profileID) ?? []).filter({ accepts($0) && windowKey($0) == window.key && !$0.isPeek }).map(\.id).firstIndex(of: id) != configuration.index {
+            if pinned { _ = owner?.setTabPinned?(id, profileID, false) }
+            _ = owner?.closeTab?(id)
+            completionHandler(nil, BrowserExtensions.failure(ExtensionWindowTargeting.placementRefusal(index: configuration.index))); return
         }
         reconcile(); guard let tab = tabs[id] else { completionHandler(nil, BrowserExtensions.failure("The new tab is not in this extension’s profile.")); return }
         completionHandler(tab, nil)
