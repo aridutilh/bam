@@ -300,13 +300,13 @@ enum ExtensionCompatibility {
         const ns = {};
         const invalid = (detail) => new TypeError("Invalid history.search query: " + detail + ".");
         define(ns, "search", call(async (query) => {
-          if (query === null || typeof query !== "object") throw invalid("a query object is required");
+          if (query === null || typeof query !== "object" || Array.isArray(query)) throw invalid("a query object is required");
           if (typeof query.text !== "string") throw invalid("'text' must be a string");
           for (const key of ["startTime", "endTime"]) {
             if (query[key] !== undefined && (typeof query[key] !== "number" || !Number.isFinite(query[key]))) throw invalid("'" + key + "' must be a finite number");
           }
-          if (query.maxResults !== undefined && (typeof query.maxResults !== "number" || !Number.isInteger(query.maxResults) || query.maxResults < 0)) {
-            throw invalid("'maxResults' must be a non-negative integer");
+          if (query.maxResults !== undefined && (typeof query.maxResults !== "number" || !Number.isInteger(query.maxResults) || query.maxResults < 0 || query.maxResults > 2147483647)) {
+            throw invalid("'maxResults' must be an integer from 0 to 2147483647");
           }
           const params = { text: query.text };
           for (const key of ["startTime", "endTime", "maxResults"]) if (query[key] !== undefined) params[key] = query[key];
@@ -1067,7 +1067,7 @@ enum ExtensionCompatibility {
             case .failure(let failure): return (nil, failure.description)
             }
             guard let visits = historyVisits?() else { return (nil, "Bam's history is not available right now.") }
-            switch ExtensionHistory.reply(ExtensionHistory.search(visits, query)) {
+            switch ExtensionHistory.search(visits, query) {
             case .success(let items): return (items, nil)
             case .failure(let failure): return (nil, failure.description)
             }

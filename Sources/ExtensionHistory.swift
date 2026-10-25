@@ -16,8 +16,11 @@ import Foundation
 ///   - Startup load sends nothing.
 enum ExtensionHistory {
     static let maximumVisits = 5_000
-    /// Encoded search reply bound; larger replies are refused, never truncated.
+    /// Encoded search reply bound; larger replies are refused, never truncated. Checked from UTF-8 lengths before any
+    /// item, hash or encoding is built.
     static let maximumReplyBytes = 4 * 1_048_576
+    /// Chromium's schema types maxResults as an integer (Int32): 0...2147483647.
+    static let maximumResultsValue = 2_147_483_647
 
     struct Visit: Equatable, Sendable {
         let url: String
@@ -51,16 +54,19 @@ enum ExtensionHistory {
         func invalid(_ detail: String) -> Result<Query, Failure> { .failure(Failure(description: "Invalid history.search query: \(detail).")) }
         guard let object = raw as? [String: Any] else { return invalid("a query object is required") }
         guard let text = object["text"] as? String, !isBoolean(object["text"]) else { return invalid("'text' must be a string") }
+        // Optional members are omitted or numbers; null is refused (as the adapter does).
         func number(_ key: String) -> Double?? {
-            guard let value = object[key], !(value is NSNull) else { return .some(nil) }
+            guard let value = object[key] else { return .some(nil) }
             guard !isBoolean(value), let double = (value as? NSNumber)?.doubleValue, double.isFinite else { return nil }
             return .some(double)
         }
         guard let start = number("startTime") else { return invalid("'startTime' must be a finite number") }
         guard let end = number("endTime") else { return invalid("'endTime' must be a finite number") }
         guard let max = number("maxResults") else { return invalid("'maxResults' must be a non-negative integer") }
-        if let max, max < 0 || max.rounded(.towardZero) != max { return invalid("'maxResults' must be a non-negative integer") }
-        let limit = max.map { $0 >= Double(Int.max) ? Int.max : Int($0) } ?? 100
+        if let max, max < 0 || max > Double(maximumResultsValue) || max.rounded(.towardZero) != max {
+            return invalid("'maxResults' must be an integer from 0 to \(maximumResultsValue)")
+        }
+        let limit = max.map { Int($0) } ?? 100
         return .success(Query(words: text.split(whereSeparator: \.isWhitespace).map(String.init),
                               start: start ?? (now.timeIntervalSince1970 - 86_400) * 1_000, end: end, maxResults: limit))
     }
@@ -77,8 +83,10 @@ enum ExtensionHistory {
     static func id(_ url: String) -> String { SHA256.hash(data: Data(url.utf8)).map { String(format: "%02x", $0) }.joined() }
 
     /// One item per URL with a visit in [start, end); title and lastVisitTime from its most recent visit overall;
-    /// newest first; words must all appear (case-insensitive) in title + URL. Only the first 5,000 visits are read.
-    static func search(_ visits: [Visit], _ query: Query) -> [[String: Any]] {
+    /// newest first; every word must appear (case-insensitive) in the title or the URL. Only the first 5,000 visits
+    /// are read. The reply's encoded size is bounded from UTF-8 lengths before any item, hash or encoding is built;
+    /// an oversized reply is refused, never truncated.
+    static func search(_ visits: [Visit], _ query: Query) -> Result<[[String: Any]], Failure> {
         var latest: [String: Visit] = [:], matched = Set<String>(), order: [String] = []
         for visit in visits.prefix(maximumVisits) {
             if let known = latest[visit.url] { if visit.visitedAt > known.visitedAt { latest[visit.url] = visit } }
@@ -86,22 +94,34 @@ enum ExtensionHistory {
             let time = visit.visitedAt.timeIntervalSince1970 * 1_000
             if time >= query.start, query.end.map({ time < $0 }) ?? true { matched.insert(visit.url) }
         }
-        let items = order.compactMap { url -> Visit? in
+        let selected = order.compactMap { url -> Visit? in
             guard matched.contains(url), let visit = latest[url] else { return nil }
-            let text = visit.title + " " + visit.url
-            return query.words.allSatisfy { text.localizedCaseInsensitiveContains($0) } ? visit : nil
+            return query.words.allSatisfy { visit.title.localizedCaseInsensitiveContains($0) || visit.url.localizedCaseInsensitiveContains($0) } ? visit : nil
         }
         .sorted { $0.visitedAt > $1.visitedAt }
         .prefix(query.maxResults)
-        return items.map { item(url: $0.url, title: $0.title, lastVisit: $0.visitedAt) }
-    }
-
-    /// The reply, or a refusal when its encoded size exceeds the bound (never truncated).
-    static func reply(_ items: [[String: Any]]) -> Result<[[String: Any]], Failure> {
-        guard let data = try? JSONSerialization.data(withJSONObject: items) else { return .failure(Failure(description: "The history results could not be encoded.")) }
-        guard data.count <= maximumReplyBytes else {
-            return .failure(Failure(description: "The history results are too large to deliver (\(data.count) bytes); request fewer with maxResults or a narrower time range."))
+        var budget = maximumReplyBytes - 2
+        for visit in selected {
+            budget -= itemOverhead
+            guard budget >= 0, let url = encodedLength(visit.url, limit: budget) else { return .failure(tooLarge) }
+            budget -= url
+            guard let title = encodedLength(visit.title, limit: budget) else { return .failure(tooLarge) }
+            budget -= title
         }
-        return .success(items)
+        return .success(selected.map { item(url: $0.url, title: $0.title, lastVisit: $0.visitedAt) })
+    }
+    static let tooLarge = Failure(description: "The history results are too large to deliver; request fewer with maxResults or a narrower time range.")
+    /// Upper bound for one item's encoded bytes besides its URL and title: keys, quotes, separators, the 64-character
+    /// ID and a millisecond time.
+    static let itemOverhead = 160
+    /// Bytes a string takes as a JSON string literal (quotes included), counting JSONSerialization's escapes (control
+    /// characters up to 6 bytes; quote, backslash and slash 2); nil once over `limit`, without scanning further.
+    static func encodedLength(_ string: String, limit: Int) -> Int? {
+        var total = 2
+        for byte in string.utf8 {
+            total += byte < 0x20 ? 6 : (byte == 0x22 || byte == 0x5C || byte == 0x2F) ? 2 : 1
+            if total > limit { return nil }
+        }
+        return total
     }
 }

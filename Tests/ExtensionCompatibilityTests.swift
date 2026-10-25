@@ -530,7 +530,7 @@ import JavaScriptCore
         hist.evaluateScript("""
             var out = {keys: Object.keys(chrome.history).sort().join(','), heard: [], removed: []};
             chrome.history.search({text: 'a', startTime: 0, maxResults: 20000}).then(function (value) { out.passed = value === items; });
-            var invalid = [{}, {text: 1}, {text: '', startTime: '0'}, {text: '', endTime: Infinity}, {text: '', maxResults: 1.5}, {text: '', maxResults: -1}, {text: '', maxResults: true}, null];
+            var invalid = [{}, {text: 1}, {text: '', startTime: '0'}, {text: '', endTime: Infinity}, {text: '', maxResults: 1.5}, {text: '', maxResults: -1}, {text: '', maxResults: true}, null, Object.assign([], {text: ''}), {text: '', maxResults: 2147483648}, {text: '', startTime: null}];
             out.rejections = 0;
             invalid.forEach(function (query) { chrome.history.search(query).then(function () {}, function (error) { if (error instanceof TypeError) out.rejections += 1; }); });
             chrome.history.search({}, function () { out.invalidCallbackArgs = arguments.length; });
@@ -547,7 +547,7 @@ import JavaScriptCore
             chrome.history.onVisited.removeListener(onVisit); chrome.history.onVisitRemoved.removeListener(onRemove);
             """)
         try check(histErrors.isEmpty && hist.evaluateScript("""
-            out.keys === 'onVisitRemoved,onVisited,search' && out.passed && out.rejections === 8 && out.invalidCallbackArgs === 0 && out.validRequests === 1
+            out.keys === 'onVisitRemoved,onVisited,search' && out.passed && out.rejections === 11 && out.invalidCallbackArgs === 0 && out.validRequests === 1
             && out.request === '{"kind":"request","method":"history.search","params":{"text":"a","startTime":0,"maxResults":20000}}'
             && JSON.stringify(out.heard) === '["https://a.example/"]' && out.removed.length === 1 && out.removed[0].allHistory === true
             && out.denied === 'Bam has not been granted history access for this extension.' && out.deniedCallbackArgs === 0
