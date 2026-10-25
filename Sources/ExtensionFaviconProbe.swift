@@ -16,26 +16,42 @@ import WebKit
         weak var tab: WKWebView?
         weak var page: WKWebView?
         weak var window: NSWindow?
-        var all: Bool { host == nil && controller == nil && tab == nil && page == nil && window == nil }
+        /// The action popup page WebKit created for the probe extension: another owned page.
+        weak var popup: WKWebView?
+        var all: Bool { pending.isEmpty }
         var pending: [String] {
-            [("host", host == nil), ("controller", controller == nil), ("tab", tab == nil), ("page", page == nil), ("window", window == nil)]
+            [("host", host == nil), ("controller", controller == nil), ("tab", tab == nil), ("page", page == nil), ("window", window == nil), ("popup", popup == nil)]
                 .filter { !$0.1 }.map(\.0)
         }
     }
     private final class Once { var done = false }
 
-    /// Waits at most `seconds` for `work`; nil on timeout. The work keeps running on its own (JavaScript cannot be
-    /// cancelled), but the probe moves on; anything it still holds shows up in the release check.
-    static func bounded<T>(_ seconds: Double, _ work: @escaping @MainActor () async -> T?) async -> T? {
-        await withCheckedContinuation { (continuation: CheckedContinuation<T?, Never>) in
+    /// The whole measurement (before release checks) finishes inside this, well within the runner's watchdog.
+    static let measurementBudget: TimeInterval = 55
+    static let releaseBudget: TimeInterval = 5
+    enum Bounded<T> { case value(T?), timedOut }
+    /// Waits at most `seconds` (never past `deadline`) for `work`. On timeout the probe stops that phase instead of
+    /// starting more calls; the work keeps running on its own (JavaScript cannot be cancelled), and anything it still
+    /// holds shows up in the release check.
+    static func bounded<T>(_ seconds: Double, by deadline: TimeInterval, _ work: @escaping @MainActor () async -> T?) async -> Bounded<T> {
+        let limit = min(seconds, deadline - ProcessInfo.processInfo.systemUptime)
+        guard limit > 0 else { return .timedOut }
+        return await withCheckedContinuation { (continuation: CheckedContinuation<Bounded<T>, Never>) in
             let once = Once()
             Task { @MainActor in
                 let value = await work()
-                if !once.done { once.done = true; continuation.resume(returning: value) }
+                if !once.done { once.done = true; continuation.resume(returning: .value(value)) }
             }
-            DispatchQueue.main.asyncAfter(deadline: .now() + seconds) {
-                MainActor.assumeIsolated { if !once.done { once.done = true; continuation.resume(returning: nil) } }
+            DispatchQueue.main.asyncAfter(deadline: .now() + limit) {
+                MainActor.assumeIsolated { if !once.done { once.done = true; continuation.resume(returning: .timedOut) } }
             }
+        }
+    }
+    /// The value, or a thrown failure naming the phase when the bound or the overall deadline was reached.
+    static func within<T>(_ phase: String, _ seconds: Double, by deadline: TimeInterval, _ work: @escaping @MainActor () async -> T?) async throws -> T? {
+        switch await bounded(seconds, by: deadline, work) {
+        case .value(let value): return value
+        case .timedOut: throw Failure(description: "\(phase) did not finish within its bound or the \(Int(measurementBudget)) s measurement deadline")
         }
     }
 
@@ -46,28 +62,31 @@ import WebKit
         let fm = FileManager.default
         let root = fm.temporaryDirectory.appendingPathComponent("bam-favicon-probe-" + UUID().uuidString, isDirectory: true)
         let released = Released()
-        let measured = await measure(root: root, pageURL: pageURL, released: released)
-        // Teardown happened inside measure(); confirm release before removing the folder the controller used.
-        var waited = 0
-        while !released.all && waited < 50 { try? await Task.sleep(nanoseconds: 100_000_000); waited += 1 }
+        let deadline = ProcessInfo.processInfo.systemUptime + measurementBudget
+        let measured = await measure(root: root, pageURL: pageURL, released: released, deadline: deadline)
+        // Teardown happened inside measure(); confirm release (bounded) before removing the folder the controller used.
+        // An unreleased run keeps its folder, reported by path, rather than claiming a clean removal.
+        let releaseDeadline = ProcessInfo.processInfo.systemUptime + releaseBudget
+        while !released.all && ProcessInfo.processInfo.systemUptime < releaseDeadline { try? await Task.sleep(nanoseconds: 100_000_000) }
         let releasedAll = released.all, pending = released.pending
-        try? fm.removeItem(at: root)
+        if releasedAll { try? fm.removeItem(at: root) }
         let removed = !fm.fileExists(atPath: root.path)
         var (outcome, reason) = ExtensionFaviconProbeModel.classify(measured.report, contextRecordedFaviconError: measured.contextFaviconError)
         if let failure = measured.failure { outcome = .incomplete; reason = "Stopped at \(measured.stage): \(failure)" }
         let cleaned = releasedAll && removed
         let summary: [String: Any] = ["outcome": outcome.rawValue, "reason": reason, "stage": measured.stage, "contextFaviconError": measured.contextFaviconError,
-                                      "report": measured.report ?? NSNull(), "released": releasedAll, "notReleased": pending, "folderRemoved": removed]
+                                      "report": measured.report ?? NSNull(), "released": releasedAll, "notReleased": pending, "folderRemoved": removed,
+                                      "preservedFolder": removed ? NSNull() : root.path as Any]
         let json = (try? JSONSerialization.data(withJSONObject: summary, options: [.sortedKeys])).flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
         let complete = outcome != .incomplete && cleaned
         print("EXTENSION_FAVICON_PROBE \(json)")
-        print("MEASUREMENT \(complete ? "complete" : "incomplete"): \(reason)\(cleaned ? "" : " (cleanup not confirmed: \(pending.joined(separator: ", "))\(removed ? "" : ", folder"))")")
+        print("MEASUREMENT \(complete ? "complete" : "incomplete"): \(reason)\(cleaned ? "" : " (cleanup not confirmed: not released \(pending.joined(separator: ", ")); folder kept at \(root.path))")")
         fflush(stdout)
         return (complete, json)
     }
 
     /// Everything strong lives here and is torn down before returning, on every path.
-    private static func measure(root: URL, pageURL: URL, released: Released) async -> Measured {
+    private static func measure(root: URL, pageURL: URL, released: Released, deadline: TimeInterval) async -> Measured {
         var result = Measured()
         var host: BrowserExtensions?, window: NSWindow?, tab: WKWebView?, page: WKWebView?
         defer {
@@ -87,7 +106,7 @@ import WebKit
             configuration.websiteDataStore = .nonPersistent()
             owned.configure(configuration, profileID: profile)
             released.controller = configuration.webExtensionController
-            guard await bounded(10, { await owned.ready(profileID: profile); return true }) == true else { throw Failure(description: "the extension host did not become ready within 10 s") }
+            _ = try await within("host readiness", 10, by: deadline) { await owned.ready(profileID: profile); return true }
             let frame = NSRect(x: 0, y: 0, width: 420, height: 300)
             let ownedWindow = NSWindow(contentRect: frame, styleMask: [.titled], backing: .buffered, defer: false)
             ownedWindow.isReleasedWhenClosed = false; window = ownedWindow; released.window = ownedWindow
@@ -101,20 +120,24 @@ import WebKit
             }
             owned.reconcile()
             result.stage = "install"
-            let installed: UUID?? = await bounded(30) { try? await owned.importPackage(at: package, profileID: profile) }
-            guard let id = installed ?? nil else { throw Failure(description: "the probe package was not installed within 30 s: \(owned.errors)") }
+            guard let id = try await within("install", 20, by: deadline, { try? await owned.importPackage(at: package, profileID: profile) }) else {
+                throw Failure(description: "the probe package was not installed: \(owned.errors)")
+            }
             guard let context = owned.context(for: id), let popup = context.action(for: nil)?.popupWebView else { throw Failure(description: "the probe extension did not load: \(owned.errors)") }
+            released.popup = popup
             popup.frame = frame
             let errorsBefore = context.errors.count
             // Readiness: the worker answers only after evaluating the script that registered its fetch listener.
             result.stage = "ready"
             var ready = false
-            for _ in 0..<15 where !ready {
-                let answer: [String: Any]?? = await bounded(2) {
-                    try? await popup.callAsyncJavaScript("return await (globalThis.browser || globalThis.chrome).runtime.sendMessage({kind: 'ready'});",
-                                                         arguments: [:], in: nil, contentWorld: .page) as? [String: Any]
+            let readyDeadline = min(deadline, ProcessInfo.processInfo.systemUptime + 12)
+            while !ready && ProcessInfo.processInfo.systemUptime < readyDeadline {
+                // A call that does not return ends the phase (no further calls are started).
+                let answer: [String: Any]? = try await within("worker readiness", 2, by: readyDeadline) { [weak popup] in
+                    try? await popup?.callAsyncJavaScript("return await (globalThis.browser || globalThis.chrome).runtime.sendMessage({kind: 'ready'});",
+                                                          arguments: [:], in: nil, contentWorld: .page) as? [String: Any]
                 }
-                ready = (answer ?? nil)?["ready"] as? Bool == true
+                ready = answer?["ready"] as? Bool == true
                 if !ready { try await Task.sleep(nanoseconds: 300_000_000) }
             }
             guard ready else { throw Failure(description: "the worker never acknowledged its fetch listener") }
@@ -125,9 +148,12 @@ import WebKit
             let ownedPage = WKWebView(frame: frame, configuration: pageConfiguration)
             page = ownedPage; released.page = ownedPage
             container.addSubview(ownedPage); ownedPage.load(URLRequest(url: components.url!))
-            for _ in 0..<40 where result.report == nil {
-                let text: String?? = await bounded(2) { try? await ownedPage.evaluateJavaScript("document.documentElement.dataset.bamFaviconProbe || ''") as? String }
-                if let text = text ?? nil, !text.isEmpty, let data = text.data(using: .utf8) { result.report = try? JSONSerialization.jsonObject(with: data) as? [String: Any] }
+            let pageDeadline = min(deadline, ProcessInfo.processInfo.systemUptime + 15)
+            while result.report == nil && ProcessInfo.processInfo.systemUptime < pageDeadline {
+                let text: String? = try await within("page report", 2, by: pageDeadline) { [weak ownedPage] in
+                    try? await ownedPage?.evaluateJavaScript("document.documentElement.dataset.bamFaviconProbe || ''") as? String
+                }
+                if let text, !text.isEmpty, let data = text.data(using: .utf8) { result.report = try? JSONSerialization.jsonObject(with: data) as? [String: Any] }
                 if result.report == nil { try await Task.sleep(nanoseconds: 300_000_000) }
             }
             guard result.report != nil else { throw Failure(description: "the probe page did not report within its bound") }
