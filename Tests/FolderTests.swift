@@ -149,7 +149,7 @@ import Foundation
             .replacingOccurrences(of: "\"folders\" : [", with: "\"folders\" : [ 42, ")
         try json.write(to: fixtures.appendingPathComponent("corrupt-folders.json"), atomically: true, encoding: .utf8)
         let recovered = SessionFile.load(fixtures.appendingPathComponent("corrupt-folders.json"))
-        expect(recovered.tabs.count == session.tabs.count && recovered.folders.isEmpty, "Corrupt folder metadata degrades to unfoldered kept tabs")
+        expect(recovered.tabs.count == session.tabs.count && recovered.folders == session.folders, "One corrupt folder record costs only that record")
 
         // Splits move as one row and keep their companion in the folder.
         var splitting = BrowserSession(tabs: [kept("Left"), kept("Right")], activeID: UUID()); splitting.sanitize()
@@ -158,6 +158,53 @@ import Foundation
         let pane = splitting.createFolder(name: "Panes", space: 0, containing: [right])!
         expect(splitting.tabs.allSatisfy { $0.folderID == pane }, "Both Split members move together")
         expect(splitting.keptLayout(in: 0).map(\.id) == [pane, left], "Split is one row inside the folder")
+
+        // Mixed retention: kept primary + Today companion, and the reverse.
+        for keptPrimary in [true, false] {
+            let first = keptPrimary ? kept("KeptPane") : BrowserTab(title: "TodayPane", address: "https://todaypane.example", space: 0)
+            let second = keptPrimary ? BrowserTab(title: "TodayPane", address: "https://todaypane.example", space: 0) : kept("KeptPane")
+            var mixed = BrowserSession(tabs: [first, second, kept("Other")], activeID: first.id); mixed.sanitize()
+            expect(mixed.makeSplit(primary: first.id, secondary: second.id), "Mixed Split")
+            guard let box = mixed.createFolder(name: "Box", space: 0, containing: [second.id]) else { expect(false, "Wrap mixed Split"); continue }
+            let todayPane = mixed.tabs.first { $0.title == "TodayPane" }!
+            expect(mixed.tabs.first { $0.id == first.id }?.saved?.kind == .kept, "The Split row becomes kept when it enters a folder")
+            expect(todayPane.saved == nil || todayPane.id == first.id, "An ordinary companion keeps its retention")
+            let layout = mixed.keptLayout(in: 0)
+            let boxIndex = layout.firstIndex { $0.id == box }!
+            expect(layout[boxIndex + 1].id == first.id && layout[boxIndex + 1].depth == 1 && !layout.contains { $0.id == second.id },
+                   "Mixed Split is one row in the folder")
+            expect(Set(mixed.tabIDs(inFolder: box)) == [first.id, second.id], "Folder membership includes both panes")
+            // Cross-profile move carries both panes and keeps the pair.
+            let other = mixed.createProfile(name: "Work")!
+            let workSpace = mixed.createSpace(name: "Work", symbol: "briefcase", colorIndex: 1, profileID: other)!
+            var moved = mixed
+            expect(moved.moveFolder(id: box, toSpace: workSpace), "Move folder holding a mixed Split")
+            expect(moved.tabs.filter { [first.id, second.id].contains($0.id) }.allSatisfy { $0.space == workSpace }, "Both panes move")
+            expect(moved.split(for: first.id) == BrowserSplit(primaryID: first.id, secondaryID: second.id), "Pair survives the move")
+            let roundTrip = fixtures.appendingPathComponent("mixed-\(keptPrimary).json")
+            try SessionFile.save(moved, to: roundTrip)
+            let reloaded = SessionFile.load(roundTrip)
+            expect(reloaded.split(for: first.id) != nil && reloaded.folder(box)?.space == workSpace, "Mixed Split folder survives restart")
+            // Unkeeping the primary while grouped takes the whole row out of the folder.
+            var unkept = mixed
+            expect(unkept.setRetention(id: first.id, kind: nil), "Unkeep grouped primary")
+            expect(unkept.tabIDs(inFolder: box).isEmpty && unkept.tabs.allSatisfy { $0.folderID == nil }, "No pane is left behind in the folder")
+            var afterUnkeep = unkept
+            expect(afterUnkeep.moveFolder(id: box, toSpace: workSpace) && afterUnkeep.split(for: first.id) != nil
+                   && afterUnkeep.tabs.first { $0.id == second.id }?.space == 0, "Moving the emptied folder leaves the Split intact")
+        }
+
+        // Wrapping is atomic: unsupported rows leave no empty folder behind.
+        var atomic = BrowserSession(tabs: [kept("Keep"), BrowserTab(title: "Ext", address: "webkit-extension://\(UUID().uuidString)/popup.html", space: 0)], activeID: UUID())
+        atomic.sanitize()
+        let extID = atomic.tabs.first { $0.title == "Ext" }!.id
+        let folderCount = atomic.folders.count
+        expect(atomic.createFolder(name: "Nope", space: 0, containing: [extID]) == nil && atomic.folders.count == folderCount, "Extension pages cannot be wrapped and no folder remains")
+        expect(atomic.createFolder(name: "Nope", space: 0, containing: [atomic.tabs[0].id, UUID()]) == nil && atomic.tabs[0].folderID == nil, "A stale item fails the whole wrap")
+        expect(atomic.createFolder(name: "Cross", space: 1, containing: [atomic.tabs[0].id]) == nil, "Cross-Space wrap refused")
+        expect(atomic.createFolder(name: "Plain", space: 0) != nil, "Plain creation still works")
+        expect(atomic.createFolder(name: "Zero", space: 0, id: UUID(uuid: (0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0))) == nil, "Zero identifier refused")
+        expect(!atomic.canMoveKeptItem(extID, into: nil) && atomic.canMoveKeptItem(atomic.tabs[0].id, into: atomic.folders.last!.id), "Move targets are prevalidated")
 
         // Dormant saved Splits (imported) persist until opened.
         var dormant = BrowserSession(tabs: [kept("One"), kept("Two"), today], activeID: today.id)
