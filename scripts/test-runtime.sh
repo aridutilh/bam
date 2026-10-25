@@ -15,6 +15,12 @@ if [[ "$EXECUTABLE" == */* || ! -x "$APP/Contents/MacOS/$EXECUTABLE" ]]; then
     echo "FAIL: Runtime app has no valid executable: $APP" >&2
     exit 1
 fi
+# Without its App.swift hook the profile-activation flag would be ignored and
+# the app would open its own profile instead of the disposable fixture one.
+if ! LC_ALL=C grep -aq -- '--profile-instance-test' "$APP/Contents/MacOS/$EXECUTABLE"; then
+    echo "FAIL: Runtime app lacks the --profile-instance-test launch hook; rebuild it with the hook first: $APP" >&2
+    exit 1
+fi
 RUN_DIR=$(mktemp -d /private/tmp/bam-tests.XXXXXX)
 SERVER_PID=''
 cleanup() { if [ -n "$SERVER_PID" ]; then kill "$SERVER_PID" 2>/dev/null || true; wait "$SERVER_PID" 2>/dev/null || true; fi; rm -rf "$RUN_DIR"; }
@@ -31,7 +37,7 @@ for attempt in {1..50}; do [ -s "$RUN_DIR/port" ] && break; sleep 0.1; done
 export BAM_TEST_URL="http://127.0.0.1:$(cat "$RUN_DIR/port")/index.html"
 export ARK_TEST_URL="$BAM_TEST_URL"
 export ORBIT_TEST_URL="$BAM_TEST_URL"
-for test in --web-test --pip-test --interaction-test --auto-pip-test --feature-test --resource-test --profile-test --extension-test --favicon-test; do
+for test in --web-test --pip-test --interaction-test --auto-pip-test --feature-test --resource-test --profile-test --extension-test --favicon-test --profile-instance-test; do
     case "$test" in
         --web-test) marker='PASS: WebKit — ' ;;
         --pip-test) marker='PASS: PiP — ' ;;
@@ -48,6 +54,8 @@ for test in --web-test --pip-test --interaction-test --auto-pip-test --feature-t
 
         --favicon-test) marker='PASS: Favicons — ' ;;
         --feature-test) marker='PASS: Features — ' ;;
+        # Duplicate launches run this same executable; temporary profile only.
+        --profile-instance-test) marker='PASS: Profile activation — ' ;;
     esac
     log="$RUN_DIR/${test#--}.log"
     if ! "$APP/Contents/MacOS/$EXECUTABLE" "$test" 2>&1 | tee "$log"; then
@@ -65,19 +73,3 @@ for test in --web-test --pip-test --interaction-test --auto-pip-test --feature-t
         exit 1
     fi
 done
-
-# Isolated processes/windows: no installed profile or persistent WebKit store.
-BUILD_DIR=${BAM_BUILD_DIR:-${ARK_BUILD_DIR:-${ORBIT_BUILD_DIR:-"$ROOT/.build"}}}
-log="$RUN_DIR/profile-instance-tests.log"
-if ! "$BUILD_DIR/profile-instance-tests" 2>&1 | tee "$log"; then
-    echo 'FAIL: Profile activation runtime exited unsuccessfully' >&2
-    exit 1
-fi
-if ! awk '
-    /^PASS: Profile activation — / { passed++ }
-    /^FAIL:/ { failed = 1 }
-    END { exit !(passed == 1 && !failed) }
-' "$log"; then
-    echo 'FAIL: Profile activation runtime did not emit exactly one successful terminal result' >&2
-    exit 1
-fi
