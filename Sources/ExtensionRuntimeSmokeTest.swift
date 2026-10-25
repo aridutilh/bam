@@ -50,6 +50,12 @@ import WebKit
                     ExtensionGestureProbe.start(pageURL: page)
                     return
                 }
+                if CommandLine.arguments.contains("--extension-focus-probe") {
+                    // Measurement only: one BAM_FOCUS_CASE per run; this probe owns its budget and cleanup.
+                    self.watchdog?.invalidate(); self.watchdog = nil
+                    ExtensionFocusProbe.start(pageURL: page)
+                    return
+                }
                 // Diagnostic modifier: `--extension-test --extension-dnr-only` runs only the
                 // declarativeNetRequest suite. The full run (no modifier) always includes it.
                 if CommandLine.arguments.contains("--extension-dnr-only") {
