@@ -219,6 +219,18 @@ import AppKit
         check(!futureLibrary.clearHistory() && futureEvents.isEmpty, "When the library can't be changed, nothing is sent")
         check(futureLibrary.recordVisit(title: "Refused", address: "https://future.example/") == nil, "A refused visit has no token")
 
+        // Recently Closed shows Bam's own pages by name (display only); the stored record and restore keep the real addresses.
+        let internalClosed = BrowserLibrary(storageURL: nil)
+        var closedEvents: [BrowserLibrary.HistoryChange] = []
+        internalClosed.onHistoryChange = { closedEvents.append($0) }
+        let closedEasel = ArcEaselReference.address(for: UUID())
+        internalClosed.recordClosed(tabs: [BrowserTab(title: "New tab", address: "orbit://newtab", space: 0)], split: false)
+        internalClosed.recordClosed(tabs: [BrowserTab(title: "Board", address: closedEasel, space: 0)], split: false)
+        let shownAddresses = internalClosed.closedRecords.flatMap(\.tabs).map { SidebarDisplayPolicy.readableAddress($0.address) }
+        check(Set(shownAddresses) == ["New Tab", "Arc Easel"] && !shownAddresses.contains { $0.contains("orbit") }, "Recently Closed names never show orbit://")
+        let restoredEasel = internalClosed.closedRecords.first { $0.tabs.first?.address == closedEasel }.flatMap { internalClosed.takeClosed(id: $0.id) }
+        check(restoredEasel?.tabs.first?.address == closedEasel && closedEvents.isEmpty, "Restore still gets the stored internal address; no history events")
+
         // Late document titles (history-title-approval.md): only the recorded visit's title changes.
         final class Writes: @unchecked Sendable {
             private let lock = NSLock(); private var value = 0

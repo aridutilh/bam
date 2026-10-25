@@ -317,6 +317,11 @@ import AppKit
         // MARK: Display policy: internal addresses, blank placeholders, imported-folder provenance.
         require(SidebarDisplayPolicy.visibleAddress("orbit://newtab").isEmpty && SidebarDisplayPolicy.visibleAddress("ORBIT://video").isEmpty
                 && SidebarDisplayPolicy.visibleAddress("https://example.com/") == "https://example.com/", "Internal orbit:// addresses are never shown")
+        require(SidebarDisplayPolicy.readableAddress("orbit://newtab") == "New Tab" && SidebarDisplayPolicy.readableAddress("orbit://video") == "Picture in Picture demo"
+                && SidebarDisplayPolicy.readableAddress(ArcEaselReference.address(for: UUID())) == "Arc Easel"
+                && SidebarDisplayPolicy.readableAddress("orbit://future-page") == "Bam page"
+                && SidebarDisplayPolicy.readableAddress("https://docs.example/a") == "https://docs.example/a",
+                "Recently Closed names Bam's own pages plainly and leaves web addresses as they are")
         let blank = BrowserTab(title: "New tab", address: "orbit://newtab", space: 0)
         let page = BrowserTab(title: "Docs", address: "https://docs.example/", space: 0)
         var keptBlank = BrowserTab(title: "New tab", address: "orbit://newtab", space: 0)

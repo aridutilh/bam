@@ -389,7 +389,9 @@ extension BrowserLibrary {
         if mode == .history {
             rows = library.searchHistory(search.stringValue).map { Row(id: $0.id, title: $0.title, address: $0.address, date: $0.visitedAt) }
         } else {
-            rows = library.searchClosed(search.stringValue).map { Row(id: $0.id, title: $0.tabs.map(\.title).joined(separator: "\n"), address: $0.tabs.map(\.address).joined(separator: "\n"), date: $0.closedAt) }
+            // Display only: restore takes the stored record by id, with its addresses unchanged.
+            rows = library.searchClosed(search.stringValue).map { Row(id: $0.id, title: $0.tabs.map(\.title).joined(separator: "\n"),
+                address: $0.tabs.map { SidebarDisplayPolicy.readableAddress($0.address) }.joined(separator: "\n"), date: $0.closedAt) }
         }
         table.reloadData()
         if let selectedID, let index = rows.firstIndex(where: { $0.id == selectedID }) { table.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false) }
