@@ -38,6 +38,13 @@ import WebKit
                 guard let page = components.url else {
                     throw ExtensionSmokeTest.Failure(description: "Could not construct the local extension test page URL")
                 }
+                // Diagnostic modifier: `--extension-test --extension-dnr-only` runs only the
+                // declarativeNetRequest suite. The full run (no modifier) always includes it.
+                if CommandLine.arguments.contains("--extension-dnr-only") {
+                    let dnrChecks = try await ExtensionDeclarativeNetRequestSmokeTest.run(pageURL: page)
+                    self.finish(true, "\(dnrChecks) (declarativeNetRequest only; not a full extension run)")
+                    return
+                }
                 let isolatedChecks = try await ExtensionSmokeTest.run(fixtureURL: fixture, pageURL: page)
                 let frameChecks = try await ExtensionFrameMessagingSmokeTest.runIntegrated(fixtureURL: fixture, pageURL: page)
                 let integratedChecks = try await BrowserExtensionSmokeTest.run(fixtureURL: fixture, pageURL: page)
