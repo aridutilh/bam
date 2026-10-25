@@ -369,6 +369,47 @@ import JavaScriptCore
         nativeLifecycle.evaluateScript(ExtensionCompatibility.workerScript(manifest: [:], browserVersion: "test"))
         try check(nativeLifecycle.evaluateScript("browser.runtime.onUpdateAvailable === engineEvent")!.toBool(), "An engine-provided onUpdateAvailable was replaced")
 
+        // declarativeNetRequest guard: unsafe added rules are refused before WebKit; valid calls pass through untouched.
+        let guardJS = JSContext()!
+        var guardErrors: [String] = []
+        guardJS.exceptionHandler = { _, error in guardErrors.append(error?.toString() ?? "JavaScript error") }
+        guardJS.evaluateScript("""
+            var location = {origin: 'webkit-extension://fixture', href: 'webkit-extension://fixture/worker.js'}, console = {error: function() {}}, performance = {now: function() { return 0; }};
+            var nativeCalls = [], nativeResult = Promise.resolve('native');
+            function DNR() {}
+            ['updateDynamicRules', 'updateSessionRules'].forEach(function (name) {
+              DNR.prototype[name] = function () { nativeCalls.push({name: name, receiver: this, args: Array.prototype.slice.call(arguments)});
+                var callback = arguments[1]; if (typeof callback === 'function') callback(); return nativeResult; };
+            });
+            var browser = {runtime: {getURL: function(p) { return 'webkit-extension://fixture' + p; }, getManifest: function() { return {}; }}, declarativeNetRequest: new DNR()};
+            var chrome = {runtime: browser.runtime, declarativeNetRequest: new DNR()};
+            var allTypes = ['font', 'image', 'main_frame', 'media', 'other', 'ping', 'script', 'stylesheet', 'sub_frame', 'websocket', 'xmlhttprequest'];
+            var unsafe = {id: 7, priority: 1, action: {type: 'block'}, condition: {urlFilter: '/x', excludedResourceTypes: allTypes}};
+            var safe = {id: 8, priority: 1, action: {type: 'block'}, condition: {urlFilter: '/y', excludedResourceTypes: ['image', 'webtransport']}};
+            """)
+        guardJS.evaluateScript(ExtensionCompatibility.workerScript(manifest: ["permissions": ["declarativeNetRequest"]], browserVersion: "test"))
+        guardJS.evaluateScript("""
+            var out = {};
+            var validOptions = {addRules: [safe], removeRuleIds: [3]}, validCallback = function () { out.callbackRan = true; };
+            out.promiseReturn = browser.declarativeNetRequest.updateDynamicRules(validOptions) === nativeResult;
+            chrome.declarativeNetRequest.updateSessionRules(validOptions, validCallback);
+            out.validCalls = nativeCalls.length === 2 && nativeCalls[0].receiver === browser.declarativeNetRequest && nativeCalls[0].args.length === 1 && nativeCalls[0].args[0] === validOptions
+              && nativeCalls[1].receiver === chrome.declarativeNetRequest && nativeCalls[1].args[1] === validCallback && out.callbackRan === true;
+            nativeCalls = [];
+            browser.declarativeNetRequest.updateDynamicRules({addRules: [safe, unsafe]}).then(function () { out.promise = 'resolved'; }, function (error) { out.promise = error.message; });
+            try { chrome.declarativeNetRequest.updateSessionRules({addRules: [unsafe]}, function () { out.unsafeCallbackRan = true; }); out.callbackForm = 'returned'; }
+            catch (error) { out.callbackForm = error.message; }
+            out.removeOnly = browser.declarativeNetRequest.updateDynamicRules({removeRuleIds: [7]}) === nativeResult;
+            """)
+        try check(guardErrors.isEmpty && guardJS.evaluateScript("out.promiseReturn && out.validCalls")!.toBool(),
+                  "A valid DNR update did not reach the native method with its receiver, arguments, callback and return value: \(guardJS.evaluateScript("JSON.stringify(out)")!)")
+        let refusal = "Rule with id 7 excludes every resource type this browser supports, so it would match all requests here."
+        try check(guardJS.evaluateScript("out.promise === '\(refusal)' && out.callbackForm === '\(refusal)' && out.unsafeCallbackRan === undefined && out.removeOnly && nativeCalls.length === 1 && nativeCalls[0].args[0].removeRuleIds[0] === 7")!.toBool(),
+                  "An unsafe DNR update reached WebKit or was not refused in promise (reject) and callback (synchronous throw) forms: \(guardJS.evaluateScript("JSON.stringify([out, nativeCalls.length])")!)")
+        guardJS.evaluateScript(ExtensionCompatibility.workerScript(manifest: ["permissions": ["declarativeNetRequest"]], browserVersion: "test"))
+        try check(guardJS.evaluateScript("browser.declarativeNetRequest.updateDynamicRules.__bamDNRGuard === true && browser.declarativeNetRequest.updateDynamicRules({removeRuleIds: []}) === nativeResult")!.toBool(),
+                  "Re-running the adapter wrapped the DNR guard twice")
+
         // scripting.ExecutionWorld: the enum WebKit lacks, on the native namespace and its shared
         // prototype (so a distinct chrome.scripting wrapper sees it); never replacing a native enum.
         func executionWorld(_ setup: String) -> JSContext {

@@ -147,6 +147,19 @@ import WebKit
         let edgeJSON = (try? JSONSerialization.data(withJSONObject: edges, options: [.sortedKeys])).flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
         print("EXTENSION_DNR edges=\(edgeJSON) macOS=\(ProcessInfo.processInfo.operatingSystemVersionString)"); fflush(stdout)
 
+        // Bam's guard: a rule excluding every resource type WebKit supports is refused before WebKit (promise
+        // form rejects, callback form throws synchronously), and its path stays unfiltered.
+        let refusal = "excludes every resource type this browser supports"
+        try check(((edges["excludesAllKnownTypes"] as? [String: Any])?["add"] as? String)?.contains(refusal) == true,
+                  "The broadening excludedResourceTypes rule was not refused in promise form: \(edges["excludesAllKnownTypes"] ?? "nil")")
+        let callbackForm = await dnr("""
+            try { chrome.declarativeNetRequest.updateDynamicRules({addRules: [{id: 299, priority: 1, action: {type: 'block'}, condition: {urlFilter: '/bam-dnr/excluded-all', excludedResourceTypes: \(knownTypes)}}]}, () => {}); return 'returned'; }
+            catch (error) { return 'threw: ' + error.message; }
+            """)
+        try check(callbackForm.hasPrefix("threw: ") && callbackForm.contains(refusal), "The broadening rule was not refused synchronously in callback form: \(callbackForm)")
+        let unfiltered = await outcome(webA, "/bam-dnr/excluded-all")
+        try check(unfiltered.hasPrefix("reached"), "A refused rule still filtered its path: \(unfiltered)")
+
         // Disabling the extension removes its rules.
         try await host.setEnabled(false, id: id)
         try await wait("Disabling the extension left its static rule blocking") { await outcome(webA, "/bam-dnr/static-blocked").hasPrefix("reached") }
