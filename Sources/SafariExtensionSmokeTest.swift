@@ -92,6 +92,15 @@ import WebKit
         configuration.websiteDataStore = .nonPersistent(); otherConfiguration.websiteDataStore = .nonPersistent()
         host.configure(configuration, profileID: profile); host.configure(otherConfiguration, profileID: otherProfile)
         await host.ready(profileID: profile); await host.ready(profileID: otherProfile)
+        var fixtureControllers = [configuration.webExtensionController!, otherConfiguration.webExtensionController!]
+        func clearFixtureStorage() async {
+            host.shutdown()
+            for controller in fixtureControllers {
+                let records = await controller.dataRecords(ofTypes: WKWebExtensionController.allExtensionDataTypes)
+                await controller.removeData(ofTypes: WKWebExtensionController.allExtensionDataTypes, from: records)
+            }
+        }
+        func exercise() async throws {
         let frame = NSRect(x: 0, y: 0, width: 500, height: 340)
         let web = WKWebView(frame: frame, configuration: configuration), otherWeb = WKWebView(frame: frame, configuration: otherConfiguration)
         let window = NSWindow(contentRect: frame, styleMask: [.titled], backing: .buffered, defer: false)
@@ -129,16 +138,23 @@ import WebKit
             return (try? await otherWeb.evaluateJavaScript("document.readyState")) as? String == "complete"
         }
         try check(await result(otherWeb) == "" && !host.allowsExtensionURL(context.baseURL, profileID: otherProfile), "Safari extension escaped its login profile")
+        let storedValue = "original-fixture-" + UUID().uuidString
+        _ = try await popup.callAsyncJavaScript("await browser.storage.local.set({retained: value}); return true;", arguments: ["value": storedValue], contentWorld: .page)
         context.action(for: nil)?.closePopup(); host.shutdown()
         let restored = BrowserExtensions(storageURL: registry); restored.safariImporter = importer
         defer { restored.shutdown() }
         let restoredConfiguration = WKWebViewConfiguration(); restoredConfiguration.websiteDataStore = .nonPersistent()
         restored.configure(restoredConfiguration, profileID: profile); await restored.ready(profileID: profile)
+        fixtureControllers.append(restoredConfiguration.webExtensionController!)
         guard let restoredContext = restored.context(for: id), let restoredPopup = restoredContext.action(for: nil)?.popupWebView else { throw Failure(description: "Safari bundle did not reload from its registry: \(restored.errors)") }
         restoredPopup.frame = frame
         try check(restored.records.first?.safariBundle == descriptor && restoredContext.uniqueIdentifier == context.uniqueIdentifier,
                   "Safari registry reload lost signed provenance or extension identity")
         try await wait("Restored Safari bundle did not execute its background and popup") { await result(restoredPopup)?.hasPrefix("safari-") == true }
+        func retainedValue(_ popup: WKWebView) async -> String? {
+            try? await popup.callAsyncJavaScript("return (await browser.storage.local.get('retained')).retained;", arguments: [:], contentWorld: .page) as? String
+        }
+        try check(await retainedValue(restoredPopup) == storedValue, "Safari registry restart lost extension storage")
         try await restored.setEnabled(false, id: id)
         try Data((String(data: manifestBytes, encoding: .utf8)! + " ").utf8).write(to: manifestURL)
         var tamperRejected = false
@@ -151,6 +167,93 @@ import WebKit
         try check(updateRejected && restored.context(for: id) == nil && restored.records.first?.enabled == false,
                   "A new signed containing-app version silently reused the old Safari snapshot")
         try check(try Data(contentsOf: snapshot.appendingPathComponent("manifest.json")) == manifestBytes, "Refused app changes modified the reviewed private snapshot")
+
+        // Refresh uses only verified installed metadata, with no App Store lookup.
+        // A deliberately disabled extension must stay disabled after replacement.
+        restored.permissionPrompt = { _ in true }
+        guard let disabledRecord = restored.records.first(where: { $0.id == id }) else { throw Failure(description: "Missing disabled Safari record") }
+        try check(try await restored.installer.refreshSafariFromInstalledApp(disabledRecord), "Changed installed Safari app was not refreshed")
+        try check(restored.records.first?.id == id && restored.records.first?.version == "1.1" && restored.records.first?.enabled == false && restored.context(for: id) == nil,
+                  "Refreshing a disabled Safari extension changed its identity or enabled it")
+        try check(restored.records.first?.catalog?.verifiedChromeExtensionID == nil,
+                  "Safari signing provenance created verified Chrome authority")
+        try await restored.setEnabled(true, id: id)
+        guard let v1Context = restored.context(for: id), let v1Popup = v1Context.action(for: nil)?.popupWebView else { throw Failure(description: "Refreshed Safari extension did not enable") }
+        try await wait("Refreshed Safari popup did not start") { await result(v1Popup)?.hasPrefix("safari-") == true }
+        try check(await retainedValue(v1Popup) == storedValue, "Safari refresh lost existing extension storage")
+        let version1Bytes = try Data(contentsOf: snapshot.appendingPathComponent("manifest.json"))
+
+        manifest["version"] = "1.2"
+        try JSONSerialization.data(withJSONObject: manifest, options: [.sortedKeys]).write(to: manifestURL); try seal()
+        restored.permissionPrompt = { _ in false }
+        var canceled = false
+        do { _ = try await restored.installer.refreshSafariFromInstalledApp(restored.records.first!) }
+        catch is BrowserExtensionUpdateCancelled { canceled = true }
+        try check(canceled && restored.context(for: id) === v1Context && restored.records.first?.version == "1.1" &&
+                  (try Data(contentsOf: snapshot.appendingPathComponent("manifest.json"))) == version1Bytes,
+                  "Canceling Safari refresh changed its running context or package")
+        restored.permissionPrompt = { _ in true }
+        try check(try await restored.installer.refreshSafariFromInstalledApp(restored.records.first!), "Approved Safari refresh did not replace its package")
+        guard let v2Context = restored.context(for: id), let v2Popup = v2Context.action(for: nil)?.popupWebView else { throw Failure(description: "Updated Safari context is missing") }
+        try await wait("Updated Safari popup did not start") { await result(v2Popup)?.hasPrefix("safari-") == true }
+        let version2Stored = await retainedValue(v2Popup)
+        try check(v2Context.uniqueIdentifier == context.uniqueIdentifier && restored.records.first?.version == "1.2" && version2Stored == storedValue,
+                  "Safari update changed identity, version, or saved settings")
+        let unchangedRefresh = try await restored.installer.refreshSafariFromInstalledApp(restored.records.first!)
+        try check(!unchangedRefresh && restored.context(for: id) === v2Context,
+                  "Refreshing an unchanged Safari app unnecessarily replaced its runtime")
+
+        // Simulate an App Store update while Bam is closed. Its old enabled
+        // record cannot load until the newly installed signed package is reviewed.
+        restored.shutdown()
+        manifest["version"] = "1.3"
+        try JSONSerialization.data(withJSONObject: manifest, options: [.sortedKeys]).write(to: manifestURL); try seal()
+        let recovered = BrowserExtensions(storageURL: registry); recovered.safariImporter = importer
+        defer { recovered.shutdown() }
+        let recoveryConfiguration = WKWebViewConfiguration(); recoveryConfiguration.websiteDataStore = .nonPersistent()
+        recovered.configure(recoveryConfiguration, profileID: profile); await recovered.ready(profileID: profile)
+        fixtureControllers.append(recoveryConfiguration.webExtensionController!)
+        try check(recovered.context(for: id) == nil && recovered.errors[id] != nil, "Changed Safari app silently loaded an old snapshot on restart")
+        recovered.permissionPrompt = { _ in true }
+        try check(try await recovered.installer.refreshSafariFromInstalledApp(recovered.records.first!), "Offline refresh did not recover a changed-app startup failure")
+        // The host may preserve a disabled state after startup failure; an explicit
+        // enable still reviews access and must preserve the same storage identity.
+        if recovered.context(for: id) == nil { try await recovered.setEnabled(true, id: id) }
+        guard let recoveredContext = recovered.context(for: id), let recoveredPopup = recoveredContext.action(for: nil)?.popupWebView else { throw Failure(description: "Recovered Safari popup is missing") }
+        try await wait("Recovered Safari popup did not start") { await result(recoveredPopup)?.hasPrefix("safari-") == true }
+        let recoveredStored = await retainedValue(recoveredPopup)
+        try check(recoveredContext.uniqueIdentifier == context.uniqueIdentifier && recoveredStored == storedValue,
+                  "Safari restart recovery lost its identity or settings")
+        let recoveredBytes = try Data(contentsOf: snapshot.appendingPathComponent("manifest.json"))
+
+        // Change the installed app after staging/review so final activation
+        // fails. Rollback must retain the prior snapshot and registry identity.
+        manifest["version"] = "1.4"
+        let nextBytes = try JSONSerialization.data(withJSONObject: manifest, options: [.sortedKeys])
+        try nextBytes.write(to: manifestURL); try seal()
+        var invalidationError: Error?
+        recovered.permissionPrompt = { _ in
+            do { try (nextBytes + Data(" ".utf8)).write(to: manifestURL) } catch { invalidationError = error }
+            return true
+        }
+        var failedActivation = false
+        do { _ = try await recovered.installer.refreshSafariFromInstalledApp(recovered.records.first!) } catch { failedActivation = true }
+        if let invalidationError { throw invalidationError }
+        try check(failedActivation && recovered.context(for: id) == nil && recovered.records.first?.id == id &&
+                  recovered.records.first?.version == "1.3" && recovered.records.first?.enabled == false &&
+                  (try Data(contentsOf: snapshot.appendingPathComponent("manifest.json"))) == recoveredBytes,
+                  "Failed Safari activation did not restore its previous package and disabled record")
+        try nextBytes.write(to: manifestURL); try seal()
+        recovered.permissionPrompt = { _ in true }
+        _ = try await recovered.installer.refreshSafariFromInstalledApp(recovered.records.first!)
+        try await recovered.setEnabled(true, id: id)
+        guard let finalPopup = recovered.context(for: id)?.action(for: nil)?.popupWebView else { throw Failure(description: "Safari rollback recovery did not enable") }
+        try await wait("Safari rollback recovery popup did not start") { await result(finalPopup)?.hasPrefix("safari-") == true }
+        try check(await retainedValue(finalPopup) == storedValue, "Safari rollback recovery lost stored settings")
+        }
+        do { try await exercise() }
+        catch { await clearFixtureStorage(); throw error }
+        await clearFixtureStorage()
         return checks
     }
 }

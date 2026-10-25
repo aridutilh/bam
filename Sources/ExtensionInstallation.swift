@@ -13,6 +13,8 @@ struct ExtensionCatalogRecord: Codable, Equatable {
     var sha256: String
     /// Human-readable verification result ("AMO-published SHA-256 matched", "CRX3 signature verified for <id>", …).
     var provenance: String
+    /// Populated only after actual CRX verification; prose is not native-host authority.
+    var verifiedChromeExtensionID: String? = nil
     var installedAt: Date
     var updatedAt: Date?
     var lastUpdateCheck: Date?
@@ -271,7 +273,9 @@ enum ExtensionBuildResolver {
         }
         return ExtensionCatalogRecord(source: fetched.candidate.source, upstreamID: fetched.candidate.upstreamID, listingURL: fetched.candidate.listingURL,
                                       downloadURL: fetched.candidate.downloadURL, publisher: fetched.candidate.publisher, version: fetched.candidate.version,
-                                      sha256: fetched.sha256, provenance: provenance, installedAt: previous?.installedAt ?? installedAt,
+                                      sha256: fetched.sha256, provenance: provenance,
+                                      verifiedChromeExtensionID: fetched.crxVerification.flatMap { $0.verified ? $0.extensionID : nil },
+                                      installedAt: previous?.installedAt ?? installedAt,
                                       updatedAt: previous == nil ? nil : installedAt, lastUpdateCheck: Date(), availableVersion: nil)
     }
 
@@ -301,6 +305,91 @@ enum ExtensionBuildResolver {
         let result = try await catalog.resolve(.safariAppStore(id: id))
         guard let candidate = result.candidates.first(where: { $0.source == .safariAppStore && $0.upstreamID == id }) else { throw BrowserExtensions.failure("The Safari app listing is unavailable.") }
         return candidate
+    }
+
+    /// Refresh a previously reviewed Safari bundle from its installed app. This
+    /// path works offline and does not acquire or update the containing app.
+    @discardableResult func refreshSafariFromInstalledApp(_ record: BrowserExtensionRecord) async throws -> Bool {
+        try Task.checkCancellation()
+        guard let host, let current = host.records.first(where: { $0.id == record.id }),
+              let original = current.safariBundle else { throw BrowserExtensions.failure("This Safari extension is no longer installed in Bam.") }
+        guard !isBusy else { throw BrowserExtensions.failure("Another extension installation is in progress.") }
+        isBusy = true; defer { isBusy = false }
+        statusChanged?("Verifying the installed Safari app…")
+        let app = FileManager.default.fileExists(atPath: original.appURL.path) ? original.appURL
+            : NSWorkspace.shared.urlForApplication(withBundleIdentifier: original.applicationBundleIdentifier) ?? original.appURL
+        let importer = host.safariImporter
+        let bundles = try await Task.detached(priority: .userInitiated) {
+            try importer.inspect(applicationURL: app,
+                expectedApplicationBundleIdentifier: original.distribution == .appStore ? original.applicationBundleIdentifier : nil)
+        }.value
+        try Task.checkCancellation()
+        guard let bundle = bundles.first(where: { $0.extensionBundleIdentifier == original.extensionBundleIdentifier }),
+              bundle.applicationBundleIdentifier == original.applicationBundleIdentifier,
+              bundle.teamIdentifier == original.teamIdentifier, bundle.distribution == original.distribution else {
+            throw BrowserExtensions.failure("The installed app no longer contains the same signed Safari WebExtension.")
+        }
+        guard let latest = host.records.first(where: { $0.id == current.id }), latest.safariBundle == original else {
+            throw BrowserExtensionUpdateCancelled(name: current.name)
+        }
+        if bundle == original {
+            if latest.enabled && host.context(for: latest.id) == nil {
+                try await host.setEnabled(true, id: latest.id)
+                guard host.context(for: latest.id) != nil else { throw BrowserExtensionUpdateCancelled(name: latest.name) }
+                return true
+            }
+            return false
+        }
+        let now = Date()
+        var catalog = latest.catalog ?? ExtensionCatalogRecord(source: bundle.distribution == .appStore ? .safariAppStore : .local,
+            publisher: "", version: bundle.version, sha256: "", provenance: "", installedAt: now)
+        catalog.version = bundle.version; catalog.updatedAt = now; catalog.lastUpdateCheck = now; catalog.availableVersion = nil
+        catalog.verifiedChromeExtensionID = nil
+        catalog.provenance = "\(bundle.distribution == .appStore ? "Mac App Store" : "Developer ID") signed containing app and Safari WebExtension verified; team \(bundle.teamIdentifier), extension code hash \(bundle.extensionCodeHash). Bundle copied without modification."
+        try await host.replacePackage(id: latest.id, with: bundle.appexURL, catalog: catalog, safariBundle: bundle)
+        return true
+    }
+
+    /// Older installs have no structured CRX verification record. Reacquire the
+    /// same official store package before allowing a desktop-host connection,
+    /// retaining its identity/settings and accepting only equal/newer code.
+    func reverifyNativeCompanion(_ record: BrowserExtensionRecord) async throws {
+        try Task.checkCancellation()
+        guard let host else { throw BrowserExtensions.failure("The browser is closing.") }
+        guard !isBusy else { throw BrowserExtensions.failure("Another extension installation is in progress.") }
+        let expected = ExtensionNativeMessaging.chromeExtensionIdentifier
+        func liveRecord() throws -> BrowserExtensionRecord {
+            guard let current = host.records.first(where: { $0.id == record.id && $0.profileID == record.profileID }),
+                  current.safariBundle == nil, current.catalog?.source == .chromeWebStore,
+                  current.catalog?.upstreamID == expected else {
+                throw BrowserExtensions.failure("Desktop support verification is available for the installed official Chrome Web Store build of 1Password.")
+            }
+            return current
+        }
+        _ = try liveRecord()
+        isBusy = true; defer { isBusy = false }
+        statusChanged?("Resolving the official 1Password Chrome package…")
+        let candidate = try await chromeWebStore.candidate(for: expected)
+        try Task.checkCancellation(); _ = try liveRecord()
+        let staging = FileManager.default.temporaryDirectory.appendingPathComponent("bam-native-verification-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: staging) }
+        let fetched = try await fetcher.fetch(candidate, into: staging)
+        try Task.checkCancellation()
+        let latest = try liveRecord()
+        guard fetched.candidate.source == .chromeWebStore, fetched.candidate.upstreamID == expected,
+              let verification = fetched.crxVerification, verification.verified, verification.extensionID == expected else {
+            throw BrowserExtensions.failure("The downloaded package did not verify as the official 1Password Chrome extension.")
+        }
+        let manifest = try ExtensionManifestSummary.read(fromUnpackedPackage: fetched.packageURL)
+        let currentVersion = latest.version.isEmpty ? latest.catalog?.version ?? "" : latest.version
+        guard !currentVersion.isEmpty, ExtensionBuildResolver.compareVersions(manifest.version, currentVersion) != .orderedAscending else {
+            throw BrowserExtensions.failure("Verification would replace 1Password with an older version. Keep this version and try again when its store package is available.")
+        }
+        var catalog = Self.catalogRecord(for: fetched, installedAt: Date(), previous: latest.catalog)
+        catalog.version = manifest.version
+        statusChanged?("Verified 1Password \(manifest.version). Reviewing replacement permissions…")
+        try await host.replacePackage(id: latest.id, with: fetched.packageURL, catalog: catalog)
     }
 
     /// Replaces the package in place, keeping the extension's identifier, storage,

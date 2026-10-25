@@ -131,7 +131,11 @@ import AppKit
         if let record {
             installButton.title = candidate.source == .safariAppStore ? "Manage app extensions" : record.enabled ? "Added to Bam ✓" : "Enable in Bam"
             installButton.isEnabled = !installing && (candidate.source == .safariAppStore || !record.enabled)
-            compatibility.stringValue = record.enabled ? "Enabled in \(host?.profileName?(profileID) ?? "this profile"). Click its icon below Bam’s address bar to open it." : "Added to this profile. Enable it to review permissions and start using it."
+            if record.safariBundle != nil, host?.errors[record.id] != nil || (record.enabled && host?.context(for: record.id) == nil) {
+                compatibility.stringValue = "This Safari extension needs attention. Open Installed extensions and choose Refresh from Installed App to review the current version and keep its settings."
+            } else {
+                compatibility.stringValue = record.enabled ? "Enabled in \(host?.profileName?(profileID) ?? "this profile"). Click its icon below Bam’s address bar to open it." : "Added to this profile. Enable it to review permissions and start using it."
+            }
         } else if candidate.source == .safariAppStore {
             let installed = ExtensionInstaller.installedSafariApplication(for: candidate) != nil
             installButton.title = installed ? "Add to Bam" : "Get from App Store ↗"

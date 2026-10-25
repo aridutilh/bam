@@ -61,7 +61,7 @@ import JavaScriptCore
         let result = try object(classic.appendingPathComponent("manifest.json"))
         let background = result["background"] as! [String: Any], marker = result[ExtensionServiceWorkerPreparation.markerKey] as! [String: Any]
         let entry = background["service_worker"] as! String, shim = marker["adapter"] as! String
-        try check(note?.contains("external native apps remain unavailable") == true && note?.contains("keeps its original entry URL") == true, "Disclosure states transport and worker URL limits")
+        try check(note?.contains("External desktop access requires separate approval") == true && note?.contains("keeps its original entry URL") == true, "Disclosure states transport and worker URL limits")
         try check(ExtensionServiceWorkerPreparation.isPrepared(manifest: result), "Prepared marker describes the selected worker")
         try check(entry == "lib/worker.js" && shim.hasPrefix("lib/"), "Classic registration URL is preserved and its adapter is a sibling")
         try check(background["page"] == nil && background["scripts"] == nil && background["type"] == nil, "Classic background remains a classic service worker")

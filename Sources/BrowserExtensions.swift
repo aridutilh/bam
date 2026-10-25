@@ -38,6 +38,8 @@ struct BrowserExtensionRecord: Codable, Identifiable {
     var catalog: ExtensionCatalogRecord? = nil
     /// Signed Safari WebExtension provenance; its private .appex remains unmodified.
     var safariBundle: SafariExtensionBundle? = nil
+    /// Separately reviewed desktop host, scoped by this record's extension/profile.
+    var nativeHost: ExtensionNativeMessaging.Host? = nil
 }
 
 /// Lightweight native action state for visible chrome. Reading it never opens a popup.
@@ -65,6 +67,7 @@ struct BrowserExtensionPermissionReview {
     var compatibilityNote: String? = nil
     /// Permissions provided by Bam's limited compatibility layer rather than WebKit.
     var bridged: [String] = []
+    var nativeCompanionAvailable = false
 }
 
 @available(macOS 15.4, *)
@@ -97,6 +100,8 @@ struct BrowserExtensionPermissionReview {
     /// user mutation without assuming WebKit's async initializer suspends.
     var packageParser: @MainActor (URL) async throws -> WKWebExtension = { try await WKWebExtension(resourceBaseURL: $0) }
     var safariImporter = SafariExtensionImport()
+    var nativeMessagingPolicy = ExtensionNativeMessaging()
+    var nativeHostPrompt: ((BrowserExtensionRecord, ExtensionNativeMessaging.Host) -> Bool)?
     private(set) var records: [BrowserExtensionRecord] = []
     private(set) var lastError: String?
     private(set) var errors: [UUID: String] = [:]
@@ -402,14 +407,16 @@ struct BrowserExtensionPermissionReview {
         replacement.name = ext.displayName ?? before.name; replacement.version = ext.version ?? ""
         replacement.compatibilityNote = note; replacement.catalog = catalog
         replacement.safariBundle = safariBundle
+        if !Self.supportsNativeCompanion(replacement) || !ext.requestedPermissions.contains(.init(rawValue: "nativeMessaging")) { replacement.nativeHost = nil }
         if before.enabled {
             let requested = Set(ext.requestedPermissions.map(\.rawValue))
             let supported = requested.intersection(Self.supportedPermissions)
             let bridged = ExtensionCompatibility.plan(manifest: ext.manifest).provided.filter { ExtensionCompatibility.bridgedPermissions.contains($0) }
             let patterns = ext.allRequestedMatchPatterns.map(\.string).sorted()
             let review = BrowserExtensionPermissionReview(name: replacement.name, profileName: profileName?(before.profileID) ?? "Current profile",
-                permissions: supported.sorted(), websites: patterns, unsupported: requested.subtracting(supported).subtracting(bridged).sorted(),
-                isOptional: false, compatibilityNote: note, bridged: bridged)
+                permissions: supported.sorted(), websites: patterns, unsupported: requested.subtracting(supported).subtracting(bridged).subtracting(Self.supportsNativeCompanion(replacement) ? ["nativeMessaging"] : []).sorted(),
+                isOptional: false, compatibilityNote: note, bridged: bridged,
+                nativeCompanionAvailable: Self.supportsNativeCompanion(replacement) && requested.contains("nativeMessaging"))
             guard approve(review) else { throw BrowserExtensionUpdateCancelled(name: before.name) }
             try Task.checkCancellation()
             for permission in supported {
@@ -434,7 +441,7 @@ struct BrowserExtensionPermissionReview {
         do {
             if let oldContext {
                 runtime.closePopup(for: oldContext); try runtime.controller.unload(oldContext)
-                runtime.compatibility.remove(oldContext); runtime.contexts.removeValue(forKey: id); unloaded = true
+                runtime.disconnectNative(oldContext); runtime.compatibility.remove(oldContext); runtime.contexts.removeValue(forKey: id); unloaded = true
             }
             try fm.moveItem(at: package, to: previous); movedPackage = true
             if fm.fileExists(atPath: originalManifest.path) { try fm.moveItem(at: originalManifest, to: previousManifest); movedManifest = true }
@@ -467,6 +474,7 @@ struct BrowserExtensionPermissionReview {
                 restored.permissions = records[currentIndex].permissions; restored.patterns = records[currentIndex].patterns
                 restored.deniedPermissions = records[currentIndex].deniedPermissions; restored.deniedPatterns = records[currentIndex].deniedPatterns
                 restored.compatibilityGrants = records[currentIndex].compatibilityGrants
+                restored.nativeHost = records[currentIndex].nativeHost
                 if let oldContext { restored = Self.retainingDeclaredPermissions(restored, for: oldContext.webExtension) }
             }
             // A newer disable/revoke/remove action or shutdown must never be
@@ -474,7 +482,7 @@ struct BrowserExtensionPermissionReview {
             if interrupted { restored.enabled = false }
             if let context = runtime.contexts[id], context !== oldContext {
                 runtime.closePopup(for: context); try? runtime.controller.unload(context)
-                runtime.compatibility.remove(context); runtime.contexts.removeValue(forKey: id)
+                runtime.disconnectNative(context); runtime.compatibility.remove(context); runtime.contexts.removeValue(forKey: id)
             }
             if movedPackage { try? fm.removeItem(at: package); try? fm.moveItem(at: previous, to: package) }
             if installedManifest { try? fm.removeItem(at: originalManifest) }
@@ -528,7 +536,7 @@ struct BrowserExtensionPermissionReview {
             if let runtime = runtimes[records[i].profileID], let context = runtime.contexts[id] {
                 runtime.closePopup(for: context)
                 try runtime.controller.unload(context)
-                runtime.compatibility.remove(context)
+                runtime.disconnectNative(context); runtime.compatibility.remove(context)
                 runtime.contexts.removeValue(forKey: id)
             }
             records[i].enabled = false
@@ -551,7 +559,8 @@ struct BrowserExtensionPermissionReview {
     func revokePermissions(id: UUID) throws {
         guard let i = records.firstIndex(where: { $0.id == id }) else { return }
         noteMutation(id, permissions: true); loadGeneration.removeValue(forKey: id)
-        records[i].permissions = [:]; records[i].patterns = [:]; records[i].compatibilityGrants = [:]
+        records[i].permissions = [:]; records[i].patterns = [:]; records[i].compatibilityGrants = [:]; records[i].nativeHost = nil
+        if let runtime = runtimes[records[i].profileID], let context = runtime.contexts[id] { runtime.disconnectNative(context) }
         if let context = context(for: id) { context.grantedPermissions = [:]; context.grantedPermissionMatchPatterns = [:] }
         try persist(); onReloadNeeded?(records[i].profileID); changed()
     }
@@ -599,7 +608,8 @@ struct BrowserExtensionPermissionReview {
             let supported = requested.intersection(Self.supportedPermissions)
             let patterns = ext.allRequestedMatchPatterns.map(\.string).sorted()
             let details = BrowserExtensionPermissionReview(name: record.name, profileName: profileName?(record.profileID) ?? "Current profile", permissions: supported.sorted(), websites: patterns,
-                unsupported: requested.subtracting(supported).subtracting(bridged).sorted(), isOptional: false, compatibilityNote: record.compatibilityNote, bridged: bridged)
+                unsupported: requested.subtracting(supported).subtracting(bridged).subtracting(Self.supportsNativeCompanion(record) ? ["nativeMessaging"] : []).sorted(), isOptional: false, compatibilityNote: record.compatibilityNote, bridged: bridged,
+                nativeCompanionAvailable: Self.supportsNativeCompanion(record) && requested.contains("nativeMessaging"))
             guard approve(details) else { changed(); return }
             try Task.checkCancellation()
             // Native review runs a nested loop; deletion, disabling or shutdown wins.
@@ -626,7 +636,7 @@ struct BrowserExtensionPermissionReview {
         context.unsupportedAPIs = Self.unsupportedAPIs
         context.hasAccessToPrivateData = isPrivate
         context.grantedPermissions = Dictionary(uniqueKeysWithValues: current.permissions.filter { Self.supportedPermissions.contains($0.key) }.map { (WKWebExtension.Permission(rawValue: $0.key), $0.value) })
-        if current.safariBundle == nil && ExtensionServiceWorkerPreparation.isPrepared(manifest: ext.manifest) {
+        if current.safariBundle == nil && (ExtensionServiceWorkerPreparation.isPrepared(manifest: ext.manifest) || Self.supportsNativeCompanion(current)) {
             context.unsupportedAPIs.subtract(["browser.runtime.sendNativeMessage", "browser.runtime.connectNative"])
             context.grantedPermissions[.init(rawValue: "nativeMessaging")] = .distantFuture
         }
@@ -635,11 +645,11 @@ struct BrowserExtensionPermissionReview {
         context.deniedPermissionMatchPatterns = Self.matchPatterns(current.deniedPatterns)
         // The layer only defines what WebKit lacks, scoped to this extension's origin.
         runtime.compatibility.install(plan, for: context)
-        do { try runtime.controller.load(context) } catch { runtime.compatibility.remove(context); throw error }
+        do { try runtime.controller.load(context) } catch { runtime.disconnectNative(context); runtime.compatibility.remove(context); throw error }
         runtime.contexts[id] = context
         records[index].enabled = true; records[index].compatibility = bridged; errors.removeValue(forKey: id)
         do { try persist() } catch {
-            runtime.contexts.removeValue(forKey: id); runtime.compatibility.remove(context); try? runtime.controller.unload(context); records[index].enabled = false; throw error
+            runtime.contexts.removeValue(forKey: id); runtime.disconnectNative(context); runtime.compatibility.remove(context); try? runtime.controller.unload(context); records[index].enabled = false; throw error
         }
         runtime.reconcile()
         if review { onReloadNeeded?(record.profileID) }
@@ -659,7 +669,9 @@ struct BrowserExtensionPermissionReview {
         records[i].patterns = Dictionary(uniqueKeysWithValues: context.grantedPermissionMatchPatterns.map { ($0.key.string, $0.value) })
         records[i].deniedPermissions = Dictionary(uniqueKeysWithValues: context.deniedPermissions.map { ($0.key.rawValue, $0.value) })
         records[i].deniedPatterns = Dictionary(uniqueKeysWithValues: context.deniedPermissionMatchPatterns.map { ($0.key.string, $0.value) })
-        if before.permissions != records[i].permissions || before.patterns != records[i].patterns || before.deniedPermissions != records[i].deniedPermissions || before.deniedPatterns != records[i].deniedPatterns { noteMutation(id, permissions: true) }
+        if !context.hasPermission(.init(rawValue: "nativeMessaging")) { records[i].nativeHost = nil }
+        if before.permissions != records[i].permissions || before.patterns != records[i].patterns || before.deniedPermissions != records[i].deniedPermissions || before.deniedPatterns != records[i].deniedPatterns || before.nativeHost != records[i].nativeHost { noteMutation(id, permissions: true) }
+        if let runtime = runtimes[records[i].profileID], runtime.approvedNativeHost(context) == nil { runtime.disconnectNative(context) }
         do { try persist() } catch { setError(error, for: id) }
     }
     private func persist() throws {
@@ -667,6 +679,48 @@ struct BrowserExtensionPermissionReview {
         try FileManager.default.createDirectory(at: storageURL, withIntermediateDirectories: true)
         let data = try JSONEncoder().encode(records)
         try data.write(to: storageURL.appendingPathComponent("registry.json"), options: .atomic)
+    }
+    static func supportsNativeCompanion(_ record: BrowserExtensionRecord) -> Bool {
+        guard record.safariBundle == nil, let catalog = record.catalog else { return false }
+        let expected = ExtensionNativeMessaging.chromeExtensionIdentifier
+        return catalog.source == .chromeWebStore && catalog.upstreamID == expected && catalog.verifiedChromeExtensionID == expected
+    }
+    func connectDesktopApp(id: UUID) async throws {
+        guard !stopped, let record = records.first(where: { $0.id == id }), record.enabled,
+              Self.supportsNativeCompanion(record), let context = context(for: id) else {
+            throw Self.failure("Enable the verified Chrome Web Store build of 1Password before connecting its desktop app. Older installations may need a verified update or reinstall.")
+        }
+        guard context.isLoaded, context.webExtension.requestedPermissions.contains(.init(rawValue: "nativeMessaging")),
+              context.hasPermission(.init(rawValue: "nativeMessaging")) else {
+            throw Self.failure("1Password’s native messaging permission is unavailable. Disable and re-enable the extension to review its permissions before connecting the desktop app.")
+        }
+        let revision = mutationRevisions[id, default: 0], policy = nativeMessagingPolicy
+        let host = try await Task.detached(priority: .utility) { try policy.validateBrowser(); return try policy.discover() }.value
+        try Task.checkCancellation()
+        guard !stopped, mutationRevisions[id, default: 0] == revision, self.context(for: id) === context else { return }
+        let approved: Bool
+        if let nativeHostPrompt { approved = nativeHostPrompt(record, host) }
+        else {
+            let alert = NSAlert(); alert.messageText = "Connect 1Password’s desktop app?"
+            alert.informativeText = "Profile: \(profileName?(record.profileID) ?? "Current profile")\n\nAllow this verified 1Password extension to exchange messages with \(host.applicationURL.lastPathComponent)? You’ll also need to trust Bam in 1Password’s Settings → Browsers.\n\nApp: \(host.applicationURL.path)\nHost: \(host.executableURL.path)\nVerified publisher: \(host.teamIdentifier)\n\nThis access is separate from website permissions. Disconnect it here or revoke the extension’s permissions at any time. App updates require a new review."
+            alert.addButton(withTitle: "Cancel"); alert.addButton(withTitle: "Connect")
+            approved = alert.runModal() == .alertSecondButtonReturn
+        }
+        guard approved else { return }
+        try await Task.detached(priority: .utility) { try policy.validate(host) }.value
+        try Task.checkCancellation()
+        guard !stopped, mutationRevisions[id, default: 0] == revision, self.context(for: id) === context,
+              let index = records.firstIndex(where: { $0.id == id && $0.profileID == record.profileID }), records[index].enabled else { return }
+        let previous = records[index].nativeHost
+        records[index].nativeHost = host
+        do { try persist() } catch { records[index].nativeHost = previous; throw error }
+        noteMutation(id, permissions: true); errors.removeValue(forKey: id); changed()
+    }
+    func disconnectDesktopApp(id: UUID) throws {
+        guard let index = records.firstIndex(where: { $0.id == id }) else { return }
+        noteMutation(id, permissions: true); records[index].nativeHost = nil
+        if let runtime = runtimes[records[index].profileID], let context = runtime.contexts[id] { runtime.disconnectNative(context) }
+        try persist(); changed()
     }
     func setError(_ error: Error, for id: UUID? = nil) {
         lastError = error.localizedDescription
@@ -808,7 +862,8 @@ struct BrowserExtensionPermissionReview {
     }
     deinit { for observer in observers { NotificationCenter.default.removeObserver(observer) } }
     private func clearPopupPresentation() { activePopup = nil; activePopupPopover = nil; activePopupTabID = nil }
-    func shutdown() { compatibility.shutdown(); ExtensionNotificationCenter.shared.unregister(compatibility) }
+    var nativeSessions: [UUID: BrowserExtensionNativeSession] = [:]
+    func shutdown() { disconnectAllNative(); compatibility.shutdown(); ExtensionNotificationCenter.shared.unregister(compatibility) }
     func closePopup(for context: WKWebExtensionContext) {
         if popupContextID == context.uniqueIdentifier { popupAnchor = nil; popupTabID = nil; popupContextID = nil }
         if let action = activePopup, action.webExtensionContext === context { clearPopupPresentation(); action.closePopup() }
@@ -1017,7 +1072,11 @@ struct BrowserExtensionPermissionReview {
     }
     func webExtensionController(_ controller: WKWebExtensionController, didUpdate action: WKWebExtension.Action, forExtensionContext context: WKWebExtensionContext) { if owns(context) { owner?.changed() } }
     func webExtensionController(_ controller: WKWebExtensionController, sendMessage message: Any, toApplicationWithIdentifier applicationIdentifier: String?, for context: WKWebExtensionContext, replyHandler: @escaping (Any?, Error?) -> Void) {
-        guard controller === self.controller, allowsCompatibilityTransport(context), applicationIdentifier == ExtensionCompatibility.nativeApplicationIdentifier else {
+        guard controller === self.controller else { replyHandler(nil, BrowserExtensions.failure("This extension controller is not authorized.")); return }
+        if applicationIdentifier == ExtensionNativeMessaging.applicationIdentifier {
+            sendNative(message, context: context, reply: replyHandler); return
+        }
+        guard allowsCompatibilityTransport(context), applicationIdentifier == ExtensionCompatibility.nativeApplicationIdentifier else {
             replyHandler(nil, BrowserExtensions.failure("This native application is not available in Bam.")); return
         }
         Task { @MainActor in
@@ -1026,7 +1085,11 @@ struct BrowserExtensionPermissionReview {
         }
     }
     func webExtensionController(_ controller: WKWebExtensionController, connectUsing port: WKWebExtension.MessagePort, for context: WKWebExtensionContext, completionHandler: @escaping (Error?) -> Void) {
-        guard controller === self.controller, allowsCompatibilityTransport(context), port.applicationIdentifier == ExtensionCompatibility.nativeApplicationIdentifier else {
+        guard controller === self.controller else { completionHandler(BrowserExtensions.failure("This extension controller is not authorized.")); return }
+        if port.applicationIdentifier == ExtensionNativeMessaging.applicationIdentifier {
+            connectNative(port, context: context, completion: completionHandler); return
+        }
+        guard allowsCompatibilityTransport(context), port.applicationIdentifier == ExtensionCompatibility.nativeApplicationIdentifier else {
             completionHandler(BrowserExtensions.failure("This native application is not available in Bam.")); return
         }
         completionHandler(compatibility.connectNativePort(port, context: context))

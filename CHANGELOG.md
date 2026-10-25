@@ -5,6 +5,14 @@
 - Hide the window's close, minimize and zoom buttons together with the sidebar, as Arc does: they fade out over the last 80 points of the collapse, so a collapsed sidebar leaves the page alone in the window, and they return as the sidebar slides back in.
 - Retire the “A little space” start page. An empty tab is now a plain dark surface titled “New tab” (the address bar still reads “Search or enter URL”), and the History ▸ Home command (⇧⌘H) that navigated to it is gone. Existing tabs on that page keep working and simply show the blank surface.
 
+## 0.21.0 draft — build 41
+
+- Add a separate, profile-scoped desktop connection review for the verified Chrome Web Store build of 1Password. Authenticate the official installed BrowserSupport helper and app, pin the reviewed host, bound message/connection queues, and close helpers on revoke, disable, update or shutdown. This transport is fixture-tested; real 1Password pairing and Touch ID remain unverified and require an Apple-signed Bam build plus vendor trust.
+- Offer same-version publisher reverification for older 1Password installations while preserving their identity and storage. This does not automatically grant desktop access.
+- Add **Refresh from Installed App** for Safari extensions, expose interrupted loads as needing recovery, and preserve identity/storage through refresh, cancellation and rollback.
+- Clear compatibility diagnostics on unload/shutdown, bound individual messages, and add repeated real popup/bridge-release checks plus app memory phase observations.
+- Add dummy login forms for the separate signed-in password/autofill pass. User account unlock and real vendor Safari testing remain pending.
+
 ## 0.20.1 draft — build 40
 
 - Display SVG website favicons, including percent-escaped and base64 data URLs and public SVG files. Preserve existing URL escapes when bridging page declarations into native code. This fixes the missing disco-ball favicon on aridutilh.com.

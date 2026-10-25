@@ -225,6 +225,125 @@ import WebKit
         runtime.reconcile()
         try check(runtime.tabs.isEmpty && runtime.windows.isEmpty && runtime.orderedIDs.isEmpty, "Closing all live tabs must clear adapters and window topology")
         host.shutdown()
+        checks += try await nativeAuthority()
         print("PASS: Extension enumeration — \(checks)")
+    }
+
+    /// Original inert packages and synthetic signed-host metadata exercise the
+    /// host's authority decisions. This test never executes any native helper.
+    @available(macOS 15.4, *)
+    static func nativeAuthority() async throws -> Int {
+        var checks = 0
+        func check(_ condition: Bool, _ message: String) throws {
+            guard condition else { throw Failure(message: message) }; checks += 1
+        }
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("bam-native-authority-\(UUID())", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let app = root.appendingPathComponent("Synthetic.app", isDirectory: true), executable = app.appendingPathComponent(ExtensionNativeMessaging.helperRelativePath)
+        try FileManager.default.createDirectory(at: executable.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("#!/bin/false\n".utf8).write(to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
+        try PropertyListSerialization.data(fromPropertyList: ["CFBundleIdentifier": ExtensionNativeMessaging.applicationIdentifier], format: .xml, options: 0)
+            .write(to: app.appendingPathComponent("Contents/Info.plist"))
+        let registration = root.appendingPathComponent(ExtensionNativeMessaging.applicationIdentifier + ".json")
+        try JSONSerialization.data(withJSONObject: ["name": ExtensionNativeMessaging.applicationIdentifier, "type": "stdio",
+            "path": executable.path, "allowed_origins": [ExtensionNativeMessaging.origin]]) .write(to: registration)
+        let signature: ExtensionNativeMessaging.SignatureValidator = { url in
+            let path = url.resolvingSymlinksInPath().standardizedFileURL.path
+            let isApp = path == app.resolvingSymlinksInPath().standardizedFileURL.path
+            guard isApp || path == executable.resolvingSymlinksInPath().standardizedFileURL.path else { throw Failure(message: "Unexpected synthetic signature target") }
+            return .init(identifier: isApp ? ExtensionNativeMessaging.applicationIdentifier : "synthetic-browser-support",
+                teamIdentifier: ExtensionNativeMessaging.vendorTeamIdentifier, codeHash: isApp ? "synthetic-app" : "synthetic-host")
+        }
+        let policy = ExtensionNativeMessaging(searchDirectories: [root], signatureValidator: signature, browserValidator: {})
+        let approved = try policy.discover()
+        let verified = ExtensionNativeMessaging.chromeExtensionIdentifier
+        let catalog = ExtensionCatalogRecord(source: .chromeWebStore, upstreamID: verified, listingURL: nil, downloadURL: nil,
+            publisher: "Synthetic fixture", version: "1.0", sha256: "synthetic", provenance: "CRX3 signature verified for \(verified)",
+            verifiedChromeExtensionID: verified, installedAt: Date())
+        let profile = UUID(), otherProfile = UUID(), approvedID = UUID(), unapprovedID = UUID(), otherID = UUID()
+        let granted = BrowserExtensionRecord(id: approvedID, profileID: profile, name: "Native Authority Fixture", version: "1.0", packageName: "package", enabled: true, catalog: catalog, nativeHost: approved)
+        var oldText = granted; oldText.catalog?.verifiedChromeExtensionID = nil
+        try check(!BrowserExtensions.supportsNativeCompanion(oldText), "Human-readable old verification text authorized desktop access")
+        var wrongIdentity = granted; wrongIdentity.catalog?.verifiedChromeExtensionID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        try check(!BrowserExtensions.supportsNativeCompanion(wrongIdentity), "A different verified CRX identity authorized the 1Password companion")
+        var wrongSource = granted; wrongSource.catalog?.source = .amo
+        try check(!BrowserExtensions.supportsNativeCompanion(wrongSource), "A non-Chrome source authorized the Chrome companion")
+        let unapproved = BrowserExtensionRecord(id: unapprovedID, profileID: profile, name: "Unapproved Fixture", version: "1.0", packageName: "package", enabled: true, catalog: catalog)
+        let other = BrowserExtensionRecord(id: otherID, profileID: otherProfile, name: "Other Profile Fixture", version: "1.0", packageName: "package", enabled: true, catalog: catalog, nativeHost: approved)
+        for record in [granted, unapproved, other] {
+            let package = root.appendingPathComponent(record.id.uuidString).appendingPathComponent("package")
+            try FileManager.default.createDirectory(at: package, withIntermediateDirectories: true)
+            try Data(#"{"manifest_version":3,"name":"Native Authority Fixture","description":"Original inert authority fixture","version":"1.0","permissions":["nativeMessaging"]}"#.utf8)
+                .write(to: package.appendingPathComponent("manifest.json"))
+        }
+        try JSONEncoder().encode([granted, unapproved, other]).write(to: root.appendingPathComponent("registry.json"))
+        let host = BrowserExtensions(storageURL: root)
+        host.nativeMessagingPolicy = policy; host.permissionPrompt = { _ in true }; host.onReloadNeeded = nil
+        defer { host.shutdown() }
+        await host.prepare(profileID: profile, dataStore: .nonPersistent())
+        await host.prepare(profileID: otherProfile, dataStore: .nonPersistent())
+        guard let context = host.context(for: approvedID), let unapprovedContext = host.context(for: unapprovedID), let otherContext = host.context(for: otherID),
+              let runtime = context.webExtensionController?.delegate as? BrowserExtensionRuntime,
+              let otherRuntime = otherContext.webExtensionController?.delegate as? BrowserExtensionRuntime else {
+            throw Failure(message: "Native authority fixture failed to load: \(host.errors)")
+        }
+        try check(runtime.approvedNativeHost(context) == approved, "Verified loaded context lost its separately reviewed host")
+        try check(runtime.approvedNativeHost(unapprovedContext) == nil, "A verified package without a desktop grant gained access")
+        try check(runtime.approvedNativeHost(otherContext) == nil && otherRuntime.approvedNativeHost(context) == nil && otherRuntime.approvedNativeHost(otherContext) == approved,
+            "Desktop host authority crossed a profile/controller boundary")
+        let foreignContext = WKWebExtensionContext(for: context.webExtension)
+        foreignContext.uniqueIdentifier = context.uniqueIdentifier
+        try check(runtime.approvedNativeHost(foreignContext) == nil, "Copying an approved identifier authorized an unowned context")
+        context.grantedPermissions[.init(rawValue: "nativeMessaging")] = nil
+        try check(runtime.approvedNativeHost(context) == nil, "Missing live nativeMessaging permission did not deny the host")
+        context.grantedPermissions[.init(rawValue: "nativeMessaging")] = .distantFuture
+        host.nativeHostPrompt = { _, _ in false }
+        try await host.connectDesktopApp(id: unapprovedID)
+        try check(runtime.approvedNativeHost(unapprovedContext) == nil && host.records.first { $0.id == unapprovedID }?.nativeHost == nil,
+            "Canceling desktop review persisted a host grant")
+        host.nativeHostPrompt = { _, _ in true }
+        try await host.connectDesktopApp(id: unapprovedID)
+        try check(runtime.approvedNativeHost(unapprovedContext) == approved, "Approved desktop review did not bind the discovered host")
+        try host.disconnectDesktopApp(id: unapprovedID)
+        try check(runtime.approvedNativeHost(unapprovedContext) == nil && host.records.first { $0.id == unapprovedID }?.nativeHost == nil,
+            "Disconnect retained the desktop grant")
+        try await host.connectDesktopApp(id: unapprovedID)
+        try host.revokePermissions(id: unapprovedID)
+        try check(runtime.approvedNativeHost(unapprovedContext) == nil && host.records.first { $0.id == unapprovedID }?.nativeHost == nil &&
+            !unapprovedContext.hasPermission(.init(rawValue: "nativeMessaging")), "Revoking permissions retained native-app authority")
+        var refusedRevokedConnection = false
+        do { try await host.connectDesktopApp(id: unapprovedID) }
+        catch { refusedRevokedConnection = true }
+        try check(refusedRevokedConnection && host.records.first { $0.id == unapprovedID }?.nativeHost == nil,
+            "Connecting after permission revocation falsely reported success or persisted a desktop grant")
+        // Create a real pending runtime session, then unload synchronously before
+        // its launch Task runs. The injected validator additionally forbids any
+        // helper launch even if task scheduling changes in a future SDK.
+        host.nativeMessagingPolicy = ExtensionNativeMessaging(searchDirectories: [root], signatureValidator: signature,
+            browserValidator: { throw Failure(message: "Synthetic fixture forbids launching a native host") })
+        var permissionReplies = 0, permissionReplyError: Error?
+        otherRuntime.sendNative(["synthetic": true], context: otherContext) { _, error in permissionReplies += 1; permissionReplyError = error }
+        try check(otherRuntime.nativeSessions.count == 1, "Permission-removal fixture did not retain its pending session")
+        otherContext.grantedPermissions[.init(rawValue: "nativeMessaging")] = nil
+        host.persistPermissions(otherContext)
+        try check(host.records.first { $0.id == otherID }?.nativeHost == nil && otherRuntime.nativeSessions.isEmpty &&
+            permissionReplies == 1 && permissionReplyError != nil && otherRuntime.approvedNativeHost(otherContext) == nil,
+            "Removing WebKit nativeMessaging permission did not clear the grant and close its pending session")
+        var replies = 0, replyError: Error?
+        runtime.sendNative(["synthetic": true], context: context) { _, error in replies += 1; replyError = error }
+        try check(runtime.nativeSessions.count == 1 && replies == 0, "Native request did not register its pending session")
+        try await host.setEnabled(false, id: approvedID)
+        try check(runtime.nativeSessions.isEmpty && replies == 1 && replyError != nil && runtime.approvedNativeHost(context) == nil,
+            "Unloading failed to close a pending native session and reply once")
+        await Task.yield()
+        try check(replies == 1 && permissionReplies == 1, "Canceled native startup delivered a duplicate reply")
+        host.shutdown()
+        for controller in [runtime.controller, otherRuntime.controller] {
+            let data = await controller.dataRecords(ofTypes: WKWebExtensionController.allExtensionDataTypes)
+            await controller.removeData(ofTypes: WKWebExtensionController.allExtensionDataTypes, from: data)
+        }
+        return checks
     }
 }

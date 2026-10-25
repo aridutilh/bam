@@ -144,7 +144,7 @@ enum ExtensionServiceWorkerPreparation {
         let detail = module
             ? "The module entry URL changes within its original directory; original module source URLs and import.meta.url are preserved."
             : "The classic worker keeps its original entry URL. Its private entry is replaced by a loader, with the byte-exact original script preserved beside it."
-        return "Prepared a compatibility entry for the Manifest V3 service worker; worker type is unchanged. \(detail) Uses nativeMessaging only for Bam’s internal compatibility transport; external native apps remain unavailable. The original manifest is preserved."
+        return "Prepared a compatibility entry for the Manifest V3 service worker; worker type is unchanged. \(detail) The compatibility layer uses Bam’s internal nativeMessaging transport. External desktop access requires separate approval and currently supports only the verified Chrome build of 1Password. The original manifest is preserved."
     }
 
     private static func wrapper(original: String, adapter: String, module: Bool) -> String {

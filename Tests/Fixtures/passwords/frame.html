@@ -1,0 +1,4 @@
+<!doctype html><meta charset="utf-8"><title>Dummy iframe login</title>
+<style>body{font:16px system-ui;color:#203b2d}label{display:block;margin:12px}input,button{font:inherit;padding:8px;border:1px solid #909b8b;border-radius:8px}input{display:block;margin-top:4px}output{display:block;margin:12px}</style>
+<form action="#"><label>Username<input name="username" type="email" autocomplete="username"></label><label>Password<input name="password" type="password" autocomplete="current-password"></label><button>Submit dummy iframe form</button></form><output aria-live="polite"></output>
+<script>document.querySelector('form').onsubmit=e=>{e.preventDefault();document.querySelector('output').textContent=Array.from(e.target.querySelectorAll('input')).map(i=>i.name+': '+(i.value?'filled':'empty')).join(' · ')+'. No values sent or stored.';};</script>

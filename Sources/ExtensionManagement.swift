@@ -16,6 +16,7 @@ import UniformTypeIdentifiers
     private let importButton = NSButton(title: "Import Folder…", target: nil, action: nil)
     private let libraryButton = NSButton(title: "Find Extensions…", target: nil, action: nil)
     private let updateButton = NSButton(title: "Check for Update", target: nil, action: nil)
+    private let desktopButton = NSButton(title: "Connect Desktop…", target: nil, action: nil)
     private var busy = false
     /// A one-shot message shown by the next refresh instead of the generic guidance.
     private var pendingStatus: String?
@@ -40,9 +41,10 @@ import UniformTypeIdentifiers
         importButton.frame = NSRect(x: 236, y: 56, width: 160, height: 32); importButton.target = self; importButton.action = #selector(importPackage)
         updateButton.frame = NSRect(x: 400, y: 56, width: 198, height: 32); updateButton.target = self; updateButton.action = #selector(checkForUpdate)
         toggle.frame = NSRect(x: 18, y: 21, width: 100, height: 32); toggle.target = self; toggle.action = #selector(toggleExtension)
-        revoke.frame = NSRect(x: 122, y: 21, width: 190, height: 32); revoke.target = self; revoke.action = #selector(revokePermissions)
+        revoke.frame = NSRect(x: 122, y: 21, width: 160, height: 32); revoke.target = self; revoke.action = #selector(revokePermissions)
+        desktopButton.frame = NSRect(x: 286, y: 21, width: 190, height: 32); desktopButton.target = self; desktopButton.action = #selector(connectDesktop)
         removeButton.frame = NSRect(x: 482, y: 21, width: 116, height: 32); removeButton.target = self; removeButton.action = #selector(removeExtension)
-        [libraryButton, importButton, updateButton, toggle, revoke, removeButton].forEach { root.addSubview($0) }
+        [libraryButton, importButton, updateButton, toggle, revoke, desktopButton, removeButton].forEach { root.addSubview($0) }
         Self.dress?(window, root)
     }
     /// The app installs Bam's wash and pill styling here; this file also builds
@@ -76,11 +78,23 @@ import UniformTypeIdentifiers
         toggle.attributedTitle = NSAttributedString(string: toggleTitle, attributes: attributes)
         toggle.isEnabled = !busy && selected != nil; removeButton.isEnabled = !busy && selected != nil; revoke.isEnabled = !busy && selected != nil; importButton.isEnabled = !busy
         libraryButton.isEnabled = !busy
-        let updatable = selected?.catalog.map { $0.source == .amo || $0.source == .chromeWebStore } ?? false
+        let desktopCandidate = selected?.catalog?.source == .chromeWebStore && selected?.catalog?.upstreamID == ExtensionNativeMessaging.chromeExtensionIdentifier
+        desktopButton.isHidden = !desktopCandidate
+        desktopButton.isEnabled = !busy && (selected?.nativeHost != nil || (selected?.enabled == true && selected.flatMap { host?.context(for: $0.id) } != nil))
+        let verified = selected.map(BrowserExtensions.supportsNativeCompanion) ?? false
+        let desktopTitle = selected?.nativeHost != nil ? "Disconnect Desktop" : verified ? "Connect Desktop…" : "Verify Desktop Support…"
+        let desktopAttributes = desktopButton.attributedTitle.length > 0 ? desktopButton.attributedTitle.attributes(at: 0, effectiveRange: nil) : [:]
+        desktopButton.attributedTitle = NSAttributedString(string: desktopTitle, attributes: desktopAttributes)
+        desktopButton.toolTip = "Connect the official 1Password Chrome extension to its signed desktop app. Requires an Apple-signed Bam build and approval in 1Password’s browser settings."
+        let safari = selected?.safariBundle != nil
+        let updatable = safari || (selected?.catalog.map { $0.source == .amo || $0.source == .chromeWebStore } ?? false)
+        let updateAttributes = updateButton.attributedTitle.length > 0 ? updateButton.attributedTitle.attributes(at: 0, effectiveRange: nil) : [:]
+        updateButton.attributedTitle = NSAttributedString(string: safari ? "Refresh from Installed App" : "Check for Update", attributes: updateAttributes)
         updateButton.isEnabled = !busy && updatable
-        updateButton.toolTip = updatable ? "Ask \(selected?.catalog?.sourceLabel ?? "the store") for a newer version of this build. Updates keep the extension’s identity and storage and never switch stores." : "Only store-installed extensions can check for updates."
+        updateButton.toolTip = safari ? "Review the current signed extension in its installed app, without contacting the store. Keeps its Bam identity and settings. Update the containing app in the App Store first when needed."
+            : updatable ? "Ask \(selected?.catalog?.sourceLabel ?? "the store") for a newer version of this build. Updates keep the extension’s identity and storage and never switch stores." : "Only store-installed extensions can check for updates."
         let guidance = "Reload already open pages after enabling, disabling, or revoking access. Code injected into a page cannot be removed until that page reloads. Extension storage stays local to this profile."
-        status.stringValue = selected.flatMap { host?.errors[$0.id] } ?? host?.lastError ?? pendingStatus
+        status.stringValue = pendingStatus ?? selected.flatMap { host?.errors[$0.id] } ?? (selected == nil ? host?.lastError : nil)
             ?? selected?.compatibilityNote.map { $0 + " Reload open pages after changing access." } ?? guidance
         pendingStatus = nil
         status.toolTip = guidance
@@ -94,7 +108,9 @@ import UniformTypeIdentifiers
         let bridged = (record.compatibility ?? []).isEmpty ? "" : " · Compatibility layer: \(record.compatibility!.joined(separator: ", "))"
         var origin = record.catalog.map { "\n\($0.sourceLabel)\($0.publisher.isEmpty ? "" : " · \($0.publisher)") · \($0.provenance)" } ?? "\nLocal folder · trusted by you"
         if let available = record.catalog?.availableVersion { origin += " · Update available: \(available)" }
-        let label = NSTextField(wrappingLabelWithString: "\(record.name)  \(record.version)\n\(record.enabled ? "Enabled" : "Disabled")\(host?.errors[record.id] != nil ? " · Needs attention" : "")\(bridged)\(origin)")
+        let state = record.safariBundle != nil && record.enabled && host?.context(for: record.id) == nil ? "Not running" : record.enabled ? "Enabled" : "Disabled"
+        let desktop = record.nativeHost == nil ? "" : " · Desktop access approved"
+        let label = NSTextField(wrappingLabelWithString: "\(record.name)  \(record.version)\n\(state)\(host?.errors[record.id] != nil ? " · Needs attention" : "")\(desktop)\(bridged)\(origin)")
         label.font = .systemFont(ofSize: 12); label.setAccessibilityLabel(label.stringValue)
         let cell = NSView(); label.translatesAutoresizingMaskIntoConstraints = false; cell.addSubview(label)
         NSLayoutConstraint.activate([label.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 12),
@@ -109,10 +125,18 @@ import UniformTypeIdentifiers
     }
     @objc private func checkForUpdate() {
         guard let host, let selected = selection, !busy else { return }
-        busy = true; updateControls(); status.stringValue = "Checking \(selected.catalog?.sourceLabel ?? "the store") for a newer \(selected.name)…"
+        busy = true; updateControls()
+        status.stringValue = selected.safariBundle != nil ? "Verifying the installed app for \(selected.name)…" : "Checking \(selected.catalog?.sourceLabel ?? "the store") for a newer \(selected.name)…"
         Task { @MainActor [weak self] in
             defer { self?.busy = false; self?.refresh() }
             do {
+                if selected.safariBundle != nil {
+                    let refreshed = try await host.installer.refreshSafariFromInstalledApp(selected)
+                    let record = host.records.first { $0.id == selected.id }
+                    self?.pendingStatus = refreshed ? "\(record?.name ?? selected.name) was refreshed from its installed app.\(record?.enabled == true ? " Its settings are kept." : " Enable it when you’re ready to review permissions.")"
+                        : "\(selected.name) already matches its installed app.\(record?.enabled == true ? "" : " It remains disabled.")"
+                    return
+                }
                 guard let candidate = try await host.installer.checkForUpdate(selected) else {
                     self?.pendingStatus = "\(selected.name) \(selected.version) is the newest version on \(selected.catalog?.sourceLabel ?? "its source")."; return
                 }
@@ -135,6 +159,35 @@ import UniformTypeIdentifiers
         Task { @MainActor [weak self] in
             defer { if access { url.stopAccessingSecurityScopedResource() }; self?.busy = false; self?.refresh() }
             do { _ = try await host.importPackage(at: url, profileID: profile) } catch { host.setError(error) }
+        }
+    }
+    @objc private func connectDesktop() {
+        guard let host, let selected = selection, !busy else { return }
+        if selected.nativeHost != nil {
+            do { try host.disconnectDesktopApp(id: selected.id) } catch { host.setError(error, for: selected.id) }
+            return
+        }
+        let needsVerification = !BrowserExtensions.supportsNativeCompanion(selected)
+        if needsVerification {
+            let alert = NSAlert(); alert.messageText = "Verify 1Password for desktop support?"
+            alert.informativeText = "Bam will download the current build from the same Chrome Web Store listing, verify its publisher signature and review its permissions. Your extension’s settings and sign-ins are kept. Desktop access will still need a separate approval."
+            alert.addButton(withTitle: "Cancel"); alert.addButton(withTitle: "Verify")
+            guard alert.runModal() == .alertSecondButtonReturn else { return }
+        }
+        busy = true; updateControls()
+        Task { @MainActor [weak self] in
+            defer { self?.busy = false; self?.refresh() }
+            do {
+                if needsVerification {
+                    try await host.installer.reverifyNativeCompanion(selected)
+                    self?.pendingStatus = "1Password’s publisher is verified. Choose Connect Desktop to review access to its desktop app."
+                } else {
+                    try await host.connectDesktopApp(id: selected.id)
+                    if host.records.first(where: { $0.id == selected.id })?.nativeHost != nil {
+                        self?.pendingStatus = "Desktop access approved. Trust Bam in 1Password’s Settings → Browsers, then reopen the extension."
+                    }
+                }
+            } catch { host.setError(error, for: selected.id) }
         }
     }
     @objc private func toggleExtension() {
@@ -169,8 +222,9 @@ import UniformTypeIdentifiers
         if !review.permissions.isEmpty { lines += ["Browser capabilities:", review.permissions.joined(separator: ", "), ""] }
         if !review.websites.isEmpty { lines += ["Websites:"] + review.websites + [""] }
         if !review.bridged.isEmpty { lines += ["Provided by Bam’s compatibility layer (limited):", review.bridged.joined(separator: ", "), ""] }
+        if review.nativeCompanionAvailable { lines += ["Desktop app (separate approval required):", "The verified 1Password extension can request a connection from Manage Extensions. Enabling website access does not approve it.", ""] }
         if !review.unsupported.isEmpty { lines += ["Unavailable in Bam (not granted):", review.unsupported.joined(separator: ", "), ""] }
-        lines += ["Native messaging to desktop apps and full Chrome compatibility are unavailable. Reload existing pages after changing access."]
+        lines += ["Desktop-app access is reviewed separately in Manage Extensions and currently supports only the verified Chrome build of 1Password. Other native hosts and full Chrome compatibility remain unavailable. Reload existing pages after changing access."]
         let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 420, height: 180)); scroll.hasVerticalScroller = true; scroll.borderType = .bezelBorder
         let text = NSTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 180)); text.isEditable = false; text.isSelectable = true
         text.font = .systemFont(ofSize: 12); text.string = lines.joined(separator: "\n"); text.textContainer?.widthTracksTextView = true
