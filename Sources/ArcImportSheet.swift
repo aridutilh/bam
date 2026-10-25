@@ -72,9 +72,25 @@ import UniformTypeIdentifiers
         sourceLabel.font = .systemFont(ofSize: 12); sourceLabel.setAccessibilityLabel("Layout file")
         sourceLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         chooseButton.target = self; chooseButton.action = #selector(choose); chooseButton.bezelStyle = .rounded
-        let sourceRow = NSStackView(views: [sourceLabel, chooseButton]); sourceRow.orientation = .horizontal; sourceRow.spacing = 10
-        // A long file path truncates in the middle; it must not hold the sheet wider than its minimum.
-        sourceRow.setClippingResistancePriority(.defaultLow, for: .horizontal)
+        // The path takes only the width left after Choose File… and truncates in
+        // the middle; the button always keeps its full width at the trailing edge.
+        // (A stack view here would clip the button instead of shrinking the label.)
+        let sourceRow = NSView()
+        for view in [sourceLabel, chooseButton] as [NSView] { view.translatesAutoresizingMaskIntoConstraints = false; sourceRow.addSubview(view) }
+        sourceLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        sourceLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        chooseButton.setContentCompressionResistancePriority(.required, for: .horizontal)
+        chooseButton.setContentHuggingPriority(.required, for: .horizontal)
+        NSLayoutConstraint.activate([
+            sourceLabel.leadingAnchor.constraint(equalTo: sourceRow.leadingAnchor),
+            sourceLabel.trailingAnchor.constraint(lessThanOrEqualTo: chooseButton.leadingAnchor, constant: -10),
+            chooseButton.trailingAnchor.constraint(equalTo: sourceRow.trailingAnchor),
+            sourceLabel.centerYAnchor.constraint(equalTo: sourceRow.centerYAnchor),
+            chooseButton.centerYAnchor.constraint(equalTo: sourceRow.centerYAnchor),
+            chooseButton.topAnchor.constraint(greaterThanOrEqualTo: sourceRow.topAnchor),
+            chooseButton.bottomAnchor.constraint(lessThanOrEqualTo: sourceRow.bottomAnchor),
+            sourceRow.heightAnchor.constraint(equalTo: chooseButton.heightAnchor)
+        ])
         let header = NSStackView(views: [title, intro, sourceRow])
         header.orientation = .vertical; header.alignment = .leading; header.spacing = 8; header.setCustomSpacing(4, after: title)
         // Body (scrolls)
