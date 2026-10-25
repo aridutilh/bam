@@ -52,7 +52,8 @@ enum ExtensionServiceWorkerPreparation {
         guard let rawBackground = manifest["background"] else { return nil }
         guard var background = rawBackground as? [String: Any] else { throw failure("The extension background declaration must be an object.") }
         guard let rawWorker = background["service_worker"] else { return nil }
-        guard let worker = rawWorker as? String else { throw failure("The service worker must be a local script path.") }
+        guard let declaredWorker = rawWorker as? String else { throw failure("The service worker must be a local script path.") }
+        let worker = packageRelative(declaredWorker)
         let type = background["type"] as? String
         guard background["type"] == nil || type == "classic" || type == "module" else { throw failure("The service worker type must be classic or module.") }
         let module = type == "module"
@@ -200,6 +201,13 @@ enum ExtensionServiceWorkerPreparation {
             throw failure("The prepared worker scripts have changed. Use the original extension package.")
         }
         return record
+    }
+
+    /// Chrome resolves a service-worker path with one leading "/" against the extension root
+    /// (uBlock Origin Lite declares "/js/background.js"). Only that single slash is removed;
+    /// "//", "..", schemes, queries and every other check still apply to the result.
+    static func packageRelative(_ path: String) -> String {
+        path.hasPrefix("/") && !path.hasPrefix("//") ? String(path.dropFirst()) : path
     }
 
     private static func wrapper(original: String, adapter: String, module: Bool) -> String {
