@@ -151,6 +151,44 @@ import JavaScriptCore
         foreignWorld.evaluateScript(iconBinding)
         try check(foreignWorld.evaluateScript("browser.action.setIcon === original && typeof __bamNativeActionIconBindings === 'undefined'")!.toBool(), "Action binding ran outside its exact extension origin")
 
+        // storage.managed with Grammarly's exact call shape: callback form inside a 3 s Promise.race whose
+        // timer logs unconditionally. Bam's answer must win the race in both forms, through a separate
+        // chrome.storage wrapper sharing WebKit's prototype, with no runtime.lastError.
+        let managed = JSContext()!
+        var managedErrors: [String] = []
+        managed.exceptionHandler = { _, error in managedErrors.append(error?.toString() ?? "JavaScript error") }
+        managed.evaluateScript("""
+            var location = {origin: 'webkit-extension://fixture', href: 'webkit-extension://fixture/sw.js'}, console = {error: function() {}}, performance = {now: function() { return 0; }};
+            var timers = [], logged = [];
+            function setTimeout(fn) { timers.push(fn); return timers.length; }
+            function StorageArea() {} StorageArea.prototype.get = function () {};
+            function Storage() { this.local = new StorageArea(); }
+            var browser = {runtime: {getURL: function(path) { return 'webkit-extension://fixture' + path; }, getManifest: function() { return {}; }}, storage: new Storage()};
+            var chrome = {runtime: {lastError: undefined}, storage: new Storage()};
+            """)
+        managed.evaluateScript(ExtensionCompatibility.workerScript(manifest: ["permissions": ["storage"]], browserVersion: "test"))
+        managed.evaluateScript("""
+            var outcomes = {};
+            function grammarlyGet(key) {
+              return Promise.race([
+                new Promise(function (t) { chrome.storage.managed.get(key, function (n) {
+                  if (chrome.runtime.lastError) { t(['error', chrome.runtime.lastError.message]); return; }
+                  t(['answered', n[key], Object.keys(n).length]); }); }),
+                new Promise(function (t) { setTimeout(function () { logged.push('Manage storage timeout to get "' + key + '"'); t(['timeout']); }, 3000); })
+              ]);
+            }
+            Promise.all(['GrammarlyExtensionMode', 'GrammarlyEnrollmentToken'].map(function (key) { return grammarlyGet(key).then(function (r) { outcomes[key] = r; }); }))
+              .then(function () { return chrome.storage.managed.get('GrammarlyExtensionMode'); }).then(function (value) { outcomes.promise = Object.keys(value).length; });
+            """)
+        try check(managedErrors.isEmpty && managed.evaluateScript("""
+            JSON.stringify(outcomes.GrammarlyExtensionMode) === '["answered",null,0]' && JSON.stringify(outcomes.GrammarlyEnrollmentToken) === '["answered",null,0]'
+            && outcomes.promise === 0 && timers.length === 2 && logged.length === 0
+            """)!.toBool(), "storage.managed did not settle Grammarly's race before its timer: \(managed.evaluateScript("JSON.stringify([outcomes, timers.length])")!) \(managedErrors)")
+        // Firing the timers afterwards reproduces Grammarly's log lines although the race was already won.
+        managed.evaluateScript("timers.forEach(function (fn) { fn(); });")
+        try check(managed.evaluateScript("logged.length === 2 && JSON.stringify(outcomes.GrammarlyExtensionMode) === '[\"answered\",null,0]'")!.toBool(),
+                  "Grammarly's unconditional timeout log was not reproduced after a settled race")
+
         // scripting.ExecutionWorld: the enum WebKit lacks, on the native namespace and its shared
         // prototype (so a distinct chrome.scripting wrapper sees it); never replacing a native enum.
         func executionWorld(_ setup: String) -> JSContext {
