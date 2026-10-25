@@ -1111,6 +1111,8 @@ import Darwin
         withExtendedLifetime(contentController) {}
         recordLifecycle("after-3-disable-reenable-cycles", retiredPopovers: retiredPopovers.filter { $0.value != nil }.count,
             retiredWebViews: retiredWebViews.filter { $0.value != nil }.count, retiredContexts: retiredContexts.filter { $0.value != nil }.count)
+        // Chrome tabs metadata facade: its own profile and original fixture extensions (see the file's header).
+        checks += try await ExtensionTabMetadataSmokeTest.run(controller: controller, host: host, pageURL: pageURL)
         return checks
     }
 }
