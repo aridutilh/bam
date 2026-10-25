@@ -397,11 +397,22 @@ import WebKit
         clean = clean.replacingOccurrences(of: #"([A-Za-z][A-Za-z0-9+.-]*://[^\s?#]+)[?#][^\s"'<>]*"#, with: "$1[redacted]", options: .regularExpression)
         return clean.count > limit ? String(clean.prefix(limit)) + "…" : clean
     }
-    /// Applies `sanitize` to every string inside a JSON-like value.
+    /// Applies `sanitize` to every string inside a JSON-like value, dictionary
+    /// keys included (custom probes may key results by URL). Keys are bounded to
+    /// 200 characters. If two keys sanitize to the same text, original keys are
+    /// taken in sorted order: the first keeps it and later ones get " [2]", " [3]"…
     nonisolated static func scrub(_ value: Any) -> Any {
         switch value {
         case let text as String: return sanitize(text)
-        case let object as [String: Any]: return object.mapValues(scrub)
+        case let object as [String: Any]:
+            var result: [String: Any] = [:]
+            for key in object.keys.sorted() {
+                let base = sanitize(key, limit: 200)
+                var clean = base, ordinal = 2
+                while result[clean] != nil { clean = "\(base) [\(ordinal)]"; ordinal += 1 }
+                result[clean] = scrub(object[key]!)
+            }
+            return result
         case let list as [Any]: return list.map(scrub)
         default: return value
         }
