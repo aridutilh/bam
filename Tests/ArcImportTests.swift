@@ -280,6 +280,27 @@ import Foundation
         let (_, damagedReport) = ArcImport.apply(damagedSource, to: BrowserSession.fresh())
         expect(damagedReport.missingItems >= 3, "Missing pinned, Today and Favorites roots are reported")
 
+        // Undo after a failed save removes exactly the import, keeping later user changes.
+        var afterImport = session
+        let userTab = afterImport.add(address: "https://user.example.com/")
+        let undone = ArcImport.undo(session, over: existing, in: afterImport)
+        expect(Set(undone.spaces.map(\.id)) == Set(existing.spaces.map(\.id)) && undone.profiles.map(\.id) == existing.profiles.map(\.id),
+               "Undo removes imported Spaces and profiles")
+        expect(undone.folders.isEmpty && undone.importLinks == nil, "Undo removes imported folders and provenance")
+        expect(existing.tabs.allSatisfy { tab in undone.tabs.contains { $0.id == tab.id } }, "Undo keeps every pre-import tab")
+        expect(!undone.tabs.contains { tab in !existing.tabs.contains { $0.id == tab.id } && tab.id != userTab }, "Undo removes every imported tab")
+        // A tab the user opened after the import survives the undo.
+        expect(undone.tabs.contains { $0.id == userTab } && undone.spaceDefinition(undone.tabs.first { $0.id == userTab }!.space) != nil,
+               "A Space the user filled after import keeps the user's tab")
+
+        var filled = session
+        filled.changeSpace(work.id)
+        let inWork = filled.add(address: "https://work-note.example.com/")
+        let keptSpace = ArcImport.undo(session, over: existing, in: filled)
+        expect(keptSpace.tabs.first { $0.id == inWork }?.space == work.id && keptSpace.spaceDefinition(work.id) != nil
+               && !keptSpace.tabs.contains { $0.title == "Team Docs" || $0.displayTitle == "Team Docs" },
+               "An imported Space the user added a tab to is kept, minus the imported tabs")
+
         // Optional recovery of unattached profiles into their own Space and profile.
         var options = ArcImport.Options(); options.includeUnattachedProfiles = true
         let (recovered, recoveredReport) = ArcImport.apply(source, to: BrowserSession.fresh(), options: options)

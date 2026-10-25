@@ -298,6 +298,32 @@ enum ArcImport {
         }
     }
 
+    /// Removes exactly what an import added (`imported` minus `previous`) from
+    /// `current`, keeping anything the user did since. Used when the imported
+    /// session can't be saved. A Space the user has since filled is kept.
+    static func undo(_ imported: BrowserSession, over previous: BrowserSession, in current: BrowserSession) -> BrowserSession {
+        let addedTabs = Set(imported.tabs.map(\.id)).subtracting(previous.tabs.map(\.id))
+        let addedFolders = Set(imported.folders.map(\.id)).subtracting(previous.folders.map(\.id))
+        let addedSpaces = Set(imported.spaces.map(\.id)).subtracting(previous.spaces.map(\.id))
+        let addedProfiles = Set(imported.profiles.map(\.id)).subtracting(previous.profiles.map(\.id))
+        var session = current
+        session.tabs.removeAll { addedTabs.contains($0.id) }
+        session.folders.removeAll { addedFolders.contains($0.id) }
+        session.splits = session.splits?.filter { !addedTabs.contains($0.primaryID) && !addedTabs.contains($0.secondaryID) }
+        let occupied = Set(session.tabs.filter { !$0.isFavorite }.map(\.space))
+        let removableSpaces = addedSpaces.subtracting(occupied)
+        if session.spaces.count > removableSpaces.count {
+            session.spaces.removeAll { removableSpaces.contains($0.id) }
+            for id in removableSpaces { session.rootOrder?[id] = nil }
+        }
+        let referenced = Set(session.spaces.map(\.profileID) + session.tabs.compactMap { $0.isFavorite ? $0.saved?.profileID : nil })
+        session.profiles.removeAll { addedProfiles.contains($0.id) && !referenced.contains($0.id) }
+        session.importLinks = previous.importLinks
+        if session.spaceDefinition(session.space) == nil, let first = session.spaces.first { session.space = first.id }
+        session.sanitize()
+        return session
+    }
+
     /// Builds the imported session without touching the input. Preview and
     /// commit run the same function, so the preview counts are what commit does.
     static func apply(_ source: Source, to original: BrowserSession, options: Options = Options()) -> (session: BrowserSession, report: Report) {
