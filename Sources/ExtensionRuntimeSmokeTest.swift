@@ -12,7 +12,7 @@ import WebKit
             print("SKIP: Extensions — macOS 15.4 or later is required")
             fflush(stdout); exit(0)
         }
-        watchdog = Timer.scheduledTimer(withTimeInterval: 120, repeats: false) { [weak self] _ in
+        watchdog = Timer.scheduledTimer(withTimeInterval: 180, repeats: false) { [weak self] _ in
             Task { @MainActor [weak self] in self?.finish(false, "Overall fixture timeout") }
         }
         task = Task { @MainActor [weak self] in
@@ -42,9 +42,10 @@ import WebKit
                 let frameChecks = try await ExtensionFrameMessagingSmokeTest.runIntegrated(fixtureURL: fixture, pageURL: page)
                 let integratedChecks = try await BrowserExtensionSmokeTest.run(fixtureURL: fixture, pageURL: page)
                 let workerChecks = try await ExtensionWorkerSmokeTest.run(pageURL: page)
+                let dnrChecks = try await ExtensionDeclarativeNetRequestSmokeTest.run(pageURL: page)
                 let safariChecks = try await SafariExtensionSmokeTest.run(pageURL: page)
                 let bridgeChecks = try await ExtensionBridgeCapabilityProbe.run()
-                let checks = isolatedChecks + frameChecks + integratedChecks + workerChecks + safariChecks + bridgeChecks
+                let checks = isolatedChecks + frameChecks + integratedChecks + workerChecks + dnrChecks + safariChecks + bridgeChecks
                 self.finish(true, "\(checks)")
             } catch { self.finish(false, String(describing: error)) }
         }
