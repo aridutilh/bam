@@ -60,7 +60,45 @@ enum ExtensionCompatibility {
             .replacingOccurrences(of: "__BRIDGE__", with: javaScriptString(bridge))
             .replacingOccurrences(of: "__PROVIDED__", with: provided)
             .replacingOccurrences(of: "__VERSION__", with: javaScriptString(browserVersion))
+            + "\n" + documentActionIconBinding(baseURL: baseURL)
     }
+
+    /// WebKit's document-native API functions require their namespace receiver.
+    /// Chrome callers can extract setIcon, so bind only this method while keeping
+    /// native validation, callback/Promise handling, and permission checks intact.
+    /// Service workers use a different JS facade and retain their prepared bytes.
+    static func documentActionIconBinding(baseURL: URL) -> String {
+        let origin = baseURL.absoluteString.hasSuffix("/") ? String(baseURL.absoluteString.dropLast()) : baseURL.absoluteString
+        return documentActionIconSource.replacingOccurrences(of: "__ORIGIN__", with: javaScriptString(origin))
+    }
+
+    private static let documentActionIconSource = #"""
+    (() => {
+      if (location.origin !== __ORIGIN__) return;
+      const marker = "__bamNativeActionIconBindings";
+      if (Object.prototype.hasOwnProperty.call(globalThis, marker)) return;
+      const held = [], seen = new WeakSet();
+      const bind = Function.prototype.bind;
+      for (const api of [globalThis.browser, globalThis.chrome]) {
+        if (!api || typeof api !== "object") continue;
+        for (const name of ["action", "browserAction"]) {
+          const holder = api[name];
+          if (!holder || typeof holder.setIcon !== "function" || seen.has(holder)) continue;
+          seen.add(holder);
+          const descriptor = Object.getOwnPropertyDescriptor(holder, "setIcon");
+          const bound = Reflect.apply(bind, holder.setIcon, [holder]);
+          try {
+            Object.defineProperty(holder, "setIcon", {value: bound, writable: true, configurable: true,
+              enumerable: descriptor ? descriptor.enumerable : true});
+            held.push(holder);
+          } catch (_) { /* A non-writable native API remains unchanged. */ }
+        }
+      }
+      // Native namespace wrappers are weakly cached; retain both browser/chrome
+      // variants so future lookups return the same correctly bound method.
+      Object.defineProperty(globalThis, marker, {value: held, configurable: false});
+    })();
+    """#
 
     /// The package preparer loads this adapter before the unchanged worker entry.
     /// It performs no asynchronous initialization or lifecycle keepalive polling.

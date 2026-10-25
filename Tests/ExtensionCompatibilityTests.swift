@@ -59,6 +59,45 @@ import JavaScriptCore
         js.evaluateScript(worker)
         try check(jsErrors.isEmpty && js.evaluateScript("requests.length === 1")!.toBool(), "Worker adapter was not idempotent")
 
+        // Model WebKit's native receiver check without replacing any API semantics.
+        let binding = JSContext()!
+        var bindingErrors: [String] = []
+        binding.exceptionHandler = { _, error in bindingErrors.append(error?.toString() ?? "Binding error") }
+        binding.evaluateScript("""
+        var location = {origin: 'webkit-extension://fixture'}, calls = [], callbackValues = [];
+        var details = {path: {16:'original.png'}, tabId:undefined}, nativeError = new Error('native validation');
+        var nativePromise = Promise.resolve('native result');
+        function namespace(name) {
+          const holder = {name, getTitle: function(){return name;}};
+          holder.setIcon = function(value, callback) {
+            if (this !== holder) return undefined;
+            if (value === null) throw nativeError;
+            calls.push({holder:this,value,callback});
+            if (callback) {callback('native callback'); return 'native return';}
+            return nativePromise;
+          };
+          return holder;
+        }
+        var browser = {action:namespace('browser.action'), browserAction:namespace('browser.browserAction')};
+        var chrome = {action:namespace('chrome.action'), browserAction:namespace('chrome.browserAction')};
+        var originalTitle = browser.action.getTitle, originalAction = browser.action, originalChrome = chrome.action;
+        """)
+        let iconBinding = ExtensionCompatibility.documentActionIconBinding(baseURL: URL(string: "webkit-extension://fixture/")!)
+        binding.evaluateScript(iconBinding)
+        try check(bindingErrors.isEmpty, "Native action binding failed to install: \(bindingErrors)")
+        try check(binding.evaluateScript("var fn=chrome.action.setIcon; fn(details, value => callbackValues.push(value)) === 'native return' && callbackValues[0] === 'native callback' && calls[0].value === details && calls[0].holder === originalChrome")!.toBool(), "Detached Chrome action changed native arguments, callback, receiver or return value")
+        try check(binding.evaluateScript("var promiseFn=browser.action.setIcon; promiseFn(details) === nativePromise && browser.action === originalAction && browser.action.getTitle === originalTitle")!.toBool(), "Document binding changed native Promise identity, namespace or unrelated methods")
+        try check(binding.evaluateScript("var caught; try {promiseFn(null);} catch(error) {caught=error;} caught === nativeError")!.toBool(), "Document binding replaced native validation errors")
+        try check(binding.evaluateScript("var aliasFn=chrome.browserAction.setIcon; aliasFn(details) === nativePromise && calls[calls.length-1].holder === chrome.browserAction")!.toBool(), "Legacy browserAction detached call retained the wrong receiver")
+        binding.evaluateScript("var installed=chrome.action.setIcon;")
+        binding.evaluateScript(iconBinding)
+        try check(bindingErrors.isEmpty && binding.evaluateScript("installed === chrome.action.setIcon && __bamNativeActionIconBindings.length === 4")!.toBool(), "Native action binding stacked wrappers or lost retained namespaces")
+        try check(!worker.contains("__bamNativeActionIconBindings"), "Document-only action binding changed the prepared worker adapter")
+        let foreignWorld = JSContext()!
+        foreignWorld.evaluateScript("var location={origin:'https://example.invalid'}, original=function(){}, browser={action:{setIcon:original}};")
+        foreignWorld.evaluateScript(iconBinding)
+        try check(foreignWorld.evaluateScript("browser.action.setIcon === original && typeof __bamNativeActionIconBindings === 'undefined'")!.toBool(), "Action binding ran outside its exact extension origin")
+
         // Required namespaces are distinct from optional declarations.
         let optional = ExtensionCompatibility.plan(manifest: ["optional_permissions": ["notifications", "idle"]])
         try check(!optional.provided.contains("notifications") && !optional.provided.contains("idle"), "Optional capabilities were silently exposed")

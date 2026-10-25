@@ -61,6 +61,25 @@ import Darwin
         var sourceDefinition = try JSONSerialization.jsonObject(with: Data(contentsOf: sourceManifest)) as! [String: Any]
         sourceDefinition["optional_permissions"] = ["alarms", "cookies", "webNavigation"]
         sourceDefinition["optional_host_permissions"] = ["http://localhost/*", "https://optional.invalid/*", "https://removed.invalid/*"]
+        // Original solid-color icons make vendor-driven action changes observable
+        // in the actual sidebar pixels, without any vendor account or artwork.
+        for (name, rgb) in [("blue", [UInt8(0), 0, 255]), ("orange", [UInt8(255), 102, 0])] {
+            let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 24, pixelsHigh: 24,
+                bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                colorSpaceName: .deviceRGB, bitmapFormat: .alphaNonpremultiplied, bytesPerRow: 0, bitsPerPixel: 0)!
+            // setColor(sRGBColor) on a Device RGB bitmap can silently produce
+            // transparent pixels on some AppKit versions. Fill explicit RGBA.
+            for y in 0..<24 { for x in 0..<24 {
+                let pixel = bitmap.bitmapData!.advanced(by: y * bitmap.bytesPerRow + x * 4)
+                pixel[0] = rgb[0]; pixel[1] = rgb[1]; pixel[2] = rgb[2]; pixel[3] = 255
+            } }
+            let png = bitmap.representation(using: .png, properties: [:])!
+            try check(NSBitmapImageRep(data: png)?.colorAt(x: 12, y: 12)?.alphaComponent == 1,
+                      "Action fixture PNG did not contain opaque pixels")
+            try png.write(to: sourceFixture.appendingPathComponent("action-\(name).png"))
+        }
+        var fixtureAction = sourceDefinition["action"] as! [String: Any]
+        fixtureAction["default_icon"] = "action-blue.png"; sourceDefinition["action"] = fixtureAction
         try JSONSerialization.data(withJSONObject: sourceDefinition).write(to: sourceManifest)
         let extensionID = try await host.importPackage(at: sourceFixture, profileID: profile)
         let url = pageURL.appending(queryItems: [URLQueryItem(name: "profile", value: "browser-adapter")])
@@ -109,6 +128,134 @@ import Darwin
                 guard let web = presentedWeb(firstPopover) else { return false }
                 return (try? await web.evaluateJavaScript("document.title")) as? String == "Bam fixture ready"
             }
+            guard let popupWeb = presentedWeb(firstPopover) else { throw ExtensionSmokeTest.Failure(description: "Missing live popup for action updates") }
+            func isColor(_ color: NSColor?, _ expected: String) -> Bool {
+                guard let color = color?.usingColorSpace(.sRGB), color.alphaComponent > 0.9 else { return false }
+                // AppKit color management and compositing soften saturated icon
+                // channels in the sidebar. Require a bright, separated hue,
+                // rather than assuming an untouched zero channel at the pixel.
+                let r = color.redComponent, g = color.greenComponent, b = color.blueComponent
+                switch expected {
+                case "blue": return b > 0.65 && b - r > 0.4 && b - g > 0.35
+                case "orange": return r > 0.7 && r - g > 0.3 && g - b > 0.2
+                case "green": return g > 0.65 && g - r > 0.35 && g - b > 0.35
+                default: return false
+                }
+            }
+            func iconCenter(_ action: WKWebExtension.Action?) -> NSColor? {
+                guard let data = action?.icon(for: NSSize(width: 24, height: 24))?.tiffRepresentation,
+                      let bitmap = NSBitmapImageRep(data: data) else { return nil }
+                return bitmap.colorAt(x: bitmap.pixelsWide / 2, y: bitmap.pixelsHigh / 2)
+            }
+            func sidebarCenter() -> NSColor? {
+                guard let current = actionButton(), current === button, !current.isHidden,
+                      let bitmap = current.bitmapImageRepForCachingDisplay(in: current.bounds) else { return nil }
+                current.cacheDisplay(in: current.bounds, to: bitmap)
+                return bitmap.colorAt(x: bitmap.pixelsWide / 2, y: bitmap.pixelsHigh / 2)
+            }
+            func iconColor(_ action: WKWebExtension.Action?, _ color: String) -> Bool { isColor(iconCenter(action), color) }
+            func sidebarColor(_ color: String) -> Bool { isColor(sidebarCenter(), color) }
+            func waitAction(_ message: String, _ condition: @escaping @MainActor () async -> Bool) async throws {
+                do { try await wait(message, condition) }
+                catch {
+                    func rgba(_ color: NSColor?) -> [Double] {
+                        guard let c = color?.usingColorSpace(.sRGB) else { return [] }
+                        return [c.redComponent, c.greenComponent, c.blueComponent, c.alphaComponent].map(Double.init)
+                    }
+                    let report: [String: Any] = ["message": message, "sidebarRGBA": rgba(sidebarCenter()),
+                        "defaultRGBA": rgba(iconCenter(actionContext.action(for: nil))), "tabRGBA": rgba(iconCenter(tabAction)),
+                        "sameButton": actionButton() === button, "buttonHidden": button.isHidden,
+                        "label": button.accessibilityHelp() ?? "", "badge": button.accessibilityValue() as? String ?? "",
+                        "defaultLabel": actionContext.action(for: nil)?.label ?? "", "tabLabel": tabAction.label]
+                    if let data = try? JSONSerialization.data(withJSONObject: report, options: .sortedKeys) {
+                        print("EXTENSION_ACTION_DIAGNOSTIC " + String(decoding: data, as: UTF8.self)); fflush(stdout)
+                    }
+                    throw error
+                }
+            }
+            let actionCallShapes = try await popupWeb.callAsyncJavaScript("""
+                const details = {path: {16: 'action-orange.png', 32: 'action-orange.png'}, tabId: undefined};
+                const report = [];
+                const run = async (name, invoke) => {
+                    const record = {name, callback: false, returnedPromise: false};
+                    await new Promise(resolve => {
+                        let done = false;
+                        const finish = () => { if (done) return; done = true; clearTimeout(timer); resolve(); };
+                        const timer = setTimeout(() => { record.timeout = true; finish(); }, 2500);
+                        try {
+                            const result = invoke(() => {
+                                record.callback = true;
+                                record.error = chrome.runtime.lastError?.message || '';
+                                finish();
+                            });
+                            record.returnedPromise = !!result?.then;
+                            if (result?.then) result.then(() => { record.promiseResolved = true; }, error => { record.promiseError = String(error); });
+                        } catch (error) { record.exception = String(error); finish(); }
+                    });
+                    report.push(record);
+                };
+                await run('boundChromeCallback', callback => chrome.action.setIcon(details, callback));
+                await run('detachedChromeCallback', callback => (chrome.action?.setIcon ?? chrome.browserAction.setIcon)(details, callback));
+                globalThis.bamActionNamespaceFixture = chrome.action;
+                await run('retainedDetachedChromeCallback', callback => {
+                    const fn = bamActionNamespaceFixture.setIcon;
+                    return fn(details, callback);
+                });
+                await run('retainedBoundChromeCallback', callback => {
+                    const fn = bamActionNamespaceFixture.setIcon;
+                    return fn.call(bamActionNamespaceFixture, details, callback);
+                });
+                delete globalThis.bamActionNamespaceFixture;
+                return JSON.stringify(report);
+                """, arguments: [:], contentWorld: .page)
+            print("EXTENSION_ACTION_CALL_SHAPES " + String(describing: actionCallShapes)); fflush(stdout)
+            _ = try await popupWeb.callAsyncJavaScript("""
+                await browser.action.setIcon({path: {16: 'action-orange.png', 32: 'action-orange.png'}});
+                await browser.action.setTitle({title: 'Fixture locked'});
+                await browser.action.setBadgeText({text: 'L'});
+                return true;
+                """, arguments: [:], contentWorld: .page)
+            try await waitAction("Global action state did not redraw the existing sidebar icon, title and badge") {
+                sidebarColor("orange") && iconColor(actionContext.action(for: nil), "orange") &&
+                    button.accessibilityHelp() == "Fixture locked" && button.accessibilityValue() as? String == "L"
+            }
+            guard let actionTabID = try await popupWeb.callAsyncJavaScript("""
+                const tab = (await browser.tabs.query({active: true})).find(tab => tab.url?.includes('profile=browser-adapter'));
+                if (!tab) throw new Error('Missing action fixture tab');
+                await browser.action.setIcon({tabId: tab.id, path: 'action-blue.png'});
+                await browser.action.setTitle({tabId: tab.id, title: 'Fixture unlocked'});
+                await browser.action.setBadgeText({tabId: tab.id, text: ''});
+                return tab.id;
+                """, arguments: [:], contentWorld: .page) as? NSNumber else {
+                throw ExtensionSmokeTest.Failure(description: "Action fixture did not return a numeric tab ID")
+            }
+            try await waitAction("Tab-specific action state did not replace the visible icon without changing the default action") {
+                sidebarColor("blue") && iconColor(actionContext.action(for: nil), "orange") &&
+                    button.accessibilityHelp() == "Fixture unlocked" && button.accessibilityValue() == nil
+            }
+            _ = try await popupWeb.callAsyncJavaScript("""
+                const pixels = new ImageData(24, 24);
+                for (let i = 0; i < pixels.data.length; i += 4) { pixels.data[i + 1] = 255; pixels.data[i + 3] = 255; }
+                await browser.action.setIcon({imageData: pixels});
+                return true;
+                """, arguments: [:], contentWorld: .page)
+            try await waitAction("ImageData action update was ignored or overwrote the active tab's icon override") {
+                iconColor(actionContext.action(for: nil), "green") && sidebarColor("blue")
+            }
+            _ = try await popupWeb.callAsyncJavaScript("""
+                const pixels = new ImageData(24, 24);
+                for (let i = 0; i < pixels.data.length; i += 4) { pixels.data[i] = 255; pixels.data[i + 1] = 102; pixels.data[i + 3] = 255; }
+                await browser.action.setIcon({tabId, imageData: pixels});
+                return true;
+                """, arguments: ["tabId": actionTabID], contentWorld: .page)
+            try await waitAction("Tab-specific ImageData action update did not redraw the existing sidebar button") {
+                sidebarColor("orange") && iconColor(actionContext.action(for: nil), "green")
+            }
+            let callShapeRecords = (actionCallShapes as? String).flatMap { $0.data(using: .utf8) }
+                .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [[String: Any]] } ?? []
+            try check(callShapeRecords.count == 4 && callShapeRecords.allSatisfy {
+                $0["callback"] as? Bool == true && $0["error"] as? String == "" && $0["exception"] == nil
+            }, "Chrome action callback forms did not all complete; see EXTENSION_ACTION_CALL_SHAPES")
         }
         var retiredPopovers: [WeakReference<NSPopover>] = []
         var retiredWebViews: [WeakReference<WKWebView>] = []
