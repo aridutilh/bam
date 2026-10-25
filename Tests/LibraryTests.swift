@@ -157,6 +157,66 @@ import AppKit
         check(failed.history.count == 1 && failed.closedRecords.isEmpty && errors == 2 && failed.lastStorageError != nil,
               "Explicit write failures roll back archive changes while retaining dirty visits")
         check(mixedLoaded.flush(), "Pending salvaged-library visits finish before fixture cleanup")
+
+        // Genuine history-change events (extension history seam).
+        var events: [BrowserLibrary.HistoryChange] = []
+        let eventful = BrowserLibrary(storageURL: nil)
+        eventful.onHistoryChange = { events.append($0) }
+        eventful.recordVisit(title: "One", address: "https://events.example/one")
+        guard case .visited(let firstVisit)? = events.first, events.count == 1 else { check(false, "An accepted visit sends exactly one event"); return }
+        check(firstVisit == eventful.history[0] && firstVisit.address == "https://events.example/one", "The event carries the entry as it now stands")
+        events.removeAll()
+        eventful.recordVisit(title: "One again", address: "https://events.example/one")
+        check(events == [.visited(eventful.history[0])] && eventful.history.count == 1 && eventful.history[0].id == firstVisit.id
+              && eventful.history[0].title == "One again", "A coalesced revisit is still a visit, with the updated entry")
+        events.removeAll()
+        eventful.recordVisit(title: "Nope", address: "orbit://newtab")
+        eventful.recordVisit(title: "Nope", address: "https://user:pw@events.example/")
+        check(events.isEmpty, "Rejected visits send nothing")
+        // Trimming past 5,000: the visit, then the trimmed addresses.
+        let trimming = BrowserLibrary(storageURL: nil)
+        for n in 0..<5_000 { trimming.recordVisit(title: "T\(n)", address: "https://trim.example/\(n % 2 == 0 ? "even" : "odd\(n)")") }
+        var trimEvents: [BrowserLibrary.HistoryChange] = []
+        trimming.onHistoryChange = { trimEvents.append($0) }
+        let oldest = trimming.history.last!.address
+        trimming.recordVisit(title: "Newest", address: "https://trim.example/newest")
+        check(trimEvents.count == 2 && trimEvents[0] == .visited(trimming.history[0]) && trimEvents[1] == .trimmed(addresses: [oldest])
+              && trimming.history.count == 5_000, "A visit past the limit sends the visit, then exactly the trimmed address")
+        trimEvents.removeAll()
+        trimming.recordVisit(title: "Newest again", address: "https://trim.example/newest")
+        check(trimEvents.count == 1, "A coalesced revisit trims nothing")
+        // Clearing: only after a successful commit.
+        events.removeAll()
+        check(eventful.clearHistory() && events == [.cleared] && eventful.history.isEmpty, "A successful clear sends cleared, after the commit")
+        // Storage failures: an accepted visit is still a visit (no durability claim); a failed clear rolls back silently.
+        struct WriteRefused: Error {}
+        let failingFile = root.appendingPathComponent("failing/library.json")
+        let failing = BrowserLibrary(storageURL: failingFile, write: { _, _ in throw WriteRefused() })
+        var failingEvents: [BrowserLibrary.HistoryChange] = []
+        failing.onHistoryChange = { failingEvents.append($0) }
+        failing.recordVisit(title: "Kept in memory", address: "https://failing.example/a")
+        _ = failing.flush()
+        check(failingEvents == [.visited(failing.history[0])] && failing.history.count == 1 && failing.lastStorageError != nil,
+              "A visit accepted in memory sends visited even though its write failed")
+        failingEvents.removeAll()
+        check(!failing.clearHistory() && failingEvents.isEmpty && failing.history.count == 1, "A failed clear rolls back and sends nothing")
+        // Startup load sends nothing; an unwritable (future-version) library sends nothing either.
+        let loadedFile = root.appendingPathComponent("events/library.json")
+        let seeding = BrowserLibrary(storageURL: loadedFile)
+        seeding.recordVisit(title: "Saved", address: "https://saved.example/")
+        check(seeding.flush(), "Fixture library saved")
+        var loadEvents: [BrowserLibrary.HistoryChange] = []
+        let reloaded = BrowserLibrary(storageURL: loadedFile)
+        reloaded.onHistoryChange = { loadEvents.append($0) }
+        check(reloaded.history.count == 1 && loadEvents.isEmpty, "Loading history at startup sends nothing")
+        let futureFile = root.appendingPathComponent("future-events/library.json")
+        try FileManager.default.createDirectory(at: futureFile.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try JSONSerialization.data(withJSONObject: ["version": 99, "history": [], "closedRecords": []]).write(to: futureFile)
+        let futureLibrary = BrowserLibrary(storageURL: futureFile)
+        var futureEvents: [BrowserLibrary.HistoryChange] = []
+        futureLibrary.onHistoryChange = { futureEvents.append($0) }
+        futureLibrary.recordVisit(title: "Refused", address: "https://future.example/")
+        check(!futureLibrary.clearHistory() && futureEvents.isEmpty, "When the library can't be changed, nothing is sent")
         print("PASS: \(checks) library metadata checks")
     }
 }
