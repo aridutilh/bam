@@ -48,6 +48,9 @@ import WebKit
             self.restoreClosed(record, profileID: profileID)
         }
         profileLibraries[profileID] = value
+        // A library created after the extension host exists is wired now. This reads the stored host and never
+        // calls the `browserExtensions` getter, so creating a library can't create the host (no recursion).
+        if #available(macOS 15.4, *), let host = extensionStorage as? BrowserExtensions { wireExtensionHistory(value, profileID: profileID, host: host) }
         return value
     }
     /// Floating windows retain their originating sign-in even after the main

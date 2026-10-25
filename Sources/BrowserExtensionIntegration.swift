@@ -19,6 +19,11 @@ import WebKit
             return BookmarkSessionSnapshot.input(from: self.session, profileID: profileID,
                                                  isShuttingDown: self.isShuttingDown, isApplyingProfileChange: self.isApplyingProfileChange)
         }
+        // history: a read-only snapshot of the profile's in-memory library, and genuine change events from each
+        // profile library: the ones that exist now are wired here, later ones when library(for:) creates them
+        // (extensionStorage is already set, so neither path re-enters this getter). Nothing in private windows.
+        value.historySnapshot = { [weak self] profileID in self?.extensionHistorySnapshot(profileID: profileID) }
+        for (profile, library) in profileLibraries { wireExtensionHistory(library, profileID: profile, host: value) }
         value.selectTab = { [weak self] id in
             guard let self else { return false }
             if self.session.tabs.contains(where: { $0.id == id }) {
@@ -277,6 +282,33 @@ import WebKit
                let tab = session.tabs.first(where: { $0.id == id }) {
                 load(tab.address, in: web, id: id)
             } else if self.profileID(of: web) == profileID { web.reload() }
+        }
+    }
+
+    /// history.search's data: the registered profile's in-memory library, newest first. nil (an error for the
+    /// extension, never an empty history) in private windows, while closing or switching profiles, or for an
+    /// unknown profile. The library is created through library(for:) when it isn't in memory yet, which reads
+    /// Bam's own library file for that profile exactly as the History window does; no page or other file is read.
+    @available(macOS 15.4, *)
+    func extensionHistorySnapshot(profileID: UUID) -> [ExtensionHistory.Visit]? {
+        guard !privateMode, !isShuttingDown, !isApplyingProfileChange,
+              session.profiles.contains(where: { $0.id == profileID }) else { return nil }
+        return LibraryHistoryEvents.snapshot(library(for: profileID).history)
+    }
+
+    /// Sends this profile library's genuine changes to the extension engine. Assigning replaces any earlier
+    /// handler, so a library is never wired twice. Weak captures; each event re-checks that the profile is
+    /// registered and that the controller isn't closing. (A visit during a profile switch is still a genuine
+    /// visit of this library's own profile, so it isn't dropped; the engine re-checks grant and contexts.)
+    /// Nothing in private windows.
+    @available(macOS 15.4, *)
+    func wireExtensionHistory(_ library: BrowserLibrary, profileID: UUID, host: BrowserExtensions) {
+        guard !privateMode else { return }
+        library.onHistoryChange = { [weak self, weak library, weak host] change in
+            guard let self, let library, let host, !self.isShuttingDown,
+                  self.session.profiles.contains(where: { $0.id == profileID }),
+                  let event = LibraryHistoryEvents.change(change, history: library.history) else { return }
+            host.historyChanged(profileID: profileID, change: event)
         }
     }
 }
