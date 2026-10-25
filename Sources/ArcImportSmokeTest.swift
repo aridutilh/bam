@@ -23,13 +23,7 @@ final class NetworkTripwire: @unchecked Sendable {
             guard let self else { connection.cancel(); return }
             self.lock.lock(); self.count += 1; self.lock.unlock()
             connection.start(queue: .global(qos: .utility))
-            connection.receive(minimumIncompleteLength: 1, maximumLength: 4096) { [weak self] data, _, _, _ in
-                if let data, let text = String(data: data, encoding: .utf8), let first = text.split(separator: "\r\n").first {
-                    self?.lock.lock(); self?.lines.append(String(first.prefix(160))); self?.lock.unlock()
-                }
-                let reply = Data("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".utf8)
-                connection.send(content: reply, completion: .contentProcessed { _ in connection.cancel() })
-            }
+            self.readRequestLine(connection, buffer: Data())
         }
         return try await withCheckedThrowingContinuation { continuation in
             listener.stateUpdateHandler = { [weak self] state in
@@ -52,7 +46,41 @@ final class NetworkTripwire: @unchecked Sendable {
             listener.start(queue: .global(qos: .utility))
         }
     }
+    /// Accumulates until the request line's CRLF (TCP may split it), at most 4 KiB, then answers 404.
+    private func readRequestLine(_ connection: NWConnection, buffer: Data) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 4096) { [weak self] data, _, complete, error in
+            var buffer = buffer
+            if let data { buffer.append(data) }
+            let lineEnd = buffer.range(of: Data("\r\n".utf8))
+            if lineEnd == nil, !complete, error == nil, buffer.count < 4096 {
+                self?.readRequestLine(connection, buffer: buffer); return
+            }
+            let line = String(decoding: buffer[..<(lineEnd?.lowerBound ?? buffer.endIndex)], as: UTF8.self)
+            if !line.isEmpty { self?.lock.lock(); self?.lines.append(String(line.prefix(160))); self?.lock.unlock() }
+            let reply = Data("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".utf8)
+            connection.send(content: reply, completion: .contentProcessed { _ in connection.cancel() })
+        }
+    }
     func stop() { listener?.cancel(); listener = nil }
+}
+
+/// The relaunched child's PID, readable from the background hard deadline.
+final class OwnedChildPID: @unchecked Sendable {
+    private let lock = NSLock()
+    private var pid: pid_t = 0
+    func set(_ value: pid_t) { lock.lock(); pid = value; lock.unlock() }
+    var value: pid_t { lock.lock(); defer { lock.unlock() }; return pid }
+}
+
+/// A child's stdout, collected as it arrives, bounded to 1 MiB.
+final class ChildOutput: @unchecked Sendable {
+    private let lock = NSLock()
+    private var data = Data()
+    private var ended = false
+    func append(_ chunk: Data) { lock.lock(); if data.count < 1_048_576 { data.append(chunk.prefix(1_048_576 - data.count)) }; lock.unlock() }
+    func end() { lock.lock(); ended = true; lock.unlock() }
+    var isEnded: Bool { lock.lock(); defer { lock.unlock() }; return ended }
+    var text: String { lock.lock(); defer { lock.unlock() }; return String(decoding: data, as: UTF8.self) }
 }
 
 /// File > Import from Arc… end to end in the app under test (`--arc-import-test`).
@@ -77,6 +105,27 @@ final class NetworkTripwire: @unchecked Sendable {
     private var gammaAddress = ArcImportSmokeTest.gammaSourceAddress
     private let tripwire = NetworkTripwire()
     private var childPIDs: [Int32] = []
+    /// The relaunched child this fixture owns while one runs; every exit path stops it first.
+    private var activeChild: Process?
+    private let ownedChildPID = OwnedChildPID()
+    /// Overall deadline on the main run loop, then a background hard deadline that still works
+    /// if the main thread stalls (it kills only the owned child and exits).
+    static let parentDeadline: TimeInterval = 420
+    static let parentHardDeadline: TimeInterval = 480
+
+    /// Bounded stop of the owned child: SIGTERM, up to 5 s, then SIGKILL for that PID only,
+    /// up to 3 s more. Returns whether the child is confirmed to have exited.
+    private func stopChild(_ child: Process) async -> Bool {
+        if child.isRunning { child.terminate() }
+        for _ in 0..<50 where child.isRunning { try? await Task.sleep(for: .milliseconds(100)) }
+        if child.isRunning {
+            kill(child.processIdentifier, SIGKILL)
+            for _ in 0..<30 where child.isRunning { try? await Task.sleep(for: .milliseconds(100)) }
+        }
+        let exited = !child.isRunning
+        if exited, activeChild === child { activeChild = nil; ownedChildPID.set(0) }
+        return exited
+    }
     private var tripwirePort: UInt16 = 0
     /// Points an HTTP(S) address at the tripwire, keeping its host as the first path segment:
     /// equal addresses stay equal, and every rewritten tab shares one loopback origin.
@@ -227,17 +276,32 @@ final class NetworkTripwire: @unchecked Sendable {
 
     /// Relaunches this same app executable in a child mode on `folder` and returns its summary.
     private func launchChild(_ mode: String, folder: URL, expected: Int) async throws -> [String: Any] {
+        guard !finished, activeChild == nil else { throw Failure.assertion("No relaunch starts while the fixture is finishing or another child runs") }
         let child = Process()
         child.executableURL = Bundle.main.executableURL
         child.arguments = ["--arc-import-test", Self.childFlag, mode, folder.path, String(expected)]
-        let output = Pipe()
+        let output = Pipe(), collected = ChildOutput()
+        output.fileHandleForReading.readabilityHandler = { handle in
+            let chunk = handle.availableData
+            if chunk.isEmpty { collected.end(); handle.readabilityHandler = nil } else { collected.append(chunk) }
+        }
         child.standardOutput = output
         try child.run()
-        let reader = Task.detached { output.fileHandleForReading.readDataToEndOfFile() }
+        activeChild = child; ownedChildPID.set(child.processIdentifier)
         let deadline = Date().addingTimeInterval(90)
-        while child.isRunning && Date() < deadline { try await Task.sleep(for: .milliseconds(100)) }
-        if child.isRunning { child.terminate(); throw Failure.assertion("\(mode) relaunch timed out") }
-        let text = String(data: await reader.value, encoding: .utf8) ?? ""
+        while child.isRunning && Date() < deadline && !finished { try await Task.sleep(for: .milliseconds(100)) }
+        // finish() owns the child once the fixture is finishing.
+        guard !finished else { throw Failure.assertion("\(mode) relaunch interrupted by fixture shutdown") }
+        if child.isRunning {
+            let stopped = await stopChild(child)
+            output.fileHandleForReading.readabilityHandler = nil
+            throw Failure.assertion("\(mode) relaunch timed out after 90 s; \(stopped ? "stopped and confirmed exited" : "could not be confirmed stopped")")
+        }
+        activeChild = nil; ownedChildPID.set(0)
+        // Bounded drain: the pipe normally reaches EOF at exit; never wait more than 2 s for it.
+        for _ in 0..<40 where !collected.isEnded { try await Task.sleep(for: .milliseconds(50)) }
+        output.fileHandleForReading.readabilityHandler = nil
+        let text = collected.text
         let lines = text.split(separator: "\n").map(String.init)
         let pid = child.processIdentifier
         guard let startIndex = lines.firstIndex(of: "ARC_ICON_CHILD_START mode=\(mode) pid=\(pid)"),
@@ -323,14 +387,24 @@ final class NetworkTripwire: @unchecked Sendable {
     func start() {
         let arguments = CommandLine.arguments
         if let index = arguments.firstIndex(of: Self.childFlag), arguments.count > index + 3, let expected = Int(arguments[index + 3]) {
-            watchdog = Timer.scheduledTimer(withTimeInterval: 75, repeats: false) { _ in
+            // Off the main run loop, so a child whose main thread stalls still exits on its own.
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 75) {
                 print("ARC_ICON_CHILD {\"ok\":false,\"error\":\"child timeout\"}"); fflush(stdout); exit(1)
             }
             Task { @MainActor in await runChild(mode: arguments[index + 1], folder: URL(fileURLWithPath: arguments[index + 2], isDirectory: true), expected: expected) }
             return
         }
-        watchdog = Timer.scheduledTimer(withTimeInterval: 420, repeats: false) { [weak self] _ in
+        watchdog = Timer.scheduledTimer(withTimeInterval: Self.parentDeadline, repeats: false) { [weak self] _ in
             Task { @MainActor [weak self] in self?.finish(false, "Overall fixture timeout") }
+        }
+        // Last resort if the main thread stalls: kill only the owned child, then exit. The
+        // fixture's temporary folder is left in place rather than removed under a live child.
+        let owned = ownedChildPID
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + Self.parentHardDeadline) {
+            let pid = owned.value
+            if pid > 0 { kill(pid, SIGKILL) }
+            print("FAIL: Arc import — hard deadline reached with the main thread unresponsive\(pid > 0 ? "; killed owned relaunch child \(pid)" : "")")
+            fflush(stdout); exit(1)
         }
         Task { @MainActor in
             do {
@@ -530,7 +604,7 @@ final class NetworkTripwire: @unchecked Sendable {
         try check(try layout(controller.session) == originalLayout, "Cancelled import leaves the session unchanged")
         try check(SessionFile.load(sessionFile).importLinks == nil, "Cancelled import writes nothing imported")
         try await Task.sleep(for: .milliseconds(300))
-        try check(controller.importedTabIcons.count == 0, "Previews and Cancel read no icons")
+        try check(controller.importedTabIcons.count == 0, "Previews and Cancel install no icons")
 
         // 2a. Commit through the sheet with Today excluded.
         sheet = try await presentImporter()
@@ -680,7 +754,7 @@ final class NetworkTripwire: @unchecked Sendable {
         try check(try layout(controller.session) == beforeFailureLayout, "The window matches the saved undo")
         try await Task.sleep(for: .milliseconds(400))
         try check(controller.importedTabIcons.count == icons.count && tabID(forItem: Self.gammaItemID, in: controller.session) == nil,
-                  "Undone imports read no icons")
+                  "Undone imports install no icons")
 
         // c) A slow but successful write keeps the sheet waiting, locked.
         controller.sessionWriter = SessionWriter(url: sessionFile) { snapshot, url in
@@ -742,8 +816,21 @@ final class NetworkTripwire: @unchecked Sendable {
         controller?.sessionWriter = nil; controller?.privateMode = true
         controller?.prepareToClose(); window?.orderOut(nil)
         tripwire.stop()
-        try? FileManager.default.removeItem(at: directory)
-        print("\(success ? "PASS" : "FAIL"): Arc import — \(message)"); fflush(stdout)
-        exit(success ? 0 : 1)
+        // Any owned relaunch child is stopped and confirmed exited before its folder is removed.
+        Task { @MainActor in
+            var passed = success, detail = message, removeFolder = true
+            if let child = activeChild {
+                let pid = child.processIdentifier
+                if await stopChild(child) {
+                    detail += "; stopped owned relaunch child \(pid) and confirmed it exited before cleanup"
+                } else {
+                    passed = false; removeFolder = false
+                    detail += "; owned relaunch child \(pid) could not be confirmed stopped, so its temporary folder was kept"
+                }
+            }
+            if removeFolder { try? FileManager.default.removeItem(at: directory) }
+            print("\(passed ? "PASS" : "FAIL"): Arc import — \(detail)"); fflush(stdout)
+            exit(passed ? 0 : 1)
+        }
     }
 }
