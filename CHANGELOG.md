@@ -5,6 +5,12 @@
 - Hide the window's close, minimize and zoom buttons together with the sidebar, as Arc does: they fade out over the last 80 points of the collapse, so a collapsed sidebar leaves the page alone in the window, and they return as the sidebar slides back in.
 - Retire the “A little space” start page. An empty tab is now a plain dark surface titled “New tab” (the address bar still reads “Search or enter URL”), and the History ▸ Home command (⇧⌘H) that navigated to it is gone. Existing tabs on that page keep working and simply show the blank surface.
 
+## 0.20.1 draft — build 40
+
+- Display SVG website favicons, including percent-escaped and base64 data URLs and public SVG files. Preserve existing URL escapes when bridging page declarations into native code. This fixes the missing disco-ball favicon on aridutilh.com.
+- Rasterize SVG through a disposable WebKit image context with scripts and external resources disabled, bounded input/output, cancellation and timeout. Keep profile-scoped PNG caching and immediate replacement of cached misses.
+- Add component and native sidebar/palette regression coverage using the actual inline emoji shape, plus malformed input, dimension limits and script isolation.
+
 ## 0.20.0 draft — build 39
 
 - Fix empty extension popups on reopening: track the displayed popover and preserve the new web view when WebKit reuses an action. Add repeated dismissal/reopen checks with rendered HTML and background messaging.

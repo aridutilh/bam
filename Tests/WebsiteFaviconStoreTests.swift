@@ -55,8 +55,10 @@ private final class FaviconProtocol: URLProtocol, @unchecked Sendable {
     static var red: Data { png(red: 1, blue: 0) }
     static var blue: Data { png(red: 0, blue: 1) }
     static func main() async {
+        _ = NSApplication.shared.setActivationPolicy(.prohibited)
         do {
             try await priorityAndFallback()
+            try await svgIcons()
             try await isolationAndPersistence()
             try await retryAndSupersession()
             try await limitsAndShutdown()
@@ -135,6 +137,52 @@ private final class FaviconProtocol: URLProtocol, @unchecked Sendable {
         store.updateCandidates([icoURL], for: page, profileID: profile)
         try await wait("ICO container decode") { color(icon(store)) == "red" }
         try check(FaviconProtocol.recorded.last?.url == icoURL, "An actual ICO container must decode to a full-color icon")
+    }
+    static func svgIcons() async throws {
+        FaviconProtocol.reset()
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("bam-svg-tests-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = WebsiteFaviconStore(directory: root, configuration: config()); defer { store.shutdown() }
+        var changes = 0; store.onChange = { _, _ in changes += 1 }
+        _ = icon(store)
+        try await wait("existing missing favicon") { changes == 1 }
+        let svg = #"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text y=".9em" font-size="90">🪩</text></svg>"#
+        let encoded = URL(string: "data:image/svg+xml," + svg.addingPercentEncoding(withAllowedCharacters: .alphanumerics)!)!
+        let before = FaviconProtocol.recorded.count
+        store.updateCandidates([encoded], for: page, profileID: profile)
+        try await wait("percent-encoded SVG replaces negative cache") { icon(store) != nil }
+        let image = icon(store)!
+        let bitmap = NSBitmapImageRep(cgImage: image.cgImage(forProposedRect: nil, context: nil, hints: nil)!)
+        var visible = 0
+        for y in 0..<64 { for x in 0..<64 { if (bitmap.colorAt(x: x, y: y)?.alphaComponent ?? 0) > 0.1 { visible += 1 } } }
+        try check(visible > 1000 && !image.isTemplate && image.size == NSSize(width: 64, height: 64), "SVG emoji must be fully visible, not a clipped native SVG sliver")
+        try check(FaviconProtocol.recorded.count == before, "An embedded SVG must replace a cached miss without network access")
+        try await wait("SVG raster persisted") {
+            cacheFiles(root).contains { (try? String(contentsOf: $0).contains("png")) == true }
+        }
+        // Wait for the successful PNG rather than the preceding miss record.
+        let restored = WebsiteFaviconStore(directory: root, configuration: config()); defer { restored.shutdown() }
+        try await wait("SVG disk cache restore") { icon(restored, fetch: false) != nil }
+        try check(FaviconProtocol.recorded.count == before, "SVG disk restoration must use the cached raster without a network request")
+
+        let rectangle = #"<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"><rect width="64" height="64" fill="red"/><script>document.querySelector('rect').setAttribute('fill','blue')</script></svg>"#
+        let base64 = URL(string: "data:image/svg+xml;charset=utf-8;base64," + Data(rectangle.utf8).base64EncodedString() + "#icon")!
+        store.updateCandidates([base64], for: page, profileID: profile)
+        try await wait("base64 SVG image without executing its script") { color(icon(store)) == "red" }
+        let remote = URL(string: "https://cdn.invalid/icon.svg")!
+        FaviconProtocol.route(remote, [.init(data: Data(rectangle.replacingOccurrences(of: "fill=\"red\"", with: "fill=\"blue\"").utf8))])
+        store.updateCandidates([remote], for: page, profileID: profile)
+        try await wait("network SVG") { color(icon(store)) == "blue" }
+        try check(FaviconProtocol.recorded.last?.url == remote, "A public network SVG must decode via the same bounded image path")
+        for invalid in ["<html/>", "<svg xmlns=\"http://www.w3.org/2000/svg\"><g>", "<!DOCTYPE svg [<!ENTITY a 'x'>]><svg xmlns=\"http://www.w3.org/2000/svg\"/>", "<svg xmlns=\"http://www.w3.org/2000/svg\">" + String(repeating: "<g>", count: 65) + String(repeating: "</g>", count: 65) + "</svg>"] {
+            try check(!FaviconSVGRenderer.accepts(Data(invalid.utf8)), "Malformed, entity-bearing or excessively nested SVG must be rejected")
+        }
+        let huge = #"<svg xmlns="http://www.w3.org/2000/svg" width="100000" height="100000"><rect width="100%" height="100%" fill="blue"/></svg>"#
+        let oversized = URL(string: "data:image/svg+xml;base64," + Data(huge.utf8).base64EncodedString())!
+        FaviconProtocol.route(fallback, [.init(data: red)])
+        store.updateCandidates([oversized], for: page, profileID: profile)
+        try await wait("SVG intrinsic dimension limit falls back") { color(icon(store)) == "red" }
+        try check(FaviconProtocol.recorded.last?.url == fallback, "Oversized SVG must advance to the regular fallback")
     }
     static func isolationAndPersistence() async throws {
         FaviconProtocol.reset()

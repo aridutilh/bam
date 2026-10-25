@@ -1,0 +1,15 @@
+<!doctype html><meta charset="utf-8"><title>Bam Favicon SVG</title>
+<h1>SVG-only favicon fixture</h1>
+<script>
+const format = new URL(location.href).searchParams.get('format') || 'percent';
+const svg = format === 'percent-literals'
+  ? '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text y=".9em" font-size="16">100% / %25</text></svg>'
+  : '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text y=".9em" font-size="90">🪩</text></svg>';
+const link = document.createElement('link');
+link.rel = 'icon'; link.type = 'image/svg+xml'; link.sizes = 'any';
+link.href = format === 'network' ? 'emoji.svg' : format === 'base64'
+  ? 'data:image/svg+xml;base64,' + btoa(String.fromCharCode(...new TextEncoder().encode(svg)))
+  : 'data:image/svg+xml,' + (format === 'percent-literals' ? svg.replace('%25', '%2525') : svg).replaceAll('"', '%22');
+document.head.append(link);
+window.faviconFixtureSentinel = 'svg-document-' + format;
+</script>
