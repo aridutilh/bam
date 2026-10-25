@@ -378,7 +378,14 @@ import Darwin
             .write(to: activeFixture.appendingPathComponent("manifest.json"))
         try Data("<!doctype html><meta charset='utf-8'><title>activeTab page</title>".utf8).write(to: activeFixture.appendingPathComponent("page.html"))
         let activeID = try await host.importPackage(at: activeFixture, profileID: profile)
-        let secondURL = url.deletingLastPathComponent().appendingPathComponent("next.html")
+        // Built from components: `url` carries `?profile=…`, which path edits would keep.
+        func secondPage(host: String? = nil, query: String? = nil) -> URL {
+            var components = URLComponents(url: url, resolvingAgainstBaseURL: false)!
+            components.path = "/next.html"; components.query = query
+            if let host { components.host = host }
+            return components.url!
+        }
+        let secondURL = secondPage()
         guard let activeContext = host.context(for: activeID), let activeConfiguration = activeContext.webViewConfiguration,
               let secondID = controller.openProfileTab(secondURL, profileID: profile, active: false) else { throw ExtensionSmokeTest.Failure(description: "activeTab fixture did not load") }
         try await wait("activeTab second tab did not load") { controller.browsers[secondID]?.url == secondURL && controller.browsers[secondID]?.isLoading == false }
@@ -415,7 +422,7 @@ import Darwin
         try check(try await activeTabAccess().allowed == granted.allowed, "A repeated gesture did not restore activeTab access")
         // Same-origin navigation: Chrome keeps the activeTab grant. Record WebKit's actual
         // behavior; a dropped grant is a limitation, not something Bam re-grants.
-        controller.navigatePane(secondID, address: secondURL.absoluteString + "?same-origin")
+        controller.navigatePane(secondID, address: secondPage(query: "same-origin").absoluteString)
         try await wait("activeTab second tab did not navigate within its origin") { controller.browsers[secondID]?.url?.query == "same-origin" && controller.browsers[secondID]?.isLoading == false }
         let sameOrigin = try await activeTabAccess()
         if sameOrigin.allowed == granted.allowed { try check(true, "") }
@@ -428,9 +435,7 @@ import Darwin
         // depend on the same-origin outcome above.
         activeContext.performAction(for: secondTab)
         try check(try await activeTabAccess().allowed == granted.allowed, "A fresh gesture did not grant access before the cross-origin check")
-        var crossComponents = URLComponents(url: secondURL, resolvingAgainstBaseURL: false)!
-        crossComponents.host = "localhost"; crossComponents.query = "cross-origin"
-        let crossURL = crossComponents.url!
+        let crossURL = secondPage(host: "localhost", query: "cross-origin")
         controller.navigatePane(secondID, address: crossURL.absoluteString)
         try await wait("activeTab second tab did not navigate to another origin") { controller.browsers[secondID]?.url?.host == "localhost" && controller.browsers[secondID]?.isLoading == false }
         let crossOrigin = try await activeTabAccess()

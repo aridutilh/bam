@@ -594,6 +594,29 @@ struct BrowserExtensionPermissionReview {
             record.compatibilityNote = [record.compatibilityNote, note].compactMap { $0 }.joined(separator: " ")
             if let index = records.firstIndex(where: { $0.id == id }) { records[index].compatibilityNote = record.compatibilityNote; try persist() }
         }
+        // Refresh Bam's own worker adapter (it embeds this Bam's version and API layer) in a
+        // package prepared by an earlier Bam, only when every prepared file still verifies.
+        // Vendor scripts, the manifest, grants and extension storage are unchanged. A package
+        // that does not verify is left exactly as it was and loads as it did before.
+        if parsed == nil, record.safariBundle == nil {
+            let package = packageURL(record)
+            let refreshed: Bool
+            do {
+                refreshed = try ExtensionServiceWorkerPreparation.refreshAdapter(package: package,
+                    originalManifestURL: package.deletingLastPathComponent().appendingPathComponent("original-manifest.json"),
+                    adapterSource: ExtensionCompatibility.workerScript(manifest: Self.manifestForPreparation(package), browserVersion: Self.browserVersion))
+            } catch {
+                refreshed = false
+                NSLog("Bam kept the existing worker adapter for extension %@: %@", id.uuidString, error.localizedDescription)
+            }
+            if refreshed {
+                let note = "Updated Bam's service-worker compatibility adapter. Extension scripts are unchanged."
+                if record.compatibilityNote?.contains(note) != true {
+                    record.compatibilityNote = [record.compatibilityNote, note].compactMap { $0 }.joined(separator: " ")
+                    if let index = records.firstIndex(where: { $0.id == id }) { records[index].compatibilityNote = record.compatibilityNote; try persist() }
+                }
+            }
+        }
         let ext: WKWebExtension
         if let safari = record.safariBundle {
             try safariImporter.validate(safari)

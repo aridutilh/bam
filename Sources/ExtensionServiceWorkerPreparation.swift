@@ -66,22 +66,11 @@ enum ExtensionServiceWorkerPreparation {
         let adapterHash = digest(adapterBytes)
 
         if fm.fileExists(atPath: metadata.path) {
-            let record = try JSONDecoder().decode(Preparation.self, from: readRegular(metadata, limit: maximumMetadataBytes))
-            let originalBytes = try readRegular(backup, limit: ExtensionPackagePreparation.maximumManifestBytes)
-            guard record.schemaVersion == schema, record.entry == worker, record.module == module,
-                  record.adapterSHA256 == adapterHash, record.originalManifestSHA256 == digest(originalBytes), isPrepared(manifest: manifest),
-                  (manifest[markerKey] as? [String: Any])?["original"] as? String == record.original,
-                  (manifest[markerKey] as? [String: Any])?["adapter"] as? String == record.adapter,
-                  (manifest[markerKey] as? [String: Any])?["source"] as? String == record.source else {
+            let record = try verifiedPreparation(metadata: metadata, backup: backup, manifest: manifest, worker: worker, module: module, package: package)
+            guard record.adapterSHA256 == adapterHash else {
                 throw failure("The worker preparation metadata does not match this package or adapter. Use the original extension package.")
             }
-            for path in [record.source, record.adapter] { try ExtensionPackagePreparation.validateScript(path, in: package, kind: "service worker") }
-            guard directory(record.original) == directory(record.entry), directory(record.original) == directory(record.adapter),
-                  directory(record.original) == directory(record.source),
-                  module ? record.source == record.original && record.entry != record.original : record.entry == record.original && record.source != record.original,
-                  digest(try readRegular(file(record.source, package: package), limit: maximumWorkerBytes)) == record.originalScriptSHA256,
-                  try readRegular(file(record.adapter, package: package), limit: ExtensionPackagePreparation.maximumManifestBytes) == adapterBytes,
-                  try readRegular(file(record.entry, package: package), limit: maximumMetadataBytes) == Data(wrapper(original: record.source, adapter: record.adapter, module: module).utf8) else {
+            guard try readRegular(file(record.adapter, package: package), limit: ExtensionPackagePreparation.maximumManifestBytes) == adapterBytes else {
                 throw failure("The prepared worker scripts have changed. Use the original extension package.")
             }
             return nil
@@ -145,6 +134,72 @@ enum ExtensionServiceWorkerPreparation {
             ? "The module entry URL changes within its original directory; original module source URLs and import.meta.url are preserved."
             : "The classic worker keeps its original entry URL. Its private entry is replaced by a loader, with the byte-exact original script preserved beside it."
         return "Prepared a compatibility entry for the Manifest V3 service worker; worker type is unchanged. \(detail) The compatibility layer uses Bam’s internal nativeMessaging transport. External desktop access requires separate approval and currently supports only the verified Chrome build of 1Password. The original manifest is preserved."
+    }
+
+    /// Brings an already prepared worker's Bam adapter up to `adapterSource` (it embeds
+    /// Bam's version and API layer, so it changes between releases). Everything else must
+    /// pass the same strict checks as a verified repeat, and the installed adapter must be
+    /// byte-exact to the hash Bam recorded, or exactly the new adapter (an interrupted
+    /// earlier refresh). Only the adapter file and the external metadata change; vendor
+    /// scripts, the manifest, the entry loader, grants and extension storage do not.
+    /// Returns false for unprepared packages and adapters already current.
+    @discardableResult
+    static func refreshAdapter(package: URL, originalManifestURL: URL, adapterSource: String) throws -> Bool {
+        guard package.isFileURL, originalManifestURL.isFileURL else { throw failure("Worker preparation requires local file URLs.") }
+        let package = package.standardizedFileURL
+        let packageValues = try package.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+        guard packageValues.isDirectory == true, packageValues.isSymbolicLink != true else { throw failure("Choose an unpacked extension folder.") }
+        let backup = originalManifestURL.standardizedFileURL
+        let metadata = backup.appendingPathExtension("worker-preparation.json")
+        try validateExternal(backup, package: package)
+        try validateExternal(metadata, package: package)
+        guard FileManager.default.fileExists(atPath: metadata.path) else { return false }
+        // Another preparation schema is left to its own (re)preparation path.
+        struct Schema: Decodable { let schemaVersion: Int }
+        guard (try? JSONDecoder().decode(Schema.self, from: readRegular(metadata, limit: maximumMetadataBytes)))?.schemaVersion == schema else { return false }
+        let manifest = try JSONSerialization.jsonObject(with: readRegular(package.appendingPathComponent("manifest.json"), limit: ExtensionPackagePreparation.maximumManifestBytes)) as? [String: Any]
+        guard let manifest, let background = manifest["background"] as? [String: Any], let worker = background["service_worker"] as? String else {
+            throw failure("The prepared worker manifest no longer declares its service worker. Use the original extension package.")
+        }
+        let module = background["type"] as? String == "module"
+        let adapterBytes = Data(adapterSource.utf8)
+        guard !adapterBytes.isEmpty, adapterBytes.count <= ExtensionPackagePreparation.maximumManifestBytes else { throw failure("The worker compatibility adapter must contain at most 1 MiB of JavaScript.") }
+        let record = try verifiedPreparation(metadata: metadata, backup: backup, manifest: manifest, worker: worker, module: module, package: package)
+        let adapterURL = file(record.adapter, package: package)
+        let installed = try readRegular(adapterURL, limit: ExtensionPackagePreparation.maximumManifestBytes)
+        guard digest(installed) == record.adapterSHA256 || installed == adapterBytes else {
+            throw failure("The prepared worker scripts have changed. Use the original extension package.")
+        }
+        let adapterHash = digest(adapterBytes)
+        if record.adapterSHA256 == adapterHash { return false }
+        if installed != adapterBytes { try adapterBytes.write(to: adapterURL, options: .atomic) }
+        let refreshed = Preparation(schemaVersion: record.schemaVersion, original: record.original, entry: record.entry, adapter: record.adapter, source: record.source,
+                                    originalScriptSHA256: record.originalScriptSHA256, module: record.module, adapterSHA256: adapterHash,
+                                    originalManifestSHA256: record.originalManifestSHA256)
+        try JSONEncoder().encode(refreshed).write(to: metadata, options: .atomic)
+        return true
+    }
+
+    /// Every check of an existing preparation except the adapter's contents.
+    private static func verifiedPreparation(metadata: URL, backup: URL, manifest: [String: Any], worker: String, module: Bool, package: URL) throws -> Preparation {
+        let record = try JSONDecoder().decode(Preparation.self, from: readRegular(metadata, limit: maximumMetadataBytes))
+        let originalBytes = try readRegular(backup, limit: ExtensionPackagePreparation.maximumManifestBytes)
+        guard record.schemaVersion == schema, record.entry == worker, record.module == module,
+              record.originalManifestSHA256 == digest(originalBytes), isPrepared(manifest: manifest),
+              (manifest[markerKey] as? [String: Any])?["original"] as? String == record.original,
+              (manifest[markerKey] as? [String: Any])?["adapter"] as? String == record.adapter,
+              (manifest[markerKey] as? [String: Any])?["source"] as? String == record.source else {
+            throw failure("The worker preparation metadata does not match this package or adapter. Use the original extension package.")
+        }
+        for path in [record.source, record.adapter] { try ExtensionPackagePreparation.validateScript(path, in: package, kind: "service worker") }
+        guard directory(record.original) == directory(record.entry), directory(record.original) == directory(record.adapter),
+              directory(record.original) == directory(record.source),
+              module ? record.source == record.original && record.entry != record.original : record.entry == record.original && record.source != record.original,
+              digest(try readRegular(file(record.source, package: package), limit: maximumWorkerBytes)) == record.originalScriptSHA256,
+              try readRegular(file(record.entry, package: package), limit: maximumMetadataBytes) == Data(wrapper(original: record.source, adapter: record.adapter, module: module).utf8) else {
+            throw failure("The prepared worker scripts have changed. Use the original extension package.")
+        }
+        return record
     }
 
     private static func wrapper(original: String, adapter: String, module: Bool) -> String {
