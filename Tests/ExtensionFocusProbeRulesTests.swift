@@ -224,6 +224,92 @@ import Foundation
         malformedSnapshot.ingest(state: snapshot(1...2), run: "RUN-1", case: xo, phase: "trigger")
         check(malformedSnapshot.faults == ["a snapshot contained malformed records"], "a malformed snapshot is a permanent fault")
 
+        // Structure (BAM_FOCUS_STRUCTURE): parsing, canonical labels and the lazy handshake contract.
+        let all = Set(R.Factor.allCases)
+        check(R.parseStructure(nil) == [] && R.parseStructure("") == [] && R.parseStructure(" none ") == [], "absent/none is the reviewed baseline")
+        check(R.parseStructure("vimium") == all && R.parseStructure("VIMIUM") == all, "vimium is every factor")
+        check(R.parseStructure("vimium-minus-shadow") == all.subtracting([.shadow]) && R.parseStructure("vimium-minus-lazy")?.contains(.lazy) == false,
+              "vimium-minus-<factor> removes exactly one")
+        check(R.parseStructure("lazy,hidden") == [.lazy, .hidden] && R.parseStructure(" shadow , channel ") == [.shadow, .channel], "explicit lists")
+        check(R.parseStructure("vimium-minus-teleport") == nil && R.parseStructure("lazy,teleport") == nil && R.parseStructure("lazy,lazy") == nil
+              && R.parseStructure("lazy,") == nil && R.parseStructure("vimium,lazy") == nil, "unknown, repeated, empty or mixed factors are refused")
+        check(R.structureLabel([]) == "none" && R.structureLabel([.shadow, .hidden, .lazy]) == "hidden,lazy,shadow", "canonical label is sorted")
+        func evaluate(_ run: Run, _ structure: Set<R.Factor>) -> R.Evaluation {
+            R.evaluate(R.records(fromState: run.state, run: "RUN-1", case: run.probeCase, firstSeen: run.firstSeen).records, case: run.probeCase, structure: structure)
+        }
+        // Lazy: the parent arms in setup; the child (created by the trigger) acknowledges in the trigger phase.
+        var lazyRun = Run(probeCase: R.Case(frame: .ex, pattern: .p1))
+        lazyRun.add("parent", "armed", "setup", ["lazy": true, "hasFocus": true])
+        lazyRun.add("parent", "trigger", "trigger", ["key": "f", "trusted": true, "hasFocus": true])
+        lazyRun.add("parent", "frame_created", "trigger", ["lazy": true, "inShadow": false])
+        lazyRun.add("child", "child_load", "trigger"); lazyRun.add("child", "ready", "trigger", ["pattern": "p1", "targetEditable": false])
+        lazyRun.add("parent", "show_sent", "trigger", ["pattern": "p1", "focusCall": "none"])
+        lazyRun.add("child", "show", "trigger", ["hasFocus": false, "activeIsInput": false])
+        lazyRun.samples(); lazyRun.add("child", "focus_attempt", "trigger", ["trigger": "timer-17ms"]); lazyRun.type(in: "parent")
+        let lazyResult = evaluate(lazyRun, [.lazy])
+        check(lazyResult.complete && lazyResult.outcome["structure"] as? String == "lazy", "a lazy run with the child acknowledging after the trigger is complete: \(lazyResult.problems)")
+        check(!evaluate(lazyRun, []).complete, "the same records without lazy fail the preloaded handshake contract")
+        var lazyEarly = lazyRun; lazyEarly.firstSeen["child:2"] = "setup"
+        check(evaluate(lazyEarly, [.lazy]).problems.contains("lazy child ready acknowledgement not received in the trigger phase"),
+              "a lazy child ready seen before READY is wrong")
+        var preloaded = Run(probeCase: R.Case(frame: .ex, pattern: .p1)); preloaded.handshake(); preloaded.trigger(); preloaded.samples()
+        preloaded.add("child", "focus_attempt", "trigger", ["trigger": "timer-17ms"]); preloaded.type(in: "parent")
+        check(evaluate(preloaded, []).complete && evaluate(preloaded, []).outcome["structure"] as? String == "none",
+              "the reviewed baseline contract is unchanged (no factor evidence required) and named")
+
+        // Factor evidence: a full `vimium` run (minus lazy, preloaded) with every factor's evidence, then each removed.
+        func structured(_ edit: (inout [String: [String: Any]]) -> Void = { _ in }) -> Run {
+            var evidence: [String: [String: Any]] = [
+                "frame_created": ["lazy": false, "inShadow": true, "wrapperParent": "html", "allow": "clipboard-read; clipboard-write", "className": "bam-hidden"],
+                "style_loaded": [:],
+                "ready": ["pattern": "p1", "channel": true, "targetEditable": true],
+                "trigger": ["key": "f", "trusted": true, "hasFocus": true, "suppressed": true],
+                "show_sent": ["pattern": "p1", "focusCall": "none", "via": "port", "displayBefore": "none", "frameDisplay": "block"]]
+            edit(&evidence)
+            var run = Run(probeCase: R.Case(frame: .ex, pattern: .p1))
+            if let created = evidence["frame_created"] { run.add("parent", "frame_created", "setup", created) }
+            if let style = evidence["style_loaded"] { run.add("parent", "style_loaded", "setup", style) }
+            run.add("child", "child_load", "setup")
+            if let ready = evidence["ready"] { run.add("child", "ready", "setup", ready) }
+            run.add("parent", "armed", "setup", ["hasFocus": true])
+            if let trigger = evidence["trigger"] { run.add("parent", "trigger", "trigger", trigger) }
+            if let show = evidence["show_sent"] { run.add("parent", "show_sent", "trigger", show) }
+            run.add("child", "show", "trigger", ["hasFocus": false, "activeIsInput": false])
+            run.samples(); run.add("child", "focus_attempt", "trigger", ["trigger": "timer-17ms"]); run.type(in: "parent")
+            return run
+        }
+        let preloadedVimium = all.subtracting([.lazy])
+        let full = evaluate(structured(), preloadedVimium)
+        check(full.complete, "a structured run with every factor's evidence is a complete measurement: \(full.problems)")
+        func failsWith(_ needle: String, _ edit: (inout [String: [String: Any]]) -> Void) -> Bool {
+            evaluate(structured(edit), preloadedVimium).problems.contains { $0.hasPrefix(needle) }
+        }
+        check(failsWith("frame creation not recorded") { $0["frame_created"] = nil }, "missing frame creation is incomplete")
+        check(failsWith("shadow:") { $0["frame_created"]?["inShadow"] = false }, "a frame outside the shadow root fails the shadow factor")
+        check(failsWith("shadow:") { $0["frame_created"]?["wrapperParent"] = "body" }, "a wrapper not on documentElement fails the shadow factor")
+        check(failsWith("allow:") { $0["frame_created"]?["allow"] = nil }, "a missing allow attribute fails the allow factor")
+        check(failsWith("hidden: the class stylesheet") { $0["style_loaded"] = nil }, "a stylesheet that never loaded is incomplete, not a focus result")
+        check(failsWith("hidden: the frame was not display:none") { $0["show_sent"]?["displayBefore"] = "block" }, "a frame not hidden before show fails")
+        check(failsWith("hidden: the frame was not display:block") { $0["show_sent"]?["frameDisplay"] = "none" }, "a frame still hidden after show (CSS failure) is incomplete")
+        check(failsWith("channel: the child did not acknowledge") { $0["ready"]?["channel"] = false }, "no port acknowledgement fails the channel factor")
+        check(failsWith("channel: show was not sent") { $0["show_sent"]?["via"] = "window" }, "show over window fails the channel factor")
+        check(failsWith("editable:") { $0["ready"]?["targetEditable"] = false }, "a non-editable target fails the editable factor")
+        check(failsWith("suppress:") { $0["trigger"]?["suppressed"] = false }, "an unsuppressed trigger fails the suppress factor")
+        // Unrequested factors must be absent in a structured run.
+        check(evaluate(structured(), [.channel]).problems.contains("baseline: the frame was expected outside a shadow root")
+              && evaluate(structured(), [.channel]).problems.contains("baseline: the child focus target should be an input"),
+              "a structured run whose evidence shows unrequested factors is incomplete")
+        // Lazy evidence: the frame must be created in the trigger phase.
+        var lateCreation = lazyRun; lateCreation.firstSeen["parent:3"] = "setup"
+        check(evaluate(lateCreation, [.lazy]).problems.contains("lazy: the frame was not created in the trigger phase"), "a lazy frame created before the trigger fails")
+        // Combinations needing a trigger are refused with the pointer control.
+        check(R.combinationRefusal(R.Case(frame: .ex, pattern: .c), [.hidden]) != nil && R.combinationRefusal(R.Case(frame: .ex, pattern: .c), [.lazy]) != nil
+              && R.combinationRefusal(R.Case(frame: .ex, pattern: .c), [.suppress]) != nil, "hidden, lazy and suppress are refused with c")
+        check(R.combinationRefusal(R.Case(frame: .ex, pattern: .c), [.shadow, .channel, .editable, .allow]) == nil
+              && R.combinationRefusal(R.Case(frame: .ex, pattern: .p1), all) == nil, "other combinations are allowed")
+        var hiddenControl = Run(probeCase: R.Case(frame: .ex, pattern: .c)); hiddenControl.handshake()
+        check(evaluate(hiddenControl, [.hidden]).problems.first?.hasPrefix("the pointer control (c) has no trigger") == true, "evaluation refuses a hidden control too")
+
         // Cleanup: confirmed fixture removal is required.
         let removed: [String: Any] = ["host_temporary_storage_removed": true, "run_directory_removed": true, "fixture_removed": true]
         check(R.cleanupIsClean(removed, fixtureInstalled: true), "confirmed removal plus removed storage is clean")

@@ -21,6 +21,87 @@ enum ExtensionFocusProbeRules {
         return Case(frame: frame, pattern: pattern)
     }
 
+    /// Vimium-like structural factors (original code only), from `BAM_FOCUS_STRUCTURE`.
+    /// Not Comparable on purpose: a module-level `<` overload slows type-checking of unrelated expressions.
+    enum Factor: String, CaseIterable {
+        /// The iframe is created on the trigger (not preloaded); show waits for load and the handshake.
+        case lazy
+        /// The iframe starts under a stylesheet `iframe{display:none}`, gets class CSS shortly after, and is shown by class
+        /// toggle right after "show" is posted (Vimium's UIComponent order).
+        case hidden
+        /// The iframe and its stylesheet sit in an open shadow root on a wrapper appended to `document.documentElement`.
+        case shadow
+        /// A MessageChannel port is transferred with the hello; show and all later child records travel on the port.
+        case channel
+        /// The child's focus target is a `contenteditable="plaintext-only"` span instead of an input.
+        case editable
+        /// `allow="clipboard-read; clipboard-write"` on the iframe.
+        case allow
+        /// The parent's trigger handler calls preventDefault/stopImmediatePropagation and suppresses later parent keydowns
+        /// until the child reports focus (Vimium FindMode's suppressAllKeyboardEvents).
+        case suppress
+    }
+    /// Factors in canonical (alphabetical) order.
+    static func sortedFactors(_ factors: Set<Factor>) -> [Factor] { factors.sorted { $0.rawValue < $1.rawValue } }
+    /// Absent/`none` → no structure (the reviewed baseline); `vimium` → every factor; `vimium-minus-<factor>` → all but one;
+    /// otherwise a comma list of factors. Unknown or repeated factors are refused (nil).
+    static func parseStructure(_ raw: String?) -> Set<Factor>? {
+        let value = (raw ?? "").trimmingCharacters(in: .whitespaces).lowercased()
+        if value.isEmpty || value == "none" { return [] }
+        if value == "vimium" { return Set(Factor.allCases) }
+        if value.hasPrefix("vimium-minus-") {
+            guard let removed = Factor(rawValue: String(value.dropFirst("vimium-minus-".count))) else { return nil }
+            return Set(Factor.allCases).subtracting([removed])
+        }
+        let parts = value.split(separator: ",", omittingEmptySubsequences: false).map { $0.trimmingCharacters(in: .whitespaces) }
+        let factors = parts.compactMap(Factor.init(rawValue:))
+        guard factors.count == parts.count, Set(factors).count == factors.count else { return nil }
+        return Set(factors)
+    }
+    /// Factors that need the trigger (lazy creates the child on it, hidden shows it on it, suppress acts on it) are refused
+    /// with the pointer control, which has no trigger; otherwise nil.
+    static func combinationRefusal(_ probeCase: Case, _ structure: Set<Factor>) -> String? {
+        guard probeCase.pattern == .c else { return nil }
+        let needsTrigger = structure.intersection([.lazy, .hidden, .suppress])
+        guard !needsTrigger.isEmpty else { return nil }
+        return "the pointer control (c) has no trigger, so \(structureLabel(needsTrigger)) can't apply; use those factors with p1–p4"
+    }
+    /// Evidence that each requested factor actually took effect, so a setup or CSS failure is incomplete rather than a
+    /// mislabeled keyboard-focus result. `showSent` is nil for the pointer control.
+    /// The reviewed baseline (no structure) keeps its own contract unchanged; within a structured run, factors that were
+    /// not requested must be visibly absent too.
+    static func factorProblems(_ records: [Record], structure: Set<Factor>, lazy: Bool, ready: Record, showSent: Record?, trigger: Record?) -> [String] {
+        guard !structure.isEmpty else { return [] }
+        var problems: [String] = []
+        let created = records.first { $0.frame == "parent" && $0.kind == "frame_created" }
+        if created == nil { problems.append("frame creation not recorded") }
+        if lazy, created?.hostPhase != "trigger" { problems.append("lazy: the frame was not created in the trigger phase") }
+        if structure.contains(.shadow), created?.bool("inShadow") != true || created?.string("wrapperParent") != "html" {
+            problems.append("shadow: the frame is not in a shadow root on a documentElement wrapper")
+        }
+        if !structure.contains(.shadow), created?.bool("inShadow") != false { problems.append("baseline: the frame was expected outside a shadow root") }
+        if structure.contains(.allow), created?.string("allow") != "clipboard-read; clipboard-write" { problems.append("allow: the iframe allow attribute is missing") }
+        if structure.contains(.hidden) {
+            let style = records.first { $0.frame == "parent" && $0.kind == "style_loaded" }
+            if style == nil || (showSent.map { style!.seq > $0.seq } ?? false) { problems.append("hidden: the class stylesheet did not load before show") }
+            if showSent?.string("displayBefore") != "none" { problems.append("hidden: the frame was not display:none before show") }
+            if showSent?.string("frameDisplay") != "block" { problems.append("hidden: the frame was not display:block after show") }
+        }
+        if structure.contains(.channel) {
+            if ready.bool("channel") != true { problems.append("channel: the child did not acknowledge over the MessageChannel port") }
+            if let showSent, showSent.string("via") != "port" { problems.append("channel: show was not sent on the port") }
+        }
+        if structure.contains(.editable), ready.bool("targetEditable") != true { problems.append("editable: the child focus target is not contenteditable") }
+        if !structure.contains(.editable), ready.bool("targetEditable") != false { problems.append("baseline: the child focus target should be an input") }
+        if structure.contains(.suppress), trigger?.bool("suppressed") != true { problems.append("suppress: the trigger key was not suppressed") }
+        return problems
+    }
+
+    /// Canonical text for a structure (sorted factors, or `none`), used in URLs and output.
+    static func structureLabel(_ factors: Set<Factor>) -> String {
+        factors.isEmpty ? "none" : sortedFactors(factors).map(\.rawValue).joined(separator: ",")
+    }
+
     static let triggerKey = "f"
     static let typedKeys = ["b", "a", "m"]
     static let typedText = "bam"
@@ -28,7 +109,7 @@ enum ExtensionFocusProbeRules {
     static let sampleDelaysMilliseconds = [0, 20, 100, 1000]
     static let recordKinds: Set<String> = ["ready", "armed", "keydown", "trigger", "show_sent", "show", "focus_attempt", "focus_error",
                                            "sample", "window_focus", "window_blur", "input_focus", "input_blur", "input", "pointer",
-                                           "hello_sent", "child_load"]
+                                           "hello_sent", "child_load", "frame_created", "style_loaded"]
     static let maximumRecords = 300
 
     /// One page record as the parent publishes it, with the native phase in which the host first saw it.
@@ -133,16 +214,27 @@ enum ExtensionFocusProbeRules {
     /// a negative result is measured, not incomplete. For the pointer control (`c`): a trusted pointer on the child input in
     /// the `pointer` phase and all three typed keys in the child input, with its value containing the text; missing typing
     /// in the child is incomplete for the positive control.
-    static func evaluate(_ records: [Record], case probeCase: Case) -> Evaluation {
+    /// With `lazy`, the child doesn't exist before the trigger: the parent arms in setup, and the child's ready
+    /// acknowledgement must arrive in the trigger phase (after the trigger) instead. The positive control has no trigger,
+    /// so `lazy` doesn't apply to it.
+    static func evaluate(_ records: [Record], case probeCase: Case, structure: Set<Factor> = []) -> Evaluation {
         var problems: [String] = []
         func first(_ frame: String, _ kind: String, phase: String? = nil, _ extra: (Record) -> Bool = { _ in true }) -> Record? {
             records.first { $0.frame == frame && $0.kind == kind && (phase == nil || $0.hostPhase == phase) && extra($0) }
         }
-        guard let ready = first("child", "ready") else { return Evaluation(problems: ["child ready acknowledgement missing"], outcome: [:]) }
+        let lazy = structure.contains(.lazy) && probeCase.pattern != .c
+        if let refusal = combinationRefusal(probeCase, structure) { return Evaluation(problems: [refusal], outcome: [:]) }
+        // Preloaded: the child's acknowledgement is reported first, as before; lazy: the parent's armed record first.
+        if !lazy, first("child", "ready") == nil { return Evaluation(problems: ["child ready acknowledgement missing"], outcome: [:]) }
         guard let armed = first("parent", "armed") else { return Evaluation(problems: ["parent armed record missing"], outcome: [:]) }
-        if ready.hostPhase != "setup" || armed.hostPhase != "setup" { problems.append("handshake not completed before READY") }
+        guard let ready = first("child", "ready") else { return Evaluation(problems: ["child ready acknowledgement missing"], outcome: [:]) }
+        if armed.hostPhase != "setup" { problems.append("handshake not completed before READY") }
+        if lazy {
+            // The child is created by the trigger, so its ready acknowledgement belongs to the trigger phase.
+            if ready.hostPhase != "trigger" { problems.append("lazy child ready acknowledgement not received in the trigger phase") }
+        } else if ready.hostPhase != "setup" { problems.append("handshake not completed before READY") }
 
-        var outcome: [String: Any] = ["case": probeCase.label]
+        var outcome: [String: Any] = ["case": probeCase.label, "structure": structureLabel(structure)]
         let typing = records.filter { $0.kind == "keydown" && $0.bool("trusted") == true && $0.hostPhase == "typing" }
         let typed = typing.compactMap { $0.string("key")?.lowercased() }.filter { Self.typedKeys.contains($0) }
         let childTyped = typing.filter { $0.frame == "child" }, parentTyped = typing.filter { $0.frame == "parent" }
@@ -171,6 +263,7 @@ enum ExtensionFocusProbeRules {
             let trustedValue = records.contains { $0.frame == "child" && $0.kind == "input" && $0.hostPhase == "typing" && $0.bool("trusted") == true
                 && ($0.string("value") ?? "").lowercased().contains(typedText) }
             if !trustedValue { problems.append("positive control: no trusted child input value containing \(typedText) in the typing phase") }
+            problems += factorProblems(records, structure: structure, lazy: false, ready: ready, showSent: nil, trigger: nil)
             return Evaluation(problems: problems, outcome: outcome)
         }
 
@@ -179,12 +272,14 @@ enum ExtensionFocusProbeRules {
             return Evaluation(problems: problems, outcome: outcome)
         }
         outcome["parent_had_focus_at_trigger"] = trigger.bool("hasFocus") ?? NSNull()
-        guard first("parent", "show_sent", phase: "trigger", { $0.seq > trigger.seq }) != nil else {
+        guard let showSent = first("parent", "show_sent", phase: "trigger", { $0.seq > trigger.seq }) else {
             problems.append("show not sent after the trigger in the trigger phase"); return Evaluation(problems: problems, outcome: outcome)
         }
         guard let shown = first("child", "show", phase: "trigger") else {
             problems.append("child show acknowledgement missing in the trigger phase"); return Evaluation(problems: problems, outcome: outcome)
         }
+        // Each requested structural factor must have taken effect before any focus result counts (negative or positive).
+        problems += factorProblems(records, structure: structure, lazy: lazy, ready: ready, showSent: showSent, trigger: trigger)
         for frame in ["child", "parent"] {
             let all = records.filter { $0.frame == frame && $0.kind == "sample" }
             if all.contains(where: { $0.int("after_ms").map { !sampleDelaysMilliseconds.contains($0) } ?? true }) {
