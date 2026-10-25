@@ -901,6 +901,9 @@ enum ArkPalette {
                                     dark: NSColor(srgbRed: BamInk.darkPrimary, green: BamInk.darkPrimary, blue: BamInk.darkPrimary, alpha: 1))
     static let secondary = NSColor.chrome(light: NSColor(srgbRed: BamInk.lightSecondary, green: BamInk.lightSecondary, blue: BamInk.lightSecondary, alpha: 1),
                                           dark: NSColor(srgbRed: BamInk.darkSecondary, green: BamInk.darkSecondary, blue: BamInk.darkSecondary, alpha: 1))
+    /// Folder glyphs: Bam's ink, slightly softened.
+    static let folderGlyph = NSColor.chrome(light: NSColor(srgbRed: BamInk.lightPrimary, green: BamInk.lightPrimary, blue: BamInk.lightPrimary, alpha: 0.85),
+                                            dark: NSColor(srgbRed: BamInk.darkPrimary, green: BamInk.darkPrimary, blue: BamInk.darkPrimary, alpha: 0.85))
     /// Hover wash for rows and icon buttons.
     static let hover = NSColor.chrome(light: black(0.055), dark: white(0.07))
     static let pressed = NSColor.chrome(light: black(0.10), dark: white(0.20))
@@ -964,7 +967,8 @@ enum ArkPalette {
 @MainActor enum ArkType {
     static let rowSize: CGFloat = 13.5
     static func rowFont(active: Bool, folder: Bool) -> NSFont {
-        .systemFont(ofSize: rowSize, weight: folder ? .semibold : active ? .medium : .regular)
+        // Folders are medium, not semibold: a stack of folders no longer outweighs the tabs.
+        .systemFont(ofSize: rowSize, weight: folder || active ? .medium : .regular)
     }
 }
 /// Sidebar geometry in points, matched to Arc/Yab at a ~230-point sidebar.
@@ -1348,6 +1352,13 @@ private final class ArkNewTabButton: ArkHoverButton {
     }
 }
 
+/// Folder chevron opacity (Bam's ink) at rest and when hovered or keyboard-
+/// focused. Even the resting chevron keeps at least 3:1 against the sidebar.
+enum ArkTabRowChevron {
+    static let rest: CGFloat = 0.5
+    static let emphasized: CGFloat = 0.85
+}
+
 /// Sidebar views drawn in their Space's tint; tests read the tint they hold.
 @MainActor protocol SpaceTinted: AnyObject { var displayedSpaceTint: NSColor { get } }
 
@@ -1498,7 +1509,7 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted {
         closeButton.isHidden = !item.isActive
         closeButton.handler = { [weak self] in self?.close?() }
         chevronView.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 9, weight: .semibold)
-        chevronView.contentTintColor = ArkPalette.secondary; chevronView.isHidden = true
+        chevronView.contentTintColor = ArkPalette.ink; chevronView.isHidden = true
         chevronView.identifier = NSUserInterfaceItemIdentifier("folder-chevron")
         // The row is one accessible control; its label and icons are not separate elements.
         for view in [titleLabel, subtitleLabel, iconView, chevronView] as [NSView] { view.setAccessibilityElement(false) }
@@ -1590,7 +1601,8 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted {
         }
     }
     private func applyIconTint() {
-        if item.isFolder { iconView.contentTintColor = ArkPalette.secondary; return }
+        // Folder glyphs carry the row in Bam's ink (Yab), not a faint gray.
+        if item.isFolder { iconView.contentTintColor = ArkPalette.folderGlyph; return }
         iconView.contentTintColor = favicon == nil ? (item.isActive ? spaceTint : ArkPalette.secondary) : nil
     }
     func configureSpace(id: Int, tint: NSColor, destinations: [BrowserSpace]) {
@@ -1602,8 +1614,8 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted {
         applyIconTint()
     }
     override var acceptsFirstResponder: Bool { true }
-    override func becomeFirstResponder() -> Bool { needsDisplay = true; return true }
-    override func resignFirstResponder() -> Bool { needsDisplay = true; return true }
+    override func becomeFirstResponder() -> Bool { needsDisplay = true; updateChevronEmphasis(focused: true); return true }
+    override func resignFirstResponder() -> Bool { needsDisplay = true; updateChevronEmphasis(focused: false); return true }
     override func keyDown(with event: NSEvent) {
         // Return/Enter/Space open a tab or toggle a folder; →/← open and close
         // folders; ← elsewhere goes to the containing folder; Esc returns to the page.
@@ -1637,6 +1649,13 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted {
         let hidden = item.isFolder || item.isUnloaded || (!hovered && !item.isActive)
         if closeButton.isHidden != hidden { closeButton.isHidden = hidden; needsLayout = true }
         if chevronView.isHidden != !item.isFolder { chevronView.isHidden = !item.isFolder; needsLayout = true }
+        updateChevronEmphasis(focused: window?.firstResponder === self)
+    }
+    /// Folders recede at rest: the chevron is quieter until the row is hovered
+    /// or focused, so open/closed state stays visible without a gray column.
+    private func updateChevronEmphasis(focused: Bool) {
+        let alpha = hovered || focused ? ArkTabRowChevron.emphasized : ArkTabRowChevron.rest
+        if chevronView.alphaValue != alpha { chevronView.alphaValue = alpha }
     }
     override func draw(_ dirtyRect: NSRect) {
         if window?.firstResponder === self {
