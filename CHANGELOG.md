@@ -1,11 +1,12 @@
 # Changelog
 
-## 0.23.0 build 47 — local draft, Chrome identity
+## 0.23.0 build 47 — local draft, Chrome compatibility
 
 - Assign the verified Chrome Web Store ID to new store installs through the public native runtime API. Keep legacy installs, folder imports, unverified packages and Safari bundles on their existing installation IDs. Resource origins remain per-installation UUIDs.
 - Resolve host authorization through exact loaded contexts and their profiles, and refuse duplicate verified runtime IDs within a profile.
 - Scope notifications to their posting installation so old responses cannot reach a later reinstall with the same publisher ID.
-- Disclose the verified ID in Manage Extensions. Full build and all eleven native suites passed. Session Buddy now exposes its Open controls and passes ordinary same-window save/restore; pinned and multiwindow restoration remain incomplete.
+- Disclose the verified ID in Manage Extensions. The identity checkpoint passed the full build and all eleven native suites. Session Buddy now exposes its Open controls and passes ordinary same-window save/restore.
+- Map Chrome pinned-tab creation to real Bam kept tabs, with background selection preserved. Support lossless kept/ordinary updates, and refuse changes that would discard a Favorite, folder placement, customized saved metadata or Split membership. Native extension checks (460) and real Session Buddy kept-page restoration passed; multiwindow restoration remains incomplete.
 
 ## 0.22.1 build 46 — Arc import, folders and sidebar corrections
 
