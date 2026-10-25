@@ -353,6 +353,8 @@ import WebKit
         bound(tabs, "Next Space", #selector(BrowserController.nextSpace(_:)), .nextSpace, controller)
         bound(tabs, "Previous Space", #selector(BrowserController.previousSpace(_:)), .previousSpace, controller)
         tabs.addItem(.separator())
+        item(tabs, "New Folder…", #selector(BrowserController.newFolder(_:)), "", .command, controller)
+        tabs.addItem(.separator())
         item(tabs, "Manage Spaces…", #selector(BrowserController.manageSpaces(_:)), "", .command, controller)
         let chooseSpace = NSMenuItem(title: "Go to Space", action: nil, keyEquivalent: "")
         let submenu = NSMenu(title: "Go to Space"); chooseSpace.submenu = submenu; tabs.addItem(chooseSpace)

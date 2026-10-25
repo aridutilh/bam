@@ -62,6 +62,8 @@ done
 if [ "$VERIFIED" != true ]; then exit 1; fi
 "$SWIFTC" "${COMMON[@]}" "$PROJECT_DIR/Sources/BrowserState.swift" "$PROJECT_DIR/Tests/main.swift" -o "$BUILD_DIR/model-tests"
 "$BUILD_DIR/model-tests" "$BUILD_DIR"
+"$SWIFTC" "${COMMON[@]}" -parse-as-library "$PROJECT_DIR/Sources/BrowserState.swift" "$PROJECT_DIR/Tests/FolderTests.swift" -o "$BUILD_DIR/folder-tests"
+"$BUILD_DIR/folder-tests" "$BUILD_DIR/folder-fixtures"
 "$SWIFTC" "${COMMON[@]}" -parse-as-library "$PROJECT_DIR/Sources/BrowserState.swift" "$PROJECT_DIR/Sources/PreviewProfile.swift" "$PROJECT_DIR/Tests/PreviewProfileTests.swift" -o "$BUILD_DIR/preview-profile-tests"
 "$BUILD_DIR/preview-profile-tests"
 python3 -B "$PROJECT_DIR/Tests/PreviewInstallerTests.py"

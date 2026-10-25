@@ -9,14 +9,35 @@ import WebKit
         let favoriteCount = snapshot.favoriteTabs.count
         var companions: [UUID: BrowserTab] = [:]
         for split in snapshot.splits ?? [] { companions[split.primaryID] = tabsByID[split.secondaryID] }
-        return snapshot.visibleTabs.map { tab in
+        func item(_ tab: BrowserTab, depth: Int = 0, parent: UUID? = nil, earlier: Bool = false, later: Bool = false) -> SidebarTabItem {
             let companion = companions[tab.id]
             return SidebarTabItem(id: tab.id, title: companion.map { "\(tab.displayTitle) · \($0.displayTitle)" } ?? tab.displayTitle,
                 subtitle: companion.map { "\(tab.address) | \($0.address)" } ?? tab.address,
                 symbol: companion == nil ? tab.symbol : "rectangle.split.2x1", isPinned: tab.pinned,
                 isActive: tab.id == snapshot.activeID, isFavorite: tab.isFavorite, isUnloaded: tab.isUnloaded, isSleeping: tab.isSleeping,
-                isSplit: companion != nil, canFavorite: companion == nil && (tab.isFavorite || favoriteCount < BrowserSession.maximumFavorites))
+                isSplit: companion != nil, canFavorite: companion == nil && (tab.isFavorite || favoriteCount < BrowserSession.maximumFavorites),
+                depth: depth, parentFolderID: parent, hasEarlierSibling: earlier, hasLaterSibling: later)
         }
+        let visible = snapshot.visibleTabs
+        var result = visible.filter(\.isFavorite).map { item($0) }
+        var siblings: [BrowserSession.KeptContainer: [UUID]] = [:]
+        for entry in snapshot.visibleKeptLayout(in: snapshot.space, revealing: snapshot.activeID) {
+            let container: BrowserSession.KeptContainer = entry.parentID.map { .folder($0) } ?? .root(snapshot.space)
+            if siblings[container] == nil { siblings[container] = snapshot.keptChildren(of: container) }
+            let order = siblings[container] ?? []
+            let index = order.firstIndex(of: entry.id)
+            let earlier = (index ?? 0) > 0, later = index.map { $0 + 1 < order.count } ?? false
+            if entry.isFolder, let folder = snapshot.folder(entry.id) {
+                result.append(SidebarTabItem(id: folder.id, title: folder.name, subtitle: "", symbol: "folder", isPinned: true,
+                    isActive: false, canFavorite: false, depth: entry.depth, isFolder: true, isExpanded: !folder.isCollapsed,
+                    parentFolderID: entry.parentID, hasEarlierSibling: earlier, hasLaterSibling: later,
+                    folderTabCount: snapshot.tabIDs(inFolder: folder.id).count))
+            } else if let tab = tabsByID[entry.id] {
+                result.append(item(tab, depth: entry.depth, parent: entry.parentID, earlier: earlier, later: later))
+            }
+        }
+        result += visible.filter { !$0.isSaved }.map { item($0) }
+        return result
     }
     func showSplit(_ group: BrowserSplit) {
         guard let left = session.tabs.first(where: { $0.id == group.primaryID }), let right = session.tabs.first(where: { $0.id == group.secondaryID }) else { return }

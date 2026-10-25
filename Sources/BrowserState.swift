@@ -52,12 +52,15 @@ struct BrowserTab: Codable, Identifiable, Equatable {
     var space: Int
     var saved: SavedTabState?
     var sleepState: TabSleepState?
+    /// The kept-section folder holding this tab. Only kept tabs live in folders;
+    /// Favorites and ordinary (Today) tabs are always at their section root.
+    var folderID: UUID?
 
     init(id: UUID = UUID(), title: String, address: String, space: Int,
-         pinned: Bool = false, saved: SavedTabState? = nil, sleepState: TabSleepState? = nil) {
+         pinned: Bool = false, saved: SavedTabState? = nil, sleepState: TabSleepState? = nil, folderID: UUID? = nil) {
         self.id = id; self.title = title; self.address = address; self.space = space
         self.saved = saved ?? (pinned ? SavedTabState(kind: .kept, address: address) : nil)
-        self.sleepState = sleepState
+        self.sleepState = sleepState; self.folderID = folderID
     }
     var pinned: Bool {
         get { saved != nil }
@@ -82,13 +85,13 @@ struct BrowserTab: Codable, Identifiable, Equatable {
         if address.contains("wikipedia.org") { return "book.closed" }
         return "globe"
     }
-    fileprivate static func validAddress(_ address: String) -> Bool {
+    static func validAddress(_ address: String) -> Bool {
         address == "orbit://newtab" || address == "orbit://video" || URLInput.directURL(address) != nil || URLInput.extensionURL(address) != nil
     }
     fileprivate static func validCustomTitle(_ title: String) -> Bool {
         title.count <= 80 && !title.unicodeScalars.contains { CharacterSet.controlCharacters.contains($0) }
     }
-    private enum CodingKeys: String, CodingKey { case id, title, address, space, pinned, saved, sleepState }
+    private enum CodingKeys: String, CodingKey { case id, title, address, space, pinned, saved, sleepState, folderID }
     private enum SavedProfileKeys: String, CodingKey { case profileID }
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -109,6 +112,7 @@ struct BrowserTab: Codable, Identifiable, Equatable {
         if hasProfileBinding { saved = try values.decodeIfPresent(SavedTabState.self, forKey: .saved) }
         else { saved = try? values.decodeIfPresent(SavedTabState.self, forKey: .saved) }
         sleepState = try? values.decodeIfPresent(TabSleepState.self, forKey: .sleepState)
+        folderID = try? values.decodeIfPresent(UUID.self, forKey: .folderID)
         if saved == nil, (try? values.decodeIfPresent(Bool.self, forKey: .pinned)) == true {
             saved = SavedTabState(kind: .kept, address: address)
         }
@@ -120,7 +124,49 @@ struct BrowserTab: Codable, Identifiable, Equatable {
         try values.encode(pinned, forKey: .pinned)
         try values.encodeIfPresent(saved, forKey: .saved)
         try values.encodeIfPresent(sleepState, forKey: .sleepState)
+        try values.encodeIfPresent(folderID, forKey: .folderID)
     }
+}
+
+/// A named, collapsible group in a Space's kept section. Folders nest; stable
+/// IDs survive renames and moves. Child order lives in `childOrder`, which may
+/// list both tab and folder IDs and is repaired against actual membership.
+struct BrowserFolder: Codable, Equatable, Identifiable {
+    var id: UUID
+    var name: String
+    var space: Int
+    var parentID: UUID?
+    var isCollapsed: Bool
+    var childOrder: [UUID]
+
+    init(id: UUID = UUID(), name: String, space: Int, parentID: UUID? = nil, isCollapsed: Bool = false, childOrder: [UUID] = []) {
+        self.id = id; self.name = name; self.space = space; self.parentID = parentID
+        self.isCollapsed = isCollapsed; self.childOrder = childOrder
+    }
+    private enum CodingKeys: String, CodingKey { case id, name, space, parentID, isCollapsed, childOrder }
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decode(UUID.self, forKey: .id)
+        name = (try? values.decode(String.self, forKey: .name)) ?? "Folder"
+        space = try values.decode(Int.self, forKey: .space)
+        parentID = try? values.decodeIfPresent(UUID.self, forKey: .parentID)
+        isCollapsed = (try? values.decodeIfPresent(Bool.self, forKey: .isCollapsed)) ?? false
+        childOrder = (try? values.decodeIfPresent([UUID].self, forKey: .childOrder)) ?? []
+    }
+    static func validName(_ raw: String) -> String? {
+        let name = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, name.count <= 120,
+              !name.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else { return nil }
+        return name
+    }
+}
+
+/// One row of a Space's kept hierarchy, in display (depth-first) order.
+struct KeptLayoutEntry: Equatable {
+    let id: UUID
+    let isFolder: Bool
+    let depth: Int
+    let parentID: UUID?
 }
 
 struct BrowserSplit: Codable, Equatable {
@@ -144,11 +190,14 @@ struct BrowserSpace: Codable, Equatable, Identifiable {
     var symbol: String
     var colorIndex: Int
     var profileID: UUID
+    /// An optional emoji icon (Arc-style); when present it is shown instead of the symbol.
+    var emoji: String?
 
-    init(id: Int, name: String, symbol: String, colorIndex: Int, profileID: UUID = BrowserProfile.defaultID) {
+    init(id: Int, name: String, symbol: String, colorIndex: Int, profileID: UUID = BrowserProfile.defaultID, emoji: String? = nil) {
         self.id = id; self.name = name; self.symbol = symbol; self.colorIndex = colorIndex; self.profileID = profileID
+        self.emoji = emoji.flatMap(Self.validEmoji)
     }
-    private enum CodingKeys: String, CodingKey { case id, name, symbol, colorIndex, profileID }
+    private enum CodingKeys: String, CodingKey { case id, name, symbol, colorIndex, profileID, emoji }
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         id = try values.decode(Int.self, forKey: .id); name = try values.decode(String.self, forKey: .name)
@@ -157,6 +206,16 @@ struct BrowserSpace: Codable, Equatable, Identifiable {
         if profileID == UUID(uuid: (0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0)) {
             throw DecodingError.dataCorruptedError(forKey: .profileID, in: values, debugDescription: "Invalid profile identifier")
         }
+        emoji = (try? values.decodeIfPresent(String.self, forKey: .emoji)).flatMap { $0 }.flatMap(Self.validEmoji)
+    }
+    /// A single emoji grapheme, without text or control characters.
+    static func validEmoji(_ raw: String) -> String? {
+        let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard value.count == 1, value.unicodeScalars.count <= 16,
+              value.unicodeScalars.contains(where: { $0.properties.isEmojiPresentation || ($0.properties.isEmoji && $0.value > 0xFF) }),
+              !value.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) || CharacterSet.alphanumerics.contains($0) && $0.value < 0x80 })
+        else { return nil }
+        return value
     }
 
     static let symbols = ["sparkles", "sun.max", "globe", "briefcase", "house", "heart", "book", "paintbrush", "terminal", "bolt", "leaf", "music.note"]
@@ -198,6 +257,15 @@ struct BrowserSession: Codable {
     var splits: [BrowserSplit]?
     var spaces: [BrowserSpace]
     var profiles: [BrowserProfile]
+    /// Kept-section folders for every Space. Older sessions have none.
+    var folders: [BrowserFolder] = []
+    /// Order of root-level kept rows (tabs and folders) per Space. Absent
+    /// entries fall back to tab-array order, matching sessions before folders.
+    var rootOrder: [Int: [UUID]]?
+    /// Provenance of imported items: source key -> local identifier
+    /// ("space:<id>", "folder:<uuid>", "tab:<uuid>"). Repeat imports skip
+    /// keys already present, even when the user later removed that item.
+    var importLinks: [String: String]?
     // Persist the high-water mark, including deleted Spaces, so tab/archive
     // metadata can never accidentally refer to a different newly created Space.
     private var lastIssuedSpaceID: Int
@@ -205,6 +273,8 @@ struct BrowserSession: Codable {
     private static let formatVersion = 5
     static let maximumFavorites = 12
     static let maximumProfiles = 32
+    static let maximumFolders = 4000
+    static let maximumFolderDepth = 12
 
     init(tabs: [BrowserTab], activeID: UUID, space: Int = 0,
          sidebarWidth: Double = 228, sidebarVisible: Bool = true,
@@ -220,6 +290,7 @@ struct BrowserSession: Codable {
     private enum CodingKeys: String, CodingKey {
         case version, tabs, activeID, space, sidebarWidth, sidebarVisible
         case lastSelectedTabIDsBySpace, splits, spaces, lastIssuedSpaceID, profiles
+        case folders, rootOrder, importLinks
     }
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -236,6 +307,10 @@ struct BrowserSession: Codable {
         splits = try values.decodeIfPresent([BrowserSplit].self, forKey: .splits)
         spaces = try values.decodeIfPresent([BrowserSpace].self, forKey: .spaces) ?? BrowserSpace.defaults
         profiles = try values.decodeIfPresent([BrowserProfile].self, forKey: .profiles) ?? BrowserProfile.defaults
+        // Folder metadata is additive: a damaged folder list must never cost tabs.
+        folders = (try? values.decodeIfPresent([BrowserFolder].self, forKey: .folders)).flatMap { $0 } ?? []
+        rootOrder = (try? values.decodeIfPresent([Int: [UUID]].self, forKey: .rootOrder)).flatMap { $0 }
+        importLinks = (try? values.decodeIfPresent([String: String].self, forKey: .importLinks)).flatMap { $0 }
         lastIssuedSpaceID = max(2, max(try values.decodeIfPresent(Int.self, forKey: .lastIssuedSpaceID) ?? 2,
                                       spaces.map(\.id).max() ?? 2))
     }
@@ -250,6 +325,9 @@ struct BrowserSession: Codable {
         try values.encode(spaces, forKey: .spaces)
         try values.encode(profiles, forKey: .profiles)
         try values.encode(lastIssuedSpaceID, forKey: .lastIssuedSpaceID)
+        if !folders.isEmpty { try values.encode(folders, forKey: .folders) }
+        if let rootOrder, !rootOrder.isEmpty { try values.encode(rootOrder, forKey: .rootOrder) }
+        if let importLinks, !importLinks.isEmpty { try values.encode(importLinks, forKey: .importLinks) }
     }
 
     /// The very first launch of an installed Bam: one tab on bambrowser.com,
@@ -319,9 +397,14 @@ struct BrowserSession: Codable {
         if profile != spaces[index].profileID {
             for i in tabs.indices where tabs[i].space == id && !tabs[i].isFavorite { tabs[i].sleepState = nil }
         }
-        spaces[index] = BrowserSpace(id: id, name: name, symbol: BrowserSpace.normalizedSymbol(symbol), colorIndex: colorIndex, profileID: profile)
+        spaces[index] = BrowserSpace(id: id, name: name, symbol: BrowserSpace.normalizedSymbol(symbol), colorIndex: colorIndex, profileID: profile, emoji: spaces[index].emoji)
         repairRememberedSelections(); repairActiveSelection()
         return true
+    }
+    @discardableResult mutating func setSpaceEmoji(id: Int, emoji: String?) -> Bool {
+        guard let index = spaceIndex(id) else { return false }
+        if let emoji, BrowserSpace.validEmoji(emoji) == nil { return false }
+        spaces[index].emoji = emoji.flatMap(BrowserSpace.validEmoji); return true
     }
     @discardableResult mutating func reorderSpace(id: Int, to index: Int) -> Bool {
         guard let oldIndex = spaceIndex(id), spaces.indices.contains(index) else { return false }
@@ -337,10 +420,15 @@ struct BrowserSession: Codable {
         let newProfile = spaceDefinition(destination)!.profileID
         let remembered = rememberedTab(in: id)
         let wasSelected = space == id
+        let carriedRoot = keptChildren(of: .root(id))
+        let destinationRoot = keptChildren(of: .root(destination))
         for index in tabs.indices where tabs[index].space == id {
             if !tabs[index].isFavorite && oldProfile != newProfile { tabs[index].sleepState = nil }
             tabs[index].space = destination
         }
+        for index in folders.indices where folders[index].space == id { folders[index].space = destination }
+        setOrder(destinationRoot + carriedRoot, for: .root(destination))
+        rootOrder?[id] = nil
         spaces.remove(at: index)
         lastSelectedTabIDsBySpace?[id] = nil
         repairRememberedSelection(in: destination, preferred: remembered)
@@ -360,6 +448,7 @@ struct BrowserSession: Codable {
         let crossesProfile = profileID(for: tab) != spaceDefinition(destination)!.profileID
         for index in tabs.indices where members.contains(tabs[index].id) {
             tabs[index].space = destination
+            tabs[index].folderID = nil
             if crossesProfile { tabs[index].sleepState = nil }
         }
         repairRememberedSelection(in: tab.space)
@@ -390,6 +479,7 @@ struct BrowserSession: Codable {
         } else { tabs[index].saved = nil }
         if kind == .favorite { tabs[index].saved?.profileID = profile }
         else { tabs[index].saved?.profileID = nil }
+        if kind != .kept { tabs[index].folderID = nil }
         if wasFavorite && kind != .favorite { tabs[index].space = localDestination! }
         repairRememberedSelections()
         repairActiveSelection()
@@ -416,6 +506,7 @@ struct BrowserSession: Codable {
     @discardableResult mutating func reorderSavedTab(id: UUID, by offset: Int) -> Bool {
         let primaryID = split(for: id)?.primaryID ?? id
         guard let source = tabs.first(where: { $0.id == primaryID }), let kind = source.saved?.kind else { return false }
+        if kind == .kept { return reorderKeptItem(id: primaryID, by: offset) }
         let secondaryIDs = Set((splits ?? []).map(\.secondaryID))
         let candidates = tabs.indices.filter {
             !secondaryIDs.contains(tabs[$0].id) && tabs[$0].saved?.kind == kind
@@ -432,7 +523,9 @@ struct BrowserSession: Codable {
     private func orderedTabs(in space: Int) -> [BrowserTab] {
         let grouped = Set((splits ?? []).map(\.secondaryID))
         let local = tabs.filter { $0.space == space && !$0.isFavorite && !grouped.contains($0.id) }
-        return favorites(in: spaceDefinition(space)?.profileID ?? BrowserProfile.defaultID) + local.filter(\.isSaved) + local.filter { !$0.isSaved }
+        let byID = Dictionary(local.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let kept = keptLayout(in: space).compactMap { $0.isFolder ? nil : byID[$0.id] }
+        return favorites(in: spaceDefinition(space)?.profileID ?? BrowserProfile.defaultID) + kept + local.filter { !$0.isSaved }
     }
     private func selectable(_ tab: BrowserTab, in space: Int) -> Bool {
         !tab.isUnloaded && (tab.isFavorite ? profileID(for: tab) == spaceDefinition(space)?.profileID : tab.space == space)
@@ -527,6 +620,9 @@ struct BrowserSession: Codable {
               !left.isFavorite, !right.isFavorite, !left.isUnloaded, !right.isUnloaded,
               spaceDefinition(left.space) != nil else { return false }
         splits = (splits ?? []).filter { ![primary,secondary].contains($0.primaryID) && ![primary,secondary].contains($0.secondaryID) }
+        if let index = tabs.firstIndex(where: { $0.id == secondary }) {
+            tabs[index].folderID = tabs[index].saved?.kind == .kept ? left.folderID : nil
+        }
         splits?.append(BrowserSplit(primaryID: primary, secondaryID: secondary)); select(primary); return true
     }
     mutating func removeSplit(containing id: UUID) { splits = (splits ?? []).filter { $0.primaryID != id && $0.secondaryID != id } }
@@ -546,6 +642,302 @@ struct BrowserSession: Codable {
         repairActiveSelection()
         return closing
     }
+
+    // MARK: Kept-section folders
+
+    enum KeptContainer: Hashable { case root(Int), folder(UUID) }
+
+    func folder(_ id: UUID) -> BrowserFolder? { folders.first { $0.id == id } }
+    func folders(in space: Int) -> [BrowserFolder] { folders.filter { $0.space == space } }
+    private var splitSecondaryIDs: Set<UUID> { Set((splits ?? []).map(\.secondaryID)) }
+    /// Rows that can live in the kept hierarchy: local kept tabs (Split primaries only).
+    private func isKeptRow(_ tab: BrowserTab, secondaries: Set<UUID>) -> Bool {
+        tab.saved?.kind == .kept && !secondaries.contains(tab.id)
+    }
+    private func storedOrder(for container: KeptContainer) -> [UUID]? {
+        switch container {
+        case .root(let space): return rootOrder?[space]
+        case .folder(let id): return folder(id)?.childOrder
+        }
+    }
+    mutating func setOrder(_ ids: [UUID], for container: KeptContainer) {
+        var seen = Set<UUID>(); let ids = ids.filter { seen.insert($0).inserted }
+        switch container {
+        case .root(let space):
+            if rootOrder == nil { rootOrder = [:] }
+            rootOrder?[space] = ids
+        case .folder(let id):
+            if let index = folders.firstIndex(where: { $0.id == id }) { folders[index].childOrder = ids }
+        }
+    }
+    /// Ordered child IDs of a container. Stored order wins; members missing from
+    /// it follow in tab-array order (tabs) and then folder-array order.
+    func keptChildren(of container: KeptContainer) -> [UUID] {
+        let secondaries = splitSecondaryIDs
+        let space: Int, parent: UUID?
+        switch container {
+        case .root(let id): space = id; parent = nil
+        case .folder(let id):
+            guard let definition = folder(id) else { return [] }
+            space = definition.space; parent = id
+        }
+        let memberTabs = tabs.filter { $0.space == space && $0.folderID == parent && isKeptRow($0, secondaries: secondaries) }.map(\.id)
+        let memberFolders = folders.filter { $0.space == space && $0.parentID == parent }.map(\.id)
+        return Self.ordered(members: memberTabs + memberFolders, stored: storedOrder(for: container))
+    }
+    private static func ordered(members: [UUID], stored: [UUID]?) -> [UUID] {
+        guard let stored, !stored.isEmpty else { return members }
+        let memberSet = Set(members); var seen = Set<UUID>()
+        let known = stored.filter { memberSet.contains($0) && seen.insert($0).inserted }
+        return known + members.filter { !seen.contains($0) }
+    }
+    func container(ofKeptItem id: UUID) -> KeptContainer? {
+        if let definition = folder(id) { return definition.parentID.map { .folder($0) } ?? .root(definition.space) }
+        guard let tab = tabs.first(where: { $0.id == id }), tab.saved?.kind == .kept else { return nil }
+        return tab.folderID.map { .folder($0) } ?? .root(tab.space)
+    }
+    func folderDepth(_ id: UUID) -> Int {
+        var depth = 0, current = folder(id)?.parentID, visited = Set<UUID>([id])
+        while let parent = current, visited.insert(parent).inserted { depth += 1; current = folder(parent)?.parentID }
+        return depth
+    }
+    /// True when `candidate` is `ancestor` itself or nested anywhere inside it.
+    func isFolder(_ candidate: UUID, within ancestor: UUID) -> Bool {
+        var current: UUID? = candidate, visited = Set<UUID>()
+        while let id = current, visited.insert(id).inserted {
+            if id == ancestor { return true }
+            current = folder(id)?.parentID
+        }
+        return false
+    }
+    private func subtreeHeight(_ id: UUID) -> Int {
+        let children = folders.filter { $0.parentID == id }
+        return children.isEmpty ? 0 : 1 + (children.map { subtreeHeight($0.id) }.max() ?? 0)
+    }
+    /// Every folder nested in `id`, including itself.
+    func folderSubtree(_ id: UUID) -> Set<UUID> {
+        var result = Set<UUID>([id]), frontier = [id]
+        while let next = frontier.popLast() {
+            for child in folders where child.parentID == next && result.insert(child.id).inserted { frontier.append(child.id) }
+        }
+        return result
+    }
+    /// The kept tab IDs (Split primaries and companions) anywhere inside a folder.
+    func tabIDs(inFolder id: UUID) -> [UUID] {
+        let subtree = folderSubtree(id)
+        return tabs.filter { $0.folderID.map(subtree.contains) == true }.map(\.id)
+    }
+    /// Full depth-first kept hierarchy for a Space, ignoring collapse.
+    func keptLayout(in space: Int) -> [KeptLayoutEntry] { keptLayout(in: space, revealing: nil, honorCollapse: false) }
+    /// Sidebar rows: collapsed folders hide their contents, except that the
+    /// selected tab stays visible beneath its collapsed ancestor.
+    func visibleKeptLayout(in space: Int, revealing selected: UUID?) -> [KeptLayoutEntry] {
+        keptLayout(in: space, revealing: selected, honorCollapse: true)
+    }
+    private func keptLayout(in space: Int, revealing selected: UUID?, honorCollapse: Bool) -> [KeptLayoutEntry] {
+        let secondaries = splitSecondaryIDs
+        var tabChildren: [UUID?: [UUID]] = [:], folderChildren: [UUID?: [UUID]] = [:]
+        for tab in tabs where tab.space == space && isKeptRow(tab, secondaries: secondaries) { tabChildren[tab.folderID, default: []].append(tab.id) }
+        var byID: [UUID: BrowserFolder] = [:]
+        for definition in folders where definition.space == space {
+            folderChildren[definition.parentID, default: []].append(definition.id); byID[definition.id] = definition
+        }
+        let selectedPrimary = selected.map { split(for: $0)?.primaryID ?? $0 }
+        var result: [KeptLayoutEntry] = []; var visited = Set<UUID>()
+        func children(_ parent: UUID?) -> [UUID] {
+            Self.ordered(members: (tabChildren[parent] ?? []) + (folderChildren[parent] ?? []),
+                         stored: parent.map { byID[$0]?.childOrder } ?? rootOrder?[space])
+        }
+        func contains(_ folderID: UUID, _ target: UUID) -> Bool {
+            var stack = [folderID], seen = Set<UUID>()
+            while let next = stack.popLast(), seen.insert(next).inserted {
+                if (tabChildren[next] ?? []).contains(target) { return true }
+                stack += folderChildren[next] ?? []
+            }
+            return false
+        }
+        func walk(_ parent: UUID?, depth: Int, hidden: Bool) {
+            for id in children(parent) where visited.insert(id).inserted {
+                if let definition = byID[id] {
+                    if !hidden { result.append(KeptLayoutEntry(id: id, isFolder: true, depth: depth, parentID: parent)) }
+                    let collapsed = honorCollapse && definition.isCollapsed
+                    if hidden || collapsed {
+                        // Only descend to reveal the selection inside a collapsed folder.
+                        if !hidden, let target = selectedPrimary, contains(id, target) {
+                            result.append(KeptLayoutEntry(id: target, isFolder: false, depth: depth + 1, parentID: id))
+                        }
+                        if !honorCollapse { walk(id, depth: depth + 1, hidden: hidden) }
+                    } else { walk(id, depth: depth + 1, hidden: false) }
+                } else if !hidden { result.append(KeptLayoutEntry(id: id, isFolder: false, depth: depth, parentID: parent)) }
+            }
+        }
+        walk(nil, depth: 0, hidden: false)
+        return result
+    }
+
+    @discardableResult mutating func createFolder(name: String, space: Int, parent: UUID? = nil, at position: Int? = nil,
+                                                  containing items: [UUID] = [], id: UUID = UUID()) -> UUID? {
+        guard spaceDefinition(space) != nil, folders.count < Self.maximumFolders, folder(id) == nil,
+              !tabs.contains(where: { $0.id == id }), let name = BrowserFolder.validName(name) else { return nil }
+        if let parent {
+            guard let definition = folder(parent), definition.space == space,
+                  folderDepth(parent) + 1 < Self.maximumFolderDepth else { return nil }
+        }
+        let container: KeptContainer = parent.map { .folder($0) } ?? .root(space)
+        var order = keptChildren(of: container)
+        folders.append(BrowserFolder(id: id, name: name, space: space, parentID: parent))
+        // A folder made from a row takes that row's place.
+        let anchor = items.first.flatMap { item in order.firstIndex(of: split(for: item)?.primaryID ?? item) }
+        let index = min(order.count, max(0, position ?? anchor ?? order.count))
+        order.insert(id, at: index)
+        setOrder(order, for: container)
+        for item in items { _ = moveKeptItem(item, into: id) }
+        return id
+    }
+    @discardableResult mutating func renameFolder(id: UUID, name: String) -> Bool {
+        guard let index = folders.firstIndex(where: { $0.id == id }), let name = BrowserFolder.validName(name) else { return false }
+        folders[index].name = name; return true
+    }
+    @discardableResult mutating func setFolderCollapsed(id: UUID, collapsed: Bool) -> Bool {
+        guard let index = folders.firstIndex(where: { $0.id == id }) else { return false }
+        folders[index].isCollapsed = collapsed; return true
+    }
+    /// Moves a tab or folder into `destination` (nil: the Space's kept root) at
+    /// `position` among its new siblings. Ordinary tabs become kept tabs; a
+    /// Split moves as one row. Cycles, cross-Space moves and Favorites are refused.
+    @discardableResult mutating func moveKeptItem(_ rawID: UUID, into destination: UUID?, at position: Int? = nil) -> Bool {
+        let id = split(for: rawID)?.primaryID ?? rawID
+        let itemSpace: Int
+        if let definition = folder(id) {
+            itemSpace = definition.space
+            if let destination {
+                guard let target = folder(destination), target.space == itemSpace, !isFolder(destination, within: id),
+                      folderDepth(destination) + 1 + subtreeHeight(id) < Self.maximumFolderDepth else { return false }
+            }
+        } else {
+            guard let tab = tabs.first(where: { $0.id == id }), !tab.isFavorite, spaceDefinition(tab.space) != nil else { return false }
+            itemSpace = tab.space
+            if let destination { guard folder(destination)?.space == itemSpace else { return false } }
+            if tab.saved == nil { guard setRetention(id: id, kind: .kept) else { return false } }
+        }
+        let oldContainer = container(ofKeptItem: id) ?? .root(itemSpace)
+        let newContainer: KeptContainer = destination.map { .folder($0) } ?? .root(itemSpace)
+        var oldOrder = keptChildren(of: oldContainer)
+        let oldIndex = oldOrder.firstIndex(of: id)
+        oldOrder.removeAll { $0 == id }
+        setOrder(oldOrder, for: oldContainer)
+        if let index = folders.firstIndex(where: { $0.id == id }) { folders[index].parentID = destination }
+        else {
+            let members = split(for: id).map { [$0.primaryID, $0.secondaryID] } ?? [id]
+            for index in tabs.indices where members.contains(tabs[index].id) && tabs[index].saved?.kind == .kept {
+                tabs[index].folderID = destination
+            }
+        }
+        var newOrder = keptChildren(of: newContainer).filter { $0 != id }
+        var index = position ?? newOrder.count
+        // Positions within the same container refer to the order before removal.
+        if oldContainer == newContainer, let oldIndex, let position, position > oldIndex { index = position - 1 }
+        newOrder.insert(id, at: min(newOrder.count, max(0, index)))
+        setOrder(newOrder, for: newContainer)
+        return true
+    }
+    @discardableResult mutating func reorderKeptItem(id rawID: UUID, by offset: Int) -> Bool {
+        let id = split(for: rawID)?.primaryID ?? rawID
+        guard let container = container(ofKeptItem: id) else { return false }
+        var order = keptChildren(of: container)
+        guard let current = order.firstIndex(of: id) else { return false }
+        let (target, overflow) = current.addingReportingOverflow(offset)
+        guard !overflow, order.indices.contains(target) else { return false }
+        order.swapAt(current, target)
+        setOrder(order, for: container); return true
+    }
+    /// Removes the folder and puts its contents where it was, in order.
+    @discardableResult mutating func ungroupFolder(id: UUID) -> Bool {
+        guard let definition = folder(id) else { return false }
+        let parent: KeptContainer = definition.parentID.map { .folder($0) } ?? .root(definition.space)
+        let siblings = keptChildren(of: parent)
+        let contents = keptChildren(of: .folder(id))
+        for index in tabs.indices where tabs[index].folderID == id { tabs[index].folderID = definition.parentID }
+        for index in folders.indices where folders[index].parentID == id { folders[index].parentID = definition.parentID }
+        folders.removeAll { $0.id == id }
+        var order: [UUID] = []
+        for sibling in siblings { if sibling == id { order += contents } else { order.append(sibling) } }
+        setOrder(order, for: parent)
+        return true
+    }
+    /// Moves a folder, its nested folders and their tabs to another Space's kept root.
+    @discardableResult mutating func moveFolder(id: UUID, toSpace destination: Int) -> Bool {
+        guard let definition = folder(id), let target = spaceDefinition(destination) else { return false }
+        guard definition.space != destination else { return true }
+        rememberActiveSelection()
+        let source = definition.space
+        let subtree = folderSubtree(id)
+        let moving = Set(tabIDs(inFolder: id))
+        let crossesProfile = spaceDefinition(source)?.profileID != target.profileID
+        let movedSelection = moving.contains(activeID)
+        setOrder(keptChildren(of: .root(source)).filter { $0 != id }, for: .root(source))
+        let destinationRoot = keptChildren(of: .root(destination))
+        for index in folders.indices where subtree.contains(folders[index].id) { folders[index].space = destination }
+        if let index = folders.firstIndex(where: { $0.id == id }) { folders[index].parentID = nil }
+        for index in tabs.indices where moving.contains(tabs[index].id) {
+            tabs[index].space = destination
+            if crossesProfile { tabs[index].sleepState = nil }
+        }
+        // A Split whose companion stayed behind cannot span Spaces.
+        splits = (splits ?? []).filter { moving.contains($0.primaryID) == moving.contains($0.secondaryID) }
+        setOrder(destinationRoot + [id], for: .root(destination))
+        repairRememberedSelection(in: source)
+        repairRememberedSelection(in: destination)
+        if movedSelection { space = destination }
+        repairActiveSelection()
+        return true
+    }
+    private mutating func sanitizeFolders(validSpaceIDs: Set<Int>) {
+        let zero = UUID(uuid: (0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0))
+        let tabIDs = Set(tabs.map(\.id))
+        var seen = Set<UUID>()
+        folders = Array(folders.filter { definition in
+            definition.id != zero && !tabIDs.contains(definition.id) && validSpaceIDs.contains(definition.space)
+                && seen.insert(definition.id).inserted
+        }.prefix(Self.maximumFolders)).map { definition in
+            var definition = definition
+            definition.name = BrowserFolder.validName(definition.name) ?? "Folder"
+            return definition
+        }
+        let spaceByFolder = Dictionary(uniqueKeysWithValues: folders.map { ($0.id, $0.space) })
+        for index in folders.indices {
+            if let parent = folders[index].parentID, spaceByFolder[parent] != folders[index].space || parent == folders[index].id {
+                folders[index].parentID = nil
+            }
+        }
+        // Break cycles and over-deep chains by lifting the offending folder to its Space root.
+        for index in folders.indices {
+            var chain = [folders[index].id], current = folders[index].parentID
+            while let parent = current {
+                if chain.contains(parent) || chain.count >= Self.maximumFolderDepth { folders[index].parentID = nil; break }
+                chain.append(parent)
+                current = folders.first(where: { $0.id == parent })?.parentID
+            }
+        }
+        for index in tabs.indices {
+            guard let folderID = tabs[index].folderID else { continue }
+            if tabs[index].saved?.kind != .kept || spaceByFolder[folderID] != tabs[index].space { tabs[index].folderID = nil }
+        }
+        let validItems = tabIDs.union(spaceByFolder.keys)
+        for index in folders.indices {
+            var unique = Set<UUID>()
+            folders[index].childOrder = folders[index].childOrder.filter { validItems.contains($0) && unique.insert($0).inserted }
+        }
+        rootOrder = rootOrder.map { orders in
+            Dictionary(uniqueKeysWithValues: orders.compactMap { key, ids -> (Int, [UUID])? in
+                guard validSpaceIDs.contains(key) else { return nil }
+                var unique = Set<UUID>()
+                return (key, ids.filter { validItems.contains($0) && unique.insert($0).inserted })
+            })
+        }
+        if rootOrder?.isEmpty == true { rootOrder = nil }
+    }
+
     mutating func sanitize() {
         let zero = UUID(uuid: (0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0))
         var seenProfiles = Set<UUID>()
@@ -579,7 +971,8 @@ struct BrowserSession: Codable {
                                 colorIndex: BrowserSpace.colorNames.indices.contains(definition.colorIndex)
                                     ? definition.colorIndex
                                     : min(BrowserSpace.flatColorCount - 1, max(0, definition.colorIndex)),
-                                profileID: validProfiles.contains(definition.profileID) ? definition.profileID : BrowserProfile.defaultID)
+                                profileID: validProfiles.contains(definition.profileID) ? definition.profileID : BrowserProfile.defaultID,
+                                emoji: definition.emoji)
         }
         if spaces.isEmpty { spaces = BrowserSpace.defaults }
         lastIssuedSpaceID = max(2, max(lastIssuedSpaceID, spaces.map(\.id).max() ?? 2))
@@ -627,11 +1020,12 @@ struct BrowserSession: Codable {
         splits = (splits ?? []).filter { group in
             guard group.primaryID != group.secondaryID,
                   let left = tabByID[group.primaryID], let right = tabByID[group.secondaryID], left.space == right.space,
-                  !left.isFavorite, !right.isFavorite, !left.isUnloaded, !right.isUnloaded,
+                  !left.isFavorite, !right.isFavorite, left.isUnloaded == right.isUnloaded, !left.isUnloaded || (left.isSaved && right.isSaved),
                   !grouped.contains(group.primaryID), !grouped.contains(group.secondaryID) else { return false }
             grouped.insert(group.primaryID); grouped.insert(group.secondaryID); return true
         }
         if let group = split(for: activeID) { activeID = group.primaryID }
+        sanitizeFolders(validSpaceIDs: validSpaceIDs)
         lastSelectedTabIDsBySpace = (lastSelectedTabIDsBySpace ?? [:]).filter { entry in
             validSpaceIDs.contains(entry.key) && tabByID[entry.value].map { selectable($0, in: entry.key) } == true
         }.mapValues { split(for: $0)?.primaryID ?? $0 }
