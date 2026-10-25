@@ -115,7 +115,7 @@ import WebKit
               };
               return {order:globalThis.fixtureOrder, hasDocument:typeof document !== 'undefined', originalURL:globalThis.fixtureOriginalURL,
                 workerURL:location.href, starts:await started, events:events.slice(), wasm:await wasmResult, disposal,
-                adapterVersion: globalThis.__bamCompatibility?.version || 'missing', idle: typeof requestIdleCallback,
+                adapterVersion: globalThis.__bamCompatibility?.version || 'missing', idleCallback: typeof requestIdleCallback,
                 fonts: await api.fontSettings.getFontList().then(list => list.filter(font => typeof font.fontId === 'string' && typeof font.displayName === 'string').length, error => 'error: ' + error.message),
                 idle:await api.idle.queryState(15), permission:await api.notifications.getPermissionLevel()};
             });
@@ -222,8 +222,8 @@ import WebKit
         try check(wasmB["compiled"] as? Int == 42 && wasmB["instantiated"] as? Int == 42, "Module worker packaged Wasm streaming failed: \(wasmB)")
         try check(firstA?["disposal"] as? String == "available" && firstB?["disposal"] as? String == "available",
                   "Worker lacked usable Symbol.dispose/asyncDispose: classic=\(firstA?["disposal"] ?? "nil"), module=\(firstB?["disposal"] ?? "nil")")
-        try check(firstA?["idle"] as? String == "undefined" && firstB?["idle"] as? String == "undefined",
-                  "A prepared worker gained requestIdleCallback, which Chrome workers lack: classic=\(firstA?["idle"] ?? "nil"), module=\(firstB?["idle"] ?? "nil")")
+        try check(firstA?["idleCallback"] as? String == "undefined" && firstB?["idleCallback"] as? String == "undefined",
+                  "A prepared worker gained requestIdleCallback, which Chrome workers lack: classic=\(firstA?["idleCallback"] ?? "nil"), module=\(firstB?["idleCallback"] ?? "nil")")
         try check((firstA?["fonts"] as? Int ?? 0) > 0 && (firstB?["fonts"] as? Int ?? 0) > 0,
                   "fontSettings.getFontList returned no installed families: classic=\(firstA?["fonts"] ?? "nil"), module=\(firstB?["fonts"] ?? "nil")")
         print("Worker Wasm response MIME: classic=\(wasmA["mime"] as? String ?? "missing"), module=\(wasmB["mime"] as? String ?? "missing")")
