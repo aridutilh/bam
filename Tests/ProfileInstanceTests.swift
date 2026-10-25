@@ -23,7 +23,7 @@ import AppKit
         child.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
         child.arguments = [mode, directory.path]
         try child.run()
-        let deadline = Date().addingTimeInterval(5)
+        let deadline = Date().addingTimeInterval(8)
         while child.isRunning && Date() < deadline { try await Task.sleep(for: .milliseconds(20)) }
         if child.isRunning { child.terminate(); child.waitUntilExit(); require(false, "Child timed out") }
         return child.terminationStatus
@@ -79,7 +79,27 @@ import AppKit
         require(!FileManager.default.fileExists(atPath: base.appendingPathComponent("fresh").path), "Fresh preview creates no lock or directory")
         require(try await launch("--contend", directory: base.appendingPathComponent("persistent-preview")) == 0, "Persistent preview owns its separate directory")
         require(activations == 4, "Unrelated preview does not focus the persistent owner")
-        print("PASS: Profile activation — \(checks) startup, hidden/minimized focus, canceled quit, duplicate exit and preview-isolation checks")
+        let ownerURLs = ExternalURLDelivery()
+        var opened: [URL] = []
+        instance.onOpenURLs = { urls in
+            // The owner is briefly busy, forcing the duplicate to resend the
+            // same request before it can receive an acknowledgment.
+            Thread.sleep(forTimeInterval: 0.3)
+            ownerURLs.receive(urls)
+        }
+        require(try await launch("--url-launch", directory: base) == 0, "Duplicate waits for acknowledged early and late URL delivery")
+        require(opened.isEmpty, "Owner may accept URLs before its browser is ready")
+        ownerURLs.connect { opened.append(contentsOf: $0) }
+        try await Task.sleep(for: .milliseconds(200))
+        require(opened.count == 2, "Retries must not open extra windows")
+        require(opened.filter { $0.absoluteString == "https://early.invalid/launch" }.count == 1, "Early launch URL opens exactly once")
+        require(opened.filter { $0.absoluteString == "https://late.invalid/launch" }.count == 1, "Late launch URL opens exactly once")
+        require(try await launch("--url-launch", directory: base) == 0, "A later intentional launch may open the same URLs")
+        require(opened.count == 4, "Intentional repeat is not mistaken for a transport retry")
+        require(opened.filter { $0.absoluteString == "https://early.invalid/launch" }.count == 2, "Same URL in distinct requests opens once per request")
+        instance.onOpenURLs = nil
+        require(try await launch("--url-launch", directory: base) == 3, "Unacknowledged URLs fail instead of silently exiting successfully")
+        print("PASS: Profile activation — \(checks) startup, focus, canceled quit, preview isolation and acknowledged exactly-once early/late URL checks")
         finish(0)
     }
 }
@@ -88,8 +108,23 @@ import AppKit
     @MainActor static func main() throws {
         if CommandLine.arguments.count > 2 {
             let instance = ProfileInstance()
+            let urls = ExternalURLDelivery()
+            if CommandLine.arguments[1] == "--url-launch" {
+                urls.receive([URL(string: "https://early.invalid/launch")!])
+            }
             let acquired = try instance.start(in: URL(fileURLWithPath: CommandLine.arguments[2]),
                                               ephemeral: CommandLine.arguments[1] == "--ephemeral")
+            if CommandLine.arguments[1] == "--url-launch" {
+                guard !acquired else { exit(2) }
+                instance.beginHandoff(completed: { exit(0) }, failed: { exit(3) })
+                urls.connect { instance.forwardURLs($0) }
+                let late = Timer(timeInterval: 0.25, repeats: false) { _ in
+                    MainActor.assumeIsolated { urls.receive([URL(string: "https://late.invalid/launch")!]) }
+                }
+                RunLoop.main.add(late, forMode: .common)
+                RunLoop.main.run()
+                exit(4)
+            }
             exit(acquired ? 0 : 73)
         }
         let application = NSApplication.shared

@@ -68,7 +68,7 @@ if [ "$VERIFIED" != true ]; then exit 1; fi
 "$BUILD_DIR/preview-icon-tests" "$DELIVERABLE_APP"
 "$SWIFTC" "${COMMON[@]}" -parse-as-library "$PROJECT_DIR/Sources/ProfileLock.swift" "$PROJECT_DIR/Tests/ProfileLockTests.swift" -o "$BUILD_DIR/profile-lock-tests"
 "$BUILD_DIR/profile-lock-tests"
-"$SWIFTC" "${COMMON[@]}" -parse-as-library -framework AppKit "$PROJECT_DIR/Sources/ProfileLock.swift" "$PROJECT_DIR/Sources/ProfileInstance.swift" "$PROJECT_DIR/Sources/QuitCoordinator.swift" "$PROJECT_DIR/Tests/ProfileInstanceTests.swift" -o "$BUILD_DIR/profile-instance-tests"
+"$SWIFTC" "${COMMON[@]}" -parse-as-library -framework AppKit "$PROJECT_DIR/Sources/ProfileLock.swift" "$PROJECT_DIR/Sources/ProfileInstance.swift" "$PROJECT_DIR/Sources/ExternalURLDelivery.swift" "$PROJECT_DIR/Sources/QuitCoordinator.swift" "$PROJECT_DIR/Tests/ProfileInstanceTests.swift" -o "$BUILD_DIR/profile-instance-tests"
 "$SWIFTC" "${COMMON[@]}" -parse-as-library "$PROJECT_DIR/Sources/ExtensionPackagePreparation.swift" "$PROJECT_DIR/Tests/ExtensionPackagePreparationTests.swift" -o "$BUILD_DIR/extension-package-tests"
 "$BUILD_DIR/extension-package-tests" "$BUILD_DIR/extension-package-fixtures"
 "$SWIFTC" "${COMMON[@]}" -parse-as-library -framework JavaScriptCore "$PROJECT_DIR/Sources/ExtensionPackagePreparation.swift" "$PROJECT_DIR/Sources/ExtensionServiceWorkerPreparation.swift" "$PROJECT_DIR/Sources/SafariExtensionImport.swift" "$PROJECT_DIR/Sources/ExtensionSelectPickerCompatibility.swift" "$PROJECT_DIR/Sources/ExtensionContentScriptPreparation.swift" "$PROJECT_DIR/Tests/ExtensionContentScriptTests.swift" -o "$BUILD_DIR/extension-messaging-tests"

@@ -14,7 +14,7 @@ import WebKit
     var pipSmoke: PictureInPictureSmokeTest?
     var interactionSmoke: InteractionSmokeTest?
     var autoPiPSmoke: AutomaticPiPSmokeTest?
-    var pendingExternalURLs: [URL] = []
+    private let externalURLs = ExternalURLDelivery()
     private let profileInstance = ProfileInstance()
     var spacesMenu: NSMenu?
     var onboarding: OnboardingController?
@@ -43,10 +43,22 @@ import WebKit
         let preview = launch.isEphemeral
         PreviewIcon.apply(for: launch)
         profileInstance.onActivation = { [weak self] in self?.activateMainWindow() }
+        profileInstance.onOpenURLs = { [weak self] urls in self?.receiveExternalURLs(urls) }
         do {
             // This precedes all session/preferences/controller/store access.
             // Persistent development previews lock their own isolated profile.
-            guard try profileInstance.start(in: support, ephemeral: preview) else { exit(0) }
+            guard try profileInstance.start(in: support, ephemeral: preview) else {
+                profileInstance.beginHandoff(completed: { exit(0) }, failed: {
+                    let alert = NSAlert()
+                    alert.messageText = "Bam couldn’t hand this launch to its running window"
+                    alert.informativeText = "The running Bam did not confirm receipt. Try opening the link again after that window is ready."
+                    alert.addButton(withTitle: "Quit This Launch")
+                    alert.runModal()
+                    exit(1)
+                })
+                externalURLs.connect { [weak self] urls in self?.profileInstance.forwardURLs(urls) }
+                return
+            }
         } catch {
             let alert = NSAlert()
             alert.messageText = "Bam couldn’t open this profile safely"
@@ -86,7 +98,9 @@ import WebKit
             MainActor.assumeIsolated { self?.applyShortcuts() }
         }
         ShortcutStore.shared.reservedOwner = { [weak self] combo in self?.fixedMenuItem(wearing: combo)?.title }
-        for url in pendingExternalURLs { controller.openLittleOrbit(url: url) }; pendingExternalURLs.removeAll()
+        externalURLs.connect { [weak self] urls in
+            for url in urls { self?.controller?.openLittleOrbit(url: url) }
+        }
         // Development extension tests start at the browser without importing
         // favorites or changing the default browser through first-run setup.
         // The welcome remains available explicitly from the menu or flag.
@@ -208,9 +222,10 @@ import WebKit
     }
     func applicationWillTerminate(_ notification: Notification) { controller?.prepareToClose(persistSession: false) }
     func application(_ application: NSApplication, open urls: [URL]) {
-        for url in urls where URLInput.directURL(url.absoluteString) != nil {
-            if let controller { controller.openLittleOrbit(url: url) } else { pendingExternalURLs.append(url) }
-        }
+        receiveExternalURLs(urls)
+    }
+    private func receiveExternalURLs(_ urls: [URL]) {
+        externalURLs.receive(urls.filter { URLInput.directURL($0.absoluteString) != nil })
     }
     private func activateMainWindow() {
         ProfileInstance.activate(window: window)
