@@ -389,6 +389,15 @@ import Foundation
         expect(ArcEaselReference.easelID(payloadRow.address) == easelUUID && payloadRow.isUnloaded,
                "Null top-level title uses the Easel's own title; its Easel ID is kept as identity")
         expect(easelSession.importLinks?["arc:\(payloadOnly)"] == "tab:\(payloadRow.id.uuidString)", "Source sidebar identity is kept in provenance")
+        // The name survives the row being navigated to a page (which retitles
+        // the tab) and then reset back to its reference.
+        var wandered = easelSession
+        let wanderIndex = wandered.tabs.firstIndex { $0.id == payloadRow.id }!
+        wandered.tabs[wanderIndex].address = "https://example.invalid/elsewhere"; wandered.tabs[wanderIndex].title = "Some Page Title"
+        expect(wandered.tabs[wanderIndex].displayTitle == "Payload Title", "A page's title doesn't replace the Easel's name on its kept row")
+        expect(wandered.resetSavedTab(id: payloadRow.id), "Reset accepts an Easel reference")
+        expect(wandered.tabs[wanderIndex].address == payloadRow.address && wandered.tabs[wanderIndex].displayTitle == "Payload Title",
+               "Reset restores the reference and its name")
         expect(easelSession.tabs.contains { $0.title == "Renamed In Arc" && $0.isArcEasel }, "An Arc rename wins over the Easel's title")
         expect(easelSession.tabs.filter { $0.title == "Arc Easel" }.count == 2, "Missing titles fall back to a clear generic name")
         expect(easelSession.tabs.contains { $0.isArcEasel && !$0.isSaved && $0.space == canvas }, "A Today Easel stays in Today as a reference")

@@ -414,7 +414,9 @@ enum ArcImport {
             let identity = easelID.flatMap(UUID.init(uuidString:)) ?? UUID(uuidString: node.id) ?? UUID()
             let reference = ArcEaselReference.address(for: identity)
             let title = clipped(node.title, limit: 300) ?? clipped(payloadTitle, limit: 300) ?? "Arc Easel"
-            let saved = kept ? SavedTabState(kind: .kept, address: reference, isUnloaded: true) : nil
+            // A kept row's label is its saved custom title, so the Easel's name
+            // survives navigating the row to a page and resetting it back.
+            let saved = kept ? SavedTabState(kind: .kept, address: reference, customTitle: clipped(title, limit: 80), isUnloaded: true) : nil
             return BrowserTab(title: title, address: reference, space: space, saved: saved, folderID: kept ? folder : nil)
         }
 

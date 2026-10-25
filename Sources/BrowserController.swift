@@ -1334,6 +1334,7 @@ import QuartzCore
     private let title = NSTextField(labelWithString: "")
     private let message = NSTextField(wrappingLabelWithString: "")
     override var isFlipped: Bool { true }
+    var shownName: String { title.stringValue }
     init(title name: String) {
         super.init(frame: .zero)
         wantsLayer = true
