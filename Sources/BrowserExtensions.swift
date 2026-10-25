@@ -21,6 +21,15 @@ import WebKit
     /// A Peek shown in the browser window after its tabs. New tabs land before Peeks.
     var isPeek: Bool = false
 }
+extension BrowserExtensionSurface {
+    /// The same surface without its page: what a cached snapshot keeps once Bam retired that renderer.
+    func withoutWebView() -> BrowserExtensionSurface {
+        var copy = BrowserExtensionSurface(id: id, title: title, url: url, webView: nil, window: window)
+        copy.isActive = isActive; copy.isSelected = isSelected; copy.isPinned = isPinned; copy.isLoading = isLoading
+        copy.loadingChanged = loadingChanged; copy.isSinglePage = isSinglePage; copy.isPeek = isPeek
+        return copy
+    }
+}
 
 struct BrowserExtensionRecord: Codable, Identifiable {
     let id: UUID
@@ -270,13 +279,19 @@ struct BrowserExtensionPermissionReview {
         guard let record = records.first(where: { $0.id == id }) else { return nil }
         return runtimes[record.profileID]?.contexts[id]
     }
-    func allowsExtensionURL(_ url: URL, profileID: UUID) -> Bool {
-        guard let context = runtimes[profileID]?.controller.extensionContext(for: url) else { return false }
-        return Self.isExtensionURL(url, ownedBy: context)
-    }
-    func configuration(forExtensionURL url: URL, profileID: UUID) -> WKWebViewConfiguration? {
+    /// Only a context Bam owns and has enabled backs an extension page: never a quarantined, disabled or foreign one
+    /// that WebKit still lists.
+    private func ownedEnabledContext(for url: URL, profileID: UUID) -> (BrowserExtensionRuntime, WKWebExtensionContext)? {
         guard let runtime = runtimes[profileID], let context = runtime.controller.extensionContext(for: url),
-              Self.isExtensionURL(url, ownedBy: context) else { return nil }
+              Self.isExtensionURL(url, ownedBy: context), let index = ownedRecordIndex(for: context),
+              records[index].profileID == profileID, records[index].enabled else { return nil }
+        return (runtime, context)
+    }
+    func allowsExtensionURL(_ url: URL, profileID: UUID) -> Bool { ownedEnabledContext(for: url, profileID: profileID) != nil }
+    /// The extension controller of a profile's runtime, so the owner can confirm a view belongs to it.
+    func extensionController(profileID: UUID) -> WKWebExtensionController? { runtimes[profileID]?.controller }
+    func configuration(forExtensionURL url: URL, profileID: UUID) -> WKWebViewConfiguration? {
+        guard let (runtime, context) = ownedEnabledContext(for: url, profileID: profileID) else { return nil }
         let configuration = context.webViewConfiguration
         configuration?.websiteDataStore = runtime.dataStore
         return configuration
@@ -880,48 +895,132 @@ struct BrowserExtensionPermissionReview {
     }
     /// Test seam: a non-nil error makes the restart's `load` fail for that extension. nil in production.
     static var siteAccessRestartLoadFault: ((UUID) -> Error?)?
+    /// Test seam: called after the old context is unloaded and Bam's renderers retired, just before the fresh
+    /// context loads (the handoff boundary). nil in production.
+    static var siteAccessRestartWillLoad: ((UUID) -> Void)?
+    /// Test seam: a non-nil error makes the restart's `unload` fail for that extension. nil in production.
+    static var siteAccessRestartUnloadFault: ((UUID) -> Error?)?
+    /// Contexts WebKit still runs after a failed unload. Bam no longer owns them (no authority, no new renderer, no
+    /// configuration) and the record is off; Enable tries the unload again first.
+    private var quarantinedContexts: [UUID: WKWebExtensionContext] = [:]
     /// One-shot user-facing notices from a site-access restart (Manage Extensions shows and consumes them).
     private var siteAccessNotices: [UUID: String] = [:]
     func takeSiteAccessNotice(id: UUID) -> String? { siteAccessNotices.removeValue(forKey: id) }
 
+    /// Bam's own renderers for one extension's pages (tabs, Peek, Little Bam) around a restart, so they release the old
+    /// context's configuration and process before it unloads and get a fresh renderer after the new context loads.
+    /// The owning BrowserController sets this; each host has exactly one owner, so one closure reaches every renderer
+    /// that uses this host's contexts. Called synchronously on the main actor, never from a Task.
+    enum ExtensionRendererPhase: Equatable {
+        /// Release every renderer showing pages of `baseURL` (strong references dropped; tab models kept).
+        case retire
+        /// The extension's context is loaded again (a restart or Enable): recreate visible retired renderers.
+        case restore
+        /// The extension is stopped: keep retired tabs restorable; selecting one shows the unavailable error.
+        case unavailable
+    }
+    var onExtensionRenderers: ((_ phase: ExtensionRendererPhase, _ profileID: UUID, _ baseURL: URL) -> Void)?
+    /// Advanced once by every restart attempt (`restartForSiteAccess`), so a deferred native-withdrawal restart can see
+    /// that another restart already happened since it was scheduled. Declared here with the helper that advances it;
+    /// the engine's native path only reads it.
+    private(set) var restartGeneration: [UUID: UInt64] = [:]
+
     /// Withdrawn website access doesn't fully leave a running extension on the installed WebKit:
     /// - content scripts and style sheets registered for all-host access keep reaching new documents (native lifecycle
-    ///   regression, every broad form; fixed natively by this restart at b1ed61f);
+    ///   regression; fixed natively by a context restart at b1ed61f);
     /// - a web content process keeps every CORS-disabling pattern its extension pages ever had (append-only, see
-    ///   implicit-consent-cors-retention-diagnosis.md), so any withdrawn host could stay readable by extension pages.
-    ///   Whether this restart ends that is pending native proof (a reused process would keep the patterns).
-    /// Restarting the same context through the public controller API clears and re-adds injected content from its
-    /// current (already saved, narrower) grants and closes WebKit's background view. Same context object: identifier,
-    /// base URL, storage, grants and denials are kept exactly; the popup is closed and offscreen documents and native
-    /// ports end. Extension pages Bam or a tab still holds are not closed here. Other extensions are untouched.
-    /// Ordering mirrors `load(id:)`: compatibility is installed before `controller.load` can start the worker.
+    ///   implicit-consent-cors-retention-diagnosis.md). Native 297f6eb: a fresh context's page was refused only after
+    ///   every earlier extension page's WKWebView had deallocated.
+    /// So the restart (after the reduced access is saved):
+    /// 1. closes the popup and asks the owner to retire Bam's renderers of this extension's pages;
+    /// 2. unloads the old context, ends its native ports and its compatibility installation (tokens, offscreen
+    ///    documents, notifications); the old context object is retired: `ownedRecordIndex` and the compatibility
+    ///    registration no longer accept it;
+    /// 3. loads a fresh context for the same parsed extension with the same identifier, base URL and profile runtime
+    ///    (controller and data store, so storage is kept) and exactly the old context's validated public policy
+    ///    (`freshContext`), compatibility installed before `load` as in `load(id:)`;
+    /// 4. asks the owner to recreate visible renderers.
+    /// Other extensions are untouched. Not claimed: that any web content process ended (WebKit decides) or that
+    /// extension views Bam doesn't own (another app's, a test's) were released.
+    /// Contract for every withdrawal path (panel, Revoke, and the engine's native removal/expiry path; see
+    /// work/extension-renderer-restart-fixture-contract.md): call synchronously on the main actor, never inside a WebKit
+    /// callback, notification or prompt handler, with the context that is currently owned, after the reduced grants
+    /// are applied to it (and normally saved). It never writes grants: the fresh context copies the live, reduced
+    /// policy, so it also fails closed in-process after a failed save. It may replace the context; callers must not
+    /// use the old one afterwards. Errors are recorded here (`setError`); the result is for the caller's own report.
+    /// Every call that gets past the ownership check advances `restartGeneration[id]` exactly once.
     private func restartForSiteAccess(id: UUID, context: WKWebExtensionContext) -> SiteAccessRestart {
         guard let index = records.firstIndex(where: { $0.id == id }), let runtime = runtimes[records[index].profileID],
               runtime.contexts[id] === context else { return .restarted }
-        let name = records[index].name
+        restartGeneration[id, default: 0] &+= 1
+        let name = records[index].name, profileID = records[index].profileID, baseURL = context.baseURL
+        // Snapshot the policy before anything is unloaded.
+        let fresh = Self.freshContext(replacing: context)
         runtime.closePopup(for: context)
-        do { try runtime.controller.unload(context) } catch {
+        onExtensionRenderers?(.retire, profileID, baseURL)
+        runtime.releaseRetiredSurfaceViews()
+        do {
+            if let fault = Self.siteAccessRestartUnloadFault?(id) { throw fault }
+            try runtime.controller.unload(context)
+        } catch {
             if runtime.controller.extensionContexts.contains(context) {
-                let message = "Site access was saved, but \(name) couldn’t be restarted, so its earlier website access may still apply. Disable and enable it, or quit and reopen Bam."
-                setError(Self.failure(message), for: id)
-                return .unloadFailed(message, stillLoaded: true)
+                return quarantine(index: index, name: name, context: context, runtime: runtime, reason: error)
             }
             // WebKit no longer lists it: treat as stopped, like a failed load.
             runtime.disconnectNative(context); runtime.compatibility.remove(context); runtime.contexts.removeValue(forKey: id)
-            return stopped(index: index, name: name, reason: error)
+            let result = stopped(index: index, name: name, reason: error)
+            onExtensionRenderers?(.unavailable, profileID, baseURL)
+            return result
         }
-        runtime.disconnectNative(context); runtime.compatibility.remove(context)
-        runtime.compatibility.install(ExtensionCompatibility.plan(manifest: context.webExtension.manifest), for: context)
+        runtime.disconnectNative(context); runtime.compatibility.remove(context); runtime.contexts.removeValue(forKey: id)
+        runtime.compatibility.install(ExtensionCompatibility.plan(manifest: fresh.webExtension.manifest), for: fresh)
+        Self.siteAccessRestartWillLoad?(id)
         do {
             if let fault = Self.siteAccessRestartLoadFault?(id) { throw fault }
-            try runtime.controller.load(context)
+            try runtime.controller.load(fresh)
         } catch {
-            runtime.disconnectNative(context); runtime.compatibility.remove(context); runtime.contexts.removeValue(forKey: id)
-            return stopped(index: index, name: name, reason: error)
+            runtime.disconnectNative(fresh); runtime.compatibility.remove(fresh)
+            let result = stopped(index: index, name: name, reason: error)
+            onExtensionRenderers?(.unavailable, profileID, baseURL)
+            return result
         }
+        runtime.contexts[id] = fresh
         runtime.reconcile()
-        siteAccessNotices[id] = "Restarted \(name) so its website access change takes effect. Reopen its pages if you need them."
+        onExtensionRenderers?(.restore, profileID, baseURL)
+        siteAccessNotices[id] = "Restarted \(name) so its website access change takes effect. Its own open pages were reopened."
         return .restarted
+    }
+    /// A not-yet-loaded context for the same parsed extension carrying exactly the old context's identity and
+    /// validated public policy (what `load(id:)` set, plus later grant changes): identifier, base URL, unsupported
+    /// APIs (including the native-messaging adjustment), private-data access, granted/denied permissions and match
+    /// patterns with their expiries, and the optional all-hosts request flag. Nothing is widened or recomputed.
+    private static func freshContext(replacing old: WKWebExtensionContext) -> WKWebExtensionContext {
+        let fresh = WKWebExtensionContext(for: old.webExtension)
+        fresh.uniqueIdentifier = old.uniqueIdentifier
+        fresh.baseURL = old.baseURL
+        fresh.unsupportedAPIs = old.unsupportedAPIs
+        fresh.hasAccessToPrivateData = old.hasAccessToPrivateData
+        fresh.grantedPermissions = old.grantedPermissions
+        fresh.deniedPermissions = old.deniedPermissions
+        fresh.grantedPermissionMatchPatterns = old.grantedPermissionMatchPatterns
+        fresh.deniedPermissionMatchPatterns = old.deniedPermissionMatchPatterns
+        fresh.hasRequestedOptionalAccessToAllHosts = old.hasRequestedOptionalAccessToAllHosts
+        return fresh
+    }
+    /// `unload` failed and WebKit still runs the context with its earlier (broader) state. Bam can't stop it, so it
+    /// stops owning it: removed from the runtime (no API authority, no extension-page configuration, no new Bam
+    /// renderer), native ports and compatibility ended, record turned off. Honest about what still runs.
+    private func quarantine(index: Int, name: String, context: WKWebExtensionContext, runtime: BrowserExtensionRuntime, reason: Error) -> SiteAccessRestart {
+        let id = records[index].id, profileID = records[index].profileID
+        runtime.disconnectNative(context); runtime.compatibility.remove(context); runtime.contexts.removeValue(forKey: id)
+        quarantinedContexts[id] = context
+        records[index].enabled = false
+        var saveNote = ""
+        do { try persist() } catch { saveNote = " Bam also couldn’t save that it’s off (\(error.localizedDescription))." }
+        let message = "Site access was saved, but \(name) couldn’t be stopped to apply it (\(reason.localizedDescription)). WebKit may still run it with its earlier website access until you quit Bam. Bam turned it off and closed its pages.\(saveNote) Quit and reopen Bam, then enable it in Manage Extensions."
+        setError(Self.failure(message), for: id)
+        onExtensionRenderers?(.unavailable, profileID, context.baseURL)
+        return .unloadFailed(message, stillLoaded: true)
     }
     /// The extension is unloaded after a restart failure: recorded as disabled with an actionable error; Enable recovers.
     /// If even that can't be saved, the message says so (the saved, reduced site access still stands).
@@ -976,6 +1075,15 @@ struct BrowserExtensionPermissionReview {
         guard !loading.contains(id), let stored = records.first(where: { $0.id == id }), let runtime = runtimes[stored.profileID] else { return }
         var record = stored
         if runtime.contexts[id] != nil { return }
+        if let quarantined = quarantinedContexts[id] {
+            // A context WebKit still runs after a failed restart: it must stop before a new one can load.
+            if runtime.controller.extensionContexts.contains(quarantined) {
+                do { try runtime.controller.unload(quarantined) } catch {
+                    throw Self.failure("\(stored.name) is still running from before and couldn’t be stopped. Quit and reopen Bam, then enable it.")
+                }
+            }
+            quarantinedContexts.removeValue(forKey: id)
+        }
         let token = UUID(); loadGeneration[id] = token
         loading.insert(id); defer { loading.remove(id); if loadGeneration[id] == token { loadGeneration.removeValue(forKey: id) } }
         // Older disabled worker installs gain the adapter only when explicitly
@@ -1124,6 +1232,7 @@ struct BrowserExtensionPermissionReview {
             runtime.contexts.removeValue(forKey: id); runtime.disconnectNative(context); runtime.compatibility.remove(context); try? runtime.controller.unload(context); records[index].enabled = false; throw error
         }
         runtime.reconcile()
+        onExtensionRenderers?(.restore, record.profileID, context.baseURL)
         if review { onReloadNeeded?(record.profileID) }
         changed()
     }
@@ -1437,6 +1546,15 @@ struct BrowserExtensionPermissionReview {
     }
     /// One borrowed snapshot per enumeration, discarded before returning to WebKit.
     /// Keep reconciled ordering, but read membership and ownership from the live host.
+    /// Drops the page of every cached snapshot whose renderer the owner no longer lists (retired for a restart), so a
+    /// snapshot never keeps a released WKWebView alive. Synchronous; topology and events wait for the next reconcile.
+    func releaseRetiredSurfaceViews() {
+        let live = Set(currentSurfaces().compactMap { $0.webView.map(ObjectIdentifier.init) })
+        for (id, snapshot) in snapshots {
+            guard let web = snapshot.webView, !live.contains(ObjectIdentifier(web)) else { continue }
+            snapshots[id] = snapshot.withoutWebView()
+        }
+    }
     func currentSurfaces() -> [BrowserExtensionSurface] {
         var live: [UUID: BrowserExtensionSurface] = [:]
         var seen = Set<UUID>()
