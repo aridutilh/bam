@@ -74,7 +74,7 @@ import AppKit
             let addedIDs = Set(imported.tabs.map(\.id)).subtracting(previous.tabs.map(\.id))
             self.session = ArcImport.undo(imported, over: previous, in: self.session)
             self.importedTabIDsCache = nil
-            for id in addedIDs { self.discardInstantiatedPage(id) }
+            for id in addedIDs { self.teardownPage(id) }
             self.showActive(); self.refresh(); self.refreshPaletteResults(); self.onSpacesChanged?()
             self.save()
             if await writer.flushAsync(timeout: 30) {
@@ -123,14 +123,5 @@ import AppKit
                 self.sidebar.refreshFavicons(); self.tabSearchResults?.refreshFavicons()
             }
         }
-    }
-
-    /// Drops a page view created for a tab that no longer exists.
-    private func discardInstantiatedPage(_ id: UUID) {
-        guard let web = browsers.removeValue(forKey: id) else { return }
-        observations.removeValue(forKey: id)
-        web.navigationDelegate = nil; web.uiDelegate = nil; web.stopLoading()
-        web.removeFromSuperview()
-        tabLastUsed.removeValue(forKey: id); pendingLoads.remove(id); tabErrors.removeValue(forKey: id)
     }
 }

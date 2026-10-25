@@ -76,10 +76,13 @@ struct BrowserTab: Codable, Identifiable, Equatable {
     var displayTitle: String { saved?.customTitle ?? title }
     var isHome: Bool { address == "orbit://newtab" }
     var isVideoDemo: Bool { address == "orbit://video" }
+    /// A row kept in place of an Arc Easel; it has no web page.
+    var isArcEasel: Bool { ArcEaselReference.isReference(address) }
     var symbol: String {
         if let symbol = saved?.customSymbol { return symbol }
         if isHome { return "sparkle" }
         if isVideoDemo { return "play.rectangle.fill" }
+        if isArcEasel { return "scribble.variable" }
         if address.contains("developer.apple.com") { return "apple.logo" }
         if address.contains("github.com") { return "chevron.left.forwardslash.chevron.right" }
         if address.contains("wikipedia.org") { return "book.closed" }
@@ -87,6 +90,7 @@ struct BrowserTab: Codable, Identifiable, Equatable {
     }
     static func validAddress(_ address: String) -> Bool {
         address == "orbit://newtab" || address == "orbit://video" || URLInput.directURL(address) != nil || URLInput.extensionURL(address) != nil
+            || ArcEaselReference.isReference(address)
     }
     fileprivate static func validCustomTitle(_ title: String) -> Bool {
         title.count <= 80 && !title.unicodeScalars.contains { CharacterSet.controlCharacters.contains($0) }
@@ -624,7 +628,7 @@ struct BrowserSession: Codable {
     @discardableResult mutating func makeSplit(primary: UUID, secondary: UUID) -> Bool {
         guard primary != secondary, let left = tabs.first(where: { $0.id == primary }),
               let right = tabs.first(where: { $0.id == secondary }), left.space == right.space,
-              !left.isFavorite, !right.isFavorite, !left.isUnloaded, !right.isUnloaded,
+              !left.isFavorite, !right.isFavorite, !left.isUnloaded, !right.isUnloaded, !left.isArcEasel, !right.isArcEasel,
               spaceDefinition(left.space) != nil else { return false }
         splits = (splits ?? []).filter { ![primary,secondary].contains($0.primaryID) && ![primary,secondary].contains($0.secondaryID) }
         splits?.append(BrowserSplit(primaryID: primary, secondaryID: secondary))
@@ -1126,6 +1130,7 @@ struct BrowserSession: Codable {
             guard group.primaryID != group.secondaryID,
                   let left = tabByID[group.primaryID], let right = tabByID[group.secondaryID], left.space == right.space,
                   !left.isFavorite, !right.isFavorite, left.isUnloaded == right.isUnloaded, !left.isUnloaded || (left.isSaved && right.isSaved),
+                  !left.isArcEasel, !right.isArcEasel,
                   !grouped.contains(group.primaryID), !grouped.contains(group.secondaryID) else { return false }
             grouped.insert(group.primaryID); grouped.insert(group.secondaryID); return true
         }
@@ -1164,6 +1169,19 @@ enum DefaultSearchEngine: String, CaseIterable {
         var components = URLComponents(string: endpoint)!
         components.queryItems = [URLQueryItem(name: "q", value: query)]
         return components.url?.absoluteString
+    }
+}
+
+/// An Arc Easel brought over as a reference: its place, name and Arc identity
+/// are kept; its canvas is not imported and Bam doesn't guess a link to it.
+/// Address: `orbit://arc-easel/<Easel UUID>`. Never typed or navigated to.
+enum ArcEaselReference {
+    static let prefix = "orbit://arc-easel/"
+    static func address(for id: UUID) -> String { prefix + id.uuidString }
+    static func isReference(_ address: String) -> Bool { easelID(address) != nil }
+    static func easelID(_ address: String) -> UUID? {
+        guard address.hasPrefix(prefix) else { return nil }
+        return UUID(uuidString: String(address.dropFirst(prefix.count)))
     }
 }
 

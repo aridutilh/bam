@@ -549,7 +549,10 @@ import QuartzCore
             requestedAddresses[id] = address; pendingLoads.insert(id)
             if wasVisible { showActive() }
         }
-        if address == "orbit://newtab" || address == "orbit://video" {
+        if ArcEaselReference.isReference(address) {
+            // Never requested: an Easel reference has no page and no URL to load.
+            pendingLoads.remove(id); pendingHome.remove(id)
+        } else if address == "orbit://newtab" || address == "orbit://video" {
             pendingHome.insert(id)
             if let file = Bundle.main.url(forResource: address == "orbit://video" ? "PiPDemo" : "Home", withExtension: "html") { destination.loadFileURL(file, allowingReadAccessTo: file.deletingLastPathComponent()) }
             else { destination.loadHTMLString("<h1>Bam</h1><p>Press Command-L to explore.</p>", baseURL: nil) }
@@ -587,7 +590,13 @@ import QuartzCore
         }
         for (id, peek) in peeks { peek.setVisible(id == tab.id) }
         if let group = session.split(for: tab.id) { showSplit(group) }
-        else {
+        else if tab.isArcEasel {
+            // An Arc Easel reference has no web page: a native explanation, no
+            // renderer, no network. A page left from navigating away (then
+            // resetting back to the reference) is retired, never shown.
+            if browsers[tab.id] != nil { teardownPage(tab.id) }
+            installActiveHost(EaselReferenceView(title: tab.displayTitle))
+        } else {
             let browser = webView(for: tab)
             if pictureInPicture.owns(browser) {
                 let placeholder = PiPPlaceholder(frame: webHost.bounds)
@@ -771,25 +780,29 @@ import QuartzCore
             split.detach(); split.view.removeFromSuperview()
             retiringViews.removeValue(forKey: ObjectIdentifier(split.view))
         }
-        for closingID in closingIDs {
-            invalidateFaviconDocument(closingID)
-            peeks[closingID]?.dismiss()
-            observations.removeValue(forKey: closingID)
-            let web = browsers.removeValue(forKey: closingID)
-            if let web { tabActivityProbe.invalidate(web) }
-            tabLastUsed.removeValue(forKey: closingID); sleepRestores.removeValue(forKey: closingID); nonGetDocuments.remove(closingID); pendingNonGetDocuments.removeValue(forKey: closingID)
-            web?.navigationDelegate = nil; web?.uiDelegate = nil; web?.stopLoading()
-            // PiP restoration can synchronously re-enter showActive. The closed
-            // view must no longer be discoverable by metadata or return callbacks.
-            if let web, pictureInPicture.references(web) { pictureInPicture.restore() }
-            if let web {
-                web.pauseAllMediaPlayback(completionHandler: nil)
-                retiringViews.removeValue(forKey: ObjectIdentifier(web)); web.removeFromSuperview()
-            }
-            navigationTokens.removeValue(forKey: closingID); browserExtensionOrigins.removeValue(forKey: closingID)
-            pendingHome.remove(closingID); tabErrors.removeValue(forKey: closingID); pendingLoads.remove(closingID); requestedAddresses.removeValue(forKey: closingID)
-        }
+        for closingID in closingIDs { teardownPage(closingID) }
         showActive(); save()
+    }
+    /// Retires a tab's page completely: its web view, callbacks, load state,
+    /// Peek and floating video. Used when a tab closes, and when a tab that had
+    /// a page becomes an Arc Easel reference again (which has no page).
+    func teardownPage(_ id: UUID) {
+        invalidateFaviconDocument(id)
+        peeks[id]?.dismiss()
+        observations.removeValue(forKey: id)
+        let web = browsers.removeValue(forKey: id)
+        if let web { tabActivityProbe.invalidate(web) }
+        tabLastUsed.removeValue(forKey: id); sleepRestores.removeValue(forKey: id); nonGetDocuments.remove(id); pendingNonGetDocuments.removeValue(forKey: id)
+        web?.navigationDelegate = nil; web?.uiDelegate = nil; web?.stopLoading()
+        // PiP restoration can synchronously re-enter showActive. The retired
+        // view must no longer be discoverable by metadata or return callbacks.
+        if let web, pictureInPicture.references(web) { pictureInPicture.restore() }
+        if let web {
+            web.pauseAllMediaPlayback(completionHandler: nil)
+            retiringViews.removeValue(forKey: ObjectIdentifier(web)); web.removeFromSuperview()
+        }
+        navigationTokens.removeValue(forKey: id); browserExtensionOrigins.removeValue(forKey: id)
+        pendingHome.remove(id); tabErrors.removeValue(forKey: id); pendingLoads.remove(id); requestedAddresses.removeValue(forKey: id)
     }
     func pinTab(_ id: UUID) {
         cancelPaging()
@@ -1145,9 +1158,14 @@ import QuartzCore
         returnActiveVideo()
         let id = focusedTabID
         guard let i = session.tabs.firstIndex(where: { $0.id == id }) else { return }
+        // Leaving an Easel reference (a native view) for a web address must
+        // install the new page as the visible host, not just load it hidden.
+        let leavingNativeView = session.tabs[i].isArcEasel
         session.tabs[i].address = address; session.tabs[i].title = address == "orbit://newtab" ? "New tab" : (address == "orbit://video" ? "Picture in Picture demo" : URL(string: address)?.host ?? address)
         let browser = webView(for: session.tabs[i]); load(address, in: browser, id: id)
-        dismissAddress(); refresh(); save()
+        dismissAddress()
+        if leavingNativeView { showActive() } else { refresh() }
+        save()
     }
     func scheduleSave() {
         saveWork?.cancel(); let work = DispatchWorkItem { [weak self] in self?.save() }; saveWork = work
@@ -1306,6 +1324,44 @@ import QuartzCore
     func webView(_ webView: WKWebView, runJavaScriptTextInputPanelWithPrompt prompt: String, defaultText: String?, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (String?) -> Void) {
         let alert = NSAlert(); alert.messageText = prompt; let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 24)); input.stringValue = defaultText ?? ""; alert.accessoryView = input; alert.addButton(withTitle: "OK"); alert.addButton(withTitle: "Cancel")
         if let window = view.window { alert.beginSheetModal(for: window) { completionHandler($0 == .alertFirstButtonReturn ? input.stringValue : nil) } } else { completionHandler(nil) }
+    }
+}
+
+/// Shown when an Arc Easel reference is selected: what it is, honestly, with
+/// no web content and no link to Arc (Bam can't open or verify the canvas).
+@MainActor final class EaselReferenceView: NSView {
+    private let icon = NSImageView()
+    private let title = NSTextField(labelWithString: "")
+    private let message = NSTextField(wrappingLabelWithString: "")
+    override var isFlipped: Bool { true }
+    var shownName: String { title.stringValue }
+    init(title name: String) {
+        super.init(frame: .zero)
+        wantsLayer = true
+        icon.image = NSImage(systemSymbolName: "scribble.variable", accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: 34, weight: .regular))
+        icon.contentTintColor = .secondaryLabelColor; icon.setAccessibilityElement(false)
+        title.stringValue = name; title.font = .systemFont(ofSize: 20, weight: .semibold); title.alignment = .center
+        title.lineBreakMode = .byTruncatingTail; title.textColor = .labelColor
+        message.stringValue = "An Easel from Arc. Bam kept its name and its place in your sidebar, but not its canvas — that stays in Arc. Bam can’t open Easels."
+        message.font = .systemFont(ofSize: 13); message.alignment = .center; message.textColor = .secondaryLabelColor
+        [icon, title, message].forEach(addSubview)
+        setAccessibilityElement(true); setAccessibilityRole(.group)
+        setAccessibilityLabel("\(name). Easel from Arc; its canvas wasn’t imported.")
+        applyColors()
+    }
+    required init?(coder: NSCoder) { fatalError() }
+    private func applyColors() { layer?.backgroundColor = resolvedCGColor(BrowserChrome.pageSurface, for: self) }
+    override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); applyColors() }
+    override func layout() {
+        super.layout()
+        let width = min(420, max(0, bounds.width - 48)), x = (bounds.width - width) / 2
+        let messageHeight = message.cell?.cellSize(forBounds: NSRect(x: 0, y: 0, width: width, height: 400)).height ?? 40
+        let total = 44 + 14 + 26 + 10 + messageHeight
+        var y = max(24, (bounds.height - total) / 2)
+        icon.frame = NSRect(x: bounds.midX - 22, y: y, width: 44, height: 44); y += 58
+        title.frame = NSRect(x: x, y: y, width: width, height: 26); y += 36
+        message.frame = NSRect(x: x, y: y, width: width, height: messageHeight)
     }
 }
 

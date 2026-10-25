@@ -348,6 +348,7 @@ import WebKit
             appearanceMenu.addItem(entry)
         }
         appearanceItem.submenu = appearanceMenu; view.addItem(appearanceItem); self.appearanceMenu = appearanceMenu
+        item(view, "Focus Sidebar", #selector(BrowserController.focusSidebar(_:)), "s", [.command, .control], controller)
         view.addItem(.separator())
         bound(view, "Toggle Sidebar", #selector(BrowserController.toggleSidebar(_:)), .toggleSidebar, controller)
         item(view, "Reset Sidebar Width", #selector(BrowserController.resetSidebar(_:)), "s", [.command, .shift], controller)

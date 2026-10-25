@@ -13,6 +13,10 @@ import AppKit
         sidebar.onDrop = { [weak self] id, target, space in self?.dropSidebarRow(id, at: target, space: space) ?? false }
         // Another Space may use another login profile: moveTab asks before reloading pages.
         sidebar.onDropOnSpace = { [weak self] id, space in self?.moveTab(id, toSpace: space) ?? false }
+        sidebar.onFocusPage = { [weak self] in
+            guard let self else { return }
+            self.view.window?.makeFirstResponder(self.commandWebView ?? self.webHost)
+        }
     }
     /// Commits a sidebar drag within the shown Space. A refused drop changes nothing.
     func dropSidebarRow(_ id: UUID, at target: BrowserSession.SidebarDropTarget, space: Int) -> Bool {
@@ -23,6 +27,15 @@ import AppKit
         return true
     }
     @objc func newFolder(_ sender: Any?) { newFolder(around: nil) }
+    /// View ▸ Focus Sidebar (⌃⌘S): shows the sidebar if hidden and focuses the
+    /// selected tab's row. Arrows then move focus without opening anything;
+    /// Return opens, Escape goes back to the page.
+    @objc func focusSidebar(_ sender: Any?) {
+        guard !isShuttingDown, !suspendsChromeInteraction else { return }
+        cancelPaging(); dismissAddress()
+        if !session.sidebarVisible { setSidebar(true) }
+        sidebar.focusTabList()
+    }
 
     func toggleFolder(_ id: UUID) {
         guard let folder = session.folder(id) else { return }

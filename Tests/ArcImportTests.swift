@@ -133,9 +133,9 @@ import Foundation
             // Counts only: never prints titles, URLs or profile identifiers.
             let (session, report) = ArcImport.apply(try ArcImport.load(from: URL(fileURLWithPath: arguments[2])), to: .fresh())
             for (index, space) in report.spaces.enumerated() {
-                print("space \(index): kept \(space.keptTabs), folders \(space.folders), today \(space.todayTabs), favorites \(space.favorites), splits \(space.splits), emoji \(space.emoji != nil)")
+                print("space \(index): kept \(space.keptTabs), folders \(space.folders), today \(space.todayTabs), favorites \(space.favorites), splits \(space.splits), easel refs \(space.easels), emoji \(space.emoji != nil)")
             }
-            print("tabs \(report.importedTabs), folders \(report.importedFolders), profiles new \(report.newProfiles.count), easels \(report.easels), live \(report.liveFolders), overflow \(report.favoriteOverflow), unattached \(report.unattachedProfiles)/\(report.unattachedFavorites), invalid \(report.invalidAddresses), missing \(report.missingItems), unknown \(report.unknownItems), depth \(report.depthLimited), refused \(report.refusal != nil)")
+            print("tabs \(report.importedTabs), folders \(report.importedFolders), profiles new \(report.newProfiles.count), easel refs \(report.easelReferences), easels unplaced \(report.easels), live \(report.liveFolders), overflow \(report.favoriteOverflow), unattached \(report.unattachedProfiles)/\(report.unattachedFavorites), invalid \(report.invalidAddresses), missing \(report.missingItems), unknown \(report.unknownItems), depth \(report.depthLimited), refused \(report.refusal != nil)")
             print("max depth \(session.folders.map { session.folderDepth($0.id) }.max() ?? -1), dormant kept \(session.tabs.filter { $0.saved?.kind == .kept && !$0.isUnloaded }.count == 3)")
             let layout = URL(fileURLWithPath: arguments[2])
             if let directory = ArcIconImport.cacheDirectory(besideLayout: layout) {
@@ -178,7 +178,7 @@ import Foundation
         let workRows = rows(session, work.id)
         let expectedPrefix = ["[More Favorites]", "  Fav 13", "  Fav 14", "Team Docs", "[Projects]", "  Alpha Board", "  [Alpha]",
                               "    [Level 2]", "      [Level 3]", "        [Level 4]", "          Deep Page", "  Beta Board",
-                              "[Empty]", "Alpha Board copy", "Left Pane", "[Pull Requests]", "  PR 1", "Wide 1", "Wide 3"]
+                              "[Empty]", "Alpha Board copy", "Sketch", "Left Pane", "[Pull Requests]", "  PR 1", "Wide 1", "Wide 3"]
         expect(workRows == expectedPrefix, "Work hierarchy matches Arc order: \(workRows)")
         let workTabs = session.tabs.filter { $0.space == work.id }
         expect(workTabs.filter { $0.address == "https://board.example.com/a" }.count == 2, "Same URL in different places stays distinct")
@@ -206,7 +206,11 @@ import Foundation
         expect(!session.tabs.contains { $0.title.hasPrefix("Other ") }, "Unattached profile Favorites are not placed in unrelated profiles")
 
         // Unsupported items are counted, not silently dropped.
-        expect(report.easels == 1 && report.liveFolders == 1 && report.invalidAddresses == 1, "Easel, live folder and file URL reported")
+        expect(report.easelReferences == 1 && report.easels == 0 && report.liveFolders == 1 && report.invalidAddresses == 1,
+               "Easel kept as a reference; live folder and file URL reported")
+        let sketch = session.tabs.first { $0.title == "Sketch" }!
+        expect(sketch.isArcEasel && sketch.saved?.kind == .kept && sketch.isUnloaded && session.split(for: sketch.id) == nil,
+               "The Easel row is a dormant kept reference, never a web page")
         expect(report.flattenedTodayFolders == 1 && session.tabs.contains { $0.title == "Loose Today" && !$0.isSaved }, "Folders in Today flatten with a notice")
         expect(report.notices.contains { $0.contains("Easel") } && report.notices.last?.contains("passwords") == true, "Notices explain limits honestly")
 
@@ -363,6 +367,69 @@ import Foundation
         renamed.tab("Page Title", "https://renamed.example.com/", in: renamedSpace.unpinned, custom: "My Name")
         let (renamedSession, _) = ArcImport.apply(try ArcImport.parse(renamed.json()), to: BrowserSession.fresh())
         expect(renamedSession.tabs.contains { $0.title == "My Name" && !$0.isSaved }, "Renamed Today tab keeps its name")
+
+        // Easels: kept as reference rows in place, with titles and identity.
+        let easels = Fixture(); let easelSpace = easels.space("Canvas", profile: nil)
+        let easelOuter = easels.folder("Outer", in: easelSpace.pinned), mid = easels.folder("Mid", in: easelOuter), deepFolder = easels.folder("Deep", in: mid)
+        easels.tab("Before", "https://before.example/", in: deepFolder)
+        let easelUUID = UUID()
+        let payloadOnly = easels.node(["easel": ["easelID": easelUUID.uuidString, "title": "Payload Title", "creatorID": "x", "shareStatus": "y", "timeLastActiveAt": 0.0]],
+                                      parent: deepFolder, title: nil)
+        easels.tab("After", "https://after.example/", in: deepFolder)
+        let renamedEasel = easels.node(["easel": ["easelID": UUID().uuidString, "title": "Old"]], parent: easelSpace.pinned, title: "Renamed In Arc")
+        easels.node(["easel": ["easelID": "not-a-uuid"]], parent: easelSpace.pinned, title: nil)          // no title, odd ID
+        easels.node(["easel": [:]], parent: easelSpace.unpinned, title: nil)                                // Today, nothing at all
+        let easelSource = try ArcImport.parse(easels.json())
+        let (easelSession, easelReport) = ArcImport.apply(easelSource, to: BrowserSession.fresh())
+        let canvas = easelSession.spaces.first { $0.name == "Canvas" }!.id
+        expect(rows(easelSession, canvas) == ["[Outer]", "  [Mid]", "    [Deep]", "      Before", "      Payload Title", "      After",
+                                              "Renamed In Arc", "Arc Easel"],
+               "Easels keep their exact folder and order, between their sibling tabs: \(rows(easelSession, canvas))")
+        let payloadRow = easelSession.tabs.first { $0.title == "Payload Title" }!
+        expect(ArcEaselReference.easelID(payloadRow.address) == easelUUID && payloadRow.isUnloaded,
+               "Null top-level title uses the Easel's own title; its Easel ID is kept as identity")
+        expect(easelSession.importLinks?["arc:\(payloadOnly)"] == "tab:\(payloadRow.id.uuidString)", "Source sidebar identity is kept in provenance")
+        // The name survives the row being navigated to a page (which retitles
+        // the tab) and then reset back to its reference.
+        var wandered = easelSession
+        let wanderIndex = wandered.tabs.firstIndex { $0.id == payloadRow.id }!
+        wandered.tabs[wanderIndex].address = "https://example.invalid/elsewhere"; wandered.tabs[wanderIndex].title = "Some Page Title"
+        expect(wandered.tabs[wanderIndex].displayTitle == "Payload Title", "A page's title doesn't replace the Easel's name on its kept row")
+        expect(wandered.resetSavedTab(id: payloadRow.id), "Reset accepts an Easel reference")
+        expect(wandered.tabs[wanderIndex].address == payloadRow.address && wandered.tabs[wanderIndex].displayTitle == "Payload Title",
+               "Reset restores the reference and its name")
+        expect(easelSession.tabs.contains { $0.title == "Renamed In Arc" && $0.isArcEasel }, "An Arc rename wins over the Easel's title")
+        expect(easelSession.tabs.filter { $0.title == "Arc Easel" }.count == 2, "Missing titles fall back to a clear generic name")
+        expect(easelSession.tabs.contains { $0.isArcEasel && !$0.isSaved && $0.space == canvas }, "A Today Easel stays in Today as a reference")
+        expect(easelReport.easelReferences == 4 && easelReport.easels == 0 && easelReport.spaces.first?.easels == 4, "Every Easel is counted as kept")
+        expect(easelReport.notices.contains { $0.contains("4 Easels will be kept as references") && $0.contains("stay in Arc") },
+               "The preview says Easels are references and their canvases aren't imported")
+        expect(!easelSession.tabs.contains { $0.isArcEasel && (URL(string: $0.address)?.scheme == "https" || URL(string: $0.address)?.scheme == "http") },
+               "No web address is invented for an Easel")
+        // Persistence and model behavior.
+        let easelFile = fixtures.appendingPathComponent("easels.json")
+        try SessionFile.save(easelSession, to: easelFile)
+        var reloaded = SessionFile.load(easelFile)
+        expect(reloaded.tabs.filter(\.isArcEasel).count == 4 && rows(reloaded, canvas) == rows(easelSession, canvas), "Easel rows survive restart")
+        expect(!reloaded.makeSplit(primary: payloadRow.id, secondary: reloaded.tabs.first { $0.title == "Before" }!.id), "Easels can't join a Split")
+        // Repeat import after local rename, move and delete: nothing comes back, nothing duplicates.
+        let renamedRow = reloaded.tabs.first { $0.title == "Renamed In Arc" }!.id
+        _ = reloaded.updateSavedTab(id: renamedRow, customTitle: "My Canvas", customSymbol: nil)
+        _ = reloaded.drop(payloadRow.id, at: .keptEnd, space: canvas)
+        let deletedEasel = reloaded.tabs.first { $0.title == "Arc Easel" && $0.isSaved }!.id
+        _ = reloaded.setRetention(id: deletedEasel, kind: nil); _ = reloaded.close(deletedEasel)
+        let (again2, againReport2) = ArcImport.apply(easelSource, to: reloaded)
+        expect(again2.tabs.filter(\.isArcEasel).count == 3 && againReport2.easelReferences == 0 && againReport2.isEmpty,
+               "Repeat import keeps local rename/move/delete of Easel rows and adds none")
+        expect(again2.tabs.first { $0.id == renamedRow }?.displayTitle == "My Canvas" && rows(again2, canvas).last == "Payload Title",
+               "Local rename and move survive")
+        expect(againReport2.emptyReason == "All supported sidebar items in this layout are already in Bam.", "Repeat wording is precise")
+        // Ungrouping a folder keeps its Easel row in place.
+        var dissolved = again2
+        let deepID = dissolved.folders.first { $0.name == "Deep" }!.id
+        _ = dissolved.drop(payloadRow.id, at: .into(deepID), space: canvas)
+        expect(dissolved.ungroupFolder(id: deepID) && dissolved.tabs.contains { $0.id == payloadRow.id && $0.folderID == dissolved.folders.first { $0.name == "Mid" }!.id },
+               "Dissolving a folder keeps its Easel row with the other rows")
 
         // Cycles and missing children are survived and reported.
         let cyclic = Fixture()
