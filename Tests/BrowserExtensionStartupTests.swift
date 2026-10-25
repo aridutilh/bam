@@ -66,6 +66,23 @@ import WebKit
                       "Private Default and named profiles must remain nonpersistent and separate")
         }
         try check(controllers[defaultID] !== controllers[namedID], "Default and named profiles must not share a controller")
+        // Controller storage policy: the default keeps existing behavior; the opt-in non-persistent
+        // policy gives a non-private host non-persistent controllers without granting private data.
+        try check(!BrowserExtensions.usesNonPersistentController(isPrivate: false, storage: .automatic) &&
+                  BrowserExtensions.usesNonPersistentController(isPrivate: true, storage: .automatic) &&
+                  BrowserExtensions.usesNonPersistentController(isPrivate: false, storage: .nonPersistent) &&
+                  BrowserExtensions.usesNonPersistentController(isPrivate: true, storage: .nonPersistent),
+                  "Controller storage policy decisions changed")
+        try check(host.controllerStorage == .automatic && privateHost.controllerStorage == .automatic, "The default controller storage policy changed")
+        let probeRoot = root.appendingPathComponent("NormalProbeExtensions")
+        let normalProbe = BrowserExtensions(storageURL: probeRoot, isPrivate: false, controllerStorage: .nonPersistent)
+        defer { normalProbe.shutdown() }
+        let probeProfile = UUID()
+        let probeConfiguration = WKWebViewConfiguration(); probeConfiguration.websiteDataStore = .nonPersistent()
+        normalProbe.configure(probeConfiguration, profileID: probeProfile)
+        guard let probeController = probeConfiguration.webExtensionController else { throw Failure(message: "The opt-in host did not configure a controller") }
+        try check(!probeController.configuration.isPersistent && !normalProbe.isPrivate && normalProbe.storageURL == probeRoot,
+                  "The opt-in policy did not give a non-private host a non-persistent controller with its own registry")
         print("PASS: Extension startup — \(checks)")
     }
 }

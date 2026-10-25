@@ -127,8 +127,25 @@ struct BrowserExtensionPermissionReview {
     static let unsupportedAPIs: Set<String> = ["browser.runtime.sendNativeMessage", "browser.runtime.connectNative", "browser.tabs.move", "browser.tabs.duplicate", "browser.tabs.highlight", "browser.tabs.discard", "browser.bookmarks", "browser.history", "browser.identity", "browser.sessions"]
     nonisolated static var browserVersion: String { Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0" }
 
-    init(storageURL: URL?, isPrivate: Bool = false) {
+    /// Where each profile's extension controller keeps extension data (extension storage and
+    /// WebKit's per-extension state). Private-data access never depends on this; it follows `isPrivate`.
+    enum ControllerStorage: Sendable, Equatable {
+        /// Existing behavior: non-persistent for a private host; otherwise the profile's persistent
+        /// identifier when one exists, else WebKit's default configuration.
+        case automatic
+        /// Always non-persistent, even for a non-private host whose pages use a persistent website
+        /// store. For disposable normal-profile probes: WebKit offers no public removal for a
+        /// persistent controller configuration, so it must not be created for throwaway runs.
+        case nonPersistent
+    }
+    let controllerStorage: ControllerStorage
+    nonisolated static func usesNonPersistentController(isPrivate: Bool, storage: ControllerStorage) -> Bool {
+        isPrivate || storage == .nonPersistent
+    }
+
+    init(storageURL: URL?, isPrivate: Bool = false, controllerStorage: ControllerStorage = .automatic) {
         self.isPrivate = isPrivate
+        self.controllerStorage = controllerStorage
         ownsTemporaryStorage = storageURL == nil || isPrivate
         self.storageURL = ownsTemporaryStorage
             ? FileManager.default.temporaryDirectory.appendingPathComponent("bam-extensions-\(UUID().uuidString)", isDirectory: true)
@@ -833,7 +850,7 @@ struct BrowserExtensionPermissionReview {
     init(owner: BrowserExtensions, profileID: UUID, dataStore: WKWebsiteDataStore) {
         self.owner = owner; self.profileID = profileID; self.dataStore = dataStore
         let configuration: WKWebExtensionController.Configuration
-        if owner.isPrivate { configuration = .nonPersistent() }
+        if BrowserExtensions.usesNonPersistentController(isPrivate: owner.isPrivate, storage: owner.controllerStorage) { configuration = .nonPersistent() }
         // Development previews keep a separate persistent store; production's
         // legacy Default profile continues using WebKit's default store.
         else if let identifier = PreviewProfile.persistentIdentifier(for: profileID) { configuration = WKWebExtensionController.Configuration(identifier: identifier) }
