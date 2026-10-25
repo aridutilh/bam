@@ -375,28 +375,39 @@ import UniformTypeIdentifiers
         let ungranted = (record.compatibility ?? []).filter { (record.compatibilityGrants?[$0] ?? .distantPast) <= now }
         let access = ungranted.isEmpty ? nil : "Not granted: \(ExtensionCompatibility.reviewLabel(ungranted)). Disable and enable the extension to review this access."
         let identity = record.runtimeIdentifier.map { "Chrome Web Store ID \($0), from a verified publisher signature. The extension sees it as its runtime ID; its pages keep a private per-install address." }
-        let parts = [access, identity, record.staticRuleAudit?.note, record.compatibilityNote].compactMap { $0 }
+        let tabs = (record.permissions["tabs"] ?? .distantPast) > now ? tabsDisclosure : nil
+        let parts = [access, identity, record.staticRuleAudit?.note, record.compatibilityNote, tabs].compactMap { $0 }
         return parts.isEmpty ? nil : (parts + ["Reload open pages after changing access."]).joined(separator: "\n\n")
     }
     static func statusText(headline: String?, details: String?, guidance: String) -> String {
         let parts = [headline, details].compactMap { $0 }
         return parts.isEmpty ? guidance : parts.joined(separator: "\n\n")
     }
-    static func reviewPermissions(_ review: BrowserExtensionPermissionReview) -> Bool {
-        let alert = NSAlert()
-        alert.messageText = review.isOptional ? "Allow more access for \(review.name)?" : "Enable \(review.name)?"
-        alert.informativeText = "Profile: \(review.profileName)\nOnly continue if you trust this extension. Website access lets it read and change content, including information you enter."
+    /// What the `tabs` permission means, in plain words. The permission itself and how it's granted are unchanged.
+    static let tabsDisclosure = "Tabs: it can see the addresses and titles of your tabs. This permission alone doesn’t let it read or change what’s on a page."
+    /// The review's details text (the dialog's scrolling accessory), in this order.
+    static func reviewDetails(_ review: BrowserExtensionPermissionReview) -> String {
         var lines: [String] = []
         if let note = review.compatibilityNote { lines += ["Compatibility preparation:", note, ""] }
-        if !review.permissions.isEmpty { lines += ["Browser capabilities:", review.permissions.joined(separator: ", "), ""] }
+        if !review.permissions.isEmpty {
+            lines += ["Browser capabilities:", review.permissions.joined(separator: ", ")]
+            if review.permissions.contains("tabs") { lines.append(tabsDisclosure) }
+            lines.append("")
+        }
         if !review.websites.isEmpty { lines += ["Websites:"] + review.websites + [""] }
         if !review.bridged.isEmpty { lines += ["Provided by Bam’s compatibility layer (limited):", ExtensionCompatibility.reviewLabel(review.bridged), ""] }
         if review.nativeCompanionAvailable { lines += ["Desktop app (separate approval required):", "The verified 1Password extension can request a connection from Manage Extensions. Enabling website access does not approve it.", ""] }
         if !review.unsupported.isEmpty { lines += ["Unavailable in Bam (not granted):", review.unsupported.joined(separator: ", "), ""] }
         lines += ["Desktop-app access is reviewed separately in Manage Extensions and currently supports only the verified Chrome build of 1Password. Other native hosts and full Chrome compatibility remain unavailable. Reload existing pages after changing access."]
+        return lines.joined(separator: "\n")
+    }
+    static func reviewPermissions(_ review: BrowserExtensionPermissionReview) -> Bool {
+        let alert = NSAlert()
+        alert.messageText = review.isOptional ? "Allow more access for \(review.name)?" : "Enable \(review.name)?"
+        alert.informativeText = "Profile: \(review.profileName)\nOnly continue if you trust this extension. Website access lets it read and change content, including information you enter."
         let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 420, height: 180)); scroll.hasVerticalScroller = true; scroll.borderType = .bezelBorder
         let text = NSTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 180)); text.isEditable = false; text.isSelectable = true
-        text.font = .systemFont(ofSize: 12); text.string = lines.joined(separator: "\n"); text.textContainer?.widthTracksTextView = true
+        text.font = .systemFont(ofSize: 12); text.string = reviewDetails(review); text.textContainer?.widthTracksTextView = true
         scroll.documentView = text; alert.accessoryView = scroll
         alert.addButton(withTitle: "Cancel"); alert.addButton(withTitle: review.isOptional ? "Allow" : "Enable")
         return alert.runModal() == .alertSecondButtonReturn

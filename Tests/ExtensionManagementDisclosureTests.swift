@@ -87,6 +87,21 @@ import Foundation
                   "An ungranted bookmarks capability was not disclosed, or a granted one was listed: \(earlierDetails)")
         earlier.compatibilityGrants?["bookmarks"] = .distantFuture; earlier.compatibilityGrants?["history"] = .distantFuture
         try check(ExtensionManagement.details(earlier) == nil, "A fully granted install still showed a not-granted note")
+        // The tabs permission, in plain words: addresses and titles, not page content. Names and grants are unchanged.
+        let tabsReview = BrowserExtensionPermissionReview(name: "Tab Helper", profileName: "Work", permissions: ["storage", "tabs"], websites: [],
+                                                          unsupported: [], isOptional: false)
+        let reviewText = ExtensionManagement.reviewDetails(tabsReview)
+        try check(reviewText.contains("Browser capabilities:\nstorage, tabs\n" + ExtensionManagement.tabsDisclosure)
+                  && ExtensionManagement.tabsDisclosure.contains("addresses and titles") && ExtensionManagement.tabsDisclosure.contains("alone doesn’t let it read or change"),
+                  "The review lists tabs, then explains it sees addresses and titles but not page content: \(reviewText)")
+        let plainReview = BrowserExtensionPermissionReview(name: "Store", profileName: "Work", permissions: ["storage"], websites: ["https://a.example/*"],
+                                                           unsupported: [], isOptional: true)
+        try check(!ExtensionManagement.reviewDetails(plainReview).contains("Tabs:") && ExtensionManagement.reviewDetails(plainReview).contains("Websites:\nhttps://a.example/*"),
+                  "Without tabs there is no tabs note, and the rest of the review is as before")
+        earlier.permissions["tabs"] = .distantFuture
+        try check(ExtensionManagement.details(earlier)?.contains(ExtensionManagement.tabsDisclosure) == true, "A granted tabs permission is explained in the details")
+        earlier.permissions["tabs"] = .distantPast
+        try check(ExtensionManagement.details(earlier) == nil, "An expired tabs grant isn't described as held")
         return checks
     }
 }
