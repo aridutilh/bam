@@ -83,6 +83,89 @@ import AppKit
                 && Set(pure.map { (($0.x - minX + $0.y - minY) % 2 == 0) == $0.red }).count == 1, "The checker pattern survives exactly")
         withExtendedLifetime(window) {}
 
+        // MARK: Hover follows the real pointer (via the test seam), not stale enter/exit events.
+        var pointer: NSPoint? = nil
+        ArkHover.pointerLocation = { _ in pointer }
+        @MainActor func spin() { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+        let hoverSidebar = SidebarView(frame: NSRect(x: 0, y: 0, width: 240, height: 720))
+        let hoverWindow = NSWindow(contentRect: hoverSidebar.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        hoverWindow.contentView = hoverSidebar
+        hoverSidebar.configureSpaces([BrowserSpace(id: 0, name: "One", symbol: "sparkles", colorIndex: 0),
+                                      BrowserSpace(id: 1, name: "Two", symbol: "globe", colorIndex: 1)])
+        let spaceZero = (0..<60).map { SidebarTabItem(id: UUID(), title: "Zero \($0)", subtitle: "", symbol: "globe", isPinned: false, isActive: $0 == 59) }
+        let spaceOne = (0..<3).map { SidebarTabItem(id: UUID(), title: "One \($0)", subtitle: "", symbol: "globe", isPinned: false, isActive: $0 == 0) }
+        @MainActor func show(_ items: [SidebarTabItem], _ space: Int) {
+            hoverSidebar.update(tabs: items, space: space, canGoBack: false, canGoForward: false, isLoading: false)
+            hoverSidebar.layoutSubtreeIfNeeded(); spin()
+        }
+        @MainActor func hoverTable() -> NSTableView {
+            descendants(hoverSidebar).compactMap { $0 as? NSTableView }.first { $0.window != nil && !$0.isHiddenOrHasHiddenAncestor }!
+        }
+        @MainActor func rowView(titled title: String) -> NSView? {
+            descendants(hoverSidebar).first { $0.accessibilityRole() == .button && $0.accessibilityLabel() == title && $0.window != nil }
+        }
+        /// Unselected rows show their close button only while hovered: the visible hover signal.
+        @MainActor func hoveredRows() -> [String] {
+            descendants(hoverSidebar).filter { view in
+                view.window != nil && view.accessibilityRole() == .button && view.identifier?.rawValue.hasPrefix("tab-row-") == true
+                    && view.accessibilityValue() as? String != "Selected"
+                    && descendants(view).contains { !$0.isHiddenOrHasHiddenAncestor && $0.accessibilityLabel() == "Close tab" }
+            }.compactMap { $0.accessibilityLabel() }
+        }
+        @MainActor func center(_ view: NSView) -> NSPoint { view.convert(NSPoint(x: view.bounds.midX, y: view.bounds.midY), to: nil) }
+        show(spaceZero, 0)
+        let rowTwo = rowView(titled: "Zero 2")!
+        pointer = center(rowTwo)
+        rowTwo.mouseEntered(with: NSEvent.enterExitEvent(with: .mouseEntered, location: pointer!, modifierFlags: [], timestamp: 0,
+                                                          windowNumber: 0, context: nil, eventNumber: 0, trackingNumber: 0, userData: nil)!)
+        require(hoveredRows() == ["Zero 2"], "The row under the pointer hovers")
+        // Switch Spaces; the pointer moves to the footer. AppKit sends no exit to a page that left the window.
+        show(spaceOne, 1)
+        pointer = NSPoint(x: 120, y: 10)
+        show(spaceZero, 0)
+        require(hoveredRows().isEmpty, "Returning to a Space leaves no stale gray on the row hovered before the switch")
+        // A still pointer over a row when its page comes back keeps hovering exactly that row.
+        pointer = center(rowView(titled: "Zero 4")!)
+        show(spaceOne, 1); show(spaceZero, 0)
+        require(hoveredRows() == ["Zero 4"], "A still pointer keeps hovering only the row actually under it after a switch")
+        // Rebuild with different rows (cells reused): hover is resolved, not reset or carried.
+        var renamed = spaceZero
+        for index in 0..<10 { renamed[index] = SidebarTabItem(id: UUID(), title: "Fresh \(index)", subtitle: "", symbol: "globe", isPinned: false, isActive: false) }
+        show(renamed, 0)
+        require(hoveredRows() == ["Fresh 4"], "After a rebuild the reused cell under the still pointer hovers, and only it")
+        // Scrolling under a still pointer: hover follows the row now under it.
+        let list = hoverTable()
+        let clipView = list.enclosingScrollView!.contentView
+        clipView.scroll(to: NSPoint(x: 0, y: clipView.bounds.minY + 3 * (list.rowHeight + list.intercellSpacing.height)))
+        list.enclosingScrollView!.reflectScrolledClipView(clipView)
+        hoverSidebar.layoutSubtreeIfNeeded(); spin()
+        let under = hoveredRows()
+        require(under.count == 1 && under != ["Fresh 4"], "Scrolling moves hover to the row under the pointer (\(under))")
+        // The window losing key clears hover (the tracking areas only apply in the key window).
+        pointer = nil
+        NotificationCenter.default.post(name: NSWindow.didResignKeyNotification, object: hoverWindow)
+        require(hoveredRows().isEmpty, "Hover clears when the window resigns key")
+        // Buttons too: the list's New Tab row (the gray seen stuck in the baseline screenshot).
+        clipView.scroll(to: .zero); list.enclosingScrollView!.reflectScrolledClipView(clipView)
+        show(spaceOne, 1)
+        let newTab = descendants(hoverSidebar).first { $0.accessibilityLabel() == "New tab" && $0.window != nil && $0 is NSButton } as! NSButton
+        @MainActor func pixels(_ view: NSView) -> Data? {
+            let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds)!; view.cacheDisplay(in: view.bounds, to: rep); return rep.tiffRepresentation
+        }
+        pointer = center(newTab)
+        newTab.mouseEntered(with: NSEvent.enterExitEvent(with: .mouseEntered, location: pointer!, modifierFlags: [], timestamp: 0,
+                                                          windowNumber: 0, context: nil, eventNumber: 0, trackingNumber: 0, userData: nil)!)
+        let hoveredPixels = pixels(newTab)
+        show(spaceZero, 0)
+        pointer = NSPoint(x: 120, y: 10)
+        show(spaceOne, 1)
+        let afterReturn = pixels(newTab)
+        newTab.mouseExited(with: NSEvent.enterExitEvent(with: .mouseExited, location: .zero, modifierFlags: [], timestamp: 0,
+                                                         windowNumber: 0, context: nil, eventNumber: 0, trackingNumber: 0, userData: nil)!)
+        require(afterReturn != hoveredPixels && afterReturn == pixels(newTab), "The New Tab button shows no stale hover after a Space round trip")
+        ArkHover.pointerLocation = { _ in nil }
+        withExtendedLifetime(hoverWindow) {}
+
         print("PASS: \(checks) sidebar morning checks")
     }
 }

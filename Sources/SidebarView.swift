@@ -340,7 +340,10 @@ struct SidebarExtensionItem {
                 library.playSelection()
             }
         }
-        if items != tabs || spaceChanged { items = tabs; page.configure(tabs, space: definition, destinations: spaceDefinitions) }
+        if items != tabs || spaceChanged {
+            items = tabs; page.configure(tabs, space: definition, destinations: spaceDefinitions)
+            scheduleHoverResync()
+        }
         back.isEnabled = canGoBack; forward.isEnabled = canGoForward
         reload.setSymbol(isLoading ? "xmark" : "arrow.clockwise", label: isLoading ? "Stop loading" : "Reload page")
         for button in spaces { button.selected = button.index == space }
@@ -421,12 +424,27 @@ struct SidebarExtensionItem {
         setPagingOffset(preservingOffset ? incomingOffset : 0)
         for button in spaces { button.selected = button.index == space }
         library.playSelection()
+        scheduleHoverResync()
         return offset
     }
     func endPaging() {
         next?.removeFromSuperview(); next = nil; nextSpace = nil; nextItems = []
         departing?.removeFromSuperview(); departing = nil; departingSpace = nil
         setPagingOffset(0)
+        scheduleHoverResync()
+    }
+    private var hoverResyncScheduled = false
+    /// After a Space switch, paging settle or list rebuild, once rows have their final frames: whatever the
+    /// still pointer is over hovers, and nothing else (a row hovered on a page that left keeps no gray).
+    private func scheduleHoverResync() {
+        guard !hoverResyncScheduled else { return }
+        hoverResyncScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.hoverResyncScheduled = false
+            self.layoutSubtreeIfNeeded()
+            ArkHover.resync(in: self)
+        }
     }
     override func layout() {
         super.layout(); let w = bounds.width
@@ -558,7 +576,14 @@ struct SidebarExtensionItem {
         table.identifier = NSUserInterfaceItemIdentifier("sidebar-tab-list")
         scroll.documentView = table
         heading.handler = { [weak self] in self?.manageSpaces?() }
+        // Rows move under a still pointer while scrolling; hover follows the row actually under it.
+        scroll.contentView.postsBoundsChangedNotifications = true
+        scrollObserver = NotificationCenter.default.addObserver(forName: NSView.boundsDidChangeNotification, object: scroll.contentView, queue: nil) { [weak self] _ in
+            MainActor.assumeIsolated { if let self, self.window != nil { ArkHover.resync(in: self.table) } }
+        }
     }
+    private var scrollObserver: NSObjectProtocol?
+    deinit { if let scrollObserver { NotificationCenter.default.removeObserver(scrollObserver) } }
     required init?(coder: NSCoder) { fatalError() }
 
     override func viewDidMoveToSuperview() {
@@ -1147,8 +1172,50 @@ private func arkLabel(_ text: String, size: CGFloat, weight: NSFont.Weight) -> N
 @MainActor
 private class ArkFlippedView: NSView { override var isFlipped: Bool { true } }
 
+/// Hover from where the pointer actually is. Enter/exit events alone go stale: a view taken out of the window
+/// (a cached Space page during a switch), a reused table cell, a scroll under a still pointer, or the window
+/// losing key never sends the matching exit. Views re-resolve at those moments instead of resetting blindly,
+/// so a still pointer keeps hovering exactly the view under it, and nothing else stays gray.
+@MainActor enum ArkHover {
+    /// The pointer in window coordinates when hover applies there (the window is key, as the tracking areas
+    /// require), else nil. The app reads the real pointer; tests substitute a location.
+    static var pointerLocation: (NSWindow) -> NSPoint? = { window in
+        window.isKeyWindow ? window.mouseLocationOutsideOfEventStream : nil
+    }
+    /// True only when the pointer is inside the view's visible part and the view (or one of its subviews) is
+    /// the topmost hit there: a page sliding over another, or a control on top, owns the pointer instead.
+    static func isUnderPointer(_ view: NSView) -> Bool {
+        guard let window = view.window, !view.isHiddenOrHasHiddenAncestor, let point = pointerLocation(window),
+              let content = window.contentView else { return false }
+        guard view.visibleRect.contains(view.convert(point, from: nil)),
+              let hit = content.hitTest(content.superview?.convert(point, from: nil) ?? point) else { return false }
+        return hit === view || hit.isDescendant(of: view)
+    }
+    /// Re-resolves every hover-tracking view under `root` (after a page attaches, a list rebuilds or scrolls).
+    static func resync(in root: NSView) {
+        if let tracking = root as? ArkHoverTracking { tracking.resyncHover() }
+        root.subviews.forEach { resync(in: $0) }
+    }
+}
+@MainActor protocol ArkHoverTracking: AnyObject { func resyncHover() }
+
+/// Keeps one view's hover honest across window, key-window and visibility changes.
+@MainActor private final class ArkHoverLifecycle {
+    private var observers: [NSObjectProtocol] = []
+    func watch(_ window: NSWindow?, _ resync: @escaping @MainActor () -> Void) {
+        observers.forEach(NotificationCenter.default.removeObserver); observers = []
+        guard let window else { return }
+        for name in [NSWindow.didBecomeKeyNotification, NSWindow.didResignKeyNotification] {
+            observers.append(NotificationCenter.default.addObserver(forName: name, object: window, queue: .main) { _ in
+                MainActor.assumeIsolated { resync() }
+            })
+        }
+    }
+    deinit { observers.forEach(NotificationCenter.default.removeObserver) }
+}
+
 @MainActor
-private class ArkHoverButton: NSButton {
+private class ArkHoverButton: NSButton, ArkHoverTracking {
     override var isEnabled: Bool {
         didSet { if oldValue != isEnabled { window?.invalidateCursorRects(for: self) } }
     }
@@ -1157,8 +1224,9 @@ private class ArkHoverButton: NSButton {
         if isEnabled { addCursorRect(bounds, cursor: .pointingHand) }
     }
     var handler: (() -> Void)?
-    var hovered = false
+    private(set) var hovered = false
     private var area: NSTrackingArea?
+    private let hoverLifecycle = ArkHoverLifecycle()
     override var isFlipped: Bool { true }
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -1173,15 +1241,30 @@ private class ArkHoverButton: NSButton {
     override var focusRingMaskBounds: NSRect { bounds }
     override func drawFocusRingMask() { NSBezierPath(roundedRect: bounds.insetBy(dx: 2, dy: 2), xRadius: 6, yRadius: 6).fill() }
     @objc private func performHandler() { handler?() }
+    func resyncHover() { setHovered(ArkHover.isUnderPointer(self)) }
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         if let area { removeTrackingArea(area) }
         let next = NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self, userInfo: nil)
         addTrackingArea(next)
         area = next
+        resyncHover()
     }
-    override func mouseEntered(with event: NSEvent) { hovered = true; needsDisplay = true }
-    override func mouseExited(with event: NSEvent) { hovered = false; needsDisplay = true }
+    override func mouseEntered(with event: NSEvent) { setHovered(true) }
+    override func mouseExited(with event: NSEvent) { setHovered(false) }
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        hoverLifecycle.watch(window) { [weak self] in self?.resyncHover() }
+        resyncHover()
+    }
+    override func viewDidHide() { super.viewDidHide(); resyncHover() }
+    override func viewDidUnhide() { super.viewDidUnhide(); resyncHover() }
+    func setHovered(_ value: Bool) {
+        guard hovered != value else { return }
+        hovered = value; hoverDidChange()
+    }
+    /// Subclasses animate or re-lay out; the default repaints.
+    func hoverDidChange() { needsDisplay = true }
     func fill(_ color: NSColor, radius: CGFloat = 8) {
         color.setFill()
         NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: radius, yRadius: radius).fill()
@@ -1499,7 +1582,7 @@ private final class ArkSpaceHeading: ArkHoverButton, SpaceTinted {
 }
 
 @MainActor
-private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted {
+private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted, ArkHoverTracking {
     var displayedSpaceTint: NSColor { spaceTint }
     override func resetCursorRects() {
         super.resetCursorRects()
@@ -1542,6 +1625,7 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted {
     private let closeButton = ArkIconButton(symbol: "xmark", label: "Close tab", glyphSize: 12)
     private var hovered = false
     private var area: NSTrackingArea?
+    private let hoverLifecycle = ArkHoverLifecycle()
     private var configured = false
     private var dragOrigin: NSPoint?
     /// The row identity captured at mouse-down; a drag only ever carries this ID.
@@ -1582,7 +1666,8 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted {
         guard first || old != newItem else { return }
         item = newItem; configured = true
         if first || old.id != item.id {
-            hovered = false; closeButton.hovered = false
+            // A reused cell may now sit under a still pointer: resolve, don't reset.
+            resyncHover(); closeButton.resyncHover()
             identifier = NSUserInterfaceItemIdentifier("tab-row-\(item.id.uuidString)")
             // Reused for another row mid-press: abandon that press and any drag it began.
             dragOrigin = nil; pressedID = nil; didDrag = false
@@ -1768,9 +1853,22 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted {
         let next = NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self, userInfo: nil)
         addTrackingArea(next)
         area = next
+        resyncHover()
     }
-    override func mouseEntered(with event: NSEvent) { hovered = true; updateTrailingControls(); needsDisplay = true }
-    override func mouseExited(with event: NSEvent) { hovered = false; updateTrailingControls(); needsDisplay = true }
+    override func mouseEntered(with event: NSEvent) { setHovered(true) }
+    override func mouseExited(with event: NSEvent) { setHovered(false) }
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        hoverLifecycle.watch(window) { [weak self] in self?.resyncHover() }
+        resyncHover()
+    }
+    override func viewDidHide() { super.viewDidHide(); resyncHover() }
+    override func viewDidUnhide() { super.viewDidUnhide(); resyncHover() }
+    func resyncHover() { setHovered(ArkHover.isUnderPointer(self)) }
+    private func setHovered(_ value: Bool) {
+        guard hovered != value else { return }
+        hovered = value; updateTrailingControls(); needsDisplay = true
+    }
     override func hitTest(_ point: NSPoint) -> NSView? {
         guard let hit = super.hitTest(point) else { return nil }
         // Labels and symbols belong to the row's selection target; the close
@@ -1938,13 +2036,9 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted {
     }
     required init?(coder: NSCoder) { fatalError() }
 
-    override func mouseEntered(with event: NSEvent) {
-        super.mouseEntered(with: event)
-        animateHover(to: 1)
-    }
-    override func mouseExited(with event: NSEvent) {
-        super.mouseExited(with: event)
-        animateHover(to: 0)
+    override func hoverDidChange() {
+        super.hoverDidChange()
+        animateHover(to: hovered ? 1 : 0)
     }
     private func animateHover(to value: CGFloat) {
         hoverAnimator.animate(from: hoverAmount, to: value, response: 0.24, dampingRatio: 0.90) { [weak self] value in
@@ -1965,7 +2059,7 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted {
         super.viewDidMoveToWindow()
         if window == nil {
             hoverAnimator.stop(); selectionAnimator.stop()
-            hoverAmount = 0; selectionPulse = 0; hovered = false
+            hoverAmount = 0; selectionPulse = 0
         }
     }
     override func draw(_ dirtyRect: NSRect) {
