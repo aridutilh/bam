@@ -12,7 +12,9 @@ import WebKit
 /// extension controller configuration; it measures whether the extension really sees
 /// a normal profile and never claims so unmeasured. No vendor files are kept, no
 /// native companion is granted, and no account sign-in or vault operation is performed.
-/// This is an observation, not a compatibility test.
+/// This is an observation, not a compatibility test. `BAM_VENDOR_QUIET=1` (VendorQuietMode) keeps install, grants and
+/// cleanup but performs no host JavaScript evaluation, action invocation or options fallback, so a person's real input can
+/// be observed; it reports `quiet-unmeasured` (exit 3), never `completed`.
 @MainActor final class VendorExtensionProbe {
     private var watchdog: Timer?
     private var task: Task<Void, Never>?
@@ -38,6 +40,10 @@ import WebKit
     private var observations: [String: Any] = ["scope": "official Chrome Web Store CRX, signature verified for the requested ID; fresh private profile and temporary extension storage; no sign-in; no native companion; no compatibility claim"]
     private var blockedNavigations: [[String: Any]] = []
     private var reviewEvents: [[String: Any]] = []
+    /// `BAM_VENDOR_QUIET=1`: no host-initiated evaluation, action invocation or options fallback (VendorQuietMode).
+    private var quiet = false
+    private var plan = VendorQuietMode.plan(quiet: false)
+    private var responderSnapshots: [[String: Any]] = []
     /// IDs seeded by BAM_VENDOR_SEED_BOOKMARKS (empty when off), for the no-loaded-views check.
     private var seededBookmarkIDs: [UUID] = []
     /// The two seeded bookmark pages' exact addresses (empty when off): the only non-extension URLs an extension
@@ -209,6 +215,15 @@ import WebKit
             throw BrowserExtensions.failure("BAM_VENDOR_PROFILE must be private (default) or normal")
         }
         observations["profile_mode"] = mode.rawValue
+        // Opt-in quiet mode: decided (and refused if invalid) before anything is created.
+        switch VendorQuietMode.decide(env[VendorQuietMode.flag], siteProbe: env["BAM_VENDOR_SITE_PROBE"], backgroundProbe: env["BAM_VENDOR_BG_PROBE"]) {
+        case .invalid(let why): throw BrowserExtensions.failure(why)
+        case .on: quiet = true
+        case .off: quiet = false
+        }
+        plan = VendorQuietMode.plan(quiet: quiet)
+        observations["quiet_mode"] = quiet
+        if quiet { observations["quiet_scope"] = VendorQuietMode.quietUnmeasuredText }
         // Opt-in bookmark fixture: decided (and refused) before anything is created or mutated.
         let seedDecision = BookmarkVendorSeed.decide(flag: env[BookmarkVendorSeed.flag], isNormalMode: mode == .normal, site: env["BAM_VENDOR_SITE"])
         if case .refused(let why) = seedDecision { throw BrowserExtensions.failure(why) }
@@ -231,6 +246,9 @@ import WebKit
             browser.session = BrowserSession(tabs: [home], activeID: home.id)
         }
         browser.automaticallyShowsVideo = false  // a property set; only the menu toggle writes preferences
+        // Quiet: the browser's own automatic page evaluations are off before any page or view loads (property sets only).
+        if !plan.faviconDocumentDiscovery { browser.documentFaviconDiscoveryEnabled = false }
+        if !plan.automaticTabSleeping { browser.automaticTabSleeping = false }
         controller = browser
         let main = NSWindow(contentRect: NSRect(x: 120, y: 100, width: 920, height: 680),
                             styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
@@ -348,7 +366,11 @@ import WebKit
                 siteTabID = browser.openProfileTab(siteURL, profileID: profile, active: true)
                 observations["site_tab_opened"] = siteTabID != nil
             }
-            if !actionInvoked && elapsed >= 2 {
+            if plan.responderSnapshots, responderSnapshots.count < VendorQuietMode.maximumResponderSnapshots,
+               elapsed >= Double(responderSnapshots.count) * VendorQuietMode.responderSnapshotSeconds {
+                snapshotResponder(elapsed: elapsed, siteTabID: siteTabID, browser: browser)
+            }
+            if plan.invokeAction && !actionInvoked && elapsed >= 2 {
                 let target = siteTabID ?? home.id
                 browser.select(target); browser.refresh()
                 host.reconcile(); browser.refreshExtensionActions()
@@ -377,7 +399,7 @@ import WebKit
             }
             if invokedAction?.popupPopover?.isShown == true { observations["action_popup_presented"] = true }
             if let popup = invokedAction?.popupWebView { notePopup(popup) }
-            if !fallbackOpened && elapsed >= 5 {
+            if plan.openFallbackPage && !fallbackOpened && elapsed >= 5 {
                 fallbackOpened = true
                 let options = manifest["options_ui"] as? [String: Any]
                 if let path = env["BAM_VENDOR_PAGE"] ?? (options?["page"] as? String),
@@ -393,11 +415,14 @@ import WebKit
                 observations["host_error"] = host.errors[id].map { String($0.prefix(800)) }
                 if let runtime = context.webExtensionController?.delegate as? BrowserExtensionRuntime {
                     observations["compatibility_diagnostics"] = runtime.compatibility.diagnostics(for: context)
-                    if let script = env["BAM_VENDOR_BG_PROBE"], !script.isEmpty, sample >= 4 {
+                    if plan.backgroundProbe, let script = env["BAM_VENDOR_BG_PROBE"], !script.isEmpty, sample >= 4 {
                         observations["background_eval"] = await runtime.compatibility.evaluate(script, for: context)
                     }
-                    // Mode validity, measured in the extension's own documents (both modes, for comparison).
-                    if sample >= 2 { recordModeMeasurements(await runtime.compatibility.evaluate(VendorProbeIsolation.measurementScript, for: context)) }
+                    // Mode validity, measured in the extension's own documents (both modes, for comparison). Not in quiet
+                    // mode: the strict classifier then sees no rounds and reports unmeasured, as it always would.
+                    if plan.documentModeMeasurement, sample >= 2 {
+                        recordModeMeasurements(await runtime.compatibility.evaluate(VendorProbeIsolation.measurementScript, for: context))
+                    }
                 }
                 controllerConfigurationPersistent = context.webExtensionController?.configuration.isPersistent
                 observations["controller_configuration_persistent"] = controllerConfigurationPersistent
@@ -406,16 +431,19 @@ import WebKit
                 if let action = invokedAction ?? context.action(for: nil) {
                     observations["action_has_popup"] = action.presentsPopup
                     observations["action_popup_is_shown"] = action.popupPopover?.isShown == true
-                    if let popup = action.popupWebView { notePopup(popup); samplePage(popup, key: "action_popup", context: context) }
+                    if let popup = action.popupWebView {
+                        notePopup(popup)
+                        if plan.samplePages { samplePage(popup, key: "action_popup", context: context) }
+                    }
                 }
-                for (tabID, web) in browser.browsers where web.url.map({ BrowserExtensions.isExtensionURL($0, ownedBy: context) }) == true {
+                for (tabID, web) in browser.browsers where plan.samplePages && web.url.map({ BrowserExtensions.isExtensionURL($0, ownedBy: context) }) == true {
                     samplePage(web, key: "tab_\(tabID.uuidString)", context: context)
                 }
                 if let siteTabID, let web = browser.browsers[siteTabID], let current = web.url, ["http", "https"].contains(current.scheme?.lowercased() ?? "") {
                     observations["site_has_access"] = context.hasAccess(to: current)
                     observations["site_has_injected_content"] = context.hasInjectedContent(for: current)
                     observations["site_tab_uses_profile_controller"] = web.configuration.webExtensionController === context.webExtensionController
-                    sampleSite(web, script: siteProbe, elapsed: elapsed)
+                    if plan.sampleSite { sampleSite(web, script: siteProbe, elapsed: elapsed) }
                 }
             }
             try await Task.sleep(nanoseconds: 100_000_000)
@@ -433,8 +461,23 @@ import WebKit
         return base.appendingPathComponent(relative)
     }
 
+    /// Quiet mode, native reads only: key window and first-responder class, and whether it is inside the site tab's web
+    /// view (a text-input subview counts as inside). No page, title or personal text.
+    private func snapshotResponder(elapsed: TimeInterval, siteTabID: UUID?, browser: BrowserController) {
+        var entry: [String: Any] = ["t_s": Int(elapsed.rounded(.down))]
+        entry["key_window_is_probe"] = NSApp.keyWindow != nil && NSApp.keyWindow === window
+        let responder = window?.firstResponder
+        entry["first_responder_class"] = responder.map { String(String(describing: type(of: $0)).prefix(80)) } ?? "none"
+        if let siteTabID, let web = browser.browsers[siteTabID] {
+            entry["first_responder_inside_site_web_view"] = (responder as? NSView).map { $0 === web || $0.isDescendant(of: web) } ?? false
+            entry["site_tab_selected"] = browser.session.activeID == siteTabID
+        }
+        responderSnapshots.append(entry)
+    }
+
     @available(macOS 15.4, *)
     private func samplePage(_ web: WKWebView, key: String, context: WKWebExtensionContext) {
+        guard plan.samplePages else { return }   // quiet: never, whatever the caller
         guard let url = web.url, BrowserExtensions.isExtensionURL(url, ownedBy: context) else { return }
         var entry: [String: Any] = ["url": sanitizedURL(url), "title": String((web.title ?? "").prefix(200)), "is_loading": web.isLoading]
         if let prior = pages[key]?["document"] { entry["document"] = prior }
@@ -469,6 +512,7 @@ import WebKit
     /// Samples the ordinary page in the page world: content-script DOM additions are
     /// visible there, but no form values, storage or cookies are read.
     private func sampleSite(_ web: WKWebView, script: String, elapsed: TimeInterval) {
+        guard plan.sampleSite else { return }   // quiet: never, whatever the caller
         web.evaluateJavaScript(script) { [weak self] result, error in
             Task { @MainActor [weak self] in
                 guard let self, !self.finished, let current = web.url else { return }
@@ -705,7 +749,9 @@ import WebKit
             reasonText += "; temporary vendor files could not be removed"
         }
         let base = requested && observationCompleted && hostStorageClean && scratchClean
-        guard let run = normalRun else { emit(base, reasonText); return }
+        if quiet { observations["responder_snapshots"] = responderSnapshots }
+        // Quiet: the interval finished with clean cleanup, independent of the (necessarily unmeasured) profile verdict.
+        guard let run = normalRun else { emit(base, reasonText, quietIntervalClean: base); return }
         Task { @MainActor in
             let cleanup = await self.cleanUpNormalRun(run, controllerReleased: { releasedController == nil && extensionController == nil },
                                                       extensionControllerReleased: { extensionController == nil },
@@ -714,13 +760,17 @@ import WebKit
             var text = reasonText
             if !modeValid { text += "; normal-profile mode not established (\(self.observations["normal_mode_verdict"] ?? "unknown"))" }
             if !cleanup.clean { text += "; the run's own website store or directory could not be confirmed removed" }
-            self.emit(base && modeValid && cleanup.clean, text)
+            self.emit(base && modeValid && cleanup.clean, text, quietIntervalClean: base && cleanup.clean)
         }
     }
 
-    private func emit(_ success: Bool, _ reasonText: String) {
-        let reason = Self.sanitize(reasonText)
-        observations["completed"] = success
+    /// Default mode: unchanged (completed → exit 0, otherwise failed → exit 1). Quiet mode never reports completed; a
+    /// finished interval with clean cleanup is `quiet-unmeasured` (exit 3), anything else failed (exit 1).
+    private func emit(_ success: Bool, _ reasonText: String, quietIntervalClean: Bool) {
+        let result = VendorQuietMode.result(quiet: quiet, success: success, quietIntervalClean: quietIntervalClean)
+        let reason = Self.sanitize(quiet ? reasonText + "; " + VendorQuietMode.quietUnmeasuredText : reasonText)
+        observations["completed"] = result.completed
+        if quiet { observations["quiet_status"] = result.status.rawValue }
         observations["reason"] = reason
         // Single output boundary: every string printed passes through `sanitize`.
         let printable = Self.scrub(observations)
@@ -728,7 +778,7 @@ import WebKit
            let data = try? JSONSerialization.data(withJSONObject: printable, options: [.sortedKeys]),
            let output = String(data: data, encoding: .utf8) { print("VENDOR_OBSERVATIONS \(output)") }
         else { print("VENDOR_OBSERVATIONS {\"completed\":false,\"reason\":\"observations were not serializable\"}") }
-        print("PROBE \(success ? "completed" : "failed"): \(reason)")
-        fflush(stdout); exit(success ? 0 : 1)
+        print("PROBE \(result.status.rawValue): \(reason)")
+        fflush(stdout); exit(result.exitCode)
     }
 }
