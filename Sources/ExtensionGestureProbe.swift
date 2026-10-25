@@ -6,14 +6,89 @@ import WebKit
 /// Compared with no click and with the toolbar action. Opt-in (`--extension-test --extension-gesture-probe`) in
 /// canonical Bam Preview, on the loopback fixture page only. The page click must be a real pointer click (root, via
 /// the approved computer-use path); the probe never synthesises it, and reports untrusted clicks without counting them.
-/// Original MV3 package in a run-owned folder; no API permission is granted (every optional prompt is denied).
-/// Everything, cleanup included, fits a 60 s budget. Output is evidence, not a pass/fail verdict on WebKit.
+/// Original MV3 package in a run-owned folder; the optional alarms permission is never granted (every optional prompt
+/// is denied). Page-side evidence is passive: a WKUserScript in a run-unique host world reports through a script message
+/// handler, and the host evaluates no page JavaScript at any point (an evaluation API's own effect on activation is
+/// unverified, so it is not used). Everything, cleanup included, fits a 60 s budget. Output is evidence, not a verdict.
 @available(macOS 15.4, *)
 @MainActor final class ExtensionGestureProbe {
     private static var current: ExtensionGestureProbe?
     static let budget: TimeInterval = 60
     static let marker = ExtensionGestureProbeRules.marker
     static let optionalPermission = "alarms"
+
+    // Fixed protocol timings, reported verbatim in the output (`protocol`).
+    /// Content script: baseline message this long after injection, so native sampling has started.
+    static let baselineDelayMilliseconds = 1500
+    /// Host world: activation readings this long after each observed trigger (the trusted probe-button click, and each
+    /// worker result record the content script publishes). Scheduled inside the host-world script; actual offsets reported.
+    static let activationDelaysMilliseconds = [0, 20, 100, 1000, 3000]
+    /// Each phase's sampling window: the last scheduled reading plus a margin, waited out before the next gesture.
+    static let samplingWindowSeconds = Double(activationDelaysMilliseconds.max() ?? 0) / 1000 + 0.4
+    /// Content script: arms the button after the baseline reply plus the baseline's sampling window; the host prints
+    /// READY only once it observes `armed`.
+    static let armDelayMilliseconds = Int((samplingWindowSeconds * 1000).rounded()) + 200
+    /// Native sampling (gesture signal and per-tab badge) interval.
+    static let sampleMilliseconds = 20
+    static let hostMessageName = "bamGestureProbeHost"
+    static let maximumHostEvents = 400
+    static let hostEventNames: Set<String> = ["ready", "state", "record", "click", "activation", "armed"]
+
+    /// Passive host-world observer, installed as a WKUserScript in a unique probe-owned content world before the probe
+    /// page loads. It only listens and reports through a script message handler: it never dispatches, focuses, prevents
+    /// or writes, and the host runs no JavaScript in the page during the phases.
+    static let hostScript = #"""
+    (() => {
+      if (!new URLSearchParams(location.search).has("\#(marker)")) return;
+      const handler = globalThis.webkit && webkit.messageHandlers && webkit.messageHandlers.\#(hostMessageName);
+      if (!handler) return;
+      const activation = () => navigator.userActivation
+        ? {isActive: navigator.userActivation.isActive, hasBeenActive: navigator.userActivation.hasBeenActive} : null;
+      const post = (event, extra) => {
+        try { handler.postMessage(Object.assign({event, wall: Date.now(), perf: Math.round(performance.now()), activation: activation()}, extra || {})); }
+        catch (error) {}
+      };
+      const delays = \#(activationDelaysMilliseconds);
+      // Readings at fixed offsets after a trigger; each reports its scheduled offset and the actual one (monotonic).
+      const schedule = (source, id) => {
+        const origin = performance.now();
+        for (const after of delays) setTimeout(() => post("activation", {source, id, scheduled_ms: after,
+                                                                         actual_ms: Math.round(performance.now() - origin)}), after);
+      };
+      let clicks = 0;
+      // Capture phase on window: sees the same click the content script's button handler sees, before it; passive.
+      window.addEventListener("click", (event) => {
+        const target = event.target;
+        if (!target || target.id !== "\#(marker)") return;
+        const n = ++clicks;
+        post("click", {id: "click-" + n, trusted: event.isTrusted === true, detail: event.detail,
+                       pointerType: typeof event.pointerType === "string" ? event.pointerType : null});
+        schedule("click", "click-" + n);
+      }, {capture: true, passive: true});
+      // The content script's published state, on every change. A record's sample is taken when this observer sees the
+      // publication (after the worker replied and the content script wrote it), not at the worker's call.
+      const seen = new Set();
+      let armed = false;
+      const report = () => {
+        const raw = document.documentElement.getAttribute("data-bam-gesture-probe") || "";
+        post("state", {state: raw.slice(0, 60000)});
+        let parsed = null;
+        try { parsed = JSON.parse(raw); } catch (error) { return; }
+        if (parsed && parsed.armed === true && !armed) { armed = true; post("armed", {id: "armed"}); }
+        const results = (parsed && Array.isArray(parsed.results)) ? parsed.results : [];
+        results.forEach((entry, index) => {
+          if (!entry || (!("response" in entry) && !("error" in entry))) return;
+          const id = String(entry.kind) + "-" + index;
+          if (seen.has(id)) return;
+          seen.add(id);
+          post("record", {id, kind: String(entry.kind)});
+          schedule("record", id);
+        });
+      };
+      new MutationObserver(report).observe(document.documentElement, {attributes: true, attributeFilter: ["data-bam-gesture-probe"]});
+      post("ready", {id: "ready", delays});
+    })();
+    """#
 
     static func start(pageURL: URL) {
         let probe = ExtensionGestureProbe()
@@ -66,8 +141,8 @@ import WebKit
       if (!new URLSearchParams(location.search).has("\#(marker)") || document.getElementById("\#(marker)")) return;
       const api = globalThis.chrome;
       const results = [];
-      let untrustedClicks = 0, earlyClicks = 0;
-      const publish = () => { document.documentElement.dataset.bamGestureProbe = JSON.stringify({results, untrustedClicks, earlyClicks}); };
+      let untrustedClicks = 0, earlyClicks = 0, armed = false;
+      const publish = () => { document.documentElement.dataset.bamGestureProbe = JSON.stringify({results, untrustedClicks, earlyClicks, armed}); };
       const text = (error) => String((error && error.message) || error).slice(0, 300);
       const activation = () => navigator.userActivation ? {isActive: navigator.userActivation.isActive, hasBeenActive: navigator.userActivation.hasBeenActive} : null;
       const send = (kind, details) => {
@@ -76,7 +151,8 @@ import WebKit
         let reply;
         try { reply = Promise.resolve(api.runtime.sendMessage(Object.assign({kind}, details))); } catch (error) { reply = Promise.reject(error); }
         reply.then((response) => { entry.response = response === undefined ? null : response; publish(); },
-                   (error) => { entry.error = text(error); publish(); });
+                   (error) => { entry.error = text(error); publish(); })
+             .then(() => { if (kind === "baseline") setTimeout(() => { armed = true; publish(); }, \#(armDelayMilliseconds)); });
       };
       const button = document.createElement("button");
       button.id = "\#(marker)"; button.type = "button"; button.textContent = "Bam gesture probe";
@@ -87,8 +163,9 @@ import WebKit
       let relayed = false;
       button.addEventListener("click", (event) => {
         if (event.isTrusted !== true) { untrustedClicks += 1; publish(); return; }
-        // The host arms the button when it prints READY; earlier clicks would precede the baseline phase.
-        if (document.documentElement.dataset.bamGestureArmed !== "1") { earlyClicks += 1; publish(); return; }
+        // Armed by this script itself a fixed delay after the baseline reply (the host only observes, then prints READY);
+        // earlier clicks would precede the baseline phase.
+        if (!armed) { earlyClicks += 1; publish(); return; }
         if (relayed) return;
         relayed = true;
         send("click", {trusted: true, userActivation: activation(),
@@ -100,7 +177,7 @@ import WebKit
         if (message && message.kind === "toolbar-result") { results.push({kind: "toolbar", response: message.result}); publish(); }
       });
       // A short delay so the host is sampling the tab before the baseline arrives.
-      setTimeout(() => send("baseline", {trusted: null, userActivation: activation()}), 1500);
+      setTimeout(() => send("baseline", {trusted: null, userActivation: activation()}), \#(baselineDelayMilliseconds));
     })();
     """#
     static func iconPNG() -> Data? {
@@ -149,10 +226,53 @@ import WebKit
     private var measuredTab: (any WKWebExtensionTab)?
     private var tabID: UUID?
     private var pageResults: [String: Any] = [:]
-    /// Diagnostic: the page's transient activation as the host itself can read it (public evaluateJavaScript in a
-    /// probe-owned content world, not the extension's world), at each arrival and later. Read-only; grants nothing.
-    private let hostWorld = WKContentWorld.world(name: "bam-gesture-probe-host")
-    private var activationChecks: [(badge: String, due: TimeInterval, key: String)] = []
+    /// Passive host-world reporting: a unique probe-owned content world, a WKUserScript and a script message handler.
+    private let hostWorld = WKContentWorld.world(name: "bam-gesture-probe-host-\(UUID().uuidString)")
+    private var hostEvents: [[String: Any]] = []
+    private var hostEventsDropped = 0
+    private var hostReady = false
+    private weak var observedContent: WKUserContentController?
+    private var messageProxy: HostMessages?
+    private final class HostMessages: NSObject, WKScriptMessageHandler {
+        weak var owner: ExtensionGestureProbe?
+        func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+            owner?.receive(message)
+        }
+    }
+    /// The run's phase, stamped on every host-world message as it arrives (the phase ledger).
+    private var currentPhase = "setup"
+    private var probePageURL: URL?
+    private var rejectedHostMessages = 0
+    /// Accepts only this run's world, main frame, probe tab and exact probe page, with a bounded known payload shape.
+    /// Messages are evidence only; nothing is granted or decided from them. The latest `state` replaces the page results
+    /// (no host call ever reads the page).
+    private func receive(_ message: WKScriptMessage) {
+        guard message.world == hostWorld, message.frameInfo.isMainFrame, let id = tabID, message.webView === controller?.browsers[id],
+              let expected = probePageURL, message.frameInfo.request.url?.absoluteString == expected.absoluteString,
+              let body = message.body as? [String: Any], body.count <= 12, let event = body["event"] as? String,
+              Self.hostEventNames.contains(event), body["perf"] is NSNumber, body["wall"] is NSNumber else { rejectedHostMessages += 1; return }
+        if event == "ready" { hostReady = true }
+        if event == "state" {
+            if let text = body["state"] as? String, text.utf8.count <= 60_000, let data = text.data(using: .utf8),
+               let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any] { pageResults = value }
+            return   // the latest state is kept whole in `page`; not repeated in the log
+        }
+        guard hostEvents.count < Self.maximumHostEvents else { hostEventsDropped += 1; return }
+        var entry = body.filter { !($0.value is String) || ($0.value as? String)?.count ?? 0 <= 200 }
+        entry["host_t_ms"] = ms(); entry["host_phase"] = currentPhase
+        hostEvents.append(entry)
+    }
+    /// Every trigger the host world reported (click or published record) must have every scheduled reading.
+    private func missingSamples() -> [String] {
+        let triggers = hostEvents.filter { ["click", "record"].contains($0["event"] as? String ?? "") }.compactMap { $0["id"] as? String }
+        var missing: [String] = []
+        for trigger in triggers {
+            let got = Set(hostEvents.filter { $0["event"] as? String == "activation" && $0["id"] as? String == trigger }
+                .compactMap { ($0["scheduled_ms"] as? NSNumber)?.intValue })
+            for delay in Self.activationDelaysMilliseconds where !got.contains(delay) { missing.append("\(trigger)+\(delay)ms") }
+        }
+        return missing
+    }
 
     /// Bam's prompt answers deny, which WebKit remembers as an explicit denial; a remembered denial could answer the
     /// next phase's request without consulting the gesture. Back to unknown (never to granted), recorded per phase.
@@ -172,7 +292,17 @@ import WebKit
 
     private func begin(_ page: URL) {
         started = ProcessInfo.processInfo.systemUptime
-        observations["scope"] = "original MV3 fixture on the loopback page; real Bam window, tab and sidebar action; ephemeral profile; no API permission granted (optional prompts denied); measurement only, no WebKit verdict"
+        observations["scope"] = "original MV3 fixture on the loopback page; real Bam window, tab and sidebar action; ephemeral profile; no optional alarms permission granted (optional prompts denied); no external native companion used (nativeMessaging is listed only as Bam's internal prepared-worker transport); passive host-world observation, no page JavaScript evaluated by the host; measurement only, no WebKit verdict"
+        observations["protocol"] = [
+            "baseline_delay_ms_after_content_injection": Self.baselineDelayMilliseconds,
+            "arm_delay_ms_after_baseline_reply": Self.armDelayMilliseconds,
+            "host_world_activation_offsets_ms": Self.activationDelaysMilliseconds,
+            "host_world_triggers": "trusted probe-button click (capture listener) and each published worker result record (MutationObserver, after publication, not at the worker call)",
+            "phase_sampling_window_s": Self.samplingWindowSeconds,
+            "native_sample_interval_ms": Self.sampleMilliseconds,
+            "native_signals": "hasActiveUserGesture(in: tab) transitions and the worker's per-tab badge (arrival), sampled natively; native samples cannot exclude a pulse shorter than the interval",
+            "page_evaluation_by_host": "none (results arrive only as host-world script messages)",
+            "budget_s": Self.budget]
         watchdog = Timer.scheduledTimer(withTimeInterval: Self.budget - 5, repeats: false) { [weak self] _ in
             Task { @MainActor [weak self] in self?.finish(complete: false, reason: "budget reached before every phase was measured") }
         }
@@ -200,9 +330,6 @@ import WebKit
             if !badge.isEmpty {
                 arrivals.append(["badge": badge, "t_ms": ms(), "gesture_at_detection": gesture])
                 delayed.append((badge, ProcessInfo.processInfo.systemUptime + 1))
-                let now = ProcessInfo.processInfo.systemUptime
-                activationChecks += [(badge, now, "host_world_activation_at_detection"), (badge, now + 1, "host_world_activation_after_1s"),
-                                     (badge, now + 3, "host_world_activation_after_3s")]
             }
         }
         let now = ProcessInfo.processInfo.systemUptime
@@ -210,34 +337,6 @@ import WebKit
             if let index = arrivals.lastIndex(where: { $0["badge"] as? String == item.badge }) { arrivals[index]["gesture_after_1s"] = gesture }
         }
         delayed.removeAll { $0.due <= now }
-    }
-    /// `navigator.userActivation` of the tab's main frame, read from the probe's own content world.
-    private func hostWorldActivation() async -> Any {
-        guard let id = tabID, let web = controller?.browsers[id] else { return "no tab" }
-        let started = ProcessInfo.processInfo.systemUptime
-        do {
-            let value = try await web.evaluateJavaScript(
-                "navigator.userActivation ? {isActive: navigator.userActivation.isActive, hasBeenActive: navigator.userActivation.hasBeenActive} : null",
-                in: nil, contentWorld: hostWorld)
-            var result: [String: Any] = (value as? [String: Any]) ?? ["unavailable": true]
-            result["read_ms"] = Int(((ProcessInfo.processInfo.systemUptime - started) * 1000).rounded())
-            return result
-        } catch { return "error: \(String(describing: error).prefix(200))" }
-    }
-    private func runActivationChecks() async {
-        let now = ProcessInfo.processInfo.systemUptime
-        let due = activationChecks.filter { $0.due <= now }
-        activationChecks.removeAll { $0.due <= now }
-        for check in due {
-            let value = await hostWorldActivation()
-            if let index = arrivals.lastIndex(where: { $0["badge"] as? String == check.badge }) { arrivals[index][check.key] = value }
-        }
-    }
-    private func readPage() async {
-        guard let id = tabID, let web = controller?.browsers[id],
-              let text = try? await web.evaluateJavaScript("document.documentElement.dataset.bamGestureProbe || ''") as? String,
-              let data = text.data(using: .utf8), let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
-        pageResults = value
     }
     /// The phase's page entry, classified; nil until something answered.
     private func reply(_ kind: String) -> ExtensionGestureProbeRules.Reply? {
@@ -250,19 +349,16 @@ import WebKit
         phases[phase] = verdict
         return ExtensionGestureProbeRules.isMeasured(verdict)
     }
-    /// Polls every 20 ms (page every 200 ms) until `done` holds or the deadline passes.
+    /// Samples native state every 20 ms until `done` holds or the deadline passes. Page state arrives only through the
+    /// passive host-world messages; nothing here calls into the page.
     private func poll(until deadline: TimeInterval, _ done: () -> Bool) async throws -> Bool {
-        var tick = 0
         while ProcessInfo.processInfo.systemUptime < deadline {
             try Task.checkCancellation()
             sample()
-            if !activationChecks.isEmpty { await runActivationChecks() }
-            if tick % 10 == 0 { await readPage() }
-            tick += 1
             if done() { return true }
-            try await Task.sleep(nanoseconds: 20_000_000)
+            try await Task.sleep(nanoseconds: UInt64(Self.sampleMilliseconds) * 1_000_000)
         }
-        sample(); await readPage()
+        sample()
         return done()
     }
     private func settle(_ seconds: TimeInterval) async throws {
@@ -330,12 +426,14 @@ import WebKit
         observations["optional_permission_status_before"] = context.permissionStatus(for: WKWebExtension.Permission(rawValue: Self.optionalPermission)).rawValue
         phases["install"] = "done"
 
-        guard let opened = browser.openProfileTab(probePage, profileID: profile, active: true) else { throw BrowserExtensions.failure("Could not open the loopback probe tab") }
+        // 1. The plain fixture page first (no marker, so the content script stays inert), for the tab and its adapter.
+        guard let opened = browser.openProfileTab(page, profileID: profile, active: true) else { throw BrowserExtensions.failure("Could not open the loopback probe tab") }
         tabID = opened
         browser.select(opened); browser.refresh()
         let setupDeadline = started + 15
-        guard try await poll(until: setupDeadline, { browser.browsers[opened]?.url == probePage && browser.browsers[opened]?.isLoading == false }) else {
-            throw BrowserExtensions.failure("The loopback probe page did not load")
+        guard try await poll(until: setupDeadline, { browser.browsers[opened]?.url == page && browser.browsers[opened]?.isLoading == false }),
+              let web = browser.browsers[opened] else {
+            throw BrowserExtensions.failure("The loopback fixture page did not load")
         }
         host.reconcile(); browser.refreshExtensionActions()
         let runtime = context.webExtensionController?.delegate as? BrowserExtensionRuntime
@@ -345,32 +443,47 @@ import WebKit
         measuredContext = context; measuredTab = tab
         observations["gesture_at_page_load"] = context.hasActiveUserGesture(in: tab)
 
-        // Baseline: the content script's message without any click.
-        // A phase counts only with a well-formed worker reply for it and an observed arrival; failures are kept as such.
+        // 2. The passive host-world observer, installed before the probe page loads; then the probe page itself.
+        let content = web.configuration.userContentController
+        let proxy = HostMessages(); proxy.owner = self; messageProxy = proxy; observedContent = content
+        content.add(proxy, contentWorld: hostWorld, name: Self.hostMessageName)
+        content.addUserScript(WKUserScript(source: Self.hostScript, injectionTime: .atDocumentStart, forMainFrameOnly: true, in: hostWorld))
+        probePageURL = probePage
+        currentPhase = "baseline"
+        browser.navigatePane(opened, address: probePage.absoluteString)
+        guard try await poll(until: setupDeadline, { self.hostReady && browser.browsers[opened]?.url == probePage && browser.browsers[opened]?.isLoading == false }) else {
+            throw BrowserExtensions.failure(hostReady ? "The loopback probe page did not load" : "The passive host-world observer did not report from the probe page")
+        }
+
+        // 3. Baseline: the content script's message without any click. A phase counts only with a well-formed worker
+        // reply for it and an observed arrival; failures are kept as such.
         _ = try await poll(until: setupDeadline) { self.reply("baseline") != nil }
-        try await settle(1.1)
+        // The earlier denial is reset at once, so the click's request is not answered by a remembered refusal.
+        resetOptionalPermission(context, before: "page_click")
+        // The baseline record's whole sampling window, before any gesture is possible (the button arms after it).
+        try await settle(Self.samplingWindowSeconds)
         guard record("baseline", kind: "baseline") else {
             throw BrowserExtensions.failure("Baseline not measured: \(phases["baseline"] ?? "no reply")")
         }
 
-        // Real page click (root, pointer). The probe only waits. The earlier denial is reset first, so the click's
-        // request is not answered by a remembered refusal instead of by its gesture state.
-        resetOptionalPermission(context, before: "page_click")
+        // 4. Real page click (root, pointer). The content script arms itself; the host only observes that, then prints READY.
         main.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
         browser.select(opened)
-        // Host-world reading before any click: the comparison point for the arrival readings.
-        observations["host_world_activation_at_ready"] = await hostWorldActivation()
-        // Arm the button only now: clicks before READY are counted, never relayed, so phase order holds.
-        _ = try? await controller?.browsers[opened]?.evaluateJavaScript("document.documentElement.dataset.bamGestureArmed = '1'; true")
+        guard try await poll(until: ProcessInfo.processInfo.systemUptime + 3, { self.pageResults["armed"] as? Bool == true }) else {
+            throw BrowserExtensions.failure("The probe button did not arm")
+        }
+        currentPhase = "page_click"
         print("EXTENSION_GESTURE_READY click \"Bam gesture probe\" in window \"\(main.title)\" within \(Int(clickSeconds)) s"); fflush(stdout)
-        let clickDeadline = min(ProcessInfo.processInfo.systemUptime + clickSeconds, started + 47)
+        let clickDeadline = min(ProcessInfo.processInfo.systemUptime + clickSeconds, started + 40)
         let clicked = try await poll(until: clickDeadline) { self.reply("click") != nil }
         if clicked {
-            try await settle(1.1)
+            // The click's and its record's whole sampling windows, before the toolbar gesture.
+            try await settle(Self.samplingWindowSeconds)
             record("page_click", kind: "click")
         } else { phases["page_click"] = "no real click received" }
 
         // Toolbar: a fresh state first, so the click's gesture can't be credited to the toolbar.
+        currentPhase = "toolbar"
         observations["gesture_before_toolbar_clear"] = context.hasActiveUserGesture(in: tab)
         context.clearUserGesture(in: tab)
         observations["gesture_after_clear"] = context.hasActiveUserGesture(in: tab)
@@ -394,17 +507,22 @@ import WebKit
                 observations["toolbar_trigger"] = "real pointer click by root"
                 print("EXTENSION_GESTURE_READY click the Bam gesture probe toolbar button in window \"\(main.title)\" within 8 s"); fflush(stdout)
             }
-            // Ends with its 1.1 s settle before the 55 s watchdog.
-            let toolbarDeadline = min(ProcessInfo.processInfo.systemUptime + (toolbar == .real ? 8 : 5), started + 52.5)
+            // Ends with its sampling window (3.4 s) before the 55 s watchdog.
+            let toolbarDeadline = min(ProcessInfo.processInfo.systemUptime + (toolbar == .real ? 8 : 5), started + 48)
             let answered = try await poll(until: toolbarDeadline) { self.reply("toolbar") != nil }
             if answered {
-                try await settle(1.1)
+                try await settle(Self.samplingWindowSeconds)
                 record("toolbar", kind: "toolbar")
             } else { phases["toolbar"] = "no toolbar result" }
         }
+        currentPhase = "finish"
         let requested = ["install", "baseline", "page_click"] + (toolbar == .off ? [] : ["toolbar"])
-        let complete = requested.allSatisfy { phases[$0] == "done" || ExtensionGestureProbeRules.isMeasured(phases[$0]) }
-        finish(complete: complete, reason: complete ? "every requested phase measured" : "phases: \(phases)")
+        let phasesMeasured = requested.allSatisfy { phases[$0] == "done" || ExtensionGestureProbeRules.isMeasured(phases[$0]) }
+        // Every scheduled host-world reading is required; a missing one is reported, never silently treated as measured.
+        let missing = missingSamples()
+        let complete = phasesMeasured && missing.isEmpty && hostEventsDropped == 0
+        finish(complete: complete, reason: complete ? "every requested phase and host-world sample measured"
+               : "phases: \(phases); missing host-world samples: \(missing.prefix(20)); dropped host events: \(hostEventsDropped)")
     }
 
     // MARK: Finish, cleanup, output
@@ -420,6 +538,11 @@ import WebKit
         observations["arrivals"] = arrivals
         observations["permission_prompts"] = prompts
         observations["page"] = pageResults
+        observations["host_events"] = hostEvents
+        observations["host_events_dropped"] = hostEventsDropped
+        observations["host_messages_rejected"] = rejectedHostMessages
+        observations["host_world_ready"] = hostReady
+        observations["missing_host_samples"] = missingSamples()
         if let context = measuredContext {
             observations["optional_permission_status_after"] = context.permissionStatus(for: WKWebExtension.Permission(rawValue: Self.optionalPermission)).rawValue
         }
@@ -443,6 +566,13 @@ import WebKit
         var report: [String: Any] = [:]
         var clean = true
         measuredTab = nil; measuredContext = nil
+        // The run's message handler is removed; its user script (marker-gated, run-unique world) goes with the tab's
+        // controller when the window and browser are torn down below.
+        if let content = observedContent {
+            content.removeScriptMessageHandler(forName: Self.hostMessageName, contentWorld: hostWorld)
+            report["host_message_handler_removed"] = true
+        }
+        messageProxy?.owner = nil; messageProxy = nil
         if let id = extensionID, let browser = controller {
             final class Outcome { var done = false; var error: String? }
             let outcome = Outcome()
