@@ -155,6 +155,75 @@ final class ChildOutput: @unchecked Sendable {
         var events: [String] { lock.lock(); defer { lock.unlock() }; return entries }
     }
 
+    // MARK: Space theme (original synthetic values in Arc's real windowTheme schema)
+
+    /// Work keeps the repository fixture's mid-tone (0.2, 0.4, 0.9), so its nearest flat colour,
+    /// and every count, is unchanged; the rest is a full theme as Arc stores it.
+    private static let themeGradient: [[Double]] = [[0.86, 0.42, 0.30], [0.34, 0.27, 0.62]]
+    private static let themeLight: [String: [Double]] = ["background": [0.97, 0.94, 0.92], "backgroundExtra": [0.99, 0.97, 0.96],
+                                                         "title": [0.10, 0.08, 0.09], "subtitle": [0.38, 0.33, 0.35]]
+    private static let themeDark: [String: [Double]] = ["background": [0.11, 0.09, 0.12], "backgroundExtra": [0.15, 0.12, 0.16],
+                                                        "title": [0.96, 0.94, 0.95], "subtitle": [0.71, 0.66, 0.70]]
+    private static let themeAccent: [String: [Double]] = ["midTone": [0.2, 0.4, 0.9], "tintedLight": [0.82, 0.87, 0.99], "shaded": [0.14, 0.27, 0.62]]
+    private static func arcColor(_ c: [Double], alpha: Double = 1) -> [String: Any] {
+        ["red": c[0], "green": c[1], "blue": c[2], "alpha": alpha, "colorSpace": "extendedSRGB"]
+    }
+    private static func arcWindowTheme() -> [String: Any] {
+        func roles(_ p: [String: [Double]]) -> [String: Any] {
+            let ink = p["title"]!, ground = p["background"]!
+            return ["background": arcColor(ground), "backgroundExtra": arcColor(p["backgroundExtra"]!), "title": arcColor(ink),
+                    "subtitle": arcColor(p["subtitle"]!), "focus": arcColor(themeAccent["midTone"]!, alpha: 0.8),
+                    "hover": arcColor([0.5, 0.5, 0.5], alpha: 0.48), "foregroundPrimary": arcColor(ink),
+                    "foregroundSecondary": arcColor([0.6, 0.6, 0.6]), "foregroundTertiary": arcColor([0.7, 0.7, 0.7]),
+                    "cutoutColor": arcColor(ground), "maxContrastColor": arcColor(ink), "minContrastColor": arcColor(ground)]
+        }
+        let gradient: [String: Any] = ["baseColors": themeGradient.map { arcColor($0) }, "overlayColors": [Any](), "translucencyStyle": "light",
+                                       "modifiers": ["intensityFactor": 0.0, "noiseFactor": 0.0, "overlay": "grain"], "wheel": ["complimentary": [String: Any]()]]
+        return [
+            "primaryColorPalette": ["midTone": arcColor(themeAccent["midTone"]!), "tintedLight": arcColor(themeAccent["tintedLight"]!),
+                                    "shaded": arcColor(themeAccent["shaded"]!), "shadedDark": arcColor([0.08, 0.13, 0.30])],
+            "semanticColorPalette": ["appearanceBased": ["light": roles(themeLight), "dark": roles(themeDark)]],
+            "background": ["single": ["_0": ["style": ["color": ["_0": ["blendedGradient": ["_0": gradient]]]],
+                                             "isVibrant": true, "contentOverBackgroundAppearance": "light"]]]
+        ]
+    }
+    /// The SpaceTheme Bam must keep: Arc's semantic roles per appearance, its accent variants,
+    /// and the gradient's two original base colours (not the contrast-eased canvas stops).
+    private static var expectedTheme: SpaceTheme {
+        func rgba(_ c: [Double]) -> SpaceTheme.RGBA { SpaceTheme.RGBA(red: c[0], green: c[1], blue: c[2])! }
+        func roles(_ p: [String: [Double]]) -> SpaceTheme.Roles {
+            SpaceTheme.Roles(background: rgba(p["background"]!), backgroundExtra: rgba(p["backgroundExtra"]!), title: rgba(p["title"]!), subtitle: rgba(p["subtitle"]!))
+        }
+        return SpaceTheme(gradient: themeGradient.map(rgba), light: roles(themeLight), dark: roles(themeDark), accent: rgba(themeAccent["midTone"]!),
+                          accentLight: rgba(themeAccent["tintedLight"]!), accentDark: rgba(themeAccent["shaded"]!))!
+    }
+    /// The page/reference host: the topmost webHost subview other than the transient page
+    /// feedback overlay (every import shows "Imported N tabs from Arc" above everything).
+    private static func contentHost(of browser: BrowserController) -> NSView? {
+        browser.webHost.subviews.last { $0 !== browser.pageFeedback.view }
+    }
+    private static func encodedTheme(_ theme: SpaceTheme?) -> String? {
+        guard let theme else { return nil }
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+        return (try? encoder.encode(theme)).map { String(decoding: $0, as: UTF8.self) }
+    }
+    /// The layout copy with Work's windowTheme replaced by the full theme above.
+    private func withWorkTheme(_ data: Data) throws -> Data {
+        guard var root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              var sidebar = root["sidebar"] as? [String: Any], var containers = sidebar["containers"] as? [Any],
+              containers.count > 1, var main = containers[1] as? [String: Any], var spaces = main["spaces"] as? [Any],
+              let index = spaces.firstIndex(where: { ($0 as? [String: Any])?["title"] as? String == "Work" }),
+              var work = spaces[index] as? [String: Any] else { throw Failure.assertion("Fixture layout has a Work Space") }
+        var custom = work["customInfo"] as? [String: Any] ?? [:]
+        let previous = (((custom["windowTheme"] as? [String: Any])?["primaryColorPalette"] as? [String: Any])?["midTone"] as? [String: Any])
+        guard previous?["red"] as? Double == 0.2, previous?["green"] as? Double == 0.4, previous?["blue"] as? Double == 0.9 else {
+            throw Failure.assertion("Work keeps the repository fixture's mid-tone")
+        }
+        custom["windowTheme"] = Self.arcWindowTheme(); work["customInfo"] = custom; spaces[index] = work
+        main["spaces"] = spaces; containers[1] = main; sidebar["containers"] = containers; root["sidebar"] = sidebar
+        return try JSONSerialization.data(withJSONObject: root)
+    }
+
     // MARK: Imported icons (original synthetic PNGs; nothing is fetched)
 
     /// A relaunch child of this same executable: `--arc-import-test --arc-icon-child <mode> <dir> <expected icons>`.
@@ -365,13 +434,16 @@ final class ChildOutput: @unchecked Sendable {
             summary["icons"] = browser.importedTabIcons.count
             summary["colors"] = colors
             // The Easel reference survives the relaunch in its place and is shown natively.
-            if let work = browser.session.spaces.first(where: { $0.name == "Work" }) { summary["work_rows"] = rows(browser.session, work.id) }
+            if let work = browser.session.spaces.first(where: { $0.name == "Work" }) {
+                summary["work_rows"] = rows(browser.session, work.id)
+                summary["work_theme"] = Self.encodedTheme(work.theme) ?? "none"
+            }
             let easels = browser.session.tabs.filter { $0.isArcEasel && importedTabIDs(browser.session).contains($0.id) }
             summary["easel_rows"] = easels.map(\.displayTitle)
             if mode != "private", easels.count == 1 {
                 browser.select(easels[0].id)
                 summary["easel_native"] = browser.browsers[easels[0].id] == nil && !browser.pendingLoads.contains(easels[0].id)
-                    && (browser.webHost.subviews.last as? EaselReferenceView)?.shownName == easels[0].displayTitle
+                    && (Self.contentHost(of: browser) as? EaselReferenceView)?.shownName == easels[0].displayTitle
             }
             summary["imported_pages"] = importedTabIDs(browser.session).intersection(browser.browsers.keys).count
             summary["ok"] = true
@@ -545,7 +617,8 @@ final class ChildOutput: @unchecked Sendable {
         // Every imported address points at this listener, so "no page, no fetch" is observed, not assumed.
         tripwirePort = try await tripwire.start()
         gammaAddress = tripwireAddress(Self.gammaSourceAddress)
-        let data = try pointedAtTripwire(served)
+        // Work also gets a full Arc Space theme in the real windowTheme schema (original values).
+        let data = try withWorkTheme(pointedAtTripwire(served))
         let fixture = directory.appendingPathComponent(ArcImport.sourceFileName)
         try data.write(to: fixture)
         let source = try ArcImport.load(from: fixture)
@@ -553,6 +626,8 @@ final class ChildOutput: @unchecked Sendable {
         try check(source.nodes.values.contains { if case .tab(let url, _) = $0.kind { return url.hasPrefix("http://127.0.0.1:\(tripwirePort)/") }; return false }
                   && !source.nodes.values.contains { if case .tab(let url, _) = $0.kind { return url.hasPrefix("https://") }; return false },
                   "Every web address in the layout copy points at the tripwire")
+        try check(source.spaces.first { $0.title == "Work" }?.theme == Self.expectedTheme && source.spaces.filter { $0.theme != nil }.count == 1,
+                  "Work's Arc theme parses to exactly its semantic roles, accents and two original gradient colours")
         let icons = try writeIconCache(in: directory, source: source)
         let iconTitles = Set(icons.map(\.title))
         let rejectedIconItems = try Self.iconPlan.filter { !iconTitles.contains($0.title) }.map { entry -> (String, String) in
@@ -587,6 +662,7 @@ final class ChildOutput: @unchecked Sendable {
         guard let preview = sheet.report else { throw Failure.assertion("Choosing the fixture produces a preview") }
         try check(preview.refusal == nil && !preview.isEmpty && sheet.importButton.isEnabled, "Preview enables Import")
         try check(preview.spaces.map(\.title) == ["Work", "Home", "Side"] && preview.spaces.allSatisfy(\.isNew), "Preview lists three new Spaces")
+        try check(preview.importedThemes == 1 && preview.spaces.map(\.theme) == [true, false, false], "Preview marks Work's Arc theme, and only Work's")
         try check(preview.easels == 0 && preview.easelReferences == 1 && preview.spaces.first?.easels == 1 && preview.liveFolders == 1 && preview.invalidAddresses == 1 && preview.oversizedSplits == 1
                   && preview.favoriteOverflow == 2 && preview.unattachedProfiles == 1 && preview.flattenedTodayFolders == 1,
                   "Preview reports every approximation the fixture contains")
@@ -613,6 +689,15 @@ final class ChildOutput: @unchecked Sendable {
         let first = try await commitThroughSheet(sheet, "Import without Today")
         try check(first.planned.spaces.allSatisfy { $0.todayTabs == 0 } && first.planned.importedTabs == preview.importedTabs - todayInPreview,
                   "Import without Today previews no Today tabs")
+        // The imported theme: exactly Arc's colours and original gradient, on the Space now shown,
+        // and showing that themed Space wakes no imported page and connects nowhere.
+        try check(first.planned.importedThemes == 1, "The kept import brings Work's theme")
+        if let workSpace = controller.session.spaces.first(where: { $0.name == "Work" }) {
+            try check(workSpace.theme == Self.expectedTheme && workSpace.theme?.gradient == Self.expectedTheme.gradient,
+                      "Work keeps Arc's semantic colours, accents and original two-colour gradient")
+            try check(controller.session.space == workSpace.id && importedTabIDs(controller.session).isDisjoint(with: controller.browsers.keys)
+                      && tripwire.connections == 0, "Showing the themed Space wakes no imported page and makes no connection")
+        } else { throw Failure.assertion("Work exists after the kept import") }
         guard let work = controller.session.spaces.first(where: { $0.name == "Work" }),
               let home = controller.session.spaces.first(where: { $0.name == "Home" }),
               let side = controller.session.spaces.first(where: { $0.name == "Side" }) else { throw Failure.assertion("Imported Spaces exist") }
@@ -649,6 +734,8 @@ final class ChildOutput: @unchecked Sendable {
         let second = try await commitThroughSheet(sheet, "Import Today afterwards")
         try check(second.planned.importedTabs == todayInPreview && second.planned.importedFolders == 0
                   && second.planned.spaces.allSatisfy { !$0.isNew }, "Second import adds only the Today tabs to existing Spaces")
+        try check(second.planned.importedThemes == 0 && controller.session.spaceDefinition(work.id)?.theme == Self.expectedTheme,
+                  "The re-import neither reapplies nor changes Work's theme")
         let session = controller.session
         let importedIDs = importedTabIDs(session)
         let imported = session.tabs.filter { importedIDs.contains($0.id) }
@@ -696,6 +783,7 @@ final class ChildOutput: @unchecked Sendable {
         try check(try layout(reloaded) == layout(session), "Reloaded session keeps imported tabs, folders, Spaces, profiles, Splits and provenance")
         try check(rows(reloaded, work.id) == expected, "Reloaded hierarchy is identical")
         try check(reloaded.tabs.filter { importedIDs.contains($0.id) && $0.isSaved }.allSatisfy(\.isUnloaded), "Reloaded imported tabs are still dormant")
+        try check(reloaded.spaceDefinition(work.id)?.theme == Self.expectedTheme, "The saved session keeps Work's theme exactly")
 
         // The imported Easel: one named, dormant kept reference row in its place, without a web
         // address. Selecting it shows the native reference, with no page and no connection.
@@ -707,7 +795,7 @@ final class ChildOutput: @unchecked Sendable {
         try check(reloaded.tabs.contains { $0.id == sketch.id && $0.isArcEasel && $0.displayTitle == "Sketch" }, "The Easel reference row is saved")
         controller.select(sketch.id)
         try check(controller.session.activeID == sketch.id && controller.browsers[sketch.id] == nil
-                  && (controller.webHost.subviews.last as? EaselReferenceView)?.shownName == "Sketch",
+                  && (Self.contentHost(of: controller) as? EaselReferenceView)?.shownName == "Sketch",
                   "Selecting the imported Easel row shows its native reference view, with no page")
         try await Task.sleep(for: .milliseconds(300))
         try check(controller.browsers[sketch.id] == nil && !controller.pendingLoads.contains(sketch.id) && tripwire.connections == 0,
@@ -770,6 +858,9 @@ final class ChildOutput: @unchecked Sendable {
         try check(FileManager.default.fileExists(atPath: sessionFile.path)
                   && (try layout(SessionFile.load(sessionFile))) == beforeFailureLayout, "The written undo matches the layout before the import")
         try check(try layout(controller.session) == beforeFailureLayout, "The window matches the saved undo")
+        try check(controller.session.spaceDefinition(work.id)?.theme == Self.expectedTheme
+                  && SessionFile.load(sessionFile).spaceDefinition(work.id)?.theme == Self.expectedTheme,
+                  "Undoing a later failed import keeps the earlier imported theme, in the window and on disk")
         try await Task.sleep(for: .milliseconds(400))
         try check(controller.importedTabIcons.count == icons.count && tabID(forItem: Self.gammaItemID, in: controller.session) == nil,
                   "Undone imports install no icons")
@@ -809,6 +900,9 @@ final class ChildOutput: @unchecked Sendable {
                   && importChild["imported_pages"] as? Int == 0, "Import child shows and saves exactly the valid icons, creating no page")
         try check(importChild["work_rows"] as? [String] == expected && importChild["easel_rows"] as? [String] == ["Sketch"]
                   && importChild["easel_native"] as? Bool == true, "Import child keeps the Easel row in its place and shows it natively")
+        let expectedThemeJSON = Self.encodedTheme(Self.expectedTheme)
+        try check(expectedThemeJSON != nil && importChild["work_theme"] as? String == expectedThemeJSON,
+                  "Import child gives Work exactly Arc's theme colours and original gradient")
         let cacheFolder = persist.appendingPathComponent("ImportedIcons", isDirectory: true)
         try check(FileManager.default.fileExists(atPath: cacheFolder.appendingPathComponent("index.json").path), "Icons persist in the session's own cache")
         let reloadChild = try await launchChild("reload", folder: persist, expected: icons.count)
@@ -817,11 +911,14 @@ final class ChildOutput: @unchecked Sendable {
         try check(reloadChild["work_rows"] as? [String] == expected && reloadChild["easel_rows"] as? [String] == ["Sketch"]
                   && reloadChild["easel_native"] as? Bool == true,
                   "After relaunch the Easel row is still in its place and selecting it shows the native reference without a page")
+        try check(reloadChild["work_theme"] as? String == expectedThemeJSON,
+                  "After relaunch Work keeps exactly the same theme colours and original gradient, with no page woken")
         let digest = Self.treeDigest(cacheFolder)
         let isolated = try await launchChild("private", folder: persist, expected: 0)
         try check(isolated["icons"] as? Int == 0 && (isolated["colors"] as? [String: [Int]])?.isEmpty == true,
                   "A private relaunch on the same session shows no saved icons")
         try check(isolated["easel_rows"] as? [String] == ["Sketch"], "A private relaunch still loads the Easel row from the session")
+        try check(isolated["work_theme"] as? String == expectedThemeJSON, "A private relaunch reads the same theme from the session")
         try check(digest != nil && Self.treeDigest(cacheFolder) == digest, "A private relaunch leaves the icon cache unchanged")
         try check(Set(childPIDs).count == 3 && !childPIDs.contains(getpid()), "Three distinct relaunched processes, none of them this one")
         try check(tripwire.connections == 0, "No relaunched process connected to any imported address (\(tripwire.requestLines))")
