@@ -22,6 +22,14 @@ import WebKit
         var oneTimeAccess: Bool
         /// An engine message to show (for example a failed save); nil when there's nothing to report.
         var message: String? = nil
+        /// Time-limited grants the engine still honors (they end on their own and are never extended). Requested ones
+        /// belong to the site choice; separately approved ones came from the extension's own request.
+        var timedGrants: [TimedGrant] = []
+    }
+    struct TimedGrant: Equatable {
+        var pattern: String
+        var expires: Date
+        var separatelyApproved: Bool
     }
     /// A change the user asked for. The engine decides, applies and answers with a new snapshot.
     enum Action: Equatable {
@@ -60,8 +68,13 @@ import WebKit
     /// modal; tests substitute a decision.
     var confirmPending: (([String], Snapshot) -> Bool)?
     var onClose: (() -> Void)?
-    /// The app's Manage Extensions styling (wash and pill buttons), like `ExtensionManagement.dress`; nil keeps AppKit's.
+    /// The app's Manage Extensions styling, like `ExtensionManagement.dress` and friends; nil keeps AppKit's.
+    /// `dress` themes the window surface and footer; `restyle` themes the scrolling details (fonts, pill buttons,
+    /// fields, the site list card); `restyleCell` and `rowView` theme site-list rows.
     static var dress: ((NSWindow?, NSView) -> Void)?
+    static var restyle: ((NSView) -> Void)?
+    static var restyleCell: ((NSTextField) -> Void)?
+    static var rowView: (() -> NSTableRowView)?
 
     private(set) var snapshot: Snapshot
     /// "On specific sites" picked but no site added yet: the editor shows, nothing has changed.
@@ -77,7 +90,8 @@ import WebKit
     let sitesTable = NSTableView()
     private let sitesScroll = NSScrollView()
     let siteField = NSTextField()
-    let subdomainsBox = NSButton(checkboxWithTitle: "Include subdomains", target: nil, action: nil)
+    let subdomainsBox = NSSwitch()
+    private let subdomainsLabel = NSTextField(labelWithString: "Include subdomains")
     let addButton = NSButton(title: "Add Site", target: nil, action: nil)
     let removeButton = NSButton(title: "Remove", target: nil, action: nil)
     private let editor = NSStackView()
@@ -86,6 +100,7 @@ import WebKit
     let pendingButton = NSButton(title: "Review New Sites…", target: nil, action: nil)
     private let pendingRow = NSStackView()
     let optionalLabel = NSTextField(wrappingLabelWithString: "")
+    let timedLabel = NSTextField(wrappingLabelWithString: "")
     let reloadNotice = NSTextField(wrappingLabelWithString: "Reload open pages for this change to take effect.")
     let doneButton = NSButton(title: "Done", target: nil, action: nil)
     private let heading = NSTextField(labelWithString: "Site Access")
@@ -143,7 +158,7 @@ import WebKit
         prompt.font = .systemFont(ofSize: 13)
         modeMenu.target = self; modeMenu.action = #selector(modeChanged)
         let modeRow = NSStackView(views: [prompt, modeMenu]); modeRow.spacing = 8
-        for label in [modeHelp, requestedLabel, optionalLabel, pendingLabel, reloadNotice] {
+        for label in [modeHelp, requestedLabel, optionalLabel, timedLabel, pendingLabel, reloadNotice] {
             label.font = .systemFont(ofSize: 12); label.textColor = .secondaryLabelColor; label.preferredMaxLayoutWidth = 436
         }
         reloadNotice.textColor = .labelColor; reloadNotice.isHidden = true
@@ -163,11 +178,12 @@ import WebKit
         siteField.target = self; siteField.action = #selector(addSite)   // Return in the field adds
         siteField.translatesAutoresizingMaskIntoConstraints = false
         siteField.widthAnchor.constraint(greaterThanOrEqualToConstant: 160).isActive = true
-        subdomainsBox.setAccessibilityLabel("Include subdomains of the site")
+        subdomainsBox.setAccessibilityLabel("Include subdomains of the site"); subdomainsBox.controlSize = .small
+        subdomainsLabel.font = .systemFont(ofSize: 12); subdomainsLabel.textColor = .secondaryLabelColor
         addButton.target = self; addButton.action = #selector(addSite)
         removeButton.target = self; removeButton.action = #selector(removeSelectedSite)
         removeButton.setAccessibilityLabel("Remove selected site")
-        let addRow = NSStackView(views: [siteField, subdomainsBox, addButton]); addRow.spacing = 8
+        let addRow = NSStackView(views: [siteField, subdomainsBox, subdomainsLabel, addButton]); addRow.spacing = 8
         let listRow = NSStackView(views: [sitesScroll])
         let removeRow = NSStackView(views: [removeButton])
         editor.orientation = .vertical; editor.alignment = .leading; editor.spacing = 6
@@ -182,7 +198,7 @@ import WebKit
         // Long manifests (many requested, pending or optional sites) never push controls out of the window: the
         // details scroll inside a bounded region, and Done stays in a fixed footer.
         let stack = NSStackView(views: [heading, subheading, modeRow, modeHelp, requestedLabel, editor, feedbackLabel,
-                                        pendingRow, optionalLabel, reloadNotice])
+                                        pendingRow, optionalLabel, timedLabel, reloadNotice])
         stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 10
         stack.edgeInsets = NSEdgeInsets(top: 20, left: 22, bottom: 12, right: 22)
         stack.setCustomSpacing(2, after: heading)
@@ -196,7 +212,11 @@ import WebKit
         let footer = NSStackView(views: [NSView(), doneButton]); footer.distribution = .fill
         footer.translatesAutoresizingMaskIntoConstraints = false
         let separator = NSBox(); separator.boxType = .separator; separator.translatesAutoresizingMaskIntoConstraints = false
-        [detailScroll, separator, footer].forEach(root.addSubview)
+        // Theme the window surface and footer first, then the details content inside its scroll region (the
+        // region itself stays a plain, borderless scroll; only the site list becomes a card).
+        [separator, footer].forEach(root.addSubview)
+        Self.dress?(window, root)
+        root.addSubview(detailScroll)
         NSLayoutConstraint.activate([
             detailScroll.topAnchor.constraint(equalTo: root.topAnchor), detailScroll.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             detailScroll.trailingAnchor.constraint(equalTo: root.trailingAnchor), detailScroll.bottomAnchor.constraint(equalTo: separator.topAnchor),
@@ -211,7 +231,8 @@ import WebKit
             stack.topAnchor.constraint(equalTo: document.topAnchor), stack.bottomAnchor.constraint(equalTo: document.bottomAnchor)
         ])
         window.initialFirstResponder = modeMenu
-        Self.dress?(window, root)
+        Self.restyle?(document)
+        feedbackLabel.textColor = .systemRed   // a problem stays visibly a problem after theming
     }
 
     // MARK: Rendering (pure function of the snapshot plus the local draft)
@@ -228,7 +249,8 @@ import WebKit
     /// overlap them, so nothing here denies access), and says separately approved access remains. Patterns aren't
     /// counted as sites (one optional `*://*/*` is every site).
     static let separatelyApproved = "Separately approved access remains (listed below)."
-    static func help(for mode: ExtensionSiteAccess.Mode, drafting: Bool, oneTimeAccess: Bool, hasOptionalGrants: Bool = false) -> String {
+    static let timeLimited = "Some access is time-limited and ends on its own (listed below)."
+    static func help(for mode: ExtensionSiteAccess.Mode, drafting: Bool, oneTimeAccess: Bool, hasOptionalGrants: Bool = false, hasTimedGrants: Bool = false) -> String {
         let requested: String
         if drafting { requested = "Add a site below to allow only specific requested sites. Until then, this setting stays as it is." }
         else {
@@ -242,7 +264,20 @@ import WebKit
             case .allRequested: requested = "This setting allows every site it requests that you approved."
             }
         }
-        return hasOptionalGrants ? requested + " " + separatelyApproved : requested
+        return [requested, hasOptionalGrants ? separatelyApproved : nil, hasTimedGrants ? timeLimited : nil].compactMap { $0 }.joined(separator: " ")
+    }
+    /// The time-limited grants line: each pattern with when it ends, separately approved ones marked.
+    static func timedDescription(_ grants: [TimedGrant]) -> String {
+        guard !grants.isEmpty else { return "" }
+        let format = DateFormatter(); format.dateStyle = .medium; format.timeStyle = .short
+        let items = grants.sorted { $0.pattern < $1.pattern }.map {
+            "\($0.pattern) until \(format.string(from: $0.expires))\($0.separatelyApproved ? " (asked for separately)" : "")"
+        }
+        return "Time-limited (ends on its own, never extended): " + items.joined(separator: "; ")
+    }
+    /// What is actually granted: this setting's patterns, still-declared optional grants, and time-limited grants.
+    static func effectivePatterns(_ snapshot: Snapshot) -> Set<String> {
+        ExtensionSiteAccess.grantedPatterns(snapshot.state, declarations: snapshot.declarations).union(snapshot.timedGrants.map(\.pattern))
     }
     static func describe(_ refusal: ExtensionSiteAccess.Refusal) -> String {
         switch refusal {
@@ -271,9 +306,13 @@ import WebKit
         modeMenu.setAccessibilityLabel("Site access for \(snapshot.extensionName)")
         let requestsNothing = decl.requested.isEmpty
         let hasOptional = state.optionalGrants.contains { ExtensionSiteAccess.isCovered($0, by: decl.optional + decl.requested) }
+        let hasTimed = !snapshot.timedGrants.isEmpty
         modeHelp.stringValue = requestsNothing
-            ? "This extension doesn’t require access to any website." + (hasOptional ? " " + Self.separatelyApproved : "")
-            : Self.help(for: state.mode, drafting: draftingSites, oneTimeAccess: snapshot.oneTimeAccess, hasOptionalGrants: hasOptional)
+            ? (["This extension doesn’t require access to any website.", hasOptional ? Self.separatelyApproved : nil, hasTimed ? Self.timeLimited : nil]
+                .compactMap { $0 }.joined(separator: " "))
+            : Self.help(for: state.mode, drafting: draftingSites, oneTimeAccess: snapshot.oneTimeAccess, hasOptionalGrants: hasOptional, hasTimedGrants: hasTimed)
+        timedLabel.stringValue = Self.timedDescription(snapshot.timedGrants)
+        timedLabel.isHidden = !hasTimed
         requestedLabel.stringValue = requestsNothing ? "" : "Requested: " + decl.requested.sorted().joined(separator: ", ")
         requestedLabel.isHidden = requestsNothing
         let sites: [String] = { if case .specific(let sites) = state.mode, !draftingSites { return sites }; return [] }()
@@ -292,9 +331,7 @@ import WebKit
         feedbackLabel.isHidden = feedbackLabel.stringValue.isEmpty
         // Reload notice only when the engine's answer changed what is actually granted.
         if let previous {
-            let before = ExtensionSiteAccess.grantedPatterns(previous.state, declarations: previous.declarations)
-            let after = ExtensionSiteAccess.grantedPatterns(snapshot.state, declarations: snapshot.declarations)
-            if before != after { reloadNotice.isHidden = false }
+            if Self.effectivePatterns(previous) != Self.effectivePatterns(snapshot) { reloadNotice.isHidden = false }
         }
         let enabled = !busy && !requestsNothing
         modeMenu.isEnabled = enabled
@@ -402,8 +439,10 @@ import WebKit
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         let label = NSTextField(labelWithString: listedSites.indices.contains(row) ? listedSites[row] : "")
         label.font = .systemFont(ofSize: 12); label.setAccessibilityLabel(label.stringValue)
+        Self.restyleCell?(label)
         return label
     }
+    func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? { Self.rowView?() }
     func tableViewSelectionDidChange(_ notification: Notification) { updateRemoveButton() }
     /// Delete or Forward Delete in the site list removes the selected site (the Remove button's equivalent).
     override func deleteBackward(_ sender: Any?) { if window?.firstResponder === sitesTable { removeSelectedSite() } else { super.deleteBackward(sender) } }

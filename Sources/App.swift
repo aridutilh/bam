@@ -81,6 +81,11 @@ import WebKit
             ExtensionManagement.dress = { BamSheetStyle.dress(window: $0, root: $1) }
             ExtensionManagement.rowView = { BamTableRowView() }
             ExtensionManagement.restyleCell = { $0.font = BamType.sans(12.5); $0.textColor = BamTheme.ink }
+            // The Site Access sheet wears the same theme as the extension manager it opens from.
+            ExtensionSiteAccessPanel.dress = { BamSheetStyle.dress(window: $0, root: $1) }
+            ExtensionSiteAccessPanel.restyle = { BamSheetStyle.restyle($0) }
+            ExtensionSiteAccessPanel.restyleCell = { $0.font = BamType.sans(12.5); $0.textColor = BamTheme.ink }
+            ExtensionSiteAccessPanel.rowView = { BamTableRowView() }
         }
         BrowserLibrary.dress = { BamSheetStyle.dress(window: $0, root: $1) }
         BrowserLibrary.rowView = { BamTableRowView() }

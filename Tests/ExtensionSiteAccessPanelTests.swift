@@ -221,6 +221,28 @@ import WebKit
             require(!label.isEmpty && !label.contains("Refusal"), "Every refusal has plain wording: \(label)")
         }
 
+        // MARK: Time-limited grants are shown with when they end, and count as access.
+        let ends = Date(timeIntervalSinceNow: 3_600)
+        var timedSnapshot = Panel.Snapshot(extensionID: UUID(), profileID: UUID(), revision: 1, extensionName: "Timed", profileName: "Work",
+                                           state: .withheld(), declarations: docs, oneTimeAccess: false,
+                                           timedGrants: [.init(pattern: "https://api.docs.example/*", expires: ends, separatelyApproved: false),
+                                                         .init(pattern: optionalGrant, expires: ends, separatelyApproved: true)])
+        let timedPanel = Panel(snapshot: timedSnapshot)
+        require(visible(timedPanel.timedLabel) && timedPanel.timedLabel.stringValue.contains("https://api.docs.example/* until")
+                && timedPanel.timedLabel.stringValue.contains("\(optionalGrant) until") && timedPanel.timedLabel.stringValue.contains("(asked for separately)")
+                && timedPanel.timedLabel.stringValue.contains("never extended"), "Time-limited grants are listed with their end and provenance")
+        require(timedPanel.modeHelp.stringValue.contains(Panel.timeLimited) && timedPanel.modeHelp.stringValue.hasPrefix("This setting allows none"),
+                "Withheld with a time-limited requested grant doesn't claim no access: it says some access ends on its own")
+        require(!visible(withheldPanel.timedLabel) && !withheldPanel.modeHelp.stringValue.contains(Panel.timeLimited), "No time-limited line without such grants")
+        var timedEngineSide = timedSnapshot; timedEngineSide.revision = 2; timedEngineSide.timedGrants = [timedSnapshot.timedGrants[1]]
+        let timedEngine = FakeEngine(timedSnapshot)
+        timedPanel.perform = { request, completion in timedEngine.requests.append(request); completion(.success(timedEngineSide)) }
+        pick(timedPanel, tag: 2)
+        require(visible(timedPanel.reloadNotice) && !timedPanel.timedLabel.stringValue.contains("api.docs.example"),
+                "Ending a time-limited grant is a change in effective access: reload notice")
+        timedSnapshot.timedGrants = []
+        require(Panel.effectivePatterns(timedSnapshot) == [], "Effective access is the setting's patterns plus time-limited grants")
+
         // MARK: Review (1): a stale answer never lands on a replaced snapshot or a newer request.
         let (stalePanel, staleEngine) = make(.withheld())
         staleEngine.holdNext = true
