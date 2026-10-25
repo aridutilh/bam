@@ -919,17 +919,20 @@ enum ArkPalette {
     /// against its own window gradient) when it has a theme, else its flat tint.
     static func spaceTint(for space: BrowserSpace) -> NSColor {
         guard let theme = space.theme else { return spaceTint(space.colorIndex) }
-        if let cached = themedTints[theme] { return cached }
+        // The fallback flat tint depends on the Space's color, so it's part of the key.
+        let key = ThemedTintKey(theme: theme, colorIndex: space.colorIndex)
+        if let cached = themedTints[key] { return cached }
         // Where the theme can't be shown (the window falls back to the flat
         // color in that appearance), the flat tint goes with it.
         let flat = spaceTint(space.colorIndex)
         let tint = NSColor.chrome(light: theme.accent(dark: false).map(NSColor.init(spaceTheme:)) ?? flat,
                                   dark: theme.accent(dark: true).map(NSColor.init(spaceTheme:)) ?? flat)
         if themedTints.count > 64 { themedTints.removeAll() }
-        themedTints[theme] = tint   // one instance per theme keeps identity comparisons stable
+        themedTints[key] = tint   // one instance per theme and color keeps identity comparisons stable
         return tint
     }
-    private static var themedTints: [SpaceTheme: NSColor] = [:]
+    private struct ThemedTintKey: Hashable { let theme: SpaceTheme; let colorIndex: Int }
+    private static var themedTints: [ThemedTintKey: NSColor] = [:]
     /// Built once so identity comparisons stay stable across updates.
     private static let spaceTints: [NSColor] = spaceColors.map { base in
         let deep = base.usingColorSpace(.deviceRGB).map {

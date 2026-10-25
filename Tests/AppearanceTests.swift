@@ -108,6 +108,12 @@ import AppKit
         require(resolved(invertedTint, .aqua).isEqualIgnoringAlpha(resolved(ArkPalette.spaceTint(2), .aqua))
                 && !resolved(invertedTint, .darkAqua).isEqualIgnoringAlpha(resolved(ArkPalette.spaceTint(2), .darkAqua)),
                 "The tint follows: flat where the canvas is flat, themed where it's themed")
+        // The same theme on Spaces with different flat colors falls back to each one's own tint.
+        let invertedOther = BrowserSpace(id: 8, name: "Inverted other", symbol: "globe", colorIndex: 4, theme: invertedLight)
+        let otherTint = ArkPalette.spaceTint(for: invertedOther)
+        require(otherTint !== invertedTint && resolved(otherTint, .aqua).isEqualIgnoringAlpha(resolved(ArkPalette.spaceTint(4), .aqua))
+                && ArkPalette.spaceTint(for: invertedOther) === otherTint,
+                "A cached themed tint is per theme and color: each Space's fallback is its own flat tint")
         print("PASS: \(checks) appearance preference and color token checks")
     }
 }
