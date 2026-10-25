@@ -968,15 +968,108 @@ import Darwin
             try check(reviewsShown == 0 && urlAnswer == [] && patternAnswer == [] && deniedKeys(undeclaredURL).isEmpty &&
                 liveContext.permissionStatus(for: undeclaredURL) != .deniedExplicitly,
                 "A refusal the user never saw recorded a denial or showed a review: shown=\(reviewsShown), denied=\(deniedKeys(undeclaredURL))")
-            // Offered and declined (an optional site): that is the user's decision, so it is denied.
-            let declinedURL = URL(string: "http://localhost/declined")!
-            var declinedAnswer: Set<URL>?
-            promptRuntime.webExtensionController(promptController, promptForPermissionToAccess: [declinedURL], in: nil, for: liveContext) { granted, _ in declinedAnswer = granted }
-            try check(reviewsShown == 1 && declinedAnswer == [] && liveContext.permissionStatus(for: declinedURL) == .deniedExplicitly && !deniedKeys(declinedURL).isEmpty,
-                "An offered and declined site must be denied: shown=\(reviewsShown), status=\(liveContext.permissionStatus(for: declinedURL).rawValue)")
-            // Test cleanup only: drop the fixture's declined denial so later checks start from the same state.
-            for key in liveContext.deniedPermissionMatchPatterns.keys where key.matches(declinedURL) { liveContext.deniedPermissionMatchPatterns.removeValue(forKey: key) }
+        }
+        /// Chrome-style consent (work/chrome-implicit-url-consent-policy.md): WebKit's *implicit* URL requests (tab reads,
+        /// injection, cookies, CORS) are answered empty with no review and no denial, even for an optional or a
+        /// requested-but-withheld site. Only explicit pattern requests (permissions.request) are reviewed. Runs before
+        /// checkSiteAccess, from and back to All requested, so it is independent of that function's steps.
+        func checkExplicitConsent() async throws {
+            let ip = URL(string: "http://127.0.0.1/site-access")!, newSite = URL(string: "https://new.invalid/")!
+            func granted(_ url: URL) -> Bool {
+                guard let status = host.context(for: extensionID)?.permissionStatus(for: url) else { return false }
+                return status == .grantedExplicitly || status == .grantedImplicitly
+            }
+            func perform(_ snapshot: BrowserExtensionSiteAccessSnapshot, _ change: BrowserExtensionSiteAccessChange) throws -> BrowserExtensionSiteAccessSnapshot {
+                try host.performSiteAccess(id: extensionID, profileID: profile, revision: snapshot.revision, displayed: snapshot.declarations!, change: change)
+            }
+            func deniedKeys(_ url: URL) -> [String] {
+                (host.context(for: extensionID)?.deniedPermissionMatchPatterns.keys.filter { $0.matches(url) }.map(\.string) ?? []) +
+                (host.records.first { $0.id == extensionID }?.deniedPatterns.keys.filter { (try? WKWebExtension.MatchPattern(string: $0))?.matches(url) == true } ?? [])
+            }
+            guard let liveContext = host.context(for: extensionID), let promptController = liveContext.webExtensionController,
+                  let promptRuntime = promptController.delegate as? BrowserExtensionRuntime else { throw ExtensionSmokeTest.Failure(description: "No live runtime for consent checks") }
+            try check(host.siteAccess(id: extensionID)?.state.mode == .allRequested && granted(ip) && granted(newSite), "Consent checks did not start from All requested")
+            let earlierPrompt = host.permissionPrompt
+            defer { host.permissionPrompt = earlierPrompt }
+            var reviewsShown = 0
+            // A subset of the optional https://optional.invalid/* that overlaps no seeded grant or denial: WebKit can drop
+            // grants a denied pattern covers, and the time-limited http://localhost/kept/* grant must survive for later steps.
+            let optionalURL = URL(string: "https://optional.invalid/consent/page")!, optionalOrigin = "https://optional.invalid/consent/*"
+            let consentBase = try perform(host.siteAccess(id: extensionID)!, .choose(.withheld))
+            var implicitAnswer: Set<URL>?
+            host.permissionPrompt = { _ in reviewsShown += 1; return true }
+            promptRuntime.webExtensionController(promptController, promptForPermissionToAccess: [optionalURL, ip], in: nil, for: liveContext) { granted, _ in implicitAnswer = granted }
+            try check(reviewsShown == 0 && implicitAnswer == [] && !granted(ip) && deniedKeys(optionalURL).isEmpty && deniedKeys(ip).isEmpty &&
+                host.siteAccess(id: extensionID)?.state.mode == .withheld && host.siteAccess(id: extensionID)?.revision == consentBase.revision,
+                "An implicit URL request showed a review, granted, denied or changed Site Access: shown=\(reviewsShown), answer=\(String(describing: implicitAnswer))")
+            // Explicit consent keeps its decision: an offered and declined pattern is denied.
+            let optionalPattern = try WKWebExtension.MatchPattern(string: optionalOrigin)
+            var declinedAnswer: Set<WKWebExtension.MatchPattern>?
+            host.permissionPrompt = { _ in reviewsShown += 1; return false }
+            promptRuntime.webExtensionController(promptController, promptForPermissionMatchPatterns: [optionalPattern], in: nil, for: liveContext) { granted, _ in declinedAnswer = granted }
+            try check(reviewsShown == 1 && declinedAnswer == [] && liveContext.permissionStatus(for: optionalURL) == .deniedExplicitly && !deniedKeys(optionalURL).isEmpty,
+                "An offered and declined pattern must be denied: shown=\(reviewsShown), status=\(liveContext.permissionStatus(for: optionalURL).rawValue)")
+            // Test cleanup only: drop the declined denial so the installed-engine checks below start from the same state.
+            for key in liveContext.deniedPermissionMatchPatterns.keys where key.matches(optionalURL) { liveContext.deniedPermissionMatchPatterns.removeValue(forKey: key) }
             host.persistPermissions(liveContext)
+
+            // The same policy through the installed engine, from a real extension page and a real 127.0.0.1 tab.
+            guard let consentConfiguration = liveContext.webViewConfiguration else { throw ExtensionSmokeTest.Failure(description: "No extension page configuration") }
+            let consentTabURL = { () -> URL in
+                var components = URLComponents(url: url, resolvingAgainstBaseURL: false)!; components.query = "consent"; return components.url!
+            }()
+            guard let consentTab = controller.openProfileTab(consentTabURL, profileID: profile, active: false) else { throw ExtensionSmokeTest.Failure(description: "No consent tab") }
+            defer { _ = host.closeTab?(consentTab) }
+            try await wait("The consent tab did not load") { controller.browsers[consentTab]?.url == consentTabURL && controller.browsers[consentTab]?.isLoading == false }
+            let consentPage = WKWebView(frame: NSRect(x: 0, y: 0, width: 320, height: 240), configuration: consentConfiguration)
+            defer { consentPage.stopLoading() }
+            consentPage.load(URLRequest(url: liveContext.baseURL.appendingPathComponent("page.html")))
+            try await wait("The extension page for consent checks did not load") { consentPage.title == "Bam extension page ready" }
+            promptRuntime.reconcile()
+            guard let surface = promptRuntime.currentSurface(consentTab) else { throw ExtensionSmokeTest.Failure(description: "The consent tab is not visible to the extension") }
+            let consentIndex = promptRuntime.tabIndex(consentTab, in: promptRuntime.windowKey(surface))
+            func consentProbe(_ body: String, _ arguments: [String: Any] = [:]) async throws -> [String: Any] {
+                let script = "const tab = (await browser.tabs.query({})).find((t) => t.index === index && t.windowId !== undefined); return JSON.stringify(await (async () => {\n" + body + "\n})());"
+                let text = try await consentPage.callAsyncJavaScript(script, arguments: arguments.merging(["index": consentIndex]) { a, _ in a }, contentWorld: .page) as? String
+                guard let data = text?.data(using: .utf8), let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                    throw ExtensionSmokeTest.Failure(description: "Consent probe returned \(text ?? "nil")")
+                }
+                return value
+            }
+            let injection = "return await browser.scripting.executeScript({target: {tabId: tab.id}, func: () => document.location.host})" +
+                ".then((r) => 'ran:' + (r && r[0] && r[0].result), (e) => 'refused:' + String(e && e.message));"
+            // Withheld requested host: tab reads, injection and a CORS fetch neither prompt nor grant (the prompt would approve).
+            reviewsShown = 0
+            host.permissionPrompt = { _ in reviewsShown += 1; return true }
+            let withheldUse = try await consentProbe("""
+                const read = (await browser.tabs.query({})).length;
+                const injected = await (async () => { \(injection) })();
+                const fetched = await fetch(target, {credentials: 'include'}).then((r) => 'read:' + r.status, (e) => 'refused');
+                return {found: !!tab, read, injected, fetched};
+                """, ["target": consentTabURL.absoluteString])
+            try check(withheldUse["found"] as? Bool == true && reviewsShown == 0 && (withheldUse["injected"] as? String)?.hasPrefix("refused:") == true &&
+                withheldUse["fetched"] as? String == "refused" && !granted(ip) && deniedKeys(ip).isEmpty &&
+                host.siteAccess(id: extensionID)?.state.mode == .withheld && host.siteAccess(id: extensionID)?.revision == consentBase.revision,
+                "Using a withheld requested site prompted, granted, denied or changed Site Access: shown=\(reviewsShown), \(withheldUse)")
+            // An explicit request reaches the pattern review once; declining denies, approving grants and injection then works.
+            var reviewed: [BrowserExtensionPermissionReview] = []
+            host.permissionPrompt = { review in reviewed.append(review); return false }
+            let declinedRequest = try await consentProbe("return {granted: await browser.permissions.request({origins: [origin]})};", ["origin": optionalOrigin])
+            try check(reviewed.count == 1 && reviewed[0].websites == [optionalOrigin] && reviewed[0].permissions.isEmpty &&
+                declinedRequest["granted"] as? Bool == false && liveContext.permissionStatus(for: optionalURL) == .deniedExplicitly,
+                "A declined permissions.request did not show one pattern review or record its denial: \(reviewed.map(\.websites)) \(declinedRequest)")
+            for key in liveContext.deniedPermissionMatchPatterns.keys where key.matches(optionalURL) { liveContext.deniedPermissionMatchPatterns.removeValue(forKey: key) }
+            host.persistPermissions(liveContext)
+            reviewed = []
+            host.permissionPrompt = { review in reviewed.append(review); return true }
+            let approvedRequest = try await consentProbe("const granted = await browser.permissions.request({origins: ['http://127.0.0.1/*']}); const injected = await (async () => { \(injection) })(); return {granted, injected};")
+            try check(reviewed.count == 1 && reviewed[0].websites == ["http://127.0.0.1/*"] && approvedRequest["granted"] as? Bool == true && granted(ip) &&
+                (approvedRequest["injected"] as? String)?.hasPrefix("ran:127.0.0.1") == true &&
+                host.siteAccess(id: extensionID)?.state.mode == .specific(["http://127.0.0.1/*"]),
+                "An approved permissions.request did not review once, list the site and allow injection: \(reviewed.map(\.websites)) \(approvedRequest) mode=\(String(describing: host.siteAccess(id: extensionID)?.state.mode))")
+            // Back to every requested site for the steps after this check.
+            let consentRestored = try perform(host.siteAccess(id: extensionID)!, .choose(.allRequested))
+            try check(consentRestored.state.mode == .allRequested && granted(ip) && granted(newSite), "Site Access was not restored after the consent checks")
         }
         let originalContext = host.context(for: extensionID)!
         seedOptionalPermissions(originalContext)
@@ -1082,6 +1175,7 @@ import Darwin
             "Approved update did not activate its final package")
         guard let updatedPopup = host.context(for: extensionID)?.action(for: nil)?.popupWebView else { throw ExtensionSmokeTest.Failure(description: "Updated package has no popup") }
         try await wait("Updated extension still looked for scripts at the staging URL") { (try? await updatedPopup.evaluateJavaScript("document.title")) as? String == "Bam fixture ready" }
+        try await checkExplicitConsent()
         try await checkSiteAccess()
         try await host.setEnabled(false, id: extensionID)
         controller.refresh()
