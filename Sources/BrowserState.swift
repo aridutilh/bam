@@ -260,13 +260,13 @@ struct BrowserSession: Codable {
         return BrowserSession(tabs: [welcome], activeID: welcome.id, lastSelectedTabIDsBySpace: [0: welcome.id])
     }
     static func fresh() -> BrowserSession {
-        let home = BrowserTab(title: "A little space", address: "orbit://newtab", space: 0)
+        let home = BrowserTab(title: "New tab", address: "orbit://newtab", space: 0)
         return BrowserSession(tabs: [
             BrowserTab(title: "Apple Developer", address: "https://developer.apple.com", space: 0, pinned: true),
             BrowserTab(title: "GitHub", address: "https://github.com", space: 0, pinned: true), home,
-            BrowserTab(title: "A little space", address: "orbit://newtab", space: 1),
+            BrowserTab(title: "New tab", address: "orbit://newtab", space: 1),
             BrowserTab(title: "Wikipedia", address: "https://www.wikipedia.org", space: 2, pinned: true),
-            BrowserTab(title: "A little space", address: "orbit://newtab", space: 2)
+            BrowserTab(title: "New tab", address: "orbit://newtab", space: 2)
         ], activeID: home.id, lastSelectedTabIDsBySpace: [0: home.id])
     }
     var active: BrowserTab? { tabs.first { $0.id == activeID } }

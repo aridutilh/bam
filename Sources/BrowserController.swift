@@ -354,7 +354,24 @@ import QuartzCore
         window.backgroundColor = windowTranslucent ? .clear : NSColor(white: 0.10, alpha: 1)
         window.invalidateShadow()
     }
-    override func viewDidAppear() { super.viewDidAppear(); applyWindowTranslucency() }
+    override func viewDidAppear() { super.viewDidAppear(); applyWindowTranslucency(); layoutBrowser() }
+
+    /// Arc hides the traffic lights together with the sidebar: once the page
+    /// owns the whole window the close/minimize/zoom buttons fade out with the
+    /// card's margin, and they return as the sidebar slides back in.
+    var windowButtonsHidden: Bool {
+        guard let window = view.window else { return false }
+        return [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton]
+            .allSatisfy { window.standardWindowButton($0)?.isHidden ?? true }
+    }
+    func applyWindowButtons(collapse: CGFloat) {
+        guard let window = view.window else { return }
+        for kind in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
+            guard let button = window.standardWindowButton(kind) else { continue }
+            button.alphaValue = 1 - collapse
+            button.isHidden = collapse >= 1
+        }
+    }
 
     var focusedTabID: UUID {
         guard let group = session.split(for: session.activeID), splitCoordinators[group.primaryID]?.focusedSide == .right else { return session.activeID }
@@ -386,6 +403,7 @@ import QuartzCore
         card.frame = NSRect(x: width + inset, y: inset, width: max(100, w - width - 2 * inset), height: h - 2 * inset)
         card.layer?.cornerRadius = 9 * (1 - collapse)
         card.layer?.borderColor = NSColor.white.withAlphaComponent(0.30 * (1 - collapse)).cgColor
+        applyWindowButtons(collapse: collapse)
         webHost.frame = card.bounds
         if let web = activeWebView, web.superview === webHost { web.frame = webHost.bounds }
         for child in webHost.subviews where !(child is WKWebView) { child.frame = webHost.bounds }
@@ -640,7 +658,7 @@ import QuartzCore
         } else if web.url?.standardizedFileURL == Bundle.main.url(forResource: "PiPDemo", withExtension: "html")?.standardizedFileURL {
             session.tabs[i].address = "orbit://video"; session.tabs[i].title = "Picture in Picture demo"
         } else if web.url?.standardizedFileURL == Bundle.main.url(forResource: "Home", withExtension: "html")?.standardizedFileURL || (web.url == nil && pendingHome.contains(pair.key)) {
-            session.tabs[i].address = "orbit://newtab"; session.tabs[i].title = "A little space"
+            session.tabs[i].address = "orbit://newtab"; session.tabs[i].title = "New tab"
         }
         guard session.tabs[i] != previous else { return }
         scheduleFaviconDiscovery(in: web)
@@ -1061,10 +1079,6 @@ import QuartzCore
     @objc func zoomIn(_ sender: Any?) { if let web = commandWebView { web.pageZoom = min(3, web.pageZoom + 0.1) } }
     @objc func zoomOut(_ sender: Any?) { if let web = commandWebView { web.pageZoom = max(0.4, web.pageZoom - 0.1) } }
     @objc func actualSize(_ sender: Any?) { commandWebView?.pageZoom = 1 }
-    @objc func showHome(_ sender: Any?) {
-        guard !littleWindows.values.contains(where: { $0.window?.isKeyWindow == true }) else { return }
-        navigate("orbit://newtab")
-    }
     func navigate(_ address: String) {
         peeks[session.activeID]?.dismiss()
         returnActiveVideo()

@@ -222,14 +222,12 @@ import WebKit
             spacesMenu.addItem(item)
         }
     }
-    @objc func goHome(_ sender: Any?) { controller.showHome(sender) }
     @objc func recordSpaceSwipes(_ sender: Any?) { SpaceSwipeDiagnostics.shared.start() }
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         if menuItem.action == #selector(selectSpace(_:)) {
             menuItem.state = controller?.session.space == menuItem.tag ? .on : .off
             return controller?.session.spaceDefinition(menuItem.tag) != nil && window?.attachedSheet == nil
         }
-        if menuItem.action == #selector(goHome(_:)) { return window?.attachedSheet == nil && controller?.littleWindows.values.contains(where: { $0.window?.isKeyWindow == true }) != true }
         if menuItem.action == #selector(recordSpaceSwipes(_:)) {
             return !SpaceSwipeDiagnostics.shared.isRecording && !SpaceSwipeDiagnostics.shared.isStarting
         }
@@ -305,7 +303,6 @@ import WebKit
         let history = menu("History")
         item(history, "Back", #selector(BrowserController.goBack(_:)), "[", .command, controller)
         item(history, "Forward", #selector(BrowserController.goForward(_:)), "]", .command, controller)
-        item(history, "Home", #selector(goHome(_:)), "h", [.command, .shift], self)
         history.addItem(.separator())
         item(history, "Show History…", #selector(BrowserController.showHistory(_:)), "y", .command, controller)
         item(history, "Recently Closed…", #selector(BrowserController.showArchive(_:)), "", .command, controller)
