@@ -954,6 +954,15 @@ struct ExtensionPackageFetch: Sendable {
     /// `staging` is created if needed and receives `download.<ext>` and `package/`; the caller owns and removes it.
     func fetch(_ candidate: ExtensionBuildCandidate, into staging: URL) async throws -> ExtensionFetchedPackage {
         guard let source = candidate.downloadURL else { throw ExtensionPackageError("The build has no download URL.") }
+        // Invariant for every Chrome Web Store build, before anything is unpacked or handed to
+        // the installer: a CRX3 whose verified publisher key derives exactly the listing's ID.
+        var requiredChromeID: String?
+        if candidate.source == .chromeWebStore {
+            guard let id = candidate.upstreamID?.lowercased(), ExtensionStoreLink.isChromeWebStoreID(id) else {
+                throw ExtensionPackageError("A Chrome Web Store build must name its extension ID so its signature can be checked; it was not installed.")
+            }
+            requiredChromeID = id
+        }
         let fm = FileManager.default
         try fm.createDirectory(at: staging, withIntermediateDirectories: true)
         let archiveURL = staging.appendingPathComponent("download." + (source.pathExtension.isEmpty ? "bin" : source.pathExtension.lowercased()))
@@ -994,14 +1003,16 @@ struct ExtensionPackageFetch: Sendable {
         if ExtensionCrxPackage.looksLikeCRX(data) {
             format = .crx3
             let crx = try ExtensionCrxPackage(data: data)
-            let expectedID = candidate.source == .chromeWebStore ? candidate.upstreamID : nil
-            let result = crx.verify(expectedID: expectedID)
-            guard result.verified else {
+            let result = crx.verify(expectedID: requiredChromeID)
+            guard result.verified, requiredChromeID == nil || result.extensionID == requiredChromeID else {
                 throw ExtensionPackageError("The CRX signature could not be verified: \(result.failure ?? "unknown failure")")
             }
             verification = result
             try ExtensionZipArchive(data: crx.payloadZIP).extract(to: packageURL)
         } else if ExtensionZipArchive.looksLikeZip(data) {
+            guard requiredChromeID == nil else {
+                throw ExtensionPackageError("The Chrome Web Store download was a plain ZIP without a publisher signature; it was not installed.")
+            }
             format = .zip
             try ExtensionZipArchive(data: data).extract(to: packageURL)
         } else {
@@ -1021,6 +1032,7 @@ struct ExtensionPackageFetch: Sendable {
         var enriched = candidate
         if let summary = try? ExtensionManifestSummary.read(fromUnpackedPackage: packageURL) { enriched = candidate.applying(summary) }
         if enriched.upstreamID == nil, let verification { enriched.upstreamID = verification.extensionID }
+        if let requiredChromeID { enriched.upstreamID = requiredChromeID }
         return ExtensionFetchedPackage(packageURL: packageURL, archiveURL: archiveURL, sha256: sha256, format: format,
                                        crxVerification: verification, candidate: enriched, provenance: provenance)
     }

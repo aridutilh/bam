@@ -38,7 +38,7 @@ import WebKit
             if module { background["type"] = "module" }
             let manifest: [String: Any] = ["manifest_version": 3, "name": module ? "Bam module worker fixture" : "Bam classic worker fixture", "version": "1.0", "description": "Original fixture for Bam service-worker runtime tests",
                 "content_security_policy": ["extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"],
-                "background": background, "permissions": ["storage", "idle", "notifications", "offscreen", "fontSettings"], "host_permissions": ["http://127.0.0.1/*", "http://localhost/*"],
+                "background": background, "permissions": ["storage", "idle", "notifications", "offscreen", "fontSettings"], "host_permissions": ["http://127.0.0.1/*", "http://localhost/*", "https://127.0.0.1/*"],
                 "action": ["default_popup": "popup.html"], "content_scripts": [["matches": ["http://127.0.0.1/*", "http://localhost/*"], "js": ["content.js"], "run_at": "document_end"]]]
             try JSONSerialization.data(withJSONObject: manifest, options: [.sortedKeys]).write(to: package.appendingPathComponent("manifest.json"))
             let dependency = "globalThis.fixtureOrder = [globalThis.__bamCompatibility?.worker === true ? 'adapter' : 'missing-adapter', 'dependency'];\n"
@@ -139,9 +139,11 @@ import WebKit
             // blocked as mixed content and would not hold the load. The silent listener accepts
             // the connection and never answers the TLS handshake, so the image stays pending.
             let stallState = 'none';
+            // A policy block reports itself instead of looking like a network error.
+            document.addEventListener('securitypolicyviolation', event => { if (stall) stallState = 'csp:' + event.effectiveDirective + ':' + event.blockedURI; });
             if (stall) {
               const image = new Image(); stallState = 'pending';
-              image.onload = () => { stallState = 'loaded'; }; image.onerror = () => { stallState = 'error'; };
+              image.onload = () => { stallState = 'loaded'; }; image.onerror = () => { if (!stallState.startsWith('csp:')) stallState = 'error'; };
               image.src = 'https://127.0.0.1:' + stall + '/stall.png'; document.documentElement.append(image);
             }
             (globalThis.browser || globalThis.chrome).runtime.onMessage.addListener(message => {
@@ -259,15 +261,18 @@ import WebKit
             try? await popup.callAsyncJavaScript("return await (globalThis.browser || globalThis.chrome).runtime.sendMessage({kind: 'offscreen-after-close', close});",
                 arguments: ["close": close], in: nil, contentWorld: .page) as? [String: Any]
         }
+        // The fixture's own grant for the stall URL (https loopback; match patterns ignore the port).
+        let stallURL = URL(string: "https://127.0.0.1:\(stallPort)/stall.png")!
+        let stallAccess = "contextAccess=\(contextA.hasAccess(to: stallURL))"
         let stalledReport = await stalledOffscreen(popupA)
         let stalledEcho = stalledReport?["echo"] as? [String: Any]
         // The stall must be real before the lifecycle is judged: the page ran, its image request
         // reached the silent listener, and the image is still pending.
         try check(stalledEcho?["echo"] as? String == "stalled" && stalledReport?["has"] as? Bool == true,
                   "The stalled offscreen page did not run or answer: \(stalledReport ?? [:])")
-        try await wait("The stalled offscreen page's request never reached the silent listener: \(stalledReport ?? [:])") { !stalledConnections.isEmpty }
+        try await wait("The stalled offscreen page's request never reached the silent listener (\(stallAccess)): \(stalledReport ?? [:])") { !stalledConnections.isEmpty }
         try check(stalledEcho?["stall"] as? String == "pending" && stalledEcho?["readyState"] as? String != "complete",
-                  "The stalling image did not stay pending (fixture did not stall): \(stalledReport ?? [:])")
+                  "The stalling image did not stay pending (fixture did not stall; \(stallAccess)): \(stalledReport ?? [:])")
         try check(runtimeA.compatibility.offscreen.entry(for: contextA.uniqueIdentifier)?.isLoaded == false,
                   "A document whose load is still pending was reported loaded: \(stalledReport ?? [:])")
         weak var stalledWeb = runtimeA.compatibility.offscreen.currentDocument(for: contextA.uniqueIdentifier)
