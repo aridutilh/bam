@@ -897,6 +897,7 @@ import Darwin
                 return "granted=\(granted) denied=\(denied) status(\(ipPattern.string))=\(context.permissionStatus(for: ipPattern).rawValue)"
             }
             let promptBeforeDiagnostics = host.permissionPrompt
+            defer { host.permissionPrompt = promptBeforeDiagnostics }
             if let promptBeforeDiagnostics {
                 host.permissionPrompt = { review in
                     let answer = promptBeforeDiagnostics(review)
