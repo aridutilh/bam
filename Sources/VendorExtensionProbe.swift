@@ -227,7 +227,14 @@ import WebKit
         // Opt-in bookmark fixture: decided (and refused) before anything is created or mutated.
         let seedDecision = BookmarkVendorSeed.decide(flag: env[BookmarkVendorSeed.flag], isNormalMode: mode == .normal, site: env["BAM_VENDOR_SITE"])
         if case .refused(let why) = seedDecision { throw BrowserExtensions.failure(why) }
-        let home = BrowserTab(title: "Vendor observation", address: "orbit://newtab", space: 0)
+        // Opt-in restore fixture: also decided (and refused) before anything exists. Its start tab is the run's own
+        // ordinary today page, so the window holds only ordinary http tabs.
+        let restoreDecision = RestoreVendorFixture.decide(flag: env[RestoreVendorFixture.flag], isNormalMode: mode == .normal,
+                                                          site: env["BAM_VENDOR_SITE"], seedFlag: env[BookmarkVendorSeed.flag])
+        if case .refused(let why) = restoreDecision { throw BrowserExtensions.failure(why) }
+        let home: BrowserTab
+        if case .on(let today, _) = restoreDecision { home = BrowserTab(title: RestoreVendorFixture.startTitle, address: today, space: 0) }
+        else { home = BrowserTab(title: "Vendor observation", address: "orbit://newtab", space: 0) }
         let browser: BrowserController
         if mode == .normal {
             browser = try makeNormalController(home: home)
@@ -238,6 +245,10 @@ import WebKit
                 seededDestinations = Set(seeded.destinations)
                 observations["bookmark_seed"] = ["items": seeded.itemCount, "bookmark_pages": seeded.bookmarkPages,
                                                  "ids": seeded.ids.mapValues(\.uuidString)]
+            }
+            if case .on = restoreDecision {
+                seededDestinations = RestoreVendorFixture.destinations(restoreDecision)
+                observations["restore_fixture"] = ["start_tab": "the run's ordinary today page", "allowed_reopen_urls": seededDestinations.count]
             }
             observations["scope"] = "official Chrome Web Store CRX, signature verified for the requested ID; normal (non-private) semantics on a new random profile whose website store is task-owned and removed; non-persistent extension controller configuration; run-directory session and extension storage; no sign-in; no native companion; no compatibility claim"
         } else {
