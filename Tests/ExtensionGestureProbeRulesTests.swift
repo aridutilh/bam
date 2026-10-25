@@ -93,6 +93,70 @@ import Foundation
               "a transport failure stays a failure in the verdict")
         check(!R.isMeasured(R.phaseVerdict(nil, observedBadges: [])) && !R.isMeasured("done") && !R.isMeasured(nil), "no reply is not measured")
 
+        // Host-world evidence, phase-bound. Events as the probe logs them (host_phase / host_t_ms added on receipt).
+        let delays = [0, 20, 100, 1000, 3000]
+        var clock = 0
+        func message(_ event: String, _ phase: String, _ extra: [String: Any]) -> [String: Any] {
+            clock += 1
+            return ["event": event, "perf": clock, "wall": 1_000_000 + clock, "host_t_ms": clock, "host_phase": phase,
+                    "activation": ["isActive": false, "hasBeenActive": true]].merging(extra) { _, new in new }
+        }
+        func readings(_ id: String, _ phase: String, active: Bool = false, skip: Int? = nil, phaseFor: (Int) -> String = { _ in "" }) -> [[String: Any]] {
+            delays.filter { $0 != skip }.map { delay in
+                let receivedIn = phaseFor(delay).isEmpty ? phase : phaseFor(delay)
+                return message("activation", receivedIn, ["source": "x", "id": id, "scheduled_ms": delay, "actual_ms": delay + 1,
+                                                          "activation": ["isActive": active, "hasBeenActive": true]])
+            }
+        }
+        func trigger(click id: String, _ phase: String) -> [[String: Any]] {
+            [message("click", phase, ["id": id, "trusted": true, "detail": 1, "pointerType": "mouse"])] + readings(id, phase, active: true)
+        }
+        func record(_ kind: String, _ index: Int, _ phase: String, skip: Int? = nil, phaseFor: (Int) -> String = { _ in "" }) -> [[String: Any]] {
+            let id = "record-\(kind)-\(index)"
+            return [message("record", phase, ["id": id, "kind": kind])] + readings(id, phase, skip: skip, phaseFor: phaseFor)
+        }
+        let armed = [message("armed", "baseline", ["id": "armed"])]
+        func problems(_ phase: String, _ events: [[String: Any]]) -> [String] { R.phaseSampleProblems(phase, in: events, delays: delays) }
+
+        let baselineOK = record("baseline", 0, "baseline")
+        check(problems("baseline", baselineOK).isEmpty, "a baseline record with all in-phase readings has no problems")
+        check(R.armedAcknowledged(in: armed) && !R.armedAcknowledged(in: baselineOK), "the armed acknowledgement is required, not implied")
+
+        // The review's regression: an early trusted click during baseline must not satisfy page_click's input trigger.
+        let early = trigger(click: "input-click-1", "baseline")
+        let clickRecord = record("click", 1, "page_click")
+        let withoutRealClick = baselineOK + armed + early + clickRecord
+        check(!problems("page_click", withoutRealClick).isEmpty && problems("page_click", withoutRealClick).contains { $0.contains("input:trusted-click") },
+              "an early baseline click plus a valid click record but no page_click input trigger is incomplete")
+        check(R.triggerEvent(.trustedClick, phase: "page_click", in: withoutRealClick) == nil, "the early click is never the page_click trigger")
+        let withRealClick = withoutRealClick + trigger(click: "input-click-2", "page_click")
+        check(problems("page_click", withRealClick).isEmpty, "adding a correctly stamped page_click input and readings makes it measured")
+        check((R.triggerEvent(.trustedClick, phase: "page_click", in: withRealClick)?["id"] as? String) == "input-click-2",
+              "the page_click trigger is the one received in page_click")
+
+        // Wrong phase throughout: a trigger whose readings are all consistently stamped another phase still fails.
+        let wrong = baselineOK + armed + [message("click", "toolbar", ["id": "input-click-3", "trusted": true])] + readings("input-click-3", "toolbar") + clickRecord
+        check(!problems("page_click", wrong).isEmpty, "a click trigger and readings all stamped toolbar never satisfy page_click")
+
+        // Whole trigger removed while the phase's other evidence stays; one reading missing; a late reading in the next phase.
+        check(problems("toolbar", baselineOK + clickRecord).contains("record:toolbar: trigger not reported in toolbar"),
+              "a missing toolbar record is explicit incomplete evidence, never vacuous")
+        check(problems("baseline", record("baseline", 0, "baseline", skip: 3000)) == ["record:baseline+3000ms missing"], "one missing reading is reported")
+        let late = record("click", 1, "page_click", phaseFor: { $0 == 3000 ? "toolbar" : "" }) + trigger(click: "input-click-2", "page_click")
+        check(problems("page_click", late) == ["record:click+3000ms received outside page_click"],
+              "a +3 s reading delivered during toolbar does not count for the click phase")
+
+        // Event-specific shape: readings need numeric offsets and boolean activation fields; triggers need timestamps.
+        var malformed = record("baseline", 0, "baseline")
+        malformed[2]["activation"] = ["isActive": 1, "hasBeenActive": true]
+        check(problems("baseline", malformed) == ["record:baseline+20ms malformed"], "a reading with non-boolean activation is malformed")
+        var badTime = record("baseline", 0, "baseline")
+        badTime[0]["perf"] = "1"
+        check(problems("baseline", badTime) == ["record:baseline: trigger timestamps malformed"], "a trigger without numeric timestamps fails")
+        var boolTrusted = trigger(click: "input-click-2", "page_click")
+        boolTrusted[0]["trusted"] = 1
+        check(R.triggerEvent(.trustedClick, phase: "page_click", in: boolTrusted) == nil, "trusted must be a real boolean")
+
         print("PASS: Extension gesture probe rules — \(checks) checks")
     }
 }
