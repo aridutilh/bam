@@ -486,7 +486,7 @@ struct SidebarExtensionItem {
     var folderTargets: ((UUID) -> [SidebarFolderTarget])?
     let heading = ArkSpaceHeading()
     let scroll = SidebarScrollView()
-    private let table = NSTableView()
+    private let table = SidebarTableView()
     private let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("tabs"))
     private enum Entry { case tab(Int), divider, newTab }
     private var entries: [Entry] = []
@@ -538,6 +538,9 @@ struct SidebarExtensionItem {
         let changed = structureChanged ? [] : items.indices.filter { tabs[$0] != items[$0] }
         let origin = scroll.contentView.bounds.origin
         let oldKeys = structureChanged ? entryKeys : []
+        // A keyboard-focused folder keeps focus through the reload its toggle causes.
+        let focusedFolder = (window?.firstResponder as? ArkTabRow).flatMap { $0.item.isFolder && $0.isDescendant(of: table) ? $0.item.id : nil }
+        defer { if let focusedFolder { focusRow(withID: focusedFolder) } }
         tabs = items
         configureAppearance(space: space, destinations: destinations)
         if structureChanged || entries.isEmpty {
@@ -566,6 +569,45 @@ struct SidebarExtensionItem {
             }
         }
         synchronizeSelection()
+    }
+
+    /// Up/Down from a row: folders become keyboard focus stops (Return, Space,
+    /// ← and → toggle them); tab rows are selected as the table normally does.
+    @discardableResult func moveKeyboardFocus(from row: Int, by delta: Int) -> Bool {
+        var target = row + delta
+        while entries.indices.contains(target) {
+            if case .tab(let index) = entries[target] {
+                if tabs[index].isFolder { focusRow(target) }
+                else {
+                    table.selectRowIndexes(IndexSet(integer: target), byExtendingSelection: false)
+                    table.scrollRowToVisible(target)
+                    window?.makeFirstResponder(table)
+                }
+                return true
+            }
+            target += delta
+        }
+        return false
+    }
+    private func focusRow(_ row: Int) {
+        guard entries.indices.contains(row) else { return }
+        table.scrollRowToVisible(row)
+        if let cell = table.view(atColumn: 0, row: row, makeIfNecessary: true) as? SidebarTabCell { window?.makeFirstResponder(cell.row) }
+    }
+    private func focusRow(withID id: UUID) {
+        guard let row = rowByID[id], window?.firstResponder !== (table.view(atColumn: 0, row: row, makeIfNecessary: false) as? SidebarTabCell)?.row else { return }
+        focusRow(row)
+    }
+    fileprivate func handleTableArrow(_ delta: Int) -> Bool {
+        let current = table.selectedRow
+        guard current >= 0 else { return false }
+        // Only intercept when a folder lies between this row and the next tab.
+        var target = current + delta
+        while entries.indices.contains(target) {
+            if case .tab(let index) = entries[target] { return tabs[index].isFolder ? moveKeyboardFocus(from: current, by: delta) : false }
+            target += delta
+        }
+        return false
     }
 
     private static let dividerKey = UUID(), newTabKey = UUID()
@@ -642,6 +684,11 @@ struct SidebarExtensionItem {
         row.ungroupFolder = { [weak self, weak row] in if let id = row?.item.id { self?.ungroupFolder?(id) } }
         row.moveToFolder = { [weak self, weak row] target in if let id = row?.item.id { self?.moveToFolder?(id, target) } }
         row.folderTargets = { [weak self, weak row] in row.flatMap { self?.folderTargets?($0.item.id) } ?? [] }
+        row.arrow = { [weak self, weak row] delta in
+            guard let self, let row else { return false }
+            let index = self.table.row(for: row)
+            return index >= 0 && self.moveKeyboardFocus(from: index, by: delta)
+        }
     }
     private func synchronizeSelection() {
         let selected = tabs.first(where: \.isActive).flatMap { rowByID[$0.id] }
@@ -688,6 +735,15 @@ struct SidebarExtensionItem {
         let width = scroll.contentSize.width
         if table.frame.width != width { table.setFrameSize(NSSize(width: width, height: table.frame.height)) }
         if column.width != width { column.width = width }
+    }
+}
+
+/// Arrow keys reach folder rows, which are focus stops rather than selections.
+@MainActor private final class SidebarTableView: NSTableView {
+    override func keyDown(with event: NSEvent) {
+        let delta = event.keyCode == 125 ? 1 : event.keyCode == 126 ? -1 : 0
+        if delta != 0, let page = delegate as? SidebarPage, page.handleTableArrow(delta) { return }
+        super.keyDown(with: event)
     }
 }
 
@@ -1115,6 +1171,8 @@ private final class ArkTabRow: ArkFlippedView {
     var ungroupFolder: (() -> Void)?
     var moveToFolder: ((UUID?) -> Void)?
     var folderTargets: (() -> [SidebarFolderTarget])?
+    /// Moves keyboard focus to the neighboring row; returns whether it moved.
+    var arrow: ((Int) -> Bool)?
     var canMoveEarlier = false
     var canMoveLater = false
     private var currentSpace = 0
@@ -1142,6 +1200,8 @@ private final class ArkTabRow: ArkFlippedView {
         for view in [titleLabel, subtitleLabel, iconView, closeButton] as [NSView] { addSubview(view) }
         closeButton.isHidden = !item.isActive
         closeButton.handler = { [weak self] in self?.close?() }
+        // The row is one accessible control; its label and icon are not separate elements.
+        for view in [titleLabel, subtitleLabel, iconView] as [NSView] { view.setAccessibilityElement(false) }
         setAccessibilityRole(.button)
         setAccessibilityLabel(item.title)
         setAccessibilityValue(item.isActive ? "Selected" : "")
@@ -1177,8 +1237,14 @@ private final class ArkTabRow: ArkFlippedView {
         setAccessibilityDisclosureLevel(item.depth)
         // Recycled cells must not keep a folder's disclosure state.
         setAccessibilityDisclosed(item.isFolder && item.isExpanded)
+        setAccessibilityExpanded(item.isFolder && item.isExpanded)
+        if first || old.isFolder != item.isFolder {
+            setAccessibilityRole(item.isFolder ? .disclosureTriangle : .button)
+            setAccessibilityRoleDescription(item.isFolder ? "folder" : nil)
+        }
         if item.isFolder {
-            setAccessibilityValue(item.isExpanded ? "Expanded" : "Collapsed")
+            // Disclosure controls report 1 when open and 0 when closed.
+            setAccessibilityValue(NSNumber(value: item.isExpanded ? 1 : 0))
             setAccessibilityHelp("Folder with \(item.folderTabCount) tab\(item.folderTabCount == 1 ? "" : "s"). Press to \(item.isExpanded ? "collapse" : "expand").")
         } else if first || old.isActive != item.isActive || old.isUnloaded != item.isUnloaded || old.isSleeping != item.isSleeping || old.isFolder {
             setAccessibilityValue([item.isActive ? "Selected" : nil, item.isUnloaded ? "Unloaded" : item.isSleeping ? "Sleeping" : nil].compactMap { $0 }.joined(separator: ", "))
@@ -1214,6 +1280,8 @@ private final class ArkTabRow: ArkFlippedView {
         if event.keyCode == 36 || event.keyCode == 49 { activate() }
         else if item.isFolder, event.keyCode == 124, !item.isExpanded { toggleFolder?() }
         else if item.isFolder, event.keyCode == 123, item.isExpanded { toggleFolder?() }
+        else if event.keyCode == 125, arrow?(1) == true {}
+        else if event.keyCode == 126, arrow?(-1) == true {}
         else { super.keyDown(with: event) }
     }
     override func layout() {

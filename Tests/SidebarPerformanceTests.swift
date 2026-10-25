@@ -224,8 +224,61 @@ import AppKit
         selected.removeAll()
         _ = folderRow.accessibilityPerformPress()
         require(toggled == [folderIDs[0]] && selected.isEmpty, "Pressing a folder toggles it and selects nothing")
-        require(folderRow.isAccessibilityDisclosed() && folderRow.accessibilityValue() as? String == "Expanded", "Folder exposes expanded state")
+        require(folderRow.isAccessibilityDisclosed() && folderRow.isAccessibilityExpanded() && (folderRow.accessibilityValue() as? NSNumber)?.intValue == 1
+                && folderRow.accessibilityRole() == .disclosureTriangle && folderRow.accessibilityLabel()?.hasPrefix("Folder level 0") == true,
+                "Folder is one disclosure control with its name and expanded state")
+        require(descendants(folderRow).filter { $0 !== folderRow && $0.isAccessibilityElement() && !($0 is NSButton) }.isEmpty,
+                "Folder label and icon are not separate accessibility elements")
+        let leafRow = row(table(in: 0), 12)
+        require(leafRow.accessibilityRole() == .button && !leafRow.isAccessibilityDisclosed(), "Tab rows stay buttons without disclosure state")
         require(deepTable.delegate?.tableView?(deepTable, shouldSelectRow: 0) == false, "Folder rows are not table selections")
+
+        // Keyboard-only: arrows from the selected tab reach folder rows, which
+        // toggle on Return. Events go straight to the views; nothing is posted.
+        @MainActor func key(_ code: UInt16, to view: NSView) {
+            let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber,
+                                         context: nil, characters: code == 36 ? "\r" : "", charactersIgnoringModifiers: code == 36 ? "\r" : "",
+                                         isARepeat: false, keyCode: code)!
+            view.keyDown(with: event)
+        }
+        let keyTable = table(in: 0)
+        keyTable.selectRowIndexes(IndexSet(integer: 12), byExtendingSelection: false)
+        window.makeFirstResponder(keyTable)
+        key(126, to: keyTable)
+        let focusedFolder = window.firstResponder as? NSView
+        require(focusedFolder?.identifier?.rawValue == "tab-row-\(folderIDs[11].uuidString)", "Up arrow from a tab focuses the folder above it")
+        key(126, to: focusedFolder!)
+        require((window.firstResponder as? NSView)?.identifier?.rawValue == "tab-row-\(folderIDs[10].uuidString)", "Up arrow moves between folders")
+        toggled.removeAll()
+        key(36, to: window.firstResponder as! NSView)
+        require(toggled == [folderIDs[10]], "Return toggles the focused folder")
+        key(123, to: window.firstResponder as! NSView)
+        require(toggled == [folderIDs[10], folderIDs[10]], "Left arrow collapses an expanded folder")
+
+        // Native regression: a click expands a folder, the sidebar reloads, and
+        // the folder must still hold focus so Left collapses it again.
+        var tree = [SidebarTabItem(id: folderIDs[0], title: "Projects", subtitle: "", symbol: "folder", isPinned: true, isActive: false,
+                                   isFolder: true, isExpanded: false),
+                    SidebarTabItem(id: leaf, title: "Selected page", subtitle: "", symbol: "globe", isPinned: false, isActive: true)]
+        let child = UUID()
+        sidebar.onToggleFolder = { id in
+            let expanding = !tree[0].isExpanded
+            tree[0].isExpanded = expanding
+            if expanding {
+                tree.insert(SidebarTabItem(id: child, title: "Inside", subtitle: "", symbol: "globe", isPinned: true, isActive: false,
+                                           depth: 1, parentFolderID: id), at: 1)
+            } else { tree.removeAll { $0.id == child } }
+            update(0, tree)
+        }
+        update(0, tree)
+        let projects = row(table(in: 0), 0)
+        projects.mouseDown(with: NSEvent.mouseEvent(with: .leftMouseDown, location: .zero, modifierFlags: [], timestamp: 0,
+                                                     windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!)
+        require(tree.count == 3 && (window.firstResponder as? NSView)?.identifier?.rawValue == "tab-row-\(folderIDs[0].uuidString)",
+                "Clicking a folder expands it and keeps focus on it after the reload")
+        key(123, to: window.firstResponder as! NSView)
+        require(tree.count == 2 && (window.firstResponder as? NSView)?.identifier?.rawValue == "tab-row-\(folderIDs[0].uuidString)",
+                "Left then collapses it and focus stays on the folder")
         print("PASS: \(checks) sidebar virtualization, identity, scrolling, paging and extension action checks")
         window.contentView = nil
     }
