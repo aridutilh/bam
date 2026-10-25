@@ -13,6 +13,7 @@ if [ "$VERSION" != "$BUNDLE_VERSION" ]; then
     exit 1
 fi
 bash "$PROJECT_DIR/scripts/generate-icon.sh"
+bash "$PROJECT_DIR/scripts/generate-icon.sh" BamPreviewIcon
 BUILD_DIR=${BAM_BUILD_DIR:-${ARK_BUILD_DIR:-${ORBIT_BUILD_DIR:-"$PROJECT_DIR/.build"}}}
 DELIVERABLE_APP="$PROJECT_DIR/Bam.app"
 # Sign outside iCloud/File Provider folders, which may add FinderInfo during signing.
@@ -63,6 +64,8 @@ if [ "$VERIFIED" != true ]; then exit 1; fi
 "$BUILD_DIR/model-tests" "$BUILD_DIR"
 "$SWIFTC" "${COMMON[@]}" -parse-as-library "$PROJECT_DIR/Sources/BrowserState.swift" "$PROJECT_DIR/Sources/PreviewProfile.swift" "$PROJECT_DIR/Tests/PreviewProfileTests.swift" -o "$BUILD_DIR/preview-profile-tests"
 "$BUILD_DIR/preview-profile-tests"
+"$SWIFTC" "${COMMON[@]}" -parse-as-library -framework AppKit "$PROJECT_DIR/Sources/PreviewProfile.swift" "$PROJECT_DIR/Sources/PreviewIcon.swift" "$PROJECT_DIR/Tests/PreviewIconTests.swift" -o "$BUILD_DIR/preview-icon-tests"
+"$BUILD_DIR/preview-icon-tests" "$DELIVERABLE_APP"
 "$SWIFTC" "${COMMON[@]}" -parse-as-library "$PROJECT_DIR/Sources/ExtensionPackagePreparation.swift" "$PROJECT_DIR/Tests/ExtensionPackagePreparationTests.swift" -o "$BUILD_DIR/extension-package-tests"
 "$BUILD_DIR/extension-package-tests" "$BUILD_DIR/extension-package-fixtures"
 "$SWIFTC" "${COMMON[@]}" -parse-as-library -framework JavaScriptCore "$PROJECT_DIR/Sources/ExtensionPackagePreparation.swift" "$PROJECT_DIR/Sources/ExtensionServiceWorkerPreparation.swift" "$PROJECT_DIR/Sources/SafariExtensionImport.swift" "$PROJECT_DIR/Sources/ExtensionSelectPickerCompatibility.swift" "$PROJECT_DIR/Sources/ExtensionContentScriptPreparation.swift" "$PROJECT_DIR/Tests/ExtensionContentScriptTests.swift" -o "$BUILD_DIR/extension-messaging-tests"

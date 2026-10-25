@@ -40,6 +40,7 @@ import WebKit
         catch { fputs("\(error.localizedDescription)\n", stderr); NSApp.terminate(nil); return }
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent(launch.supportDirectoryName, isDirectory: true)
         let preview = launch.isEphemeral
+        PreviewIcon.apply(for: launch)
         let sessionFileExists = FileManager.default.fileExists(atPath: support.appendingPathComponent("session.json").path)
         if !preview { BrowserController.restoreDefaultSearchEngine() }
         ShortcutStore.shared.configure(persists: !preview)

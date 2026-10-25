@@ -10,7 +10,8 @@ validation/
 Resources/Recovered/
 RECOVERY-NOTES.md
 
-# Generated from the committed master PNG by the build.
+# Generated from the committed master PNGs by the build.
 /Resources/BamIcon.icns
+/Resources/BamPreviewIcon.icns
 # Ignore the previous generated icon while upgrading an existing checkout.
 /Resources/ArkIcon.icns

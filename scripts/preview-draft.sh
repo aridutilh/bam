@@ -50,6 +50,7 @@ STAGED_APP="$STAGING/Bam Extension Preview.app"
 /usr/bin/ditto --norsrc --noextattr "$APP" "$STAGED_APP"
 PLIST="$STAGED_APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c 'Set :CFBundleName Bam Extension Preview' -c 'Set :CFBundleDisplayName Bam Extension Preview' \
+    -c 'Set :CFBundleIconFile BamPreviewIcon.icns' \
     -c 'Set :CFBundleIdentifier com.ari.bam.extensionpreview' -c 'Set :CFBundleExecutable BamBrowser' "$PLIST"
 # The development app should not register as a candidate default web browser.
 /usr/libexec/PlistBuddy -c 'Delete :CFBundleURLTypes' "$PLIST" 2>/dev/null || true
