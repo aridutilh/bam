@@ -17,6 +17,15 @@ import WebKit
     private var extensionID: UUID?
     private var initialized = false
     private var finished = false
+    /// Set once a deadline has cancelled the run and is waiting for it to unwind.
+    private var expiring = false
+    /// Set when the run task has fully returned, so every cleanup in the
+    /// installation path (including the installer's staging-folder removal) ran.
+    private var runEnded = false
+    private var preparationStarted = ProcessInfo.processInfo.systemUptime
+    private var observationStarted: TimeInterval?
+    /// True only when the full requested observation period ran.
+    private var observationCompleted = false
     private var pages: [String: [String: Any]] = [:]
     private var observations: [String: Any] = ["scope": "official Chrome Web Store CRX, signature verified for the requested ID; fresh private profile and temporary extension storage; no sign-in; no native companion; no compatibility claim"]
     private var blockedNavigations: [[String: Any]] = []
@@ -27,23 +36,60 @@ import WebKit
             finish(false, reason: "WKWebExtension requires macOS 15.4 or later")
             return
         }
-        let timer = Timer(timeInterval: Self.observationSeconds + 5, repeats: false) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                self.finish(self.initialized, reason: "Overall observation deadline reached")
-            }
-        }
-        watchdog = timer; RunLoop.main.add(timer, forMode: .common)
+        // Store lookup, download, verification and installation have their own
+        // deadline; the observation deadline is armed only when observation begins.
+        preparationStarted = ProcessInfo.processInfo.systemUptime
+        arm(Self.preparationSeconds, reason: "Preparation deadline reached before observation began")
         task = Task { @MainActor [weak self] in
             guard let self else { return }
             do { try await self.run() }
-            catch { self.finish(false, reason: error.localizedDescription) }
+            catch {
+                // A deadline that cancelled the run reports once the run has unwound.
+                if !self.expiring { self.finish(false, reason: self.errorDescription(error)) }
+            }
+            self.runEnded = true
         }
     }
 
     /// BAM_VENDOR_SECONDS bounds the observation (default 19, at most 120).
     static var observationSeconds: TimeInterval {
         min(120, max(5, Double(ProcessInfo.processInfo.environment["BAM_VENDOR_SECONDS"] ?? "") ?? 19))
+    }
+    /// BAM_VENDOR_PREPARE_SECONDS bounds resolution, download, verification and
+    /// installation (default 90, 15–300), separately from the observation.
+    static var preparationSeconds: TimeInterval {
+        min(300, max(15, Double(ProcessInfo.processInfo.environment["BAM_VENDOR_PREPARE_SECONDS"] ?? "") ?? 90))
+    }
+    /// How long a deadline waits for the cancelled run to unwind before exiting.
+    static let cancellationGrace: TimeInterval = 15
+
+    private func arm(_ seconds: TimeInterval, reason: String) {
+        watchdog?.invalidate()
+        let timer = Timer(timeInterval: seconds, repeats: false) { [weak self] _ in
+            Task { @MainActor [weak self] in self?.expire(reason) }
+        }
+        watchdog = timer; RunLoop.main.add(timer, forMode: .common)
+    }
+    /// A deadline cancels the run, then waits (bounded) for it to return so the
+    /// installer's own cleanup, including removal of its staging folder, completes
+    /// before the process exits. Whether it did is reported, never assumed.
+    private func expire(_ reason: String) {
+        guard !finished, !expiring else { return }
+        expiring = true
+        observations["deadline"] = reason
+        task?.cancel()
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let limit = ProcessInfo.processInfo.systemUptime + Self.cancellationGrace
+            while !self.runEnded && ProcessInfo.processInfo.systemUptime < limit {
+                try? await Task.sleep(nanoseconds: 50_000_000)
+            }
+            self.observations["cancelled_run_unwound"] = self.runEnded
+            let detail = self.runEnded ? "" : "; the cancelled run did not return within \(Int(Self.cancellationGrace)) s, so installer cleanup is unconfirmed"
+            // A deadline never counts as completing the requested observation;
+            // the phase fields show how far the run got.
+            self.finish(false, reason: reason + detail)
+        }
     }
     /// BAM_VENDOR_SITE opens one ordinary HTTP(S) page in the profile so content
     /// scripts can run; BAM_VENDOR_SITE_PROBE is an optional JavaScript expression
@@ -143,7 +189,8 @@ import WebKit
             throw BrowserExtensions.failure("The Chrome Web Store did not resolve \(expected) to that listing")
         }
         let id = try await installer.install(listing, profileID: profile)
-        guard !finished else { return }
+        try Task.checkCancellation()
+        guard !finished, !expiring else { return }
         extensionID = id
         guard let record = host.items(profileID: profile).first(where: { $0.id == id }), let origin = record.catalog,
               origin.source == .chromeWebStore, origin.upstreamID == expected, origin.verifiedChromeExtensionID == expected else {
@@ -178,14 +225,20 @@ import WebKit
                 self.observations["background_load_callback"] = error.map { self.errorDescription($0) } ?? "completed"
             }
         }
+        // Preparation is over: the requested observation budget starts now, with
+        // its own backstop deadline, independent of how long installation took.
         let started = ProcessInfo.processInfo.systemUptime
+        observationStarted = started
+        observations["preparation_seconds"] = (started - preparationStarted).rounded()
+        let budget = Self.observationSeconds
+        observations["observation_requested_seconds"] = budget
+        arm(budget + 10, reason: "Observation backstop deadline reached")
         var actionInvoked = false, fallbackOpened = false, lastSample = -1
         var invokedAction: WKWebExtension.Action?
         observations["action_invoked"] = false
         observations["action_popup_presented"] = false
         func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
-        let budget = Self.observationSeconds
-        while !finished && ProcessInfo.processInfo.systemUptime - started < budget {
+        while !finished && !expiring && ProcessInfo.processInfo.systemUptime - started < budget {
             let elapsed = ProcessInfo.processInfo.systemUptime - started
             if siteTabID == nil, let siteURL, elapsed >= 1 {
                 siteTabID = browser.openProfileTab(siteURL, profileID: profile, active: true)
@@ -258,8 +311,9 @@ import WebKit
             }
             try await Task.sleep(nanoseconds: 100_000_000)
         }
-        observations["observation_seconds"] = ProcessInfo.processInfo.systemUptime - started
-        finish(true, reason: "Bounded package observation completed; functionality is not certified")
+        guard !finished, !expiring else { return }
+        observationCompleted = true
+        finish(true, reason: "Requested observation period completed; functionality is not certified")
     }
 
     private func localPage(_ path: String, base: URL, package: URL) -> URL? {
@@ -327,22 +381,49 @@ import WebKit
     }
     private func errorDescription(_ error: Error) -> String {
         let ns = error as NSError
-        // URL queries/fragments can contain sign-in state. The probe only reports bounded descriptions.
-        let text = ns.localizedDescription.replacingOccurrences(of: #"([A-Za-z][A-Za-z0-9+.-]*://[^\s?#]+)[?#][^\s]*"#,
-                                                               with: "$1[redacted]", options: .regularExpression)
-        return String("\(ns.domain) \(ns.code): \(text)".prefix(1500))
+        return Self.sanitize("\(ns.domain) \(ns.code): \(ns.localizedDescription)")
+    }
+    /// The one sanitizer for every string the probe prints. URL user-info,
+    /// queries and fragments can carry sign-in state, so they are removed from
+    /// anything URL-shaped, and length is bounded. Nothing else is redacted.
+    nonisolated static func sanitize(_ text: String, limit: Int = 1500) -> String {
+        var clean = text.replacingOccurrences(of: #"([A-Za-z][A-Za-z0-9+.-]*://)[^\s/?#@]+@"#, with: "$1", options: .regularExpression)
+        clean = clean.replacingOccurrences(of: #"([A-Za-z][A-Za-z0-9+.-]*://[^\s?#]+)[?#][^\s"'<>]*"#, with: "$1[redacted]", options: .regularExpression)
+        return clean.count > limit ? String(clean.prefix(limit)) + "…" : clean
+    }
+    /// Applies `sanitize` to every string inside a JSON-like value.
+    nonisolated static func scrub(_ value: Any) -> Any {
+        switch value {
+        case let text as String: return sanitize(text)
+        case let object as [String: Any]: return object.mapValues(scrub)
+        case let list as [Any]: return list.map(scrub)
+        default: return value
+        }
     }
     private func recordBlocked(_ url: URL, operation: String) {
         guard blockedNavigations.count < 20 else { return }
         blockedNavigations.append(["operation": operation, "url": sanitizedURL(url)])
     }
 
-    private func finish(_ success: Bool, reason: String) {
+    private func finish(_ requested: Bool, reason raw: String) {
         guard !finished else { return }
         finished = true; watchdog?.invalidate(); watchdog = nil
         task?.cancel(); task = nil
+        // "completed" means the full requested observation ran, not merely that
+        // the extension initialized; the phase fields say how far it got.
+        let success = requested && observationCompleted
+        let reason = Self.sanitize(raw)
         observations["completed"] = success
         observations["reason"] = reason
+        observations["phases"] = ["installed_and_initialized": initialized, "observation_started": observationStarted != nil,
+                                  "observation_completed": observationCompleted]
+        if let observationStarted {
+            observations["observation_elapsed_seconds"] = (ProcessInfo.processInfo.systemUptime - observationStarted).rounded()
+        }
+        let env = ProcessInfo.processInfo.environment
+        if env["BAM_VENDOR_SITE_PROBE"]?.isEmpty == false || env["BAM_VENDOR_BG_PROBE"]?.isEmpty == false {
+            observations["custom_probe_outputs"] = "BAM_VENDOR_SITE_PROBE / BAM_VENDOR_BG_PROBE results are operator-controlled; only URL user-info, queries and fragments are stripped"
+        }
         observations["pages"] = pages
         observations["permission_reviews"] = reviewEvents
         observations["blocked_external_tab_requests"] = blockedNavigations
@@ -355,7 +436,7 @@ import WebKit
                     observations["context_errors"] = context.errors.prefix(20).map(errorDescription)
                     observations["context_error_count"] = context.errors.count
                 }
-                observations["host_error"] = host.errors[id] ?? host.lastError
+                observations["host_error"] = (host.errors[id] ?? host.lastError).map { Self.sanitize($0) }
                 observations["native_companion_granted"] = host.items(profileID: browser.session.currentProfileID).first { $0.id == id }?.nativeHost != nil
             }
         }
@@ -370,8 +451,12 @@ import WebKit
         }
         window?.orderOut(nil); window?.close()
         controller = nil; window = nil
-        if let data = try? JSONSerialization.data(withJSONObject: observations, options: [.sortedKeys]),
+        // Single output boundary: every string printed passes through `sanitize`.
+        let printable = Self.scrub(observations)
+        if JSONSerialization.isValidJSONObject(printable),
+           let data = try? JSONSerialization.data(withJSONObject: printable, options: [.sortedKeys]),
            let output = String(data: data, encoding: .utf8) { print("VENDOR_OBSERVATIONS \(output)") }
+        else { print("VENDOR_OBSERVATIONS {\"completed\":false,\"reason\":\"observations were not serializable\"}") }
         print("PROBE \(success ? "completed" : "failed"): \(reason)")
         fflush(stdout); exit(success ? 0 : 1)
     }
