@@ -413,10 +413,28 @@ import Darwin
         try check(cleared.allowed.isEmpty && cleared.callback == "error", "Clearing the gesture did not revoke activeTab language access: \(cleared)")
         activeContext.performAction(for: secondTab)
         try check(try await activeTabAccess().allowed == granted.allowed, "A repeated gesture did not restore activeTab access")
-        controller.navigatePane(secondID, address: secondURL.absoluteString + "?navigated")
-        try await wait("activeTab second tab did not navigate") { controller.browsers[secondID]?.url?.query == "navigated" && controller.browsers[secondID]?.isLoading == false }
-        let navigated = try await activeTabAccess()
-        try check(navigated.allowed.isEmpty, "Navigation did not end the tab's activeTab grant: \(navigated)")
+        // Same-origin navigation: Chrome keeps the activeTab grant. Record WebKit's actual
+        // behavior; a dropped grant is a limitation, not something Bam re-grants.
+        controller.navigatePane(secondID, address: secondURL.absoluteString + "?same-origin")
+        try await wait("activeTab second tab did not navigate within its origin") { controller.browsers[secondID]?.url?.query == "same-origin" && controller.browsers[secondID]?.isLoading == false }
+        let sameOrigin = try await activeTabAccess()
+        if sameOrigin.allowed == granted.allowed { try check(true, "") }
+        else if ProcessInfo.processInfo.environment["BAM_REQUIRE_ACTIVE_TAB_SAME_ORIGIN"] == "1" {
+            throw ExtensionSmokeTest.Failure(description: "Same-origin navigation ended the activeTab grant, unlike Chrome: \(sameOrigin)")
+        } else {
+            print("KNOWN_LIMITATION activeTab: same-origin navigation ended the grant (gesture active: \(activeContext.hasActiveUserGesture(in: secondTab))); Chrome keeps it. Not counted as passed. Set BAM_REQUIRE_ACTIVE_TAB_SAME_ORIGIN=1 for the strict reproducer."); fflush(stdout)
+        }
+        // Cross-origin navigation must end it. Start from a fresh gesture so the check does not
+        // depend on the same-origin outcome above.
+        activeContext.performAction(for: secondTab)
+        try check(try await activeTabAccess().allowed == granted.allowed, "A fresh gesture did not grant access before the cross-origin check")
+        var crossComponents = URLComponents(url: secondURL, resolvingAgainstBaseURL: false)!
+        crossComponents.host = "localhost"; crossComponents.query = "cross-origin"
+        let crossURL = crossComponents.url!
+        controller.navigatePane(secondID, address: crossURL.absoluteString)
+        try await wait("activeTab second tab did not navigate to another origin") { controller.browsers[secondID]?.url?.host == "localhost" && controller.browsers[secondID]?.isLoading == false }
+        let crossOrigin = try await activeTabAccess()
+        try check(crossOrigin.allowed.isEmpty && crossOrigin.callback == "error", "Cross-origin navigation did not end the tab's activeTab grant: \(crossOrigin)")
         activePage.stopLoading()
         _ = host.closeTab?(secondID)
         try await host.remove(id: activeID)
