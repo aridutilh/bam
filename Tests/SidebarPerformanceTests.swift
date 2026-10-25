@@ -280,6 +280,32 @@ import AppKit
         require(descendants(leafNow).first { $0.identifier?.rawValue == "folder-chevron" }?.isHidden != false, "Tab rows show no chevron")
         let folderTitle = descendants(folderRow).compactMap { $0 as? NSTextField }.first { $0.stringValue.hasPrefix("Folder level 0") }!
         require(chevron.map { folderTitle.frame.maxX <= $0.frame.minX } == true, "Folder titles stop before the chevron")
+        // Hierarchy pass: folders recede to the tabs' weight; glyphs in ink; chevrons quiet at rest.
+        func weight(_ field: NSTextField) -> CGFloat {
+            ((field.font?.fontDescriptor.object(forKey: .traits) as? [NSFontDescriptor.TraitKey: Any])?[.weight] as? NSNumber).map { CGFloat($0.doubleValue) } ?? 0
+        }
+        require(abs(weight(folderTitle) - NSFont.Weight.medium.rawValue) < 0.01, "Folder titles are medium, not semibold")
+        let folderGlyph = descendants(folderRow).compactMap { $0 as? NSImageView }.first { $0.identifier?.rawValue != "folder-chevron" }!
+        require(folderGlyph.contentTintColor === ArkPalette.folderGlyph && chevron?.contentTintColor === ArkPalette.ink,
+                "Folder glyphs and chevrons use Bam's ink, not the secondary gray")
+        require(chevron?.alphaValue == ArkTabRowChevron.rest, "A resting chevron is quieter")
+        window.makeFirstResponder(folderRow)
+        require(chevron?.alphaValue == ArkTabRowChevron.emphasized, "Keyboard focus brings the chevron up")
+        window.makeFirstResponder(nil)
+        require(chevron?.alphaValue == ArkTabRowChevron.rest, "Leaving focus quiets it again")
+        folderRow.mouseEntered(with: NSEvent.enterExitEvent(with: .mouseEntered, location: .zero, modifierFlags: [], timestamp: 0,
+                                                          windowNumber: window.windowNumber, context: nil, eventNumber: 0, trackingNumber: 0, userData: nil)!)
+        require(chevron?.alphaValue == ArkTabRowChevron.emphasized, "Hover brings the chevron up")
+        folderRow.mouseExited(with: NSEvent.enterExitEvent(with: .mouseExited, location: .zero, modifierFlags: [], timestamp: 0,
+                                                         windowNumber: window.windowNumber, context: nil, eventNumber: 0, trackingNumber: 0, userData: nil)!)
+        require(chevron?.alphaValue == ArkTabRowChevron.rest, "Leaving hover quiets it again")
+        // Even at rest, the chevron (ink at rest alpha) keeps >=3:1 over Bam's lightest and darkest sidebars.
+        for (dark, background) in [(false, 0.90), (true, 0.20)] {
+            let ink = BamInk.primary(dark: dark).red, a = Double(ArkTabRowChevron.rest)
+            let shown = ink * a + background * (1 - a)
+            let mixed = SpaceTheme.RGBA(red: shown, green: shown, blue: shown)!, behind = SpaceTheme.RGBA(red: background, green: background, blue: background)!
+            require(mixed.contrast(with: behind) >= 3, "A resting chevron stays visible (dark: \(dark))")
+        }
         // Visual review P2: a materialized row reused between an unloaded tab and
         // a folder (same depth, close hidden in both) must re-lay out its title.
         // Scrolling recycles cells, so a row that was an unloaded tab comes back
