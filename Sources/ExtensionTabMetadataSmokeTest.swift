@@ -329,15 +329,34 @@ import WebKit
         var fragmentComponents = URLComponents(url: navigatedURL, resolvingAgainstBaseURL: false)!
         fragmentComponents.fragment = "supplemented"
         let fragmentURL = fragmentComponents.url!
+        let eventsBeforeFragment = tabs((try await js(noHost.page, eventsProbe, ["id": eventsJS]))["native"]).count
         _ = try await controller.browsers[eventsID]?.evaluateJavaScript("location.hash = 'supplemented'; 0")
-        try await wait("the redacted url key of a quiet URL change was not delivered filled") {
-            guard let value = try? await js(noHost.page, eventsProbe, ["id": eventsJS]) else { return false }
-            let wrapped = tabs(value["wrapped"]), native = tabs(value["native"])
-            return wrapped.count == native.count && zip(wrapped, native).contains { wrapped, native in
-                (native["keys"] as? [String])?.contains("url") == true && ((native["url"] as? String) ?? "").isEmpty
-                    && wrapped["url"] as? String == fragmentURL.absoluteString
-                    && (wrapped["tab"] as? [String: Any])?["url"] as? String == fragmentURL.absoluteString
+        // On timeout the failure carries the evidence that separates the causes: whether Bam's tab address followed the
+        // fragment (session vs web view), whether WebKit published any url event after it (native events since the
+        // change), and what the facade delivered (wrapped events).
+        do {
+            var lastEvents: [String: Any] = [:]
+            let deadline = ProcessInfo.processInfo.systemUptime + 12
+            var delivered = false
+            while ProcessInfo.processInfo.systemUptime < deadline {
+                if let value = try? await js(noHost.page, eventsProbe, ["id": eventsJS]) {
+                    lastEvents = value
+                    let wrapped = tabs(value["wrapped"]), native = tabs(value["native"])
+                    delivered = wrapped.count == native.count && zip(wrapped, native).contains { wrapped, native in
+                        (native["keys"] as? [String])?.contains("url") == true && ((native["url"] as? String) ?? "").isEmpty
+                            && wrapped["url"] as? String == fragmentURL.absoluteString
+                            && (wrapped["tab"] as? [String: Any])?["url"] as? String == fragmentURL.absoluteString
+                    }
+                    if delivered { break }
+                }
+                try await Task.sleep(nanoseconds: 40_000_000)
             }
+            let native = tabs(lastEvents["native"]), wrapped = tabs(lastEvents["wrapped"])
+            try check(delivered, "the redacted url key of a quiet URL change was not delivered filled: " +
+                      "session address=\(controller.session.tabs.first { $0.id == eventsID }?.address ?? "missing") " +
+                      "web view url=\(controller.browsers[eventsID]?.url?.absoluteString ?? "none") expected=\(fragmentURL.absoluteString); " +
+                      "native events since the change=\(Array(native.dropFirst(eventsBeforeFragment))) (of \(native.count)); " +
+                      "wrapped tail=\(Array(wrapped.suffix(max(1, native.count - eventsBeforeFragment)))) (of \(wrapped.count))")
         }
         let events = try await js(noHost.page, eventsProbe, ["id": eventsJS])
         let wrappedEvents = tabs(events["wrapped"]), nativeEvents = tabs(events["native"])
