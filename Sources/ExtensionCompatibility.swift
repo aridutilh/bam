@@ -189,28 +189,16 @@ enum ExtensionCompatibility {
         return e;
       };
       const unsupported = (what) => new Error(what + " is not available in Bam.");
-      // Chrome reports a callback-form failure through runtime.lastError, readable only
-      // during that callback. Shadow it on each distinct runtime object, then restore.
-      const withLastError = (error, run) => {
-        const message = String((error && error.message) || error || "Unknown error");
-        const restore = [];
-        for (const ns of new Set([globalThis.chrome, globalThis.browser])) {
-          const runtime = ns && ns.runtime;
-          if (!runtime || restore.some((entry) => entry.runtime === runtime)) continue;
-          const own = Object.getOwnPropertyDescriptor(runtime, "lastError");
-          try { Object.defineProperty(runtime, "lastError", { value: { message }, configurable: true, enumerable: false, writable: false }); restore.push({ runtime, own }); } catch (inner) {}
-        }
-        try { run(); } finally {
-          for (const { runtime, own } of restore) { try { if (own) Object.defineProperty(runtime, "lastError", own); else delete runtime.lastError; } catch (inner) {} }
-        }
-      };
+      // Chrome reports a callback-form failure through runtime.lastError. WebKit's runtime.lastError is
+      // a native attribute that Bam cannot set (measured: it stays null in pages and workers), so a
+      // failed shimmed call logs the error and calls back without arguments; the promise form rejects.
       // Callback or promise, matching WebKit's dual-style APIs.
       const call = (fn) => function (...args) {
         const callback = typeof args[args.length - 1] === "function" ? args.pop() : null;
         const promise = Promise.resolve().then(() => fn.apply(this, args));
         if (!callback) return promise;
         promise.then((value) => { try { Array.isArray(value) && value.__bamSpread ? callback(...value) : callback(value); } catch (error) { console.error(error); } },
-                     (error) => withLastError(error, () => { try { callback(); } catch (inner) { console.error(inner); } }));
+                     (error) => { console.error("[Bam compatibility]", error); try { callback(); } catch (inner) { console.error(inner); } });
         return undefined;
       };
       const bridge = (method, params) => isWorker ? sendNative({ kind: "request", method, params: params === undefined ? null : params }) : new Promise((resolve, reject) => {

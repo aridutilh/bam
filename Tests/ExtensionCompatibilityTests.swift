@@ -480,7 +480,7 @@ import JavaScriptCore
             var errors: [String] = []
             js.exceptionHandler = { _, error in errors.append(error?.toString() ?? "JavaScript error") }
             js.evaluateScript("""
-            var console = {error: function() {}}, performance = {now: function() { return 0; }};
+            var logged = [], console = {error: function() { logged.push(Array.prototype.slice.call(arguments).map(function (x) { return String(x && x.message || x); }).join(' ')); }}, performance = {now: function() { return 0; }};
             var location = {origin: 'webkit-extension://fixture', href: 'webkit-extension://fixture/worker.js'};
             var requests = [], document = null, nativeFails = \(nativeFails);
             function Runtime() {}
@@ -528,7 +528,7 @@ import JavaScriptCore
           results.all = (await browser.runtime.getContexts({})).map(function (c) { return c.contextType; }).join();
           browser.offscreen.createDocument({url: 'offscreen.html', reasons: ['CLIPBOARD'], justification: 'copy'}, function (value) {
             results.callbackArgs = arguments.length;
-            results.callbackError = [browser.runtime.lastError && browser.runtime.lastError.message, chrome.runtime.lastError && chrome.runtime.lastError.message];
+            results.callbackError = [browser.runtime.lastError, chrome.runtime.lastError, Object.getOwnPropertyNames(browser.runtime).indexOf('lastError')];
             setTimeoutLike();
           });
         })().catch(function (error) { results.failure = String(error); });
@@ -539,9 +539,9 @@ import JavaScriptCore
         try check(js.evaluateScript("results.second === 'Only a single offscreen document may be created.'")!.toBool(),
                   "A second createDocument did not reject with Chrome's exact message (Bitwarden compares it)")
         try check(js.evaluateScript("""
-            results.callbackArgs === 0 && results.callbackError[0] === 'Only a single offscreen document may be created.' && results.callbackError[1] === results.callbackError[0]
-            && results.afterCallback[0] === undefined && results.afterCallback[1] === undefined && results.afterCallback[2] === -1
-            """)!.toBool(), "Callback-form failure did not expose and then restore runtime.lastError on both namespaces: \(js.evaluateScript("JSON.stringify(results)")!)")
+            results.callbackArgs === 0 && results.callbackError[0] === undefined && results.callbackError[1] === undefined && results.callbackError[2] === -1
+            && logged.some(function (line) { return line.indexOf('Only a single offscreen document may be created.') !== -1; })
+            """)!.toBool(), "A callback-form failure faked runtime.lastError or was not logged: \(js.evaluateScript("JSON.stringify([results, logged])")!)")
         js.evaluateScript("""
         (async function () {
           await browser.offscreen.closeDocument();
@@ -568,7 +568,7 @@ import JavaScriptCore
         """)
         try check(fontErrors().isEmpty && fontsJS.evaluateScript("""
             JSON.stringify(results.promised) === '[{"fontId":"Fixture Sans","displayName":"Fixture Sans"}]' && JSON.stringify(results.callback) === JSON.stringify(results.promised)
-            && results.setError === 'fontSettings.setFont is not available in Bam.' && browser.fontSettings.GenericFamily.SERIF === 'serif'
+            && results.setError === undefined && logged.some(function (line) { return line.indexOf('fontSettings.setFont is not available in Bam.') !== -1; }) && browser.fontSettings.GenericFamily.SERIF === 'serif'
             """)!.toBool(), "fontSettings adapter did not normalize the list or reject settings changes: \(fontsJS.evaluateScript("JSON.stringify(results)")!)")
 
         // Undeclared: no namespace, and getContexts keeps its earlier empty, request-free answer.
