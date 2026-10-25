@@ -3,9 +3,17 @@ import AppKit
 /// File > Import from Arc…: choose Arc's layout file, preview exactly what
 /// will be added, then commit once. Nothing changes until Import is pressed.
 @MainActor extension BrowserController {
+    /// File ▸ Import from Arc… previews Arc's own layout file when it exists.
     @objc func importFromArc(_ sender: Any?) {
+        presentArcImport(initialSourceURL: ArcImport.defaultSourceURL())
+    }
+
+    /// Opens the import sheet with the real preview/commit/dismiss callbacks.
+    /// `initialSourceURL` is read only if readable; nil opens it empty, so a
+    /// fixture can `load(_:)` a synthetic file without touching personal data.
+    @discardableResult func presentArcImport(initialSourceURL: URL?) -> ArcImportController? {
         guard !isShuttingDown, !suspendsChromeInteraction, arcImporter == nil,
-              let window = view.window, window.attachedSheet == nil else { return }
+              let window = view.window, window.attachedSheet == nil else { return nil }
         cancelPaging(); dismissAddress(); findBar.hide(); pageFeedback.hide()
         let importer = ArcImportController()
         arcImporter = importer
@@ -23,8 +31,8 @@ import AppKit
             self.view.window?.makeFirstResponder(self.commandWebView)
         }
         importer.present(on: window)
-        let defaultSource = ArcImport.defaultSourceURL()
-        if FileManager.default.isReadableFile(atPath: defaultSource.path) { importer.load(defaultSource) }
+        if let source = initialSourceURL, FileManager.default.isReadableFile(atPath: source.path) { importer.load(source) }
+        return importer
     }
 
     /// Applies the import in one step and reports the real save outcome.
@@ -42,10 +50,8 @@ import AppKit
         if let refusal = report.refusal { completion(refusal); return }
         guard !report.isEmpty else { completion(report.emptyReason); return }
         session = updated
-        if let first = report.firstSpaceID, session.spaceDefinition(first) != nil {
-            session.changeSpace(first)
-            session.add()  // A blank page, so nothing imported is instantiated on arrival.
-        }
+        // Exactly one blank landing tab, so nothing imported is instantiated on arrival.
+        if let first = report.firstSpaceID { ArcImport.arrive(at: first, in: &session) }
         let imported = session
         showActive(); refreshPaletteResults(); onSpacesChanged?()
         let tabs = report.importedTabs

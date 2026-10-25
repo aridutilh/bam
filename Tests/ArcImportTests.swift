@@ -280,6 +280,20 @@ import Foundation
         let (_, damagedReport) = ArcImport.apply(damagedSource, to: BrowserSession.fresh())
         expect(damagedReport.missingItems >= 3, "Missing pinned, Today and Favorites roots are reported")
 
+        // Arrival: exactly one blank landing tab, whether or not the Space has a selectable tab.
+        for includeToday in [true, false] {
+            var arrival = ArcImport.Options(); arrival.includeToday = includeToday
+            var landed = ArcImport.apply(source, to: BrowserSession.fresh(), options: arrival).session
+            let before = Set(landed.tabs.map(\.id))
+            let target = landed.spaces.first { $0.name == "Work" }!.id
+            ArcImport.arrive(at: target, in: &landed)
+            let added = landed.tabs.filter { !before.contains($0.id) }
+            expect(added.count == 1 && added[0].isHome && landed.activeID == added[0].id && landed.space == target,
+                   "Arrival creates exactly one blank tab (Today \(includeToday ? "on" : "off")): \(added.count)")
+            expect(!landed.tabs.contains { before.contains($0.id) && $0.space == target && $0.id == landed.activeID },
+                   "No imported tab is selected on arrival (Today \(includeToday ? "on" : "off"))")
+        }
+
         // Undo after a failed save removes exactly the import, keeping later user changes.
         var afterImport = session
         let userTab = afterImport.add(address: "https://user.example.com/")
