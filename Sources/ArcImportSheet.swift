@@ -163,7 +163,7 @@ import UniformTypeIdentifiers
         }
         if let refusal = report.refusal { showError(refusal) }
         let newSpaces = report.spaces.filter(\.isNew).count
-        let headline = report.isEmpty ? "Everything in this layout is already in Bam."
+        let headline = report.isEmpty ? report.emptyReason
             : "\(report.importedTabs) tabs and \(report.importedFolders) folders" + (newSpaces > 0 ? " into \(newSpaces) new Space\(newSpaces == 1 ? "" : "s")" : "")
         add(label(headline, size: 14, weight: .semibold))
         for space in report.spaces {

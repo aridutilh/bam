@@ -40,7 +40,7 @@ import AppKit
         let previous = session
         let (updated, report) = ArcImport.apply(source, to: session, options: options)
         if let refusal = report.refusal { completion(refusal); return }
-        guard !report.isEmpty else { completion("Everything in this layout is already in Bam."); return }
+        guard !report.isEmpty else { completion(report.emptyReason); return }
         session = updated
         if let first = report.firstSpaceID, session.spaceDefinition(first) != nil {
             session.changeSpace(first)

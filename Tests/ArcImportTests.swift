@@ -360,6 +360,11 @@ import Foundation
         let (capped, cappedReport) = ArcImport.apply(source, to: crowded)
         expect(capped.spaces.count == BrowserSession.maximumSpaces && cappedReport.skippedSpaces == 2, "Spaces beyond the limit are reported")
 
+        var full = crowded; _ = full.createSpace(name: "Last", symbol: "globe", colorIndex: 0)
+        let (_, fullReport) = ArcImport.apply(source, to: full, options: noToday)
+        expect(fullReport.isEmpty && fullReport.emptyReason.contains("limit"), "A full Space list explains why nothing is added")
+        expect(againReport.isEmpty && againReport.emptyReason.contains("already"), "A repeat import says everything is already in Bam")
+
         // Large import stays bounded and dormant.
         let big = Fixture(); let bigSpace = big.space("Big", profile: nil)
         var parent = bigSpace.pinned

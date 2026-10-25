@@ -1175,8 +1175,9 @@ private final class ArkTabRow: ArkFlippedView {
         }
         closeButton.isHidden = item.isFolder || item.isUnloaded || (!hovered && !item.isActive)
         setAccessibilityDisclosureLevel(item.depth)
+        // Recycled cells must not keep a folder's disclosure state.
+        setAccessibilityDisclosed(item.isFolder && item.isExpanded)
         if item.isFolder {
-            setAccessibilityDisclosed(item.isExpanded)
             setAccessibilityValue(item.isExpanded ? "Expanded" : "Collapsed")
             setAccessibilityHelp("Folder with \(item.folderTabCount) tab\(item.folderTabCount == 1 ? "" : "s"). Press to \(item.isExpanded ? "collapse" : "expand").")
         } else if first || old.isActive != item.isActive || old.isUnloaded != item.isUnloaded || old.isSleeping != item.isSleeping || old.isFolder {
