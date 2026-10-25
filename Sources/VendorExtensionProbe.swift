@@ -43,6 +43,10 @@ import WebKit
     /// `BAM_VENDOR_QUIET=1`: no host-initiated evaluation, action invocation or options fallback (VendorQuietMode).
     private var quiet = false
     private var plan = VendorQuietMode.plan(quiet: false)
+    /// `BAM_VENDOR_MANUAL_SITE_ACCESS=1` (diagnostic, quiet + normal only): after the initial install, runtime permission
+    /// requests use Bam's production dialog (never auto-granted) and the real reload offer stays wired, so a person can
+    /// accept the Site Access UI by hand. Off by default: the probe behaves exactly as before.
+    private var manualSiteAccess = false
     private var responderSnapshots: [[String: Any]] = []
     /// IDs seeded by BAM_VENDOR_SEED_BOOKMARKS (empty when off), for the no-loaded-views check.
     private var seededBookmarkIDs: [UUID] = []
@@ -145,6 +149,27 @@ import WebKit
         }
         watchdog = timer; RunLoop.main.add(timer, forMode: .common)
     }
+    /// Manual Site Access: a production permission dialog or Site Access review may still be open when the run ends.
+    /// Abort the modal (an aborted dialog answers as declined, so nothing is granted) and end attached sheets, so
+    /// teardown and the controller's release stay bounded. Only this process's own windows are touched.
+    private func endManualInteraction() {
+        var aborted = false, sheets = 0
+        if NSApp.modalWindow != nil { NSApp.abortModal(); aborted = true }
+        for window in NSApp.windows {
+            if let sheet = window.attachedSheet { window.endSheet(sheet); sheets += 1 }
+        }
+        observations["manual_teardown"] = ["modal_aborted": aborted, "sheets_ended": sheets]
+    }
+    static let manualSiteAccessFlag = "BAM_VENDOR_MANUAL_SITE_ACCESS"
+    enum ManualSiteAccessDecision: Equatable { case off, on, invalid(String) }
+    /// Only "1" enables, and only with quiet mode and the normal disposable profile; anything else set is refused.
+    static func manualSiteAccessDecision(_ value: String?, quiet: Bool, normalProfile: Bool) -> ManualSiteAccessDecision {
+        guard let value, !value.isEmpty else { return .off }
+        guard value == "1" else { return .invalid("\(manualSiteAccessFlag) must be 1 when set") }
+        guard quiet else { return .invalid("\(manualSiteAccessFlag) needs quiet mode (\(VendorQuietMode.flag)=1)") }
+        guard normalProfile else { return .invalid("\(manualSiteAccessFlag) needs the normal disposable profile (BAM_VENDOR_PROFILE=normal)") }
+        return .on
+    }
     /// A deadline cancels the run, then waits (bounded) for it to return so the
     /// installer's own cleanup, including removal of its staging folder, completes
     /// before the process exits. Whether it did is reported, never assumed.
@@ -224,6 +249,16 @@ import WebKit
         plan = VendorQuietMode.plan(quiet: quiet)
         observations["quiet_mode"] = quiet
         if quiet { observations["quiet_scope"] = VendorQuietMode.quietUnmeasuredText }
+        // Opt-in manual Site Access diagnostic: decided (and refused if invalid) before any store or window exists.
+        switch Self.manualSiteAccessDecision(env[Self.manualSiteAccessFlag], quiet: quiet, normalProfile: mode == .normal) {
+        case .invalid(let why): throw BrowserExtensions.failure(why)
+        case .on: manualSiteAccess = true
+        case .off: manualSiteAccess = false
+        }
+        observations["manual_site_access"] = manualSiteAccess
+        if manualSiteAccess {
+            observations["manual_site_access_scope"] = "diagnostic: initial install auto-approves only Bam's supported permission set (as by default); after it, runtime permission requests use Bam's production dialog, never auto-granted, and the browser's real reload offer stays wired; no product behavior changed"
+        }
         // Opt-in bookmark fixture: decided (and refused) before anything is created or mutated.
         let seedDecision = BookmarkVendorSeed.decide(flag: env[BookmarkVendorSeed.flag], isNormalMode: mode == .normal, site: env["BAM_VENDOR_SITE"])
         if case .refused(let why) = seedDecision { throw BrowserExtensions.failure(why) }
@@ -277,7 +312,8 @@ import WebKit
         }
 
         let host = browser.browserExtensions
-        host.onReloadNeeded = nil
+        // Manual Site Access keeps the browser's real reload offer; by default the probe silences it, as before.
+        if !manualSiteAccess { host.onReloadNeeded = nil }
         host.permissionPrompt = { [weak self] review in
             self?.reviewEvents.append([
                 "permissions": review.permissions, "unsupported": review.unsupported,
@@ -342,6 +378,12 @@ import WebKit
         let package = host.storageURL.appendingPathComponent(record.id.uuidString, isDirectory: true).appendingPathComponent(record.packageName, isDirectory: true)
         observations["manifest_version"] = manifest["manifest_version"]
         observations["requests_native_messaging"] = (manifest["permissions"] as? [String] ?? []).contains("nativeMessaging")
+        if manualSiteAccess {
+            // The initial install is complete (approved under the supported-set rule above). From here, every runtime
+            // permission request goes to Bam's production dialog: nothing is auto-granted.
+            host.permissionPrompt = nil
+            observations["permission_prompt_after_install"] = "production dialog (not auto-approved; not recorded in permission_reviews)"
+        }
         initialized = true
         observations["extension_name"] = context.webExtension.displayName ?? ""
         observations["has_background"] = context.webExtension.hasBackgroundContent
@@ -655,6 +697,7 @@ import WebKit
         guard !finished else { return }
         finished = true; watchdog?.invalidate(); watchdog = nil
         task?.cancel(); task = nil
+        if manualSiteAccess { endManualInteraction() }
         observations["phases"] = ["installed_and_initialized": initialized, "observation_started": observationStarted != nil,
                                   "observation_completed": observationCompleted]
         if let observationStarted {
