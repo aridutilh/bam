@@ -571,9 +571,12 @@ struct SidebarExtensionItem {
         let changed = structureChanged ? [] : items.indices.filter { tabs[$0] != items[$0] }
         let origin = scroll.contentView.bounds.origin
         let oldKeys = structureChanged ? entryKeys : []
-        // A keyboard-focused folder keeps focus through the reload its toggle causes.
-        let focusedFolder = (window?.firstResponder as? ArkTabRow).flatMap { $0.item.isFolder && $0.isDescendant(of: table) ? $0.item.id : nil }
-        defer { if let focusedFolder { focusRow(withID: focusedFolder) } }
+        // Keyboard focus belongs to a row identity, not a cell: the focused tab
+        // or folder keeps focus through reloads, reorders and cell reuse. If it
+        // was removed, focus moves to the row now in its place (nothing opens).
+        let focusedRow = (window?.firstResponder as? ArkTabRow).flatMap { $0.isDescendant(of: table) ? $0 : nil }
+        let focusedID = focusedRow?.item.id, focusedIndex = focusedRow.map { table.row(for: $0) } ?? -1
+        defer { if let focusedID { restoreFocus(to: focusedID, near: focusedIndex) } }
         tabs = items
         configureAppearance(space: space, destinations: destinations)
         if structureChanged || entries.isEmpty {
@@ -618,7 +621,16 @@ struct SidebarExtensionItem {
     /// Entry point for View ▸ Focus Sidebar: the selected tab's row, else the first row.
     @discardableResult func focusInitialRow() -> Bool {
         if let active = tabs.first(where: \.isActive), let row = rowByID[active.id] { focusRow(row); return true }
-        return moveKeyboardFocus(from: -1, by: 1)
+        if moveKeyboardFocus(from: -1, by: 1) { return true }
+        // No rows yet: the list itself takes focus, so arrows are harmless no-ops.
+        window?.makeFirstResponder(table); return false
+    }
+    private func restoreFocus(to id: UUID, near index: Int) {
+        if rowByID[id] != nil { focusRow(withID: id); return }
+        // Removed: the nearest focusable row at or above its old position, else the list.
+        let start = min(max(index, 0), max(entries.count - 1, 0))
+        if moveKeyboardFocus(from: start - 1, by: 1) || moveKeyboardFocus(from: start + 1, by: -1) { return }
+        window?.makeFirstResponder(table)
     }
     /// ← on a row inside a folder moves focus to that folder.
     fileprivate func focusParent(of id: UUID) -> Bool {
@@ -816,7 +828,10 @@ struct SidebarExtensionItem {
 @MainActor private final class SidebarTableView: NSTableView {
     override func keyDown(with event: NSEvent) {
         let delta = event.keyCode == 125 ? 1 : event.keyCode == 126 ? -1 : 0
-        if delta != 0, let page = delegate as? SidebarPage, page.handleTableArrow(delta) { return }
+        // Plain Up/Down only ever move focus; with nowhere to go they are no-ops,
+        // never NSTableView selection (which would open or wake a tab).
+        let plain = event.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty
+        if delta != 0, plain, let page = delegate as? SidebarPage { _ = page.handleTableArrow(delta); return }
         super.keyDown(with: event)
     }
 }
@@ -1363,7 +1378,11 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource {
             // Reused for another row mid-press: abandon that press and any drag it began.
             dragOrigin = nil; pressedID = nil; didDrag = false
         }
-        if first || old.title != item.title { titleLabel.stringValue = item.title.isEmpty ? (item.isFolder ? "Folder" : "New Tab") : item.title; setAccessibilityLabel(item.title) }
+        if first || old.title != item.title || old.isFolder != item.isFolder {
+            // Assistive tech hears exactly what the row shows, including the blank-title fallback.
+            titleLabel.stringValue = item.title.isEmpty ? (item.isFolder ? "Folder" : "New Tab") : item.title
+            setAccessibilityLabel(titleLabel.stringValue)
+        }
         if first || old.isActive != item.isActive || old.isFolder != item.isFolder { titleLabel.font = ArkType.rowFont(active: item.isActive, folder: item.isFolder) }
         if first || old.depth != item.depth { needsLayout = true }
         if first || old.isUnloaded != item.isUnloaded || old.isSleeping != item.isSleeping {
@@ -1430,8 +1449,10 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource {
         else if item.isFolder, event.keyCode == 124, !item.isExpanded { toggleFolder?() }
         else if item.isFolder, event.keyCode == 123, item.isExpanded { toggleFolder?() }
         else if event.keyCode == 123, focusParent?() == true {}
-        else if event.keyCode == 125, arrow?(1) == true {}
-        else if event.keyCode == 126, arrow?(-1) == true {}
+        // Up/Down are always handled here: at the first or last row they do
+        // nothing rather than reaching the table's own selection (which opens tabs).
+        else if event.keyCode == 125 { _ = arrow?(1) }
+        else if event.keyCode == 126 { _ = arrow?(-1) }
         else if event.keyCode == 53, let escape { escape() }
         else { super.keyDown(with: event) }
     }

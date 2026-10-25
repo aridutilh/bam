@@ -471,6 +471,56 @@ import AppKit
         })
         window.makeFirstResponder(nil)
         require(sidebar.focusTabList() && focusedID() == rowID(navFolder), "With no selection, Focus Sidebar starts at the first row")
+
+        // Edges: Up at the first row / Down at the last row do nothing, with the
+        // active tab elsewhere (no fall-through to table selection).
+        update(0, navItems)
+        let edgeTable = table(in: 0)
+        let selectedBefore = edgeTable.selectedRow
+        navSelected.removeAll()
+        sidebar.focusTabList()
+        key(126, to: window.firstResponder as! NSView); key(126, to: window.firstResponder as! NSView); key(126, to: window.firstResponder as! NSView)
+        require(focusedID() == rowID(navFolder), "Focus reaches the first row")
+        key(126, to: window.firstResponder as! NSView)
+        require(focusedID() == rowID(navFolder) && navSelected.isEmpty && edgeTable.selectedRow == selectedBefore,
+                "Up at the first row is a no-op: no selection change, nothing opens")
+        for _ in 0..<6 { key(125, to: window.firstResponder as! NSView) }
+        require(focusedID() == rowID(navOther), "Focus reaches the last row")
+        key(125, to: window.firstResponder as! NSView)
+        require(focusedID() == rowID(navOther) && navSelected.isEmpty && edgeTable.selectedRow == selectedBefore,
+                "Down at the last row is a no-op")
+        window.makeFirstResponder(edgeTable)
+        edgeTable.selectRowIndexes(IndexSet(integer: edgeTable.numberOfRows - 1), byExtendingSelection: false)
+        navSelected.removeAll()
+        key(125, to: edgeTable)
+        require(navSelected.isEmpty, "Down past the end with the list itself focused selects nothing")
+        update(0, navItems); navSelected.removeAll()
+
+        // Focus survives a reorder/insertion and cell reuse; Return opens exactly that row.
+        sidebar.focusTabList()                                   // on Today (active A)
+        key(126, to: window.firstResponder as! NSView)           // to Kept (dormant B)
+        require(focusedID() == rowID(navKept), "Fixture: dormant B is focused while A is active")
+        let inserted = (0..<30).map { SidebarTabItem(id: UUID(), title: "New \($0)", subtitle: "", symbol: "globe", isPinned: false, isActive: false) }
+        let reordered = [navItems[2], navItems[0], navItems[1]] + inserted + [navItems[4], navItems[3]]   // B moves up; 30 rows inserted
+        update(0, reordered); prepare(table(in: 0))
+        require(focusedID() == rowID(navKept) && navSelected.isEmpty, "Focus stays on B through a reorder, insertion and reload")
+        key(36, to: window.firstResponder as! NSView)
+        require(navSelected == [navKept], "Return then opens B, exactly once")
+        // A removed focused row falls back nearby without opening anything.
+        navSelected.removeAll()
+        update(0, reordered); sidebar.focusTabList()
+        for _ in 0..<3 { key(125, to: window.firstResponder as! NSView) }
+        let doomed = focusedID()
+        update(0, reordered.filter { rowID($0.id) != doomed })
+        require(focusedID() != nil && focusedID() != doomed && navSelected.isEmpty, "Removing the focused row moves focus nearby; nothing opens")
+        // Assistive label matches the shown fallback for a blank title.
+        update(0, [SidebarTabItem(id: UUID(), title: "", subtitle: "", symbol: "globe", isPinned: false, isActive: true)])
+        require(row(table(in: 0), 1).accessibilityLabel() == "New Tab", "A blank tab is announced as New Tab, as shown")
+        // An empty list still accepts focus, and arrows there are harmless.
+        update(0, [])
+        require(!sidebar.focusTabList() && window.firstResponder === table(in: 0), "Focus Sidebar on an empty list focuses the list itself")
+        key(125, to: table(in: 0))
+        require(navSelected.isEmpty, "Arrows in an empty list do nothing")
         print("PASS: \(checks) sidebar virtualization, identity, scrolling, paging and extension action checks")
         window.contentView = nil
     }
