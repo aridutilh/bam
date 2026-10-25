@@ -122,7 +122,7 @@ struct BrowserExtensionPermissionReview {
     // windows.create/update/remove are implemented through Little Bam windows since 0.17.
     // notifications/downloads/management are absent from WebKit; Bam's compatibility
     // layer defines them in extension pages when the manifest requests them.
-    static let unsupportedAPIs: Set<String> = ["browser.runtime.sendNativeMessage", "browser.runtime.connectNative", "browser.tabs.move", "browser.tabs.duplicate", "browser.tabs.highlight", "browser.tabs.discard", "browser.tabs.detectLanguage", "browser.bookmarks", "browser.history", "browser.identity", "browser.sessions"]
+    static let unsupportedAPIs: Set<String> = ["browser.runtime.sendNativeMessage", "browser.runtime.connectNative", "browser.tabs.move", "browser.tabs.duplicate", "browser.tabs.highlight", "browser.tabs.discard", "browser.bookmarks", "browser.history", "browser.identity", "browser.sessions"]
     nonisolated static var browserVersion: String { Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0" }
 
     init(storageURL: URL?, isPrivate: Bool = false) {
@@ -560,7 +560,7 @@ struct BrowserExtensionPermissionReview {
         guard let i = records.firstIndex(where: { $0.id == id }) else { return }
         noteMutation(id, permissions: true); loadGeneration.removeValue(forKey: id)
         records[i].permissions = [:]; records[i].patterns = [:]; records[i].compatibilityGrants = [:]; records[i].nativeHost = nil
-        if let runtime = runtimes[records[i].profileID], let context = runtime.contexts[id] { runtime.disconnectNative(context) }
+        if let runtime = runtimes[records[i].profileID], let context = runtime.contexts[id] { runtime.disconnectNative(context); runtime.compatibility.revoke(context) }
         if let context = context(for: id) { context.grantedPermissions = [:]; context.grantedPermissionMatchPatterns = [:] }
         try persist(); onReloadNeeded?(records[i].profileID); changed()
     }
@@ -1168,14 +1168,16 @@ struct BrowserExtensionPermissionReview {
         guard let web = webView(for: context), web.canGoForward else { completionHandler(BrowserExtensions.failure("This page cannot go forward.")); return }
         web.goForward(); completionHandler(nil)
     }
-    /// tabs.detectLanguage: the document's declared language, else the page's navigator language.
+    /// tabs.detectLanguage: the page's recognizable text, else its declared language, else `und`.
+    /// The sample is read in an isolated world and only from pages this extension may access.
     func detectWebpageLocale(for context: WKWebExtensionContext, completionHandler: @escaping (Locale?, Error?) -> Void) {
-        guard let web = webView(for: context) else { completionHandler(nil, BrowserExtensions.failure("This page is not available.")); return }
-        web.evaluateJavaScript("(document.documentElement.lang || navigator.language || '')") { value, error in
-            guard error == nil, let tag = value as? String, !tag.isEmpty else { completionHandler(nil, error ?? BrowserExtensions.failure("The page language could not be detected.")); return }
-            completionHandler(Locale(identifier: tag), nil)
+        guard let web = webView(for: context), let url = url(for: context), context.hasAccess(to: url) else { completionHandler(nil, BrowserExtensions.failure("This page's language is not available to this extension.")); return }
+        web.callAsyncJavaScript(ExtensionLanguageDetection.sampleScript, arguments: [:], in: nil, in: Self.languageWorld) { result in
+            guard case .success(let value) = result, let sample = value as? [String: Any] else { completionHandler(nil, BrowserExtensions.failure("The page language could not be detected.")); return }
+            completionHandler(Locale(identifier: ExtensionLanguageDetection.language(declared: sample["declared"] as? String, text: sample["text"] as? String)), nil)
         }
     }
+    private static let languageWorld = WKContentWorld.world(name: "BamLanguageDetection")
     /// tabs.captureVisibleTab: a snapshot of the live page, which the extension already has host access to.
     func takeSnapshot(using configuration: WKSnapshotConfiguration, for context: WKWebExtensionContext, completionHandler: @escaping (NSImage?, Error?) -> Void) {
         guard let web = webView(for: context), let url = url(for: context), context.hasAccess(to: url) else { completionHandler(nil, BrowserExtensions.failure("This page cannot be captured.")); return }

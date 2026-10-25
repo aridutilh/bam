@@ -27,7 +27,7 @@ enum ExtensionCompatibility {
     }
 
     /// Permissions WebKit's engine does not implement and this layer can stand in for.
-    static let bridgedPermissions: [String] = ["notifications", "idle", "privacy", "management", "downloads"]
+    static let bridgedPermissions: [String] = ["notifications", "idle", "privacy", "management", "downloads", "offscreen"]
     /// Members the layer always offers when the host namespace exists but the member does not.
     static let runtimeExtras: [String] = ["runtime.getBrowserInfo", "runtime.onSuspend", "runtime.requestUpdateCheck", "runtime.getContexts",
                                           "webNavigation.onCreatedNavigationTarget", "storage.managed", "commands", "action.getUserSettings"]
@@ -128,6 +128,12 @@ enum ExtensionCompatibility {
       if (!api || typeof api !== "object" || api.__bamCompatibility) return;
       if (location.origin !== __ORIGIN__) return;
       __WASM_ADAPTER__
+      // Explicit resource management: TypeScript `using` helpers throw, and wasm-bindgen
+      // classes omit their dispose methods, when the engine lacks these well-known symbols
+      // (Bitwarden's SDK client relies on both). Native symbols are never replaced.
+      for (const name of ["dispose", "asyncDispose"]) {
+        try { if (typeof Symbol[name] !== "symbol") Object.defineProperty(Symbol, name, { value: Symbol("Symbol." + name) }); } catch (error) {}
+      }
       const isWorker = __WORKER__;
       const nativeSend = isWorker && api.runtime && typeof api.runtime.sendNativeMessage === "function" ? api.runtime.sendNativeMessage.bind(api.runtime) : null;
       const nativeConnect = isWorker && api.runtime && typeof api.runtime.connectNative === "function" ? api.runtime.connectNative.bind(api.runtime) : null;
@@ -177,13 +183,28 @@ enum ExtensionCompatibility {
         return e;
       };
       const unsupported = (what) => new Error(what + " is not available in Bam.");
+      // Chrome reports a callback-form failure through runtime.lastError, readable only
+      // during that callback. Shadow it on each distinct runtime object, then restore.
+      const withLastError = (error, run) => {
+        const message = String((error && error.message) || error || "Unknown error");
+        const restore = [];
+        for (const ns of new Set([globalThis.chrome, globalThis.browser])) {
+          const runtime = ns && ns.runtime;
+          if (!runtime || restore.some((entry) => entry.runtime === runtime)) continue;
+          const own = Object.getOwnPropertyDescriptor(runtime, "lastError");
+          try { Object.defineProperty(runtime, "lastError", { value: { message }, configurable: true, enumerable: false, writable: false }); restore.push({ runtime, own }); } catch (inner) {}
+        }
+        try { run(); } finally {
+          for (const { runtime, own } of restore) { try { if (own) Object.defineProperty(runtime, "lastError", own); else delete runtime.lastError; } catch (inner) {} }
+        }
+      };
       // Callback or promise, matching WebKit's dual-style APIs.
       const call = (fn) => function (...args) {
         const callback = typeof args[args.length - 1] === "function" ? args.pop() : null;
         const promise = Promise.resolve().then(() => fn.apply(this, args));
         if (!callback) return promise;
         promise.then((value) => { try { Array.isArray(value) && value.__bamSpread ? callback(...value) : callback(value); } catch (error) { console.error(error); } },
-                     (error) => { console.error("[Bam compatibility]", error); try { callback(); } catch (inner) { console.error(inner); } });
+                     (error) => withLastError(error, () => { try { callback(); } catch (inner) { console.error(inner); } }));
         return undefined;
       };
       const bridge = (method, params) => isWorker ? sendNative({ kind: "request", method, params: params === undefined ? null : params }) : new Promise((resolve, reject) => {
@@ -334,6 +355,31 @@ enum ExtensionCompatibility {
         define(api, "downloads", ns);
       }
 
+      // offscreen: one hidden page of this extension, hosted by Bam in the same profile.
+      // Outcomes arrive as {value} or {error} so Chrome's exact messages are preserved.
+      const offscreenRequest = async (method, params) => {
+        const result = await bridge("offscreen." + method, params);
+        if (result && typeof result === "object" && typeof result.error === "string") throw new Error(result.error);
+        return result && typeof result === "object" ? result.value : undefined;
+      };
+      if (provided.has("offscreen") && !api.offscreen) {
+        const ns = {};
+        const reasons = ["TESTING", "AUDIO_PLAYBACK", "IFRAME_SCRIPTING", "DOM_SCRAPING", "BLOBS", "DOM_PARSER", "USER_MEDIA", "DISPLAY_MEDIA",
+                         "WEB_RTC", "CLIPBOARD", "LOCAL_STORAGE", "WORKERS", "BATTERY_STATUS", "MATCH_MEDIA", "GEOLOCATION"];
+        define(ns, "createDocument", call(async (parameters) => {
+          if (!parameters || typeof parameters !== "object") throw new TypeError("offscreen.createDocument requires parameters.");
+          const { url, reasons: requested, justification } = parameters;
+          if (typeof url !== "string") throw new TypeError("offscreen.createDocument requires a url.");
+          if (!Array.isArray(requested) || requested.some((reason) => typeof reason !== "string")) throw new TypeError("offscreen.createDocument requires a reasons array.");
+          if (typeof justification !== "string") throw new TypeError("offscreen.createDocument requires a justification.");
+          await offscreenRequest("createDocument", { url, reasons: requested.slice(), justification });
+        }));
+        define(ns, "closeDocument", call(async () => { await offscreenRequest("closeDocument", null); }));
+        define(ns, "hasDocument", call(async () => (await offscreenRequest("hasDocument", null)) === true));
+        define(ns, "Reason", Object.freeze(Object.fromEntries(reasons.map((reason) => [reason, reason]))));
+        define(api, "offscreen", ns);
+      }
+
       // commands: manifest commands are listed; keyboard dispatch is not provided.
       if (provided.has("commands") && !api.commands) {
         const ns = {};
@@ -395,7 +441,19 @@ enum ExtensionCompatibility {
       if (provided.has("runtime.getBrowserInfo")) extend("runtime", "getBrowserInfo", () => call(async () => ({ name: "Bam", vendor: "Bam", version, buildID: "" })));
       if (provided.has("runtime.onSuspend")) for (const name of ["onSuspend", "onSuspendCanceled", "onRestartRequired"]) extend("runtime", name, extensionEvent("runtime", name));
       if (provided.has("runtime.requestUpdateCheck")) extend("runtime", "requestUpdateCheck", () => call(async () => { const value = ["no_update", { version: String(manifest().version || "") }]; value.__bamSpread = true; return value; }));
-      if (provided.has("runtime.getContexts")) extend("runtime", "getContexts", () => call(async () => []));
+      // Only the offscreen document Bam hosts is reported; other contexts are not enumerated.
+      if (provided.has("runtime.getContexts")) extend("runtime", "getContexts", () => call(async (filter) => {
+        if (filter !== undefined && (filter === null || typeof filter !== "object")) throw new TypeError("runtime.getContexts requires a filter object.");
+        if (!provided.has("offscreen")) return [];
+        // Without a reviewed offscreen grant this stays the earlier empty answer.
+        const contexts = await offscreenRequest("contexts", null).catch(() => []);
+        const matches = (key, value) => !filter || !Array.isArray(filter[key]) || filter[key].includes(value);
+        return (Array.isArray(contexts) ? contexts : []).filter((c) => matches("contextTypes", c.contextType) && matches("contextIds", c.contextId) &&
+          matches("documentIds", c.documentId) && matches("documentUrls", c.documentUrl) && matches("documentOrigins", c.documentOrigin) &&
+          matches("tabIds", c.tabId) && matches("windowIds", c.windowId) && matches("frameIds", c.frameId) &&
+          (!filter || typeof filter.incognito !== "boolean" || filter.incognito === c.incognito));
+      }));
+      if (provided.has("runtime.getContexts")) extend("runtime", "ContextType", () => Object.freeze({ TAB: "TAB", POPUP: "POPUP", BACKGROUND: "BACKGROUND", OFFSCREEN_DOCUMENT: "OFFSCREEN_DOCUMENT", SIDE_PANEL: "SIDE_PANEL", DEVELOPER_TOOLS: "DEVELOPER_TOOLS" }));
       extend("runtime", "restart", () => () => {});
       extend("runtime", "restartAfterDelay", () => call(async () => {}));
       if (provided.has("webNavigation.onCreatedNavigationTarget")) {
@@ -474,6 +532,9 @@ enum ExtensionCompatibility {
     func diagnostics(for context: WKWebExtensionContext) -> [String: Any] {
         ["installed": scripts[context.uniqueIdentifier] != nil, "documents": helloURLs[context.uniqueIdentifier] ?? [], "script_errors": scriptErrors[context.uniqueIdentifier] ?? []]
     }
+    /// Hidden extension documents for `chrome.offscreen`, one per loaded context.
+    private(set) var offscreen: ExtensionOffscreenDocuments<WKWebView>!
+    private var offscreenLoaders: [ObjectIdentifier: OffscreenLoader] = [:]
     /// Supplied by the host: start a download from an extension document.
     var startDownload: ((WKWebView, Download) -> Bool)?
     /// The host may resolve a live page belonging to this exact worker context.
@@ -493,7 +554,36 @@ enum ExtensionCompatibility {
         handlerName = "bamCompatibility" + UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
         super.init()
         contentController.add(self, contentWorld: .page, name: handlerName)
+        offscreen = ExtensionOffscreenDocuments(load: { [weak self] owner, url in
+            guard let self else { throw ExtensionOffscreenDocuments<WKWebView>.Failure(description: "Extensions are shutting down.") }
+            return try await self.loadOffscreen(owner: owner, url: url)
+        }, discard: { [weak self] web in
+            self?.offscreenLoaders.removeValue(forKey: ObjectIdentifier(web))
+            web.navigationDelegate = nil; web.stopLoading()
+        })
     }
+
+    /// Loads an extension page in a hidden web view built from the context's own
+    /// configuration, so it is an ordinary extension page to WebKit (messaging,
+    /// storage and this layer) in the same profile store. It is never shown.
+    private func loadOffscreen(owner: String, url: URL) async throws -> WKWebView {
+        guard let context = registrations[owner]?.context, ownsRegisteredContext(context),
+              BrowserExtensions.isExtensionURL(url, ownedBy: context), let configuration = context.webViewConfiguration else {
+            throw ExtensionOffscreenDocuments<WKWebView>.Failure(description: "Offscreen documents must be pages of this extension.")
+        }
+        let web = WKWebView(frame: NSRect(x: 0, y: 0, width: 800, height: 600), configuration: configuration)
+        let loader = OffscreenLoader(baseURL: context.baseURL)
+        loader.terminated = { [weak self, weak web] in
+            guard let self, let web else { return }
+            self.offscreen.documentEnded(web, owner: owner)
+        }
+        offscreenLoaders[ObjectIdentifier(web)] = loader
+        web.navigationDelegate = loader
+        do { try await loader.load(url, in: web); return web }
+        catch { offscreenLoaders.removeValue(forKey: ObjectIdentifier(web)); web.navigationDelegate = nil; web.stopLoading(); throw error }
+    }
+    /// Revoked grants close the extension's hidden document immediately.
+    func revoke(_ context: WKWebExtensionContext) { offscreen.discard(owner: context.uniqueIdentifier) }
 
     func install(_ plan: ExtensionCompatibility.Plan, for context: WKWebExtensionContext) {
         guard !plan.isEmpty, let contentController else { return }
@@ -504,6 +594,7 @@ enum ExtensionCompatibility {
         contentController.addUserScript(script)
     }
     func remove(_ context: WKWebExtensionContext) {
+        offscreen.discard(owner: context.uniqueIdentifier)
         documents.removeValue(forKey: context.uniqueIdentifier)
         registrations.removeValue(forKey: context.uniqueIdentifier)
         helloURLs.removeValue(forKey: context.uniqueIdentifier)
@@ -517,6 +608,7 @@ enum ExtensionCompatibility {
         for script in scripts.values { contentController.addUserScript(script) }
     }
     func shutdown() {
+        offscreen.discardAll()
         idleTimer?.invalidate(); idleTimer = nil
         let ports = eventConnections.values.flatMap { $0.values.map(\.port) }
         eventConnections.removeAll(); registrations.removeAll(); idleIntervals.removeAll(); idleStates.removeAll()
@@ -673,7 +765,8 @@ enum ExtensionCompatibility {
 
     private func handle(method: String, params: [String: Any], context: WKWebExtensionContext, web: WKWebView?) async -> (Any?, String?) {
         let methods = ["idle.queryState": "idle", "notifications.permissionLevel": "notifications", "notifications.create": "notifications",
-                       "notifications.clear": "notifications", "downloads.download": "downloads"]
+                       "notifications.clear": "notifications", "downloads.download": "downloads",
+                       "offscreen.createDocument": "offscreen", "offscreen.closeDocument": "offscreen", "offscreen.hasDocument": "offscreen", "offscreen.contexts": "offscreen"]
         guard let permission = methods[method], permits(permission, for: context) else { return (nil, "This compatibility capability is not available to the extension.") }
         switch method {
         case "idle.queryState":
@@ -714,6 +807,29 @@ enum ExtensionCompatibility {
             let started = web.map { startDownload?($0, download) == true } ?? (workerDownload?(context, download) == true)
             guard started else { return (nil, "Open a page in this extension's profile to start the download.") }
             return (true, nil)
+        case "offscreen.createDocument", "offscreen.closeDocument", "offscreen.hasDocument", "offscreen.contexts":
+            // Outcomes travel as values so Chrome's exact messages survive WebKit's
+            // native-message error wrapping; the adapter rethrows them unchanged.
+            let owner = context.uniqueIdentifier
+            do {
+                switch method {
+                case "offscreen.createDocument":
+                    let url = try ExtensionOffscreenDocuments<WKWebView>.validate(url: params["url"] as? String ?? "", reasons: params["reasons"] as? [String] ?? [],
+                                                                                 justification: params["justification"] as? String ?? "", baseURL: context.baseURL)
+                    try await offscreen.create(owner: owner, url: url)
+                    return (["value": NSNull()], nil)
+                case "offscreen.closeDocument": try offscreen.close(owner: owner); return (["value": NSNull()], nil)
+                case "offscreen.hasDocument": return (["value": offscreen.has(owner)], nil)
+                default:
+                    guard let entry = offscreen.entry(for: owner) else { return (["value": [Any]()], nil) }
+                    let origin = context.baseURL.absoluteString.hasSuffix("/") ? String(context.baseURL.absoluteString.dropLast()) : context.baseURL.absoluteString
+                    return (["value": [["contextType": "OFFSCREEN_DOCUMENT", "contextId": entry.id.uuidString, "documentId": entry.id.uuidString,
+                                        "documentUrl": entry.url.absoluteString, "documentOrigin": origin, "tabId": -1, "windowId": -1, "frameId": 0,
+                                        "incognito": dataStore?.isPersistent == false]]], nil)
+                }
+            } catch let failure as ExtensionOffscreenDocuments<WKWebView>.Failure {
+                return (["error": failure.description], nil)
+            } catch { return (["error": error.localizedDescription], nil) }
         default:
             return (nil, "Unknown compatibility request.")
         }
@@ -841,5 +957,44 @@ enum ExtensionCompatibility {
     }
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification, withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
         completionHandler([.banner, .list, .sound])
+    }
+}
+
+/// Awaits one hidden offscreen document's first load and keeps its main frame on
+/// the extension's own origin. Subframes (IFRAME_SCRIPTING) may load other sites.
+@available(macOS 15.4, *)
+@MainActor final class OffscreenLoader: NSObject, WKNavigationDelegate {
+    static let timeout: UInt64 = 30_000_000_000
+    let baseURL: URL
+    var terminated: (() -> Void)?
+    private var pending: CheckedContinuation<Void, Error>?
+    init(baseURL: URL) { self.baseURL = baseURL }
+    private static func failure(_ message: String) -> Error { ExtensionOffscreenDocuments<WKWebView>.Failure(description: message) }
+
+    func load(_ url: URL, in web: WKWebView) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            pending = continuation
+            web.load(URLRequest(url: url))
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: Self.timeout)
+                self?.finish(Self.failure("The offscreen document did not finish loading."))
+            }
+        }
+    }
+    private func finish(_ error: Error?) {
+        guard let continuation = pending else { return }
+        pending = nil
+        if let error { continuation.resume(throwing: error) } else { continuation.resume() }
+    }
+    func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+        guard navigationAction.targetFrame?.isMainFrame != false else { decisionHandler(.allow); return }
+        let url = navigationAction.request.url
+        decisionHandler(url?.scheme == baseURL.scheme && url?.host == baseURL.host ? .allow : .cancel)
+    }
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { finish(nil) }
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) { finish(error) }
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) { finish(error) }
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        if pending != nil { finish(Self.failure("The offscreen document stopped while loading.")) } else { terminated?() }
     }
 }

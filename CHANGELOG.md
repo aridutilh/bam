@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased extension-compatibility draft (branch work, after 0.21.3)
+
+- Expose `tabs.detectLanguage`, which Bam had hidden even though its tab adapter and documentation claimed it. Dashlane asks for it (callback form, behind a feature check). The answer follows Chrome: the page’s recognizable text, else its declared `lang`/`Content-Language`, else `und`. It is read from an isolated world, only on pages the extension may access, and never falls back to the user’s own locale. Component checks pass; the canonical-Preview fixture check (callback, promise, missing-tab error) is written but **not yet run**.
+- Define `Symbol.dispose`/`Symbol.asyncDispose` (only when absent, never replacing the engine's) in extension pages and prepared service workers. Bitwarden's SDK client uses TypeScript `using` and wasm-bindgen dispose methods in its background (12 sites) and popup (17), which fail without them. JavaScriptCore component checks pass; worker and page fixture checks in the canonical Preview are written but **not yet run**, and Bitwarden itself has not been run. Existing installs keep their earlier worker adapter until updated.
+- Add `offscreen` for extensions that declare it (Bitwarden, Proton Pass, uBlock Origin Lite and Claude reference it): one hidden extension page per extension in the same profile, with Chrome's argument checks and exact error messages, closed on close/revoke/disable/update/shutdown or a crashed web process. `runtime.getContexts` reports it. Callback-form failures in Bam's shimmed APIs now set `runtime.lastError` during the callback. Component checks pass (offscreen state 25, compatibility 36); the canonical-Preview worker fixture (create, worker↔page message, second-create refusal, getContexts, close, web-view release, five cycles, revocation, disable, profile separation) is written but **not yet run**. No vendor extension has been run with it.
+
 ## 0.21.3 unreleased draft — build 44
 
 - Preserve early and late external URL-open requests in duplicate launches through an acknowledged, retryable handoff to the owning profile. Deduplicate transport retries without suppressing intentional repeated opens.

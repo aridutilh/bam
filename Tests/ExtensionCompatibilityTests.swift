@@ -58,6 +58,27 @@ import JavaScriptCore
         try check(js.evaluateScript("subscriptions[2].kind === 'unsubscribe' && disconnected === 0")!.toBool(), "Removing one listener disconnected other subscriptions")
         js.evaluateScript(worker)
         try check(jsErrors.isEmpty && js.evaluateScript("requests.length === 1")!.toBool(), "Worker adapter was not idempotent")
+        // Bitwarden's SDK: a TypeScript `using` site and a class whose dispose key is computed at load.
+        try check(js.evaluateScript("""
+            (function () {
+              if (typeof Symbol.dispose !== 'symbol' || typeof Symbol.asyncDispose !== 'symbol' || Symbol.dispose === Symbol.asyncDispose) return false;
+              var released = [];
+              class Client { [Symbol.dispose]() { released.push('client'); } }
+              function usingHelper(value) { if (!Symbol.dispose) throw new TypeError('Symbol.dispose is not defined.'); var dispose = value[Symbol.dispose]; if (typeof dispose !== 'function') throw new TypeError('Object not disposable.'); dispose.call(value); }
+              usingHelper(new Client());
+              var descriptor = Object.getOwnPropertyDescriptor(Symbol, 'dispose');
+              return released.join() === 'client' && !descriptor.writable && !descriptor.enumerable && !Object.prototype.hasOwnProperty.call(Client.prototype, 'undefined');
+            })()
+            """)!.toBool(), "Worker adapter did not supply usable explicit-resource-management symbols")
+        let nativeSymbols = JSContext()!
+        nativeSymbols.evaluateScript("""
+            var location = {origin: 'webkit-extension://fixture', href: 'webkit-extension://fixture/worker.js'}, console = {error: function() {}}, performance = {now: function() { return 0; }};
+            var nativeDispose = Symbol('engine dispose');
+            Object.defineProperty(Symbol, 'dispose', {value: nativeDispose, configurable: true});
+            var browser = {runtime: {getURL: function(path) { return 'webkit-extension://fixture' + path; }, getManifest: function() { return {}; }}};
+            """)
+        nativeSymbols.evaluateScript(worker)
+        try check(nativeSymbols.evaluateScript("Symbol.dispose === nativeDispose && typeof Symbol.asyncDispose === 'symbol'")!.toBool(), "Worker adapter replaced an engine-provided Symbol.dispose")
 
         // Model WebKit's native receiver check without replacing any API semantics.
         let binding = JSContext()!
@@ -147,6 +168,108 @@ import JavaScriptCore
         bridge.remove(context)
         result = await bridge.receiveNativeMessage(query, context: context)
         try check(result.1 != nil, "Removed context retained native capability access")
+        try offscreenAdapter(check)
         print("PASS: Extension compatibility (\(checks) checks)")
+    }
+
+    /// The worker adapter's offscreen, getContexts and runtime.lastError behavior, against
+    /// a fake native side that answers like Bam's bridge (one document, enveloped outcomes).
+    @available(macOS 15.4, *)
+    static func offscreenAdapter(_ check: (Bool, String) throws -> Void) throws {
+        func context(permissions: [String], nativeFails: Bool = false) -> (JSContext, () -> [String]) {
+            let manifest: [String: Any] = ["manifest_version": 3, "name": "Original Offscreen Fixture", "version": "1.0", "permissions": permissions]
+            let js = JSContext()!
+            var errors: [String] = []
+            js.exceptionHandler = { _, error in errors.append(error?.toString() ?? "JavaScript error") }
+            js.evaluateScript("""
+            var console = {error: function() {}}, performance = {now: function() { return 0; }};
+            var location = {origin: 'webkit-extension://fixture', href: 'webkit-extension://fixture/worker.js'};
+            var requests = [], document = null, nativeFails = \(nativeFails);
+            function Runtime() {}
+            Object.defineProperty(Runtime.prototype, 'lastError', {get: function() { return undefined; }, configurable: true});
+            var browser = {runtime: new Runtime(), storage: {}, action: {}};
+            browser.runtime.getURL = function(path) { return 'webkit-extension://fixture' + (path[0] === '/' ? path : '/' + path); };
+            browser.runtime.getManifest = function() { return \(String(data: try! JSONSerialization.data(withJSONObject: manifest), encoding: .utf8)!); };
+            browser.runtime.sendNativeMessage = function(app, body) {
+              if (body.kind !== 'request') return Promise.resolve(true);
+              requests.push(body.method);
+              if (nativeFails) return Promise.reject(new Error('This compatibility capability is not available to the extension.'));
+              var params = body.params || {};
+              switch (body.method) {
+                case 'offscreen.createDocument':
+                  if (document) return Promise.resolve({error: 'Only a single offscreen document may be created.'});
+                  document = 'webkit-extension://fixture/' + params.url; return Promise.resolve({value: null});
+                case 'offscreen.closeDocument':
+                  if (!document) return Promise.resolve({error: 'No current offscreen document.'});
+                  document = null; return Promise.resolve({value: null});
+                case 'offscreen.hasDocument': return Promise.resolve({value: !!document});
+                case 'offscreen.contexts': return Promise.resolve({value: document ? [{contextType: 'OFFSCREEN_DOCUMENT', contextId: 'c1', documentId: 'c1', documentUrl: document,
+                  documentOrigin: 'webkit-extension://fixture', tabId: -1, windowId: -1, frameId: 0, incognito: false}] : []});
+              }
+              return Promise.reject(new Error('unexpected ' + body.method));
+            };
+            // Chrome's alias is a distinct object here with its own runtime, as some engines expose it.
+            var chrome = {runtime: new Runtime()};
+            var results = {};
+            """)
+            js.evaluateScript(ExtensionCompatibility.workerScript(manifest: manifest, browserVersion: "test"))
+            return (js, { errors })
+        }
+        let (js, errors) = context(permissions: ["offscreen"])
+        try check(js.evaluateScript("typeof browser.offscreen.createDocument === 'function' && browser.offscreen.Reason.CLIPBOARD === 'CLIPBOARD' && Object.isFrozen(browser.offscreen.Reason)")!.toBool(),
+                  "Offscreen namespace or Reason enum was not defined for a declared permission")
+        js.evaluateScript("""
+        (async function () {
+          await browser.offscreen.createDocument({url: 'offscreen.html', reasons: ['CLIPBOARD'], justification: 'copy'});
+          results.has = await browser.offscreen.hasDocument();
+          try { await browser.offscreen.createDocument({url: 'offscreen.html', reasons: ['CLIPBOARD'], justification: 'copy'}); results.second = 'resolved'; }
+          catch (error) { results.second = error.message; }
+          results.matching = (await browser.runtime.getContexts({contextTypes: ['OFFSCREEN_DOCUMENT'], documentUrls: [browser.runtime.getURL('offscreen.html')]})).length;
+          results.popups = (await browser.runtime.getContexts({contextTypes: [browser.runtime.ContextType.POPUP]})).length;
+          results.all = (await browser.runtime.getContexts({})).map(function (c) { return c.contextType; }).join();
+          browser.offscreen.createDocument({url: 'offscreen.html', reasons: ['CLIPBOARD'], justification: 'copy'}, function (value) {
+            results.callbackArgs = arguments.length;
+            results.callbackError = [browser.runtime.lastError && browser.runtime.lastError.message, chrome.runtime.lastError && chrome.runtime.lastError.message];
+            setTimeoutLike();
+          });
+        })().catch(function (error) { results.failure = String(error); });
+        function setTimeoutLike() { Promise.resolve().then(function () { results.afterCallback = [browser.runtime.lastError, chrome.runtime.lastError, Object.getOwnPropertyNames(browser.runtime).indexOf('lastError')]; }); }
+        """)
+        try check(errors().isEmpty && js.evaluateScript("results.failure === undefined && results.has === true && results.matching === 1 && results.popups === 0 && results.all === 'OFFSCREEN_DOCUMENT'")!.toBool(),
+                  "Offscreen create, hasDocument or getContexts filtering failed: \(js.evaluateScript("JSON.stringify(results)")!) \(errors())")
+        try check(js.evaluateScript("results.second === 'Only a single offscreen document may be created.'")!.toBool(),
+                  "A second createDocument did not reject with Chrome's exact message (Bitwarden compares it)")
+        try check(js.evaluateScript("""
+            results.callbackArgs === 0 && results.callbackError[0] === 'Only a single offscreen document may be created.' && results.callbackError[1] === results.callbackError[0]
+            && results.afterCallback[0] === undefined && results.afterCallback[1] === undefined && results.afterCallback[2] === -1
+            """)!.toBool(), "Callback-form failure did not expose and then restore runtime.lastError on both namespaces: \(js.evaluateScript("JSON.stringify(results)")!)")
+        js.evaluateScript("""
+        (async function () {
+          await browser.offscreen.closeDocument();
+          results.afterClose = [await browser.offscreen.hasDocument(), (await browser.runtime.getContexts({})).length];
+          try { await browser.offscreen.closeDocument(); } catch (error) { results.closeMissing = error.message; }
+          try { await browser.offscreen.createDocument({url: 5, reasons: ['CLIPBOARD'], justification: 'x'}); } catch (error) { results.badURL = error instanceof TypeError; }
+          try { await browser.offscreen.createDocument({url: 'x.html', reasons: 'CLIPBOARD', justification: 'x'}); } catch (error) { results.badReasons = error instanceof TypeError; }
+        })();
+        """)
+        try check(js.evaluateScript("results.afterClose[0] === false && results.afterClose[1] === 0 && results.closeMissing === 'No current offscreen document.' && results.badURL && results.badReasons")!.toBool(),
+                  "closeDocument, its missing-document error or argument validation failed: \(js.evaluateScript("JSON.stringify(results)")!)")
+        try check(js.evaluateScript("requests.filter(function (m) { return m === 'offscreen.createDocument'; }).length === 3")!.toBool(),
+                  "Invalid createDocument arguments reached the native side")
+
+        // Undeclared: no namespace, and getContexts keeps its earlier empty, request-free answer.
+        let (plain, plainErrors) = context(permissions: ["storage"])
+        plain.evaluateScript("(async function () { results.contexts = (await browser.runtime.getContexts({})).length; })();")
+        try check(plainErrors().isEmpty && plain.evaluateScript("browser.offscreen === undefined && results.contexts === 0 && requests.length === 0")!.toBool(),
+                  "An extension without the offscreen permission received the API or a native request")
+        // Declared but not granted (an install reviewed before Bam bridged offscreen): getContexts stays empty, create fails.
+        let (ungranted, _) = context(permissions: ["offscreen"], nativeFails: true)
+        ungranted.evaluateScript("""
+        (async function () {
+          results.contexts = (await browser.runtime.getContexts({})).length;
+          try { await browser.offscreen.createDocument({url: 'x.html', reasons: ['CLIPBOARD'], justification: 'x'}); results.create = 'resolved'; } catch (error) { results.create = 'rejected'; }
+        })();
+        """)
+        try check(ungranted.evaluateScript("results.contexts === 0 && results.create === 'rejected'")!.toBool(), "An ungranted offscreen permission broke getContexts or created a document")
     }
 }

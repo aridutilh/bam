@@ -330,6 +330,40 @@ import Darwin
             // The changeInfo must carry the status: a title-driven update also reads `status: "complete"` live.
             return records.contains { ($0["infoStatus"] as? String) == "complete" && ($0["url"] as? String)?.contains("extension-test.html") == true }
         }
+        // tabs.detectLanguage (Dashlane): page text first, then the declaration, in callback and promise forms.
+        guard let languageWeb = controller.browsers[id] else { throw ExtensionSmokeTest.Failure(description: "Missing tabs.detectLanguage page") }
+        _ = try await languageWeb.evaluateJavaScript("""
+            document.documentElement.lang = 'pt-BR';
+            const bamLanguage = document.createElement('p'); bamLanguage.id = 'bam-language';
+            bamLanguage.textContent = 'Die Kinder spielen am Nachmittag im großen Garten hinter dem Haus, während ihre Eltern in der Küche gemeinsam das Abendessen vorbereiten.';
+            document.body.append(bamLanguage); true
+            """)
+        let detectLanguage = """
+            const tab = (await browser.tabs.query({})).find(tab => tab.url?.includes('profile=browser-adapter'));
+            const promised = await browser.tabs.detectLanguage(tab.id);
+            const callback = await new Promise(resolve => chrome.tabs.detectLanguage(tab.id, value => resolve({value, error: chrome.runtime.lastError?.message || ''})));
+            let missing = '';
+            try { await browser.tabs.detectLanguage(987654321); } catch (error) { missing = String(error?.message || error); }
+            const missingCallback = await new Promise(resolve => chrome.tabs.detectLanguage(987654321, value => resolve(chrome.runtime.lastError ? 'error' : 'value:' + value)));
+            return JSON.stringify({promised, callback, missing, missingCallback});
+            """
+        func detectedLanguage() async throws -> [String: Any] {
+            let text = try await popup.callAsyncJavaScript(detectLanguage, arguments: [:], contentWorld: .page) as? String
+            guard let data = text?.data(using: .utf8), let result = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                throw ExtensionSmokeTest.Failure(description: "tabs.detectLanguage returned no result: \(text ?? "nil")")
+            }
+            return result
+        }
+        let recognized = try await detectedLanguage()
+        try check(recognized["promised"] as? String == "de" && (recognized["callback"] as? [String: Any])?["value"] as? String == "de"
+                  && (recognized["callback"] as? [String: Any])?["error"] as? String == "", "tabs.detectLanguage did not recognize page text in both forms: \(recognized)")
+        try check(!(recognized["missing"] as? String ?? "").isEmpty && recognized["missingCallback"] as? String == "error",
+                  "tabs.detectLanguage did not report a missing tab as an error: \(recognized)")
+        // Hidden fixture text leaves too little to recognize, so only the declaration remains.
+        _ = try await languageWeb.evaluateJavaScript("document.getElementById('bam-language').remove(); for (const node of document.body.children) node.hidden = true; true")
+        let declared = try await detectedLanguage()
+        try check(declared["promised"] as? String == "pt-BR", "tabs.detectLanguage ignored the declared language: \(declared)")
+        _ = try await languageWeb.evaluateJavaScript("document.documentElement.removeAttribute('lang'); for (const node of document.body.children) node.hidden = false; true")
         _ = try await popup.evaluateJavaScript("document.getElementById('open-page').click(); true")
         try await wait("Browser adapter did not open its own extension page") { controller.session.tabs.contains { URLInput.extensionURL($0.address) != nil } }
         guard let tab = controller.session.tabs.first(where: { URLInput.extensionURL($0.address) != nil }), let extensionWeb = controller.browsers[tab.id] else { throw ExtensionSmokeTest.Failure(description: "Missing extension renderer") }
