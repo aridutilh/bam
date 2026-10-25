@@ -233,8 +233,46 @@ final class ImportedIconDiskCache: @unchecked Sendable {
     init(directory: URL, limits: Limits = Limits()) { self.directory = directory; self.limits = limits }
 
     private var indexURL: URL { directory.appendingPathComponent("index.json") }
+    /// The path an icon would have; use `safeFile` before touching it.
     func fileURL(profile: UUID, tab: UUID) -> URL {
         directory.appendingPathComponent(profile.uuidString, isDirectory: true).appendingPathComponent("\(tab.uuidString).png")
+    }
+
+    // MARK: Folder safety — every read, write and delete goes through these.
+
+    private enum ItemKind { case missing, directory, other }
+    /// What is at `url` itself; symbolic links are reported as `.other`, never followed.
+    private static func kind(_ url: URL) -> ItemKind {
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path) else { return .missing }
+        return (attributes[.type] as? FileAttributeType) == .typeDirectory ? .directory : .other
+    }
+    /// A symlinked (or otherwise non-folder) ImportedIcons root disables the cache entirely.
+    private var disabled = false
+    private func rootUsable(create: Bool) -> Bool {
+        guard !disabled else { return false }
+        switch Self.kind(directory) {
+        case .directory: return true
+        case .other: disabled = true; return false
+        case .missing:
+            guard create, (try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)) != nil else { return false }
+            return Self.kind(directory) == .directory
+        }
+    }
+    /// The profile folder, only if it is a real folder inside a real root.
+    private func profileDirectory(_ profile: UUID, create: Bool) -> URL? {
+        guard rootUsable(create: create) else { return nil }
+        let folder = directory.appendingPathComponent(profile.uuidString, isDirectory: true)
+        switch Self.kind(folder) {
+        case .directory: return folder
+        case .other: return nil
+        case .missing:
+            guard create, (try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)) != nil,
+                  Self.kind(folder) == .directory else { return nil }
+            return folder
+        }
+    }
+    private func safeFile(profile: UUID, tab: UUID, create: Bool = false) -> URL? {
+        profileDirectory(profile, create: create)?.appendingPathComponent("\(tab.uuidString).png")
     }
     var recordCount: Int { loadIndexIfNeeded(); return index.count }
     func record(for tab: UUID) -> Record? { loadIndexIfNeeded(); return index[tab] }
@@ -247,6 +285,8 @@ final class ImportedIconDiskCache: @unchecked Sendable {
     private func loadIndexIfNeeded() {
         guard !loaded else { return }
         loaded = true
+        index = [:]; counter = 0
+        if Self.kind(directory) == .other { disabled = true; return }  // Symlinked root: never read, write or delete.
         let intact = decodeIndex()
         let before = index
         enforceLimits()
@@ -291,14 +331,12 @@ final class ImportedIconDiskCache: @unchecked Sendable {
     /// and a symlink in a PNG's place is removed as a link only. Bounded scan.
     @discardableResult private func reconcileOwnedFiles(scanLimit: Int = 20_000) -> Bool {
         let fm = FileManager.default
-        guard let top = try? fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey],
-                                                    options: [.skipsHiddenFiles]) else { return false }
+        guard rootUsable(create: false),
+              let top = try? fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) else { return false }
         var scanned = 0, changed = false
         for folder in top {
-            guard let profile = UUID(uuidString: folder.lastPathComponent),
-                  let values = try? folder.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey]),
-                  values.isDirectory == true, values.isSymbolicLink != true,
-                  let files = try? fm.contentsOfDirectory(at: folder, includingPropertiesForKeys: [.isSymbolicLinkKey], options: []) else { continue }
+            guard let profile = UUID(uuidString: folder.lastPathComponent), Self.kind(folder) == .directory,
+                  let files = try? fm.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil, options: []) else { continue }
             var remaining = files.count
             for file in files {
                 scanned += 1
@@ -309,19 +347,27 @@ final class ImportedIconDiskCache: @unchecked Sendable {
             }
             if remaining == 0 { try? fm.removeItem(at: folder) }
         }
-        // Index entries whose file is gone are dropped too.
-        for (tab, record) in index where !fm.fileExists(atPath: fileURL(profile: record.profile, tab: tab).path) {
-            index.removeValue(forKey: tab); changed = true
+        // Index entries whose file is gone, or whose profile folder isn't a
+        // real folder (e.g. a symlink), are dropped — from the index only.
+        for (tab, record) in index {
+            guard let file = safeFile(profile: record.profile, tab: tab), Self.kind(file) != .missing else {
+                index.removeValue(forKey: tab); changed = true; continue
+            }
         }
         return changed
     }
+    private struct Unavailable: Error {}
     private func writeIndex() throws {
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        guard rootUsable(create: true) else { throw Unavailable() }
         let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
         let data = try encoder.encode(Dictionary(uniqueKeysWithValues: index.map { ($0.key.uuidString, $0.value) }))
+        // An atomic write replaces whatever is at index.json (even a link) with a new file.
         try data.write(to: indexURL, options: .atomic)
     }
-    private func removeFile(profile: UUID, tab: UUID) { try? FileManager.default.removeItem(at: fileURL(profile: profile, tab: tab)) }
+    private func removeFile(profile: UUID, tab: UUID) {
+        guard let file = safeFile(profile: profile, tab: tab) else { return }
+        try? FileManager.default.removeItem(at: file)   // Removes a link itself, never its target.
+    }
 
     /// Saves icons for tabs, replacing earlier ones. Returns how many were stored.
     @discardableResult func save(_ items: [(tab: UUID, profile: UUID, origin: String, image: CGImage)]) -> Int {
@@ -330,12 +376,10 @@ final class ImportedIconDiskCache: @unchecked Sendable {
         for item in items {
             guard item.image.width <= limits.maximumDimension, item.image.height <= limits.maximumDimension,
                   let data = Self.pngData(item.image), data.count <= limits.maximumFileBytes else { continue }
+            guard let file = safeFile(profile: item.profile, tab: item.tab, create: true),
+                  Self.kind(file) != .directory else { continue }
             if let old = index[item.tab], old.profile != item.profile { removeFile(profile: old.profile, tab: item.tab) }
-            let file = fileURL(profile: item.profile, tab: item.tab)
-            do {
-                try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
-                try data.write(to: file, options: .atomic)
-            } catch { continue }
+            do { try data.write(to: file, options: .atomic) } catch { continue }
             counter += 1
             index[item.tab] = Record(profile: item.profile, origin: item.origin, bytes: data.count, sha256: Self.sha256(data), order: counter)
             stored += 1
@@ -370,8 +414,8 @@ final class ImportedIconDiskCache: @unchecked Sendable {
     }
 
     private func readImage(profile: UUID, tab: UUID, expected: Record) -> CGImage? {
-        let file = fileURL(profile: profile, tab: tab)
-        guard let values = try? file.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey]),
+        guard let file = safeFile(profile: profile, tab: tab),
+              let values = try? file.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey]),
               values.isRegularFile == true, values.isSymbolicLink != true,
               let size = values.fileSize, size == expected.bytes, size <= limits.maximumFileBytes,
               let data = try? Data(contentsOf: file), Self.sha256(data) == expected.sha256 else { return nil }

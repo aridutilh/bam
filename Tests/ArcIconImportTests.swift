@@ -269,6 +269,47 @@ import UniformTypeIdentifiers
         let capped2 = ImportedIconDiskCache(directory: crowded, limits: byteCap)
         require(capped2.recordCount == 1, "The total byte limit applies before decoding too")
 
+        // Folder boundary: no read, write or delete through a symlinked root or profile folder.
+        func snapshot(_ dir: URL) -> [String: Data] {
+            var result: [String: Data] = [:]
+            for case let file as URL in fm.enumerator(at: dir, includingPropertiesForKeys: nil) ?? FileManager.DirectoryEnumerator() {
+                if let data = try? Data(contentsOf: file) { result[file.path.replacingOccurrences(of: dir.path, with: "")] = data }
+            }
+            return result
+        }
+        // A. Symlinked ImportedIcons root pointing at a valid cache elsewhere.
+        let realRoot = base.appendingPathComponent("RealRoot", isDirectory: true)
+        let rootTab = UUID()
+        ImportedIconDiskCache(directory: realRoot).save([(rootTab, home, "https://r.example", loaded[ok]!)])
+        let rootBefore = snapshot(realRoot)
+        let linkParent = base.appendingPathComponent("LinkParent", isDirectory: true)
+        try fm.createDirectory(at: linkParent, withIntermediateDirectories: true)
+        let linkedRoot = linkParent.appendingPathComponent("ImportedIcons")
+        try fm.createSymbolicLink(at: linkedRoot, withDestinationURL: realRoot)
+        let viaLink = ImportedIconDiskCache(directory: linkedRoot)
+        require(viaLink.recordCount == 0 && viaLink.restore(validTabs: [rootTab: home]).isEmpty, "A symlinked root is never read")
+        require(viaLink.save([(UUID(), home, "https://r.example", loaded[ok]!)]) == 0, "Nothing is written through a symlinked root")
+        viaLink.remove(tabs: [rootTab])
+        require(snapshot(realRoot) == rootBefore && !rootBefore.isEmpty, "Nothing behind a symlinked root is deleted or changed")
+        // B. A valid indexed record whose profile folder is a symlink to outside files.
+        for tight in [false, true] {
+            let root = base.appendingPathComponent("ProfileLink-\(tight)", isDirectory: true)
+            let tab = UUID()
+            let seeded = ImportedIconDiskCache(directory: root)
+            seeded.save([(tab, home, "https://p.example", loaded[ok]!)])
+            let outsideProfile = base.appendingPathComponent("Outside-\(tight)", isDirectory: true)
+            try fm.moveItem(at: root.appendingPathComponent(home.uuidString), to: outsideProfile)
+            try fm.createSymbolicLink(at: root.appendingPathComponent(home.uuidString), withDestinationURL: outsideProfile)
+            let outsideBefore = snapshot(outsideProfile)
+            var limits = ImportedIconDiskCache.Limits(); if tight { limits.maximumEntries = 0 }   // would trim (delete) the entry
+            let guarded = ImportedIconDiskCache(directory: root, limits: limits)
+            require(guarded.restore(validTabs: [tab: home]).isEmpty && guarded.recordCount == 0,
+                    "An indexed icon under a symlinked profile folder is not read (limits trimming: \(tight))")
+            require(guarded.save([(tab, home, "https://p.example", loaded[other]!)]) == 0, "Nothing is written through a symlinked profile folder")
+            guarded.remove(tabs: [tab])
+            require(snapshot(outsideProfile) == outsideBefore, "Files behind a symlinked profile folder are never deleted or replaced (\(tight))")
+        }
+
         // Successive imports queue instead of cancelling each other.
         actor Gate {
             private var waiters: [CheckedContinuation<Void, Never>] = []
