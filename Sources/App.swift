@@ -15,6 +15,7 @@ import WebKit
     var interactionSmoke: InteractionSmokeTest?
     var autoPiPSmoke: AutomaticPiPSmokeTest?
     var profileInstanceSmoke: ProfileInstanceSmokeTest?
+    var arcImportSmoke: ArcImportSmokeTest?
     private let externalURLs = ExternalURLDelivery()
     private let profileInstance = ProfileInstance()
     var spacesMenu: NSMenu?
@@ -30,6 +31,7 @@ import WebKit
         if CommandLine.arguments.contains("--extension-test") { extensionSmoke = ExtensionRuntimeSmokeTest(); extensionSmoke?.start(); return }
         if CommandLine.arguments.contains("--profile-test") { profileSmoke = ProfileSmokeTest(); profileSmoke?.start(); return }
         if CommandLine.arguments.contains("--profile-instance-test") { profileInstanceSmoke = ProfileInstanceSmokeTest(); profileInstanceSmoke?.start(); return }
+        if CommandLine.arguments.contains("--arc-import-test") { arcImportSmoke = ArcImportSmokeTest(); arcImportSmoke?.start(); return }
         if CommandLine.arguments.contains("--resource-test") { resourceSmoke = TabResourceSmokeTest(); resourceSmoke?.start(); return }
         if CommandLine.arguments.contains("--feature-test") { featureSmoke = FeatureSmokeTest(); featureSmoke?.start(); return }
         if CommandLine.arguments.contains("--auto-pip-test") { autoPiPSmoke = AutomaticPiPSmokeTest(); autoPiPSmoke?.start(); return }
