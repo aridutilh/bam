@@ -89,7 +89,7 @@ enum ExtensionServiceWorkerPreparation {
             originalBytes = try readRegular(backup, limit: ExtensionPackagePreparation.maximumManifestBytes)
             guard let original = try JSONSerialization.jsonObject(with: originalBytes) as? [String: Any],
                   original["manifest_version"] as? Int == 3,
-                  (original["background"] as? [String: Any])?["service_worker"] as? String == worker else {
+                  ((original["background"] as? [String: Any])?["service_worker"] as? String).map(packageRelative) == worker else {
                 throw failure("The original manifest backup belongs to a different service worker.")
             }
         } else { originalBytes = current }

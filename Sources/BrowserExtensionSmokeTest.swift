@@ -405,7 +405,8 @@ import Darwin
             """, arguments: [:], contentWorld: .page))
         for (label, report) in [("worker", fromWorker), ("extension page", fromPage)] {
             let injected = report["result"] as? [String: Any]
-            try check(report["type"] as? String == "object" && report["isolated"] as? String == "ISOLATED" && report["main"] as? String == "MAIN" && report["frozen"] as? Bool == true,
+            // Values only: a future engine-provided enum need not be frozen (Bam's own is checked frozen in components).
+            try check(report["type"] as? String == "object" && report["isolated"] as? String == "ISOLATED" && report["main"] as? String == "MAIN",
                       "scripting.ExecutionWorld was missing or wrong in the \(label): \(report)")
             try check(injected?["injected"] as? Bool == true && injected?["title"] as? String == "Bam extension page" && report["frameId"] as? Int == 0,
                       "Bitwarden-shaped executeScript did not inject into the tab from the \(label): \(report)")
