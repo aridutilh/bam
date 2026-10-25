@@ -16,7 +16,7 @@ struct ExtensionSidePanelModel {
     }
     struct Instance: Equatable { let scope: Scope; let path: String; let windowId: Int; let tabId: Int? }
     enum Failure: Error, Equatable, CustomStringConvertible {
-        case needsTarget, needsGesture, unknownExtension, unknownTab(Int), tabNotInWindow, noGlobalPanel, disabled, invalidPath, closeGlobalWithTabId(Int)
+        case needsTarget, needsGesture, unknownExtension, unknownTab(Int), tabNotInWindow, noGlobalPanel, disabled, invalidPath, closeGlobalWithTabId(Int), ambiguousClose
         var description: String {
             switch self {
             case .needsTarget: return "At least one of tabId or windowId must be provided."
@@ -28,6 +28,7 @@ struct ExtensionSidePanelModel {
             case .disabled: return "The side panel is disabled for this tab."
             case .invalidPath: return "The side panel path must be a page inside the extension."
             case .closeGlobalWithTabId(let id): return "No tab-specific side panel is open in tab \(id)."
+            case .ambiguousClose: return "Closing with both tabId and windowId is not supported until its behavior is verified; pass one of them."
             }
         }
     }
@@ -71,10 +72,10 @@ struct ExtensionSidePanelModel {
             if let enabled { options.enabled = enabled }
             if let validated { options.path = validated }
             tabOptions[extensionID, default: [:]][tabId] = options
+            // Disabling a tab only hides its panel there (Chrome: it shows again where it is open);
+            // the open tab-specific panel is kept, so re-enabling shows it again.
             if tabOpen[tabId] == extensionID {
-                // Decision: disabling a tab whose tab-specific panel is open closes that panel.
-                if enabled == false { changes.append(closeTabPanel(tabId)) }
-                else if let validated, validated != previousPath, let window = tabOpenWindow[tabId] {
+                if let validated, validated != previousPath, let window = tabOpenWindow[tabId] {
                     changes.append(Change(kind: .pathChanged, extensionID: extensionID, path: validated, windowId: window, tabId: tabId))
                 }
             }
@@ -137,15 +138,17 @@ struct ExtensionSidePanelModel {
 
     mutating func close(extensionID: String, tabId: Int?, windowId: Int?, windowOfTab: (Int) -> Int?) throws -> [Change] {
         guard tabId != nil || windowId != nil else { throw Failure.needsTarget }
+        // Chrome's reference does not define close() with both IDs; refuse rather than guess.
+        guard tabId == nil || windowId == nil else { throw Failure.ambiguousClose }
         var changes: [Change] = []
         if let tabId {
             if tabOpen[tabId] == extensionID { changes.append(closeTabPanel(tabId)) }
-            else if windowId == nil, let window = windowOfTab(tabId), globalOpen[window] == extensionID {
+            else if let window = windowOfTab(tabId), globalOpen[window] == extensionID {
                 // Chrome 145+: closing by tab when only the global panel is open rejects.
                 throw Failure.closeGlobalWithTabId(tabId)
             }
         }
-        // Decision: with both IDs, also close the window's global panel; closing nothing is a no-op.
+        // Closing nothing is a no-op.
         if let windowId, globalOpen[windowId] == extensionID {
             globalOpen.removeValue(forKey: windowId)
             changes.append(Change(kind: .closed, extensionID: extensionID, path: defaultPath(extensionID) ?? "", windowId: windowId, tabId: nil))

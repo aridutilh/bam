@@ -77,7 +77,14 @@ import Foundation
         try check(model.visible(windowId: 1, activeTabId: 10) == nil && model.visible(windowId: 1, activeTabId: 11)?.path == "panel2.html",
                   "a disabled tab did not hide only its own view of the global panel")
         try check(fails(.disabled) { try model.open(extensionID: "A", tabId: 10, windowId: nil, windowOfTab: windowOf, hasGesture: true) }, "opening in a disabled tab was accepted")
-        try check(try model.setOptions(extensionID: "A", tabId: 20, enabled: false, path: nil) == [closed("A", "panel.html", 2, 20)], "disabling a tab did not close its open tab-specific panel")
+        // Disabling the tab hides its open tab-specific panel without closing it; re-enabling shows it again.
+        try check(try model.setOptions(extensionID: "A", tabId: 20, enabled: false, path: nil).isEmpty && model.visible(windowId: 2, activeTabId: 20) == nil &&
+                  model.openInstances(extensionID: "A").contains { $0.scope == .tab(20) }, "disabling a tab closed or kept showing its tab-specific panel")
+        try check(try model.setOptions(extensionID: "A", tabId: 20, enabled: true, path: nil).isEmpty && model.visible(windowId: 2, activeTabId: 20)?.scope == .tab(20),
+                  "re-enabling a tab did not show its open panel again")
+        // close() with both IDs is undefined in Chrome's reference: refused explicitly, nothing closes.
+        try check(fails(.ambiguousClose) { try model.close(extensionID: "A", tabId: 20, windowId: 2, windowOfTab: windowOf) } &&
+                  model.visible(windowId: 2, activeTabId: 20)?.scope == .tab(20), "close with both IDs was not refused")
         try check(fails(.invalidPath) { try model.setOptions(extensionID: "A", tabId: nil, enabled: nil, path: "https://example.com/x.html") } &&
                   fails(.invalidPath) { try model.setOptions(extensionID: "A", tabId: nil, enabled: nil, path: "../x.html") } &&
                   fails(.invalidPath) { try model.setOptions(extensionID: "A", tabId: nil, enabled: nil, path: "//x.html") } &&
