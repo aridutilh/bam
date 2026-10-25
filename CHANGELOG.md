@@ -11,7 +11,7 @@
 
 - Normalize unavailable select-picker overlay styles only inside isolated extension content-script worlds, using native `select:open` state. This addresses Dashlane mistaking a closed page dropdown for an open overlay and dismissing its inline panel; genuinely open pickers remain detectable.
 - Refresh only Bam’s recognized, byte-exact legacy content-script adapter in existing private packages. Vendor scripts, MAIN-world scripts and signed Safari resources remain unchanged.
-- Record signed-in Dashlane popup search, manual creation of an invented login and inline filling on a control page without the dropdown. Picker compatibility passes 38 checks and content preparation/migration passes 51; post-fix live validation remains pending.
+- Record signed-in Dashlane popup search, manual creation of an invented login and inline filling on a control page without the dropdown. Picker compatibility passes 38 checks and content preparation/migration passes 51. Signed-in recreated standard/dynamic forms fill both dummy values exactly; full-page vault copy/paste also passes. Fresh-load classification and iframe injection remain open issues.
 
 ## 0.21.0 draft — build 41
 

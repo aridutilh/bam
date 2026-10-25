@@ -17,7 +17,7 @@ function form(mode){
  f.innerHTML='<label>Username<input name="username" type="email" autocomplete="username"></label>'+
  (mode==='update'?'<label>Current password<input name="current-password" type="password" autocomplete="current-password"></label>':'')+
  '<label>'+(['register','update'].includes(mode)?'New password':'Password')+'<input name="password" type="password" autocomplete="'+(['register','update'].includes(mode)?'new-password':'current-password')+'"></label><button type="submit">Submit dummy form</button>';
- f.addEventListener('submit',e=>{e.preventDefault(); const inputs=Array.from(f.querySelectorAll('input')); result.textContent=inputs.map(i=>i.name+': '+(i.value?'filled':'empty')).join(' · ')+'. No values sent or stored.';});
+ f.addEventListener('submit',e=>{e.preventDefault(); const inputs=Array.from(f.querySelectorAll('input')); result.textContent=inputs.map(i=>i.name+': '+(i.value?'filled':'empty')+'; matches dummy: '+(i.value===(i.name==='username'?'bam-test@example.invalid':'Bam-Dummy-Only-2026!'))).join(' · ')+'. No values sent or stored.';});
  main.append(f);
 }
 function render(){main.replaceChildren();result.textContent='';const mode=document.querySelector('select').value;if(mode==='frame'){const frame=document.createElement('iframe');frame.title='Dummy login inside an iframe';frame.src='frame.html';main.append(frame);}else if(mode==='dynamic'){const b=document.createElement('button');b.textContent='Insert login form';b.onclick=()=>{b.remove();form('login')};main.append(b);}else form(mode)}

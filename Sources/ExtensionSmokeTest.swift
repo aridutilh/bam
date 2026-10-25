@@ -160,6 +160,7 @@ import WebKit
         mv2Manifest["optional_permissions"] = mv2Manifest.removeValue(forKey: "optional_host_permissions")
         mv2Manifest["browser_action"] = mv2Manifest.removeValue(forKey: "action")
         mv2Manifest["background"] = ["scripts": ["nonascii.js", "compat.js", "background.js"], "persistent": false]
+        try ExtensionFrameMessagingSmokeTest.prepare(package: mv2Fixture, manifest: &mv2Manifest)
         let originalManifest = try JSONSerialization.data(withJSONObject: mv2Manifest, options: [.sortedKeys, .prettyPrinted])
         try originalManifest.write(to: mv2ManifestURL)
         let nonASCII = Data("globalThis.bamCafé = \"naïve ☕\";\n".utf8)
@@ -188,6 +189,7 @@ import WebKit
         try check(try Data(contentsOf: importedFolder.appendingPathComponent("original-manifest.json")) == originalManifest, "MV2 import did not preserve the byte-exact original manifest")
         try check(try Data(contentsOf: importedFolder.appendingPathComponent("package/nonascii.js")) == nonASCII && Data(contentsOf: mv2ManifestURL) == originalManifest, "MV2 preparation changed script bytes or the selected source package")
         guard let contextB = host.context(for: extensionB) else { throw Failure(description: "Extension B did not load") }
+        try check(contextB.hasPermission(.init(rawValue: "webRequest")), "Isolated iframe fixture was not granted webRequest")
         guard let runtimeB = configB.webExtensionController?.delegate as? BrowserExtensionRuntime,
               let backgroundTab = runtimeB.tabs[tabB], let backgroundWindow = backgroundTab.window(for: contextB) as? BrowserExtensionWindow else { throw Failure(description: "Missing background-profile native adapter") }
         try check(backgroundWindow.activeTab(for: contextB) as? BrowserExtensionTab === backgroundTab && backgroundTab.isSelected(for: contextB), "Inactive profile window did not retain a valid selected tab")
@@ -246,6 +248,7 @@ import WebKit
             return withID == "callback-id" && plain == "callback"
         }
         try await wait("Callback-style sendMessage from an MV2 content script was not answered") { await javascript(webB, "document.documentElement.dataset.bamExtensionCallbackID") as? String == "callback-id" }
+        checks += try await ExtensionFrameMessagingSmokeTest.verify(web: webB, pageURL: urlB, label: "isolated MV2")
         try check(host.items(profileID: profileA).first?.compatibilityNote?.contains("messaging adapter") == true, "The content-script adaptation is not disclosed for the MV3 fixture")
         try check(await result(webA)?["token"] as? String == "profile-A", "Profile B overwrote profile A extension storage")
         try check(await result(webB)?["urls"] as? [String] == [urlB.absoluteString], "Extension B enumerated another profile")
