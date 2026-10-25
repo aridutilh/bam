@@ -41,6 +41,10 @@ enum ExtensionCompatibility {
         for case let value as String in manifest["permissions"] as? [Any] ?? [] { requested.append(value) }
         var plan = Plan()
         for permission in bridgedPermissions where requested.contains(permission) { plan.provided.append(permission) }
+        // The tab metadata facade is installed for extensions that declare `tabs` (required or optional); the native
+        // side still answers only while `tabs` is granted to that exact live context.
+        let optional = (manifest["optional_permissions"] as? [Any] ?? []).compactMap { $0 as? String }
+        if requested.contains("tabs") || optional.contains("tabs") { plan.provided.append("tabs.metadata") }
         plan.provided += runtimeExtras
         return plan
     }
@@ -587,6 +591,224 @@ enum ExtensionCompatibility {
         }
       };
 
+      // Tab metadata (Chrome's `tabs` contract: a tab's url and title without host access). WebKit blanks both unless
+      // the extension has host access to the tab's site; this adds only those two values back, for an extension whose
+      // live context holds `tabs` (checked natively on every request). It grants no site, and scripting, cookies,
+      // fetch and webRequest keep WebKit's own host checks.
+      // - The extension's own WebKit call runs first, once, synchronously and unchanged: its throws, callback
+      //   runtime.lastError, promise rejections and mutations stay WebKit's. Supplementing never repeats it.
+      // - Then a fresh WebKit read runs between a native identity token and a native answer bound to one observed tab
+      //   topology; a change in between answers null, and up to 3 attempts are made before WebKit's answer is kept.
+      // - Only url/title fields WebKit blanked are filled, matched by WebKit's own tab id; values WebKit showed are kept.
+      // - Tabs in several Little Bam windows, non-web pages and over-long values stay blank. favIconUrl stays WebKit's.
+      // - Events: every tabs.* and windows.* listener is delivered through one FIFO per document or worker, so their
+      //   order is kept. tabs.onCreated/onUpdated wait for supplementing for at most 1 s (skipped once an event has
+      //   waited 3 s, or 256 are queued), so values are those at delivery. changeInfo.url/title are filled only when
+      //   WebKit sent the key. No event is invented. A removed listener is not called again.
+      const metadataEnabled = provided.has("tabs.metadata");
+      const metadataNative = "__bamTabMetadataNative";
+      const unwrap = (fn) => (fn && fn[metadataNative]) || fn;
+      const nativeCall = (root, ns, name, args) => {
+        const holder = root && root[ns], fn = holder && unwrap(holder[name]);
+        if (typeof fn !== "function") return Promise.reject(unsupported(ns + "." + name));
+        try { return Promise.resolve(fn.apply(holder, args)); } catch (error) { return Promise.reject(error); }
+      };
+      const bridgeValue = (method, params) => bridge(method, params).then((value) => value, () => null);
+      const isRedacted = (tab) => tab && typeof tab === "object" && typeof tab.id === "number" && !tab.url;
+      const timeout = (promise, ms) => new Promise((resolve) => {
+        const timer = setTimeout(() => resolve(null), ms);
+        Promise.resolve(promise).then((value) => { clearTimeout(timer); resolve(value); }, () => { clearTimeout(timer); resolve(null); });
+      });
+      // One bound read: token, fresh WebKit read, window kinds, answer. Returns {tabs, values} or null.
+      const boundRead = async (root, read, collect, filter) => {
+        for (let attempt = 0; attempt < 3; attempt++) {
+          const token = await bridgeValue("tabs.identityToken", null);
+          if (typeof token !== "string") return null;
+          let fresh, windows;
+          try { fresh = await read(); windows = await nativeCall(root, "windows", "getAll", [{ windowTypes: ["normal", "popup"] }]); }
+          catch (error) { return null; }
+          const kinds = new Map();
+          let normalCount = 0, popupCount = 0;
+          for (const w of Array.isArray(windows) ? windows : []) {
+            if (w && w.type === "normal") { normalCount++; kinds.set(w.id, "normal"); }
+            else if (w && w.type === "popup") { popupCount++; kinds.set(w.id, "popup"); }
+          }
+          const tabs = collect(fresh).filter((tab) => tab && typeof tab.id === "number");
+          const located = tabs.filter((tab) => kinds.has(tab.windowId) && Number.isInteger(tab.index) && tab.index >= 0).slice(0, 512);
+          if (filter && located.length !== tabs.length) return null;
+          const params = { token, normalCount, popupCount, entries: located.map((tab) => ({ window: kinds.get(tab.windowId), index: tab.index })) };
+          if (filter) params.filter = filter;
+          const answer = await bridgeValue("tabs.metadata", params);
+          if (!Array.isArray(answer) || answer.length !== located.length) continue;
+          const values = new Map();
+          located.forEach((tab, i) => { const v = answer[i]; if (v && typeof v.url === "string") values.set(tab, v); });
+          return { fresh, tabs, values };
+        }
+        return null;
+      };
+      const fill = (target, value) => {
+        if (!isRedacted(target) || !value) return;
+        target.url = value.url;
+        if (typeof value.title === "string") target.title = value.title;
+      };
+      // Fill blanked tabs of `baseline` from a bound fresh read of the same WebKit tab ids.
+      const supplementTabs = async (root, baselineTabs, read, collect) => {
+        if (!baselineTabs.some(isRedacted)) return;
+        const result = await boundRead(root, read, collect, null);
+        if (!result) return;
+        const byID = new Map();
+        for (const tab of result.tabs) if (result.values.has(tab)) byID.set(tab.id, result.values.get(tab));
+        for (const tab of baselineTabs) fill(tab, byID.get(tab && tab.id));
+      };
+      const tabsOf = (value) => Array.isArray(value) ? value : value && typeof value === "object" ? [value] : [];
+      const windowTabs = (value) => tabsOf(value).flatMap((w) => Array.isArray(w && w.tabs) ? w.tabs : []);
+      // Read-style wrappers: how to re-read and supplement each API's own result.
+      const readers = {
+        "tabs.query": (root, args, value) => {
+          const info = args[0] && typeof args[0] === "object" ? args[0] : {};
+          const hasFilter = info.url !== undefined || info.title !== undefined;
+          if (!hasFilter) return supplementTabs(root, tabsOf(value), () => nativeCall(root, "tabs", "query", [info]), tabsOf).then(() => value);
+          // WebKit never matches a url/title filter on a blanked tab: re-run the query without them, evaluate the
+          // filter natively on the real values, keep WebKit's own matches for tabs it could see. Fallback: WebKit's.
+          const stripped = { ...info }; delete stripped.url; delete stripped.title;
+          const filter = {};
+          if (info.url !== undefined) filter.url = info.url;
+          if (info.title !== undefined) filter.title = info.title;
+          return boundRead(root, () => nativeCall(root, "tabs", "query", [stripped]), tabsOf, filter).then((result) => {
+            if (!result) return value;
+            const native = new Set(tabsOf(value).map((tab) => tab && tab.id));
+            return result.tabs.filter((tab) => isRedacted(tab) ? result.values.has(tab) : native.has(tab.id))
+              .map((tab) => { if (isRedacted(tab)) fill(tab, result.values.get(tab)); return tab; });
+          });
+        },
+        "tabs.get": (root, args, value) => supplementTabs(root, tabsOf(value), () => nativeCall(root, "tabs", "get", [args[0]]), tabsOf).then(() => value),
+        "tabs.getCurrent": (root, args, value) => supplementTabs(root, tabsOf(value), () => nativeCall(root, "tabs", "getCurrent", []), tabsOf).then(() => value),
+        "tabs.create": (root, args, value) => supplementTabs(root, tabsOf(value), () => nativeCall(root, "tabs", "get", [value.id]), tabsOf).then(() => value),
+        "tabs.update": (root, args, value) => supplementTabs(root, tabsOf(value), () => nativeCall(root, "tabs", "get", [value.id]), tabsOf).then(() => value),
+        "windows.create": (root, args, value) => supplementTabs(root, windowTabs(value), () => nativeCall(root, "windows", "get", [value.id, { populate: true }]), windowTabs).then(() => value)
+      };
+      for (const name of ["get", "getAll", "getCurrent", "getLastFocused"]) {
+        readers["windows." + name] = (root, args, value) => {
+          const infoIndex = name === "get" ? 1 : 0;
+          const info = args[infoIndex] && typeof args[infoIndex] === "object" ? args[infoIndex] : null;
+          if (!info || !info.populate) return Promise.resolve(value);
+          return supplementTabs(root, windowTabs(value), () => nativeCall(root, "windows", name, args.slice(0, infoIndex + 1)), windowTabs).then(() => value);
+        };
+      }
+      const wrapRead = (root, holder, ns, name, native) => {
+        const key = ns + "." + name;
+        const wrapped = function (...args) {
+          const receiver = this && typeof this === "object" ? this : holder;
+          const callback = typeof args[args.length - 1] === "function" ? args.pop() : null;
+          const supplement = (value) => readers[key](root, args, value).then((v) => v, () => value);
+          if (!callback) {
+            const result = native.apply(receiver, args);
+            return result && typeof result.then === "function" ? result.then((value) => value == null ? value : supplement(value)) : result;
+          }
+          return native.apply(receiver, [...args, (...results) => {
+            let failed = false;
+            try { failed = !!(root.runtime && root.runtime.lastError); } catch (error) {}
+            // A WebKit error is reported inside WebKit's own callback, where runtime.lastError is set.
+            if (failed || results[0] == null) { callback(...results); return; }
+            supplement(results[0]).then((value) => callback(value), () => callback(results[0]));
+          }]);
+        };
+        Object.defineProperty(wrapped, metadataNative, { value: native });
+        return wrapped;
+      };
+      // Events: one FIFO per document or worker for every tabs.* and windows.* listener.
+      const eventQueue = [];
+      let draining = false;
+      const listenerTables = new Map();
+      const prepared = new WeakMap();
+      const drain = async () => {
+        if (draining) return;
+        draining = true;
+        while (eventQueue.length) {
+          const job = eventQueue.shift();
+          if (job.prepare && !job.plain && performance.now() - job.at < 3000) await timeout(job.prepare(), 1000);
+          if (listenerTables.get(job.event)?.get(job.listener) !== job.wrapper) continue;
+          try { job.listener(...job.args); } catch (error) { console.error(error); }
+        }
+        draining = false;
+      };
+      const prepareTab = (root, tab) => {
+        if (!isRedacted(tab)) return null;
+        if (!prepared.has(tab)) prepared.set(tab, supplementTabs(root, [tab], () => nativeCall(root, "tabs", "get", [tab.id]), tabsOf));
+        return prepared.get(tab);
+      };
+      const preparers = {
+        "tabs.onCreated": (root, args) => prepareTab(root, args[0]),
+        "tabs.onUpdated": (root, args) => {
+          const [, changeInfo, tab] = args;
+          const ready = prepareTab(root, tab);
+          if (!ready) return null;
+          const blankURL = changeInfo && Object.prototype.hasOwnProperty.call(changeInfo, "url") && !changeInfo.url;
+          const blankTitle = changeInfo && Object.prototype.hasOwnProperty.call(changeInfo, "title") && !changeInfo.title;
+          return ready.then(() => {
+            if (blankURL && tab.url) changeInfo.url = tab.url;
+            if (blankTitle && typeof tab.title === "string") changeInfo.title = tab.title;
+          });
+        }
+      };
+      const wrapEvent = (root, ns, name, target) => {
+        const key = ns + "." + name;
+        const add = unwrap(target.addListener), remove = unwrap(target.removeListener), has = unwrap(target.hasListener);
+        if (typeof add !== "function" || typeof remove !== "function") return;
+        const table = listenerTables.get(key) || new Map();
+        listenerTables.set(key, table);
+        const define = (member, fn, native) => {
+          Object.defineProperty(fn, metadataNative, { value: native });
+          try { Object.defineProperty(target, member, { value: fn, writable: true, configurable: true, enumerable: true }); } catch (error) {}
+        };
+        define("addListener", function (listener, ...rest) {
+          if (typeof listener !== "function") return add.call(target, listener, ...rest);
+          let wrapper = table.get(listener);
+          if (!wrapper) {
+            wrapper = (...args) => {
+              const prepare = preparers[key] ? () => preparers[key](root, args) : null;
+              eventQueue.push({ event: key, listener, wrapper, args, prepare, at: performance.now(), plain: eventQueue.length >= 256 });
+              drain();
+            };
+            table.set(listener, wrapper);
+          }
+          return add.call(target, wrapper, ...rest);
+        }, add);
+        define("removeListener", function (listener, ...rest) {
+          const wrapper = table.get(listener);
+          table.delete(listener);
+          return remove.call(target, wrapper || listener, ...rest);
+        }, remove);
+        if (typeof has === "function") define("hasListener", function (listener) { return has.call(target, table.get(listener) || listener); }, has);
+      };
+      const tabEvents = ["onActivated", "onAttached", "onCreated", "onDetached", "onHighlighted", "onMoved", "onRemoved", "onReplaced", "onUpdated", "onZoomChange"];
+      const windowEvents = ["onCreated", "onRemoved", "onFocusChanged"];
+      const metadataHeld = [];
+      const applyTabMetadata = () => {
+        if (!metadataEnabled) return;
+        for (const root of new Set([globalThis.browser, globalThis.chrome])) {
+          if (!root || typeof root !== "object") continue;
+          for (const [ns, names, events] of [["tabs", ["query", "get", "getCurrent", "create", "update"], tabEvents], ["windows", ["get", "getAll", "getCurrent", "getLastFocused", "create"], windowEvents]]) {
+            const holder = root[ns];
+            if (!holder || typeof holder !== "object") continue;
+            for (const name of names) {
+              const current = holder[name];
+              if (typeof current !== "function" || current[metadataNative]) continue;
+              try {
+                Object.defineProperty(holder, name, { value: wrapRead(root, holder, ns, name, current), writable: true, configurable: true, enumerable: true });
+                metadataHeld.push(holder);
+              } catch (error) {}
+            }
+            for (const name of events) {
+              const target = holder[name];
+              if (!target || typeof target !== "object" || (target.addListener && target.addListener[metadataNative])) continue;
+              wrapEvent(root, ns, name, target);
+              metadataHeld.push(target);
+            }
+          }
+        }
+      };
+
       // Members added to WebKit's own namespaces. WebKit can hand the page a
       // fresh namespace object after document start (observed with 1Password's
       // HTML background page, where webNavigation lost members added at start),
@@ -601,6 +823,7 @@ enum ExtensionCompatibility {
       const held = {};
       const applyExtensions = () => {
         applyDNRGuard();
+        applyTabMetadata();
         let missing = false;
         for (const x of extensions) {
           const holder = api[x.ns];
@@ -807,6 +1030,11 @@ enum ExtensionCompatibility {
     /// Live, persisted review grants supplied by the owner. Unknown WebKit
     /// permission names are never inferred to be approved from API availability.
     var permissionGranted: ((WKWebExtensionContext, String) -> Bool)?
+    /// Tab metadata (work/chrome-tab-metadata-api.md): the runtime issues bindings and answers redeemed requests from one
+    /// observed topology. Tokens live here so unload, revoke and shutdown purge them with the registration.
+    var tabMetadataBinding: ((WKWebExtensionContext) -> ExtensionTabMetadata.Binding?)?
+    var answerTabMetadata: ((WKWebExtensionContext, ExtensionTabMetadata.Binding, ExtensionTabMetadata.Request) -> [ExtensionTabMetadata.Value?]?)?
+    private var metadataTokens = ExtensionTabMetadata.TokenStore()
     /// Supplied by the host: the identifier for notifications posted on behalf of an extension.
     var notificationIdentifier: ((String) -> String?)?
     /// Returns a delivery error, or nil when the notification was posted natively.
@@ -858,7 +1086,7 @@ enum ExtensionCompatibility {
         return (web, { try await loader.wait() })
     }
     /// Revoked grants close the extension's hidden document immediately.
-    func revoke(_ context: WKWebExtensionContext) { offscreen.discard(owner: context.uniqueIdentifier) }
+    func revoke(_ context: WKWebExtensionContext) { offscreen.discard(owner: context.uniqueIdentifier); metadataTokens.purge(context: context.uniqueIdentifier) }
 
     func install(_ plan: ExtensionCompatibility.Plan, for context: WKWebExtensionContext) {
         guard !plan.isEmpty, let contentController else { return }
@@ -885,6 +1113,7 @@ enum ExtensionCompatibility {
             UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: owned)
         }
         offscreen.discard(owner: context.uniqueIdentifier)
+        metadataTokens.purge(context: context.uniqueIdentifier)
         documents.removeValue(forKey: context.uniqueIdentifier)
         registrations.removeValue(forKey: context.uniqueIdentifier)
         helloURLs.removeValue(forKey: context.uniqueIdentifier)
@@ -902,6 +1131,7 @@ enum ExtensionCompatibility {
         idleTimer?.invalidate(); idleTimer = nil
         let ports = eventConnections.values.flatMap { $0.values.map(\.port) }
         eventConnections.removeAll(); registrations.removeAll(); idleIntervals.removeAll(); idleStates.removeAll()
+        metadataTokens.purgeAll()
         for port in ports { port.disconnect() }
         contentController?.removeScriptMessageHandler(forName: handlerName, contentWorld: .page)
         contentController?.removeAllUserScripts()
@@ -963,6 +1193,25 @@ enum ExtensionCompatibility {
             let (value, error) = await handle(method: method, params: body["params"] as? [String: Any] ?? [:], context: context, web: nil)
             return (value, error.map(Self.bridgeError))
         default: return (nil, Self.bridgeError("Unknown compatibility request."))
+        }
+    }
+
+    /// Tab metadata bridge. Every refusal answers null, which the facade reads as "use WebKit's own answer"; no
+    /// error is invented. Only a registered context whose plan includes the facade may ask, and the runtime checks the
+    /// exact live context, `tabs`, the private boundary and the observation again when answering.
+    private func tabMetadata(_ method: String, params: [String: Any], context: WKWebExtensionContext) -> Any? {
+        guard ownsRegisteredContext(context), registrations[context.uniqueIdentifier]?.plan.provided.contains("tabs.metadata") == true else { return nil }
+        switch method {
+        case "tabs.identityToken":
+            guard let binding = tabMetadataBinding?(context), let token = metadataTokens.issue(binding, now: Date()) else { return nil }
+            BrowserExtensions.metadataTestHook?("issued")
+            return token
+        default:
+            guard let request = ExtensionTabMetadata.Request.parse(params),
+                  let issued = metadataTokens.consume(request.token, now: Date()), issued.context == context.uniqueIdentifier else { return nil }
+            BrowserExtensions.metadataTestHook?("answering")
+            guard ownsRegisteredContext(context), let values = answerTabMetadata?(context, issued, request) else { return nil }
+            return ExtensionTabMetadata.response(values)
         }
     }
 
@@ -1066,6 +1315,7 @@ enum ExtensionCompatibility {
     }
 
     private func handle(method: String, params: [String: Any], context: WKWebExtensionContext, web: WKWebView?) async -> (Any?, String?) {
+        if method == "tabs.identityToken" || method == "tabs.metadata" { return (tabMetadata(method, params: params, context: context), nil) }
         let methods = ["idle.queryState": "idle", "notifications.permissionLevel": "notifications", "notifications.create": "notifications",
                        "notifications.clear": "notifications", "downloads.download": "downloads",
                        "fontSettings.getFontList": "fontSettings", "bookmarks.getTree": "bookmarks", "history.search": "history",

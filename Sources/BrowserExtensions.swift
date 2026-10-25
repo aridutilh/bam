@@ -105,6 +105,9 @@ struct BrowserExtensionPermissionReview {
 
 @available(macOS 15.4, *)
 @MainActor final class BrowserExtensions: NSObject {
+    /// Test seam for the tab metadata regressions: called with "issued" after a token is issued and "answering" after
+    /// it is redeemed, before the runtime answers. nil in production.
+    static var metadataTestHook: ((String) -> Void)?
     var surfaces: ((UUID) -> [BrowserExtensionSurface])?
     /// Optional live lookup; a nil result is authoritative, never a cache miss.
     var surface: ((UUID, UUID) -> BrowserExtensionSurface?)?
@@ -1199,6 +1202,8 @@ struct BrowserExtensionPermissionReview {
             guard let self, let owner = self.owner, !owner.isPrivate else { return nil }
             return owner.historySnapshot?(self.profileID).map { Array($0.prefix(ExtensionHistory.maximumVisits)) }
         }
+        compatibility.tabMetadataBinding = { [weak self] context in self?.tabMetadataBinding(for: context) }
+        compatibility.answerTabMetadata = { [weak self] context, issued, request in self?.answerTabMetadata(for: context, issued: issued, request: request) }
         compatibility.permissionGranted = { [weak self] context, permission in
             guard let self, let record = self.ownedRecord(for: context), record.enabled else { return false }
             return (record.compatibilityGrants?[permission] ?? .distantPast) > Date()
@@ -1360,9 +1365,13 @@ struct BrowserExtensionPermissionReview {
 
     // MARK: Tab metadata (read-only; see work/chrome-tab-metadata-api.md)
 
-    /// Only an owned, loaded context holding `tabs`, within the private-data boundary. Nothing else is granted or checked.
+    /// Only the exact loaded context registered for this runtime's own record (same profile), holding `tabs` now,
+    /// within the private-data boundary. Controller identity alone is not authority. Nothing else is granted or checked.
     private func allowsTabMetadata(_ context: WKWebExtensionContext) -> Bool {
-        owns(context) && context.hasPermission(.tabs) && (owner?.isPrivate != true || context.hasAccessToPrivateData)
+        guard context.isLoaded, owns(context), let owner, let index = owner.ownedRecordIndex(for: context),
+              owner.records[index].profileID == profileID, owner.records[index].enabled,
+              let id = BrowserExtensions.recordID(of: context), contexts[id] === context else { return false }
+        return context.hasPermission(.tabs) && (!owner.isPrivate || context.hasAccessToPrivateData)
     }
     private func metadataBinding(_ context: WKWebExtensionContext) -> ExtensionTabMetadata.Binding {
         ExtensionTabMetadata.Binding(context: context.uniqueIdentifier, runtime: ObjectIdentifier(self).hashValue, profile: profileID,
