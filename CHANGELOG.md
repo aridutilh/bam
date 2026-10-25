@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.21.3 unreleased draft — build 44
+
+- Restore original Bam construction artwork from the unshipped preview draft. Fresh previews and the isolated persistent preview use it; normal builds retain the production icon. Generate both ICNS packages at build time from authored PNG masters.
+- Take an exclusive `flock` on each persistent profile’s `instance.lock` before opening session or WebKit state. Duplicate launches request focus from that profile’s owner, restoring hidden/minimized windows, and exit. Fresh previews and fixtures do not lock. I/O failures stop startup with an explanatory error instead of proceeding unguarded.
+- Retain ownership through quit confirmation, cancellation and store teardown; process exit or death releases the lock without deleting its inode. Older Bam versions do not cooperate with this lock and must be quit before using the same profile.
+- Unreleased draft prepared for review and merge. Installation follows review and merge; no tag or GitHub Release is part of this update. Validation is recorded in `VALIDATION.md`.
+
 ## 0.21.2 — build 43
 
 - Hide the window's close, minimize and zoom buttons together with the sidebar, as Arc does: they fade out over the last 80 points of the collapse, so a collapsed sidebar leaves the page alone in the window, and they return as the sidebar slides back in.
