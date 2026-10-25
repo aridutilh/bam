@@ -5,7 +5,7 @@ import UniformTypeIdentifiers
 /// Arc icon-cache import with original synthetic PNGs and invented IDs/URLs.
 /// Pure file reads and decoding: no network, no web views, no personal data.
 @main enum ArcIconImportTests {
-    @MainActor static func main() throws {
+    @MainActor static func main() async throws {
         _ = NSApplication.shared
         var checks = 0
         func require(_ value: @autoclosure () -> Bool, _ message: String) {
@@ -187,6 +187,61 @@ import UniformTypeIdentifiers
         var small = ImportedIconDiskCache.Limits(); small.maximumFileBytes = 10
         require(ImportedIconDiskCache(directory: base.appendingPathComponent("Small", isDirectory: true), limits: small)
                 .save([(UUID(), home, "https://x.example", loaded[ok]!)]) == 0, "Oversized encodings are not stored")
+        // Damaged index: duplicate spellings of one UUID, extreme orders, bad records.
+        let messy = base.appendingPathComponent("Messy", isDirectory: true)
+        let messyTab = UUID()
+        let seed = ImportedIconDiskCache(directory: messy)
+        seed.save([(messyTab, home, "https://m.example", loaded[ok]!)])
+        let good = seed.record(for: messyTab)!
+        func entry(_ order: Int, bytes: Int) -> String {
+            "{\"profile\":\"\(home.uuidString)\",\"origin\":\"https://m.example\",\"bytes\":\(bytes),\"sha256\":\"\(good.sha256)\",\"order\":\(order)}"
+        }
+        let messyJSON = "{\"\(messyTab.uuidString.lowercased())\":\(entry(Int.max, bytes: good.bytes)),"
+            + "\"\(messyTab.uuidString.uppercased())\":\(entry(-5, bytes: good.bytes)),"
+            + "\"\(UUID().uuidString)\":\(entry(3, bytes: -1)),\"not-a-uuid\":\(entry(1, bytes: 10))}"
+        try messyJSON.write(to: messy.appendingPathComponent("index.json"), atomically: true, encoding: .utf8)
+        let tolerant = ImportedIconDiskCache(directory: messy)
+        require(tolerant.restore(validTabs: [messyTab: home]).count == 1 && tolerant.recordCount == 1,
+                "Duplicate UUID spellings merge, invalid records drop, nothing traps")
+        require(tolerant.record(for: messyTab)!.order == 1, "Orders are renumbered, so Int.max can't overflow")
+        require(tolerant.save([(UUID(), home, "https://n.example", loaded[other]!)]) == 1 && tolerant.recordCount == 2, "Saving continues after recovery")
+
+        // Successive imports queue instead of cancelling each other.
+        actor Gate {
+            private var waiters: [CheckedContinuation<Void, Never>] = []
+            var waiting: Int { waiters.count }
+            func wait() async { await withCheckedContinuation { waiters.append($0) } }
+            func openOne() { if !waiters.isEmpty { waiters.removeFirst().resume() } }
+        }
+        let gate = Gate()
+        let queue = ArcIconImportQueue(decode: { jobs, _ in
+            await gate.wait()
+            return Dictionary(uniqueKeysWithValues: jobs.map { ($0.tabID, loaded[ok]!) })
+        })
+        var finished: [[UUID]] = []
+        queue.onDecoded = { jobs, icons in finished.append(jobs.map(\.tabID)); _ = icons }
+        func job() -> ArcIconImport.IconJob { ArcIconImport.IconJob(itemID: UUID().uuidString, tabID: UUID(), origin: "https://q.example", profile: home) }
+        func settle(_ condition: () async -> Bool) async { for _ in 0..<2000 where !(await condition()) { await Task.yield() } }
+        let keptBatch = [job(), job()], todayBatch = [job()]
+        queue.enqueue(keptBatch, directory: cache)
+        await settle { await gate.waiting == 1 }
+        queue.enqueue(todayBatch, directory: cache)          // a second import while the first decodes
+        require(queue.pendingBatches == 1, "The second import waits; the first keeps decoding")
+        await gate.openOne(); await settle { await gate.waiting == 1 }
+        await gate.openOne(); await settle { queue.isIdle }
+        require(finished == [keptBatch.map(\.tabID), todayBatch.map(\.tabID)], "Both imports' icons arrive, in order (none lost)")
+        // Shutdown cancels the running batch and drops queued ones.
+        finished.removeAll()
+        queue.enqueue([job()], directory: cache); await settle { await gate.waiting == 1 }
+        queue.enqueue([job()], directory: cache)
+        queue.cancelAll()
+        require(queue.isIdle, "Cancel clears the queue")
+        await gate.openOne(); for _ in 0..<50 { await Task.yield() }
+        require(finished.isEmpty, "A cancelled batch never installs icons")
+        let afterCancel = [job()]
+        queue.enqueue(afterCancel, directory: cache); await settle { await gate.waiting >= 1 }
+        await gate.openOne(); await settle { queue.isIdle }
+        require(finished == [afterCancel.map(\.tabID)], "The queue works again after a cancel (an old worker can't clear a new one)")
         print("PASS: \(checks) Arc icon import checks")
     }
 }

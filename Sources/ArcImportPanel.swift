@@ -91,27 +91,22 @@ import AppKit
     /// page. Missing or invalid icons leave the normal fallback.
     func importArcIcons(_ jobs: [ArcIconImport.IconJob], layout: URL?) {
         guard !jobs.isEmpty, !isShuttingDown, let layout, let directory = ArcIconImport.cacheDirectory(besideLayout: layout) else { return }
-        // A newer import supersedes any decode still running; shutdown cancels too.
-        arcIconTask?.cancel()
-        arcIconTask = Task.detached(priority: .utility) { [weak self] in
-            let icons = ArcIconImport.loadIcons(for: jobs.map { ($0.itemID, $0.tabID) }, in: directory, isCancelled: { Task.isCancelled })
-            guard !icons.isEmpty, !Task.isCancelled else { return }
-            await MainActor.run {
-                guard let self, !self.isShuttingDown, !Task.isCancelled else { return }
-                var persist: [(tab: UUID, profile: UUID, origin: String, image: CGImage)] = []
-                for job in jobs {
-                    // Revalidate against the session now; use the captured site and
-                    // profile, never the tab's address at completion time.
-                    guard let image = icons[job.tabID], ArcIconImport.stillValid(job, in: self.session) else { continue }
-                    self.importedTabIcons.install(image, for: job.tabID, origin: job.origin, profile: job.profile)
-                    persist.append((job.tabID, job.profile, job.origin, image))
-                }
-                self.sidebar.refreshFavicons(); self.tabSearchResults?.refreshFavicons()
-                if let disk = self.importedIconDisk, !persist.isEmpty {
-                    self.importedIconQueue.async { disk.save(persist) }
-                }
-            }
+        // Successive imports queue behind each other; none cancels another's icons.
+        arcIconQueue.onDecoded = { [weak self] jobs, icons in self?.installImportedIcons(jobs, icons) }
+        arcIconQueue.enqueue(jobs, directory: directory)
+    }
+    private func installImportedIcons(_ jobs: [ArcIconImport.IconJob], _ icons: [UUID: CGImage]) {
+        guard !isShuttingDown, !icons.isEmpty else { return }
+        var persist: [(tab: UUID, profile: UUID, origin: String, image: CGImage)] = []
+        for job in jobs {
+            // Revalidate against the session now; use the captured site and
+            // profile, never the tab's address at completion time.
+            guard let image = icons[job.tabID], ArcIconImport.stillValid(job, in: session) else { continue }
+            importedTabIcons.install(image, for: job.tabID, origin: job.origin, profile: job.profile)
+            persist.append((job.tabID, job.profile, job.origin, image))
         }
+        sidebar.refreshFavicons(); tabSearchResults?.refreshFavicons()
+        if let disk = importedIconDisk, !persist.isEmpty { importedIconQueue.async { disk.save(persist) } }
     }
 
     /// At launch: shows imported icons saved earlier for tabs that still exist

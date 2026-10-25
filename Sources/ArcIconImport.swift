@@ -120,6 +120,54 @@ enum ArcIconImport {
     }
 }
 
+/// Runs icon batches one at a time, in import order. A later import queues
+/// behind an earlier one instead of cancelling it, so rapid successive
+/// imports keep every batch's icons. Only `cancelAll` (shutdown) stops work,
+/// and it drops queued batches too.
+@MainActor final class ArcIconImportQueue {
+    typealias Decode = @Sendable ([ArcIconImport.IconJob], URL) async -> [UUID: CGImage]
+    private var batches: [(jobs: [ArcIconImport.IconJob], directory: URL)] = []
+    private var worker: Task<Void, Never>?
+    private let decode: Decode
+    /// Called on the main actor with each finished batch.
+    var onDecoded: (([ArcIconImport.IconJob], [UUID: CGImage]) -> Void)?
+
+    init(decode: @escaping Decode = ArcIconImportQueue.decodeFromCache) { self.decode = decode }
+
+    var isIdle: Bool { worker == nil && batches.isEmpty }
+    var pendingBatches: Int { batches.count }
+
+    func enqueue(_ jobs: [ArcIconImport.IconJob], directory: URL) {
+        guard !jobs.isEmpty else { return }
+        batches.append((jobs, directory))
+        guard worker == nil else { return }
+        let token = UUID(); workerToken = token
+        worker = Task { [weak self] in
+            while let self, !Task.isCancelled, !self.batches.isEmpty {
+                let batch = self.batches.removeFirst()
+                let icons = await self.decode(batch.jobs, batch.directory)
+                guard !Task.isCancelled else { break }
+                self.onDecoded?(batch.jobs, icons)
+            }
+            // A cancelled worker must not clear a newer one started after it.
+            if let self, self.workerToken == token { self.worker = nil }
+        }
+    }
+    private var workerToken: UUID?
+    func cancelAll() {
+        batches.removeAll()
+        worker?.cancel(); worker = nil; workerToken = nil
+    }
+
+    /// Off the main thread, cancellable between files.
+    nonisolated static let decodeFromCache: Decode = { jobs, directory in
+        let task = Task.detached(priority: .utility) {
+            ArcIconImport.loadIcons(for: jobs.map { ($0.itemID, $0.tabID) }, in: directory, isCancelled: { Task.isCancelled })
+        }
+        return await withTaskCancellationHandler { await task.value } onCancel: { task.cancel() }
+    }
+}
+
 /// Imported per-tab icons, in memory only. Each icon belongs to the page the
 /// tab was imported with: once the tab shows another site, the normal
 /// favicon takes over. Bounded; the oldest entries go first.
@@ -201,8 +249,22 @@ final class ImportedIconDiskCache: @unchecked Sendable {
               let decoded = try? JSONDecoder().decode([String: Record].self, from: data) else {
             index = [:]; return
         }
-        index = Dictionary(uniqueKeysWithValues: decoded.compactMap { key, record in UUID(uuidString: key).map { ($0, record) } })
-        counter = index.values.map(\.order).max() ?? 0
+        // Tolerate a hand-edited or damaged index: drop implausible records,
+        // merge different spellings of one UUID (newest wins), and renumber
+        // the order 1…n so the counter can never overflow.
+        var merged: [UUID: Record] = [:]
+        for (key, record) in decoded {
+            guard let tab = UUID(uuidString: key), record.bytes > 0, record.bytes <= limits.maximumFileBytes,
+                  !record.origin.isEmpty, record.origin.count <= 2048 else { continue }
+            if let existing = merged[tab], existing.order >= record.order { continue }
+            merged[tab] = record
+        }
+        index = [:]; counter = 0
+        for (tab, record) in merged.sorted(by: { $0.value.order < $1.value.order }) {
+            counter += 1
+            var renumbered = record; renumbered.order = counter
+            index[tab] = renumbered
+        }
     }
     private func writeIndex() throws {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)

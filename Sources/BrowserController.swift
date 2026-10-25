@@ -297,8 +297,8 @@ import QuartzCore
     lazy var importedIconDisk: ImportedIconDiskCache? = privateMode ? nil
         : ImportedIconDiskCache(directory: sessionURL.deletingLastPathComponent().appendingPathComponent("ImportedIcons", isDirectory: true))
     let importedIconQueue = DispatchQueue(label: "com.ari.bam.imported-icons", qos: .utility)
-    /// The one in-flight icon decode; cancelled at shutdown or by a newer import.
-    var arcIconTask: Task<Void, Never>?
+    /// Icon batches from successive imports, decoded one at a time; cancelled at shutdown.
+    let arcIconQueue = ArcIconImportQueue()
     /// Tabs created by an import, which must not reach the network for icons
     /// until the user opens them. Rebuilt when provenance changes.
     var importedTabIDsCache: (count: Int, ids: Set<UUID>)?
@@ -695,7 +695,7 @@ import QuartzCore
         spaceManager?.cancel(nil)
         savedTabEditor?.cancel(nil)
         isShuttingDown = true; cancelAutomaticDepartures(); findBar.hide(); pageFeedback.hide(); downloads.cancelAll(); pictureInPicture.restore()
-        arcIconTask?.cancel(); arcIconTask = nil
+        arcIconQueue.cancelAll()
         for peek in Array(peeks.values) { peek.dismiss() }
         for little in Array(littleWindows.values) { little.close() }
         if let monitor = scrollMonitor { NSEvent.removeMonitor(monitor); scrollMonitor = nil }
