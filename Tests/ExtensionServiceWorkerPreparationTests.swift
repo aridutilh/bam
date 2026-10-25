@@ -228,6 +228,17 @@ import JavaScriptCore
             try check(try refresh(url, newer) && snapshot(url) == interrupted, "\(name): an interrupted refresh was not completed")
             try check(try ExtensionServiceWorkerPreparation.prepare(package: url, originalManifestURL: backup(url), adapterSource: newer) == nil, "\(name): repaired metadata did not verify")
 
+            // A real metadata-write failure after the adapter write: the next refresh completes it.
+            try check(try refresh(url, adapter), "\(name): could not reset before the failure case")
+            let metadataFolder = metadata(url).deletingLastPathComponent()
+            try fm.setAttributes([.posixPermissions: 0o555], ofItemAtPath: metadataFolder.path)
+            let failedWrite = refused(url, newer)
+            try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: metadataFolder.path)
+            try check(failedWrite && (try Data(contentsOf: url.appendingPathComponent(shim))) == Data(newer.utf8),
+                      "\(name): the metadata write did not fail after the adapter write")
+            try check(try refresh(url, newer) && ExtensionServiceWorkerPreparation.prepare(package: url, originalManifestURL: backup(url), adapterSource: newer) == nil,
+                      "\(name): the next refresh did not complete an interrupted metadata write")
+
             // Tampering anywhere is refused without changes, and a tampered adapter is never trusted or replaced.
             try Data("// edited adapter\n".utf8).write(to: url.appendingPathComponent(shim))
             let edited = try snapshot(url), editedMetadata = try Data(contentsOf: metadata(url))
