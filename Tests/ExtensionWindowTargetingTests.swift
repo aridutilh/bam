@@ -13,34 +13,35 @@ import Foundation
         var checks = 0
         func check(_ condition: Bool, _ message: String) throws { guard condition else { throw Failure(description: message) }; checks += 1 }
 
-        // tabs.create: WebKit's default (current window, index = its tab count) appends; clamped past the end.
-        try check(T.tabCreation(target: .browser, index: 5, windowTabCount: 5) == nil && T.tabCreation(target: .browser, index: 9, windowTabCount: 5) == nil &&
-                  T.tabCreation(target: nil, index: 0, windowTabCount: 0) == nil, "An append to the browser window was refused")
-        try check(T.tabCreation(target: .browser, index: 0, windowTabCount: 5) == T.indexRefusal && T.tabCreation(target: .browser, index: 4, windowTabCount: 5) == T.indexRefusal,
+        // tabs.create: the tab lands after this profile's tabs (landing); only that position is honored.
+        try check(T.tabCreation(target: .browser, index: 5, landing: 5, windowTabCount: 5) == nil && T.tabCreation(target: .browser, index: 9, landing: 5, windowTabCount: 5) == nil,
+                  "An append to the browser window was refused")
+        try check(T.tabCreation(target: .browser, index: 0, landing: 5, windowTabCount: 5) == T.indexRefusal && T.tabCreation(target: .browser, index: 4, landing: 5, windowTabCount: 5) == T.indexRefusal,
                   "An insertion before existing tabs was not refused")
-        try check(T.tabCreation(target: .singlePage, index: 1, windowTabCount: 1) == T.singlePageTabRefusal &&
-                  T.tabCreation(target: .otherProfile, index: 3, windowTabCount: 3) == T.otherProfileRefusal,
-                  "A popup or other-profile target was not refused")
+        // With a Peek exposed after 5 tabs (6 in WebKit's count): the default end index would be wrong, so it is refused
+        // with the honest index; that index itself is honored.
+        try check(T.tabCreation(target: .browser, index: 6, landing: 5, windowTabCount: 6) == T.peekRefusal(landing: 5) &&
+                  T.tabCreation(target: .browser, index: 9, landing: 5, windowTabCount: 6) == T.peekRefusal(landing: 5) &&
+                  T.tabCreation(target: .browser, index: 5, landing: 5, windowTabCount: 6) == nil, "An append past an exposed Peek was not refused or its landing index was refused")
+        try check(T.tabCreation(target: nil, index: 0, landing: 0, windowTabCount: 0) == T.noWindowRefusal &&
+                  T.tabCreation(target: .singlePage, index: 1, landing: 1, windowTabCount: 1) == T.singlePageTabRefusal &&
+                  T.tabCreation(target: .otherProfile, index: 3, landing: 3, windowTabCount: 3) == T.otherProfileRefusal,
+                  "A missing, popup or other-profile target was not refused")
 
-        // windows.create: only a single-page popup in a normal or minimized state.
-        try check(T.windowCreation(type: .popup, state: .normal, urlCount: 1, hasTabs: false) == nil &&
-                  T.windowCreation(type: .popup, state: .minimized, urlCount: 0, hasTabs: false) == nil, "A supported popup request was refused")
-        try check(T.windowCreation(type: .normal, state: .normal, urlCount: 1, hasTabs: false) == T.normalWindowRefusal &&
-                  T.windowCreation(type: .other, state: .normal, urlCount: 1, hasTabs: false) == T.normalWindowRefusal, "A non-popup window was not refused")
-        try check(T.windowCreation(type: .popup, state: .maximized, urlCount: 1, hasTabs: false) == T.stateRefusal &&
-                  T.windowCreation(type: .popup, state: .fullscreen, urlCount: 1, hasTabs: false) == T.stateRefusal, "Maximized or full-screen popups were not refused")
-        try check(T.windowCreation(type: .popup, state: .normal, urlCount: 2, hasTabs: false) == T.multiplePagesRefusal &&
-                  T.windowCreation(type: .popup, state: .normal, urlCount: 0, hasTabs: true) == T.multiplePagesRefusal, "A multi-page popup was not refused")
-
-        // Requested bounds: only requested components change; nothing requested means nothing applied.
-        let nan = CGFloat.nan, current = CGRect(x: 10, y: 20, width: 300, height: 200)
-        try check(T.frame(requested: CGRect(x: nan, y: nan, width: nan, height: nan), current: current) == nil && T.frame(requested: .null, current: current) == nil,
-                  "An empty request changed the frame")
-        try check(T.frame(requested: CGRect(x: 140, y: 400, width: 420, height: 300), current: current) == CGRect(x: 140, y: 400, width: 420, height: 300),
-                  "A full request was not applied as given")
-        try check(T.frame(requested: CGRect(x: nan, y: nan, width: 500, height: nan), current: current) == CGRect(x: 10, y: 20, width: 500, height: 200) &&
-                  T.frame(requested: CGRect(x: 55, y: nan, width: nan, height: nan), current: current) == CGRect(x: 55, y: 20, width: 300, height: 200),
-                  "A partial request changed unrequested components")
+        // windows.create: only a single-page popup, normal or minimized, without requested bounds.
+        try check(T.windowCreation(type: .popup, state: .normal, urlCount: 1, hasTabs: false, requestsBounds: false) == nil &&
+                  T.windowCreation(type: .popup, state: .minimized, urlCount: 0, hasTabs: false, requestsBounds: false) == nil, "A supported popup request was refused")
+        try check(T.windowCreation(type: .normal, state: .normal, urlCount: 1, hasTabs: false, requestsBounds: false) == T.normalWindowRefusal &&
+                  T.windowCreation(type: .other, state: .normal, urlCount: 1, hasTabs: false, requestsBounds: false) == T.normalWindowRefusal, "A non-popup window was not refused")
+        try check(T.windowCreation(type: .popup, state: .normal, urlCount: 1, hasTabs: false, requestsBounds: true) == T.boundsRefusal, "Requested bounds were not refused")
+        try check(T.windowCreation(type: .popup, state: .maximized, urlCount: 1, hasTabs: false, requestsBounds: false) == T.stateRefusal &&
+                  T.windowCreation(type: .popup, state: .fullscreen, urlCount: 1, hasTabs: false, requestsBounds: false) == T.stateRefusal, "Maximized or full-screen popups were not refused")
+        try check(T.windowCreation(type: .popup, state: .normal, urlCount: 2, hasTabs: false, requestsBounds: false) == T.multiplePagesRefusal &&
+                  T.windowCreation(type: .popup, state: .normal, urlCount: 0, hasTabs: true, requestsBounds: false) == T.multiplePagesRefusal, "A multi-page popup was not refused")
+        let nan = CGFloat.nan
+        try check(!T.requestsBounds(CGRect(x: nan, y: nan, width: nan, height: nan)) && !T.requestsBounds(.null) &&
+                  T.requestsBounds(CGRect(x: nan, y: nan, width: 420, height: nan)) && T.requestsBounds(CGRect(x: 10, y: nan, width: nan, height: nan)),
+                  "Requested bounds were misdetected")
         return checks
     }
 }

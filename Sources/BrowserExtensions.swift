@@ -18,6 +18,8 @@ import WebKit
     var loadingChanged: Bool = false
     /// A Little Bam window: one page, no tabs. Its window is reported to extensions as `popup`.
     var isSinglePage: Bool = false
+    /// A Peek shown in the browser window after its tabs. New tabs land before Peeks.
+    var isPeek: Bool = false
 }
 
 struct BrowserExtensionRecord: Codable, Identifiable {
@@ -1139,8 +1141,10 @@ struct BrowserExtensionPermissionReview {
             guard let window, window.runtime === self, windows[window.key] === window else { return .otherProfile }
             return singlePageWindows.contains(window.key) ? .singlePage : .browser
         }
+        // A new tab lands after this profile's tabs in the window, before any exposed Peek.
+        let members = (targetWindow ?? nil).map { window in currentSurfaces().filter { windowKey($0) == window.key } } ?? []
         if owns(context), let refusal = ExtensionWindowTargeting.tabCreation(target: target, index: configuration.index,
-                windowTabCount: (targetWindow ?? nil).map { tabIDs(in: $0.key).count } ?? 0) {
+                landing: members.filter { !$0.isPeek }.count, windowTabCount: (targetWindow ?? nil).map { tabIDs(in: $0.key).count } ?? 0) {
             completionHandler(nil, BrowserExtensions.failure(refusal)); return
         }
         guard owns(context), let url = configuration.url, (["http", "https"].contains(url.scheme?.lowercased() ?? "") || BrowserExtensions.isExtensionURL(url, ownedBy: context)),
@@ -1160,7 +1164,8 @@ struct BrowserExtensionPermissionReview {
             case .fullscreen: .fullscreen
             default: .normal
         }
-        if owns(context), let refusal = ExtensionWindowTargeting.windowCreation(type: type, state: state, urlCount: configuration.tabURLs.count, hasTabs: !configuration.tabs.isEmpty) {
+        if owns(context), let refusal = ExtensionWindowTargeting.windowCreation(type: type, state: state, urlCount: configuration.tabURLs.count,
+                hasTabs: !configuration.tabs.isEmpty, requestsBounds: ExtensionWindowTargeting.requestsBounds(configuration.frame)) {
             completionHandler(nil, BrowserExtensions.failure(refusal)); return
         }
         guard owns(context), !configuration.shouldBePrivate, configuration.tabURLs.count <= 1, configuration.tabs.isEmpty,
@@ -1170,8 +1175,6 @@ struct BrowserExtensionPermissionReview {
         }
         reconcile()
         guard let window = windows[ObjectIdentifier(native)] else { completionHandler(nil, BrowserExtensions.failure("The new window is not in this extension’s profile.")); return }
-        // Requested bounds (AppKit coordinates from WebKit; unrequested parts NaN) are applied, never dropped silently.
-        if let frame = ExtensionWindowTargeting.frame(requested: configuration.frame, current: native.frame) { native.setFrame(frame, display: true) }
         if configuration.windowState == .minimized { native.miniaturize(nil) }
         completionHandler(window, nil)
     }
