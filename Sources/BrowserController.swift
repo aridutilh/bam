@@ -37,12 +37,16 @@ import QuartzCore
     var onLayout: (() -> Void)?
     var space = 0 {
         didSet {
-            if space != oldValue { previewSpace = nil; previewProgress = 0; updateAppearanceLayers() }
+            if space != oldValue { previewSpace = nil; previewTheme = nil; previewProgress = 0; updateAppearanceLayers() }
             needsDisplay = true
         }
     }
     var previewSpace: Int? { didSet { needsDisplay = true; updatePreviewEffects() } }
     var previewProgress: CGFloat = 0 { didSet { needsDisplay = true; updatePreviewEffects() } }
+    /// The selected Space's imported Arc colors, drawn instead of its flat pair.
+    var theme: SpaceTheme? { didSet { if theme != oldValue { needsDisplay = true } } }
+    /// The theme of the Space a swipe is previewing, if it has one.
+    var previewTheme: SpaceTheme? { didSet { if previewTheme != oldValue { needsDisplay = true } } }
     /// Fires when the selected Space's appearance needs the window itself to
     /// turn translucent (Clear) or opaque again.
     var onTranslucencyChange: ((Bool) -> Void)?
@@ -100,11 +104,13 @@ import QuartzCore
     ]
     override func draw(_ dirtyRect: NSRect) {
         let palettes = isDark ? Self.palettes : Self.lightPalettes
-        func pair(_ index: Int) -> [NSColor] { palettes[min(palettes.count - 1, max(0, index))] }
-        var colors = pair(space)
+        func pair(_ index: Int, _ theme: SpaceTheme?) -> [NSColor] {
+            NSColor.themedCanvas(theme, colorIndex: index, dark: isDark) ?? palettes[min(palettes.count - 1, max(0, index))]
+        }
+        var colors = pair(space, theme)
         if let previewSpace {
             let progress = min(1, max(0, previewProgress))
-            colors = zip(colors, pair(previewSpace)).map { $0.blended(withFraction: progress, of: $1) ?? $0 }
+            colors = zip(colors, pair(previewSpace, previewTheme)).map { $0.blended(withFraction: progress, of: $1) ?? $0 }
             // Glass hides during swipes, so previews into or out of Clear fade
             // the gradient itself toward transparency.
             let fromClear = space == BrowserSpace.clearColorIndex
@@ -747,6 +753,7 @@ import QuartzCore
         guard isViewLoaded else { return }
         scheduleExtensionRefresh()
         refreshExtensionActions()
+        root.theme = session.spaceDefinition(session.space)?.theme
         root.space = session.spaceDefinition(session.space)?.colorIndex ?? 0
         sidebar.configureSpaces(session.spaces)
         let tabs = sidebarItems(in: session)
@@ -1018,6 +1025,7 @@ import QuartzCore
                 }
             } else if pagingTarget != nil { sidebar.endPaging(); pagingTarget = nil }
             sidebar.setPagingOffset(offset)
+            root.previewTheme = pagingTarget.flatMap { session.spaceDefinition($0)?.theme }
             root.previewSpace = pagingTarget.flatMap { session.spaceDefinition($0)?.colorIndex }; root.previewProgress = abs(offset) / max(1, sidebar.bounds.width)
         }
         // Never advertise creation that the Space cap would refuse.
@@ -1051,6 +1059,7 @@ import QuartzCore
             self.pagingOffset = offset; self.sidebar.setPagingOffset(offset)
             // The creation panel owns the gradient preview while it is open.
             if commit == nil, self.spaceCreationPanel == nil {
+                self.root.previewTheme = self.pagingTarget.flatMap { self.session.spaceDefinition($0)?.theme }
                 self.root.previewSpace = self.pagingTarget.flatMap { self.session.spaceDefinition($0)?.colorIndex }
                 self.root.previewProgress = abs(offset) / max(1, self.sidebar.bounds.width)
             }

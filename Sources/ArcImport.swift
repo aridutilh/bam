@@ -50,6 +50,8 @@ enum ArcImport {
         let colorIndex: Int?
         let hasCustomIcon: Bool
         let hasTheme: Bool
+        /// The theme in Bam's terms, when Arc's is complete and valid.
+        var theme: SpaceTheme? = nil
         let profile: Profile
         let pinnedRoot: String?
         let unpinnedRoot: String?
@@ -131,6 +133,7 @@ enum ArcImport {
                                 colorIndex: themeColorIndex(custom?["windowTheme"]),
                                 hasCustomIcon: emoji == nil && icon?["icon"] != nil,
                                 hasTheme: custom?["windowTheme"] != nil,
+                                theme: spaceTheme(custom?["windowTheme"]),
                                 profile: profile(object["profile"]),
                                 pinnedRoot: roots.pinned, unpinnedRoot: roots.unpinned))
         }
@@ -209,6 +212,39 @@ enum ArcImport {
         default: return .unknown(key)
         }
     }
+    /// Arc's window theme as Bam's typed Space theme, or nil when any color
+    /// Bam needs is missing, out of range or in an unknown color space (the
+    /// Space then wears its nearest flat color). Only numbers are copied.
+    static func spaceTheme(_ value: Any?) -> SpaceTheme? {
+        guard let theme = value as? [String: Any] else { return nil }
+        func color(_ raw: Any?) -> SpaceTheme.RGBA? {
+            guard let object = raw as? [String: Any] else { return nil }
+            if let space = object["colorSpace"] { guard let name = space as? String, ["extendedSRGB", "sRGB", "srgb"].contains(name) else { return nil } }
+            func number(_ key: String) -> Double? { object[key] as? Double }
+            guard let r = number("red"), let g = number("green"), let b = number("blue") else { return nil }
+            return SpaceTheme.RGBA(red: r, green: g, blue: b, alpha: number("alpha") ?? 1)
+        }
+        let primary = theme["primaryColorPalette"] as? [String: Any]
+        guard let accent = color(primary?["midTone"]),
+              let appearance = (theme["semanticColorPalette"] as? [String: Any])?["appearanceBased"] as? [String: Any] else { return nil }
+        func roles(_ key: String) -> SpaceTheme.Roles? {
+            guard let palette = appearance[key] as? [String: Any],
+                  let background = color(palette["background"]), let title = color(palette["title"]) else { return nil }
+            return SpaceTheme.Roles(background: background, backgroundExtra: color(palette["backgroundExtra"]),
+                                    title: title, subtitle: color(palette["subtitle"]))
+        }
+        guard let light = roles("light"), let dark = roles("dark") else { return nil }
+        // Only the single blended-gradient background is understood; any other
+        // variant keeps the theme's colors over its appearance backgrounds.
+        let single = ((theme["background"] as? [String: Any])?["single"] as? [String: Any])?["_0"] as? [String: Any]
+        let blended = ((((single?["style"] as? [String: Any])?["color"] as? [String: Any])?["_0"] as? [String: Any])?["blendedGradient"] as? [String: Any])?["_0"] as? [String: Any]
+        let raw = blended?["baseColors"] as? [Any] ?? []
+        let stops = raw.prefix(2).map(color)
+        let gradient = stops.contains(where: { $0 == nil }) ? [] : stops.compactMap { $0 }
+        return SpaceTheme(gradient: gradient, light: light, dark: dark, accent: accent,
+                          accentLight: color(primary?["tintedLight"]), accentDark: color(primary?["shaded"]))
+    }
+
     /// Nearest of Bam's flat colors to Arc's theme mid-tone, by hue.
     private static func themeColorIndex(_ value: Any?) -> Int? {
         guard let theme = value as? [String: Any],
@@ -251,6 +287,8 @@ enum ArcImport {
         var splits = 0
         /// Easels kept as reference rows in their places (canvas not imported).
         var easels = 0
+        /// Whether this import gives the Space its Arc theme.
+        var theme = false
     }
     struct Report: Equatable {
         var spaces: [SpaceReport] = []
@@ -270,7 +308,11 @@ enum ArcImport {
         var unattachedProfiles = 0
         var unattachedFavorites = 0
         var skippedSpaces = 0
+        /// Arc themes Bam couldn't read; those Spaces use the nearest flat color.
         var approximatedThemes = 0
+        /// Arc themes brought over with their own colors and gradient (new
+        /// Spaces, or earlier-imported Spaces that still wear the color Bam chose).
+        var importedThemes = 0
         var customIcons = 0
         var firstSpaceID: Int?
         /// Previously imported Spaces the user removed and Arc has nothing new for.
@@ -282,7 +324,7 @@ enum ArcImport {
 
         var importedTabs: Int { spaces.reduce(0) { $0 + $1.keptTabs + $1.todayTabs + $1.favorites } }
         var importedFolders: Int { spaces.reduce(0) { $0 + $1.folders } }
-        var isEmpty: Bool { importedTabs == 0 && importedFolders == 0 && easelReferences == 0 && !spaces.contains(where: \.isNew) }
+        var isEmpty: Bool { importedTabs == 0 && importedFolders == 0 && easelReferences == 0 && importedThemes == 0 && !spaces.contains(where: \.isNew) }
         /// Why nothing would be added, without implying skipped items were imported.
         var emptyReason: String {
             if skippedSpaces > 0 { return "Nothing can be added: Bam’s \(BrowserSession.maximumSpaces)-Space limit is reached." }
@@ -314,7 +356,16 @@ enum ArcImport {
             if depthLimited > 0 { lines.append("\(plural(depthLimited, "folder")) nested deeper than Bam allows will be placed in their nearest allowed parent.") }
             if missingItems > 0 || unknownItems > 0 { lines.append("\(plural(missingItems + unknownItems, "item")) Bam doesn’t recognize will be skipped.") }
             if skippedSpaces > 0 { lines.append("\(plural(skippedSpaces, "Space")) won’t fit within Bam’s \(BrowserSession.maximumSpaces)-Space limit.") }
-            if approximatedThemes > 0 { lines.append("Arc window themes become the nearest Bam Space color.") }
+            if importedThemes > 0 {
+                lines.append(importedThemes == 1
+                    ? "1 Space keeps its Arc theme colors and gradient, in light and dark. Arc’s grain and vibrancy aren’t reproduced."
+                    : "\(importedThemes) Spaces keep their Arc theme colors and gradients, in light and dark. Arc’s grain and vibrancy aren’t reproduced.")
+            }
+            if approximatedThemes > 0 {
+                lines.append(approximatedThemes == 1
+                    ? "1 Arc theme couldn’t be read; its Space uses the nearest Bam Space color."
+                    : "\(approximatedThemes) Arc themes couldn’t be read; their Spaces use the nearest Bam Space color.")
+            }
             if customIcons > 0 { lines.append("\(plural(customIcons, "Space")) with Arc’s built-in icons will use a Bam symbol instead.") }
             lines.append("Sign-ins, passwords, history and extensions stay in Arc; this imports your sidebar layout.")
             return lines
@@ -352,6 +403,14 @@ enum ArcImport {
         }
         let referenced = Set(session.spaces.map(\.profileID) + session.tabs.compactMap { $0.isFavorite ? $0.saved?.profileID : nil })
         session.profiles.removeAll { addedProfiles.contains($0.id) && !referenced.contains($0.id) }
+        // A theme this import put on an existing Space comes off again, unless
+        // the Space has been given a different theme since.
+        for index in session.spaces.indices {
+            let id = session.spaces[index].id
+            guard let before = previous.spaceDefinition(id), before.theme == nil,
+                  let added = imported.spaceDefinition(id)?.theme, session.spaces[index].theme == added else { continue }
+            session.spaces[index].theme = nil
+        }
         session.importLinks = previous.importLinks
         if session.spaceDefinition(session.space) == nil, let first = session.spaces.first { session.space = first.id }
         session.sanitize()
@@ -624,15 +683,28 @@ enum ArcImport {
                     report.skippedSpaces += 1; continue
                 }
                 if let emoji = arcSpace.emoji { session.setSpaceEmoji(id: created, emoji: emoji) }
-                if arcSpace.hasTheme { report.approximatedThemes += 1 }
+                if arcSpace.hasTheme && arcSpace.theme == nil { report.approximatedThemes += 1 }
                 if arcSpace.hasCustomIcon { report.customIcons += 1 }
                 links["arc-space:\(arcSpace.id)"] = "space:\(created)"
                 spaceID = created; isNew = true
             }
             guard let space = spaceID else { continue }
+            var themedNow = false
+            // The theme goes on once per Arc Space: on a new Space, or on one
+            // imported before themes were supported that still wears the color
+            // Bam picked for it. A later local color choice is never undone.
+            if let theme = arcSpace.theme, links["arc-theme:\(arcSpace.id)"] == nil,
+               let definition = session.spaceDefinition(space), definition.theme == nil,
+               isNew || definition.colorIndex == arcSpace.colorIndex,
+               session.setSpaceTheme(id: space, theme: theme) {
+                links["arc-theme:\(arcSpace.id)"] = "space:\(space)"
+                report.importedThemes += 1
+                themedNow = true
+            }
             if report.firstSpaceID == nil { report.firstSpaceID = space }
             if homeSpaces[arcSpace.profile] == nil { homeSpaces[arcSpace.profile] = space }
             var spaceReport = SpaceReport(title: session.spaceDefinition(space)?.name ?? title, emoji: session.spaceDefinition(space)?.emoji, isNew: isNew)
+            spaceReport.theme = themedNow
             if let root = arcSpace.pinnedRoot, let node = source.nodes[root] {
                 visited.insert(root)
                 importPinned(node.children, space: space, folder: nil, depth: 0, isNewContainer: isNew, spaceReport: &spaceReport)

@@ -717,7 +717,7 @@ struct SidebarExtensionItem {
         identifier = NSUserInterfaceItemIdentifier("sidebar-space-\(space.id)")
         heading.configure(space)
         table.setAccessibilityLabel("Tabs in \(space.name)")
-        let tint = ArkPalette.spaceTint(space.colorIndex)
+        let tint = ArkPalette.spaceTint(for: space)
         table.enumerateAvailableRowViews { [weak self] _, index in
             guard let self, let cell = self.table.view(atColumn: 0, row: index, makeIfNecessary: false) as? SidebarTabCell else { return }
             cell.row.configureSpace(id: space.id, tint: tint, destinations: destinations)
@@ -731,7 +731,7 @@ struct SidebarExtensionItem {
         row.listMaxDepth = maxDepth
         row.update(item)
         row.setFavicon(superview == nil || item.isSplit ? nil : faviconProvider?(item.id))
-        if let spaceAppearance { row.configureSpace(id: spaceAppearance.id, tint: ArkPalette.spaceTint(spaceAppearance.colorIndex), destinations: destinations) }
+        if let spaceAppearance { row.configureSpace(id: spaceAppearance.id, tint: ArkPalette.spaceTint(for: spaceAppearance), destinations: destinations) }
         row.canMoveEarlier = item.hasEarlierSibling; row.canMoveLater = item.hasLaterSibling
         // Read the cell's current identity: AppKit can recycle it for a different tab.
         row.select = { [weak self, weak row] in if let id = row?.item.id { self?.select?(id) } }
@@ -910,6 +910,17 @@ enum ArkPalette {
     static let separator = NSColor.chrome(light: black(0.08), dark: white(0.10))
     /// Space icon tint: the pastel in dark mode, a deeper version on light chrome.
     static func spaceTint(_ index: Int) -> NSColor { spaceTints[min(spaceTints.count - 1, max(0, index))] }
+    /// A Space's tint: its imported Arc accent (per appearance, contrast-checked
+    /// against its own window gradient) when it has a theme, else its flat tint.
+    static func spaceTint(for space: BrowserSpace) -> NSColor {
+        guard let theme = space.theme else { return spaceTint(space.colorIndex) }
+        if let cached = themedTints[theme] { return cached }
+        let tint = NSColor.chrome(light: NSColor(spaceTheme: theme.accent(dark: false)), dark: NSColor(spaceTheme: theme.accent(dark: true)))
+        if themedTints.count > 64 { themedTints.removeAll() }
+        themedTints[theme] = tint   // one instance per theme keeps identity comparisons stable
+        return tint
+    }
+    private static var themedTints: [SpaceTheme: NSColor] = [:]
     /// Built once so identity comparisons stay stable across updates.
     private static let spaceTints: [NSColor] = spaceColors.map { base in
         let deep = base.usingColorSpace(.deviceRGB).map {
@@ -1009,7 +1020,7 @@ enum ArkPalette {
     }
     static func image(for space: BrowserSpace, pointSize: CGFloat) -> NSImage? {
         guard let emoji = space.emoji else {
-            return SidebarSymbol.image(named: space.symbol, color: ArkPalette.spaceTint(space.colorIndex), pointSize: pointSize)
+            return SidebarSymbol.image(named: space.symbol, color: ArkPalette.spaceTint(for: space), pointSize: pointSize)
         }
         let side = pointSize + 4
         return NSImage(size: NSSize(width: side, height: side), flipped: false) { rect in
@@ -1301,7 +1312,7 @@ private final class ArkSpaceButton: ArkHoverButton {
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     func configure(_ space: BrowserSpace) {
-        name = space.name; symbolName = space.symbol; emoji = space.emoji; tint = ArkPalette.spaceTint(space.colorIndex)
+        name = space.name; symbolName = space.symbol; emoji = space.emoji; tint = ArkPalette.spaceTint(for: space)
         setAccessibilityLabel("Switch to \(name) space")
         toolTip = name
         needsDisplay = true
@@ -1334,7 +1345,7 @@ private final class ArkSpaceHeading: ArkHoverButton {
     init() { super.init(frame: .zero); toolTip = "Manage Spaces" }
     required init?(coder: NSCoder) { fatalError() }
     func configure(_ space: BrowserSpace) {
-        name = space.name; symbolName = space.symbol; emoji = space.emoji; tint = ArkPalette.spaceTint(space.colorIndex)
+        name = space.name; symbolName = space.symbol; emoji = space.emoji; tint = ArkPalette.spaceTint(for: space)
         setAccessibilityLabel("Manage Spaces — \(name)")
         needsDisplay = true
     }

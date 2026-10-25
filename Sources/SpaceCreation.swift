@@ -414,6 +414,8 @@ extension BrowserController {
         let panel = SpaceCreationPanel(profiles: session.profiles, defaultName: nextSpaceName(), initialColorIndex: initialColor)
         panel.onCancel = { [weak self] in self?.dismissSpaceCreation() }
         panel.onPreviewTheme = { [weak self] index in
+            // A new Space has no imported theme; preview the flat color itself.
+            self?.root.previewTheme = nil
             self?.root.previewSpace = index
             self?.root.previewProgress = 1
         }
@@ -423,6 +425,7 @@ extension BrowserController {
         root.addSubview(panel)
         spaceCreationPanel = panel
         sidebar.isHidden = true
+        root.previewTheme = nil
         root.previewSpace = initialColor
         root.previewProgress = 1
         layoutBrowser()
