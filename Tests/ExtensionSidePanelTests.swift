@@ -123,6 +123,16 @@ import Foundation
                   lifecycle.openInstances(extensionID: "D").isEmpty && lifecycle.visible(windowId: 1, activeTabId: 10) == nil &&
                   fails(.unknownExtension) { try lifecycle.open(extensionID: "D", tabId: 10, windowId: nil, windowOfTab: windowOf, hasGesture: true) },
                   "unregistering did not close and forget the extension")
+        // Disabled defaults hide a global panel even when no active tab is given; re-enabling shows it again.
+        var defaultsModel = Model()
+        defaultsModel.register(extensionID: "C", defaultPath: "panel.html")
+        _ = try defaultsModel.open(extensionID: "C", tabId: nil, windowId: 1, windowOfTab: { _ in nil }, hasGesture: true)
+        let shownBefore = defaultsModel.visible(windowId: 1, activeTabId: nil)?.scope == .global(window: 1)
+        _ = try defaultsModel.setOptions(extensionID: "C", tabId: nil, enabled: false, path: nil)
+        let hidden = defaultsModel.visible(windowId: 1, activeTabId: nil) == nil && defaultsModel.visible(windowId: 1, activeTabId: 10) == nil
+        _ = try defaultsModel.setOptions(extensionID: "C", tabId: nil, enabled: true, path: nil)
+        try check(shownBefore && hidden && defaultsModel.visible(windowId: 1, activeTabId: nil)?.scope == .global(window: 1),
+                  "disabled defaults did not hide the global panel without an active tab, or re-enabling did not show it")
         return checks
     }
 }

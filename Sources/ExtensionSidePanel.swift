@@ -189,9 +189,9 @@ struct ExtensionSidePanelModel {
             return Visible(extensionID: owner, scope: .tab(tab), path: path)
         }
         guard let owner = globalOpen[windowId], let path = defaultPath(owner) else { return nil }
-        if let tab = activeTabId {
-            guard options(extensionID: owner, tabId: tab).enabled, tabOptions[owner]?[tab]?.path == nil else { return nil }
-        }
+        // Without an active tab the extension-wide options still decide (disabled defaults hide the panel).
+        guard options(extensionID: owner, tabId: activeTabId).enabled else { return nil }
+        if let tab = activeTabId, tabOptions[owner]?[tab]?.path != nil { return nil }
         return Visible(extensionID: owner, scope: .global(window: windowId), path: path)
     }
     /// Open panels of one extension (the basis for runtime.getContexts SIDE_PANEL later).
