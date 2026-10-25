@@ -42,7 +42,8 @@ import WebKit
                 }
                 try check(direct.id == surface.id && direct.title == surface.title && direct.url == surface.url &&
                           direct.webView === surface.webView && direct.window === surface.window &&
-                          direct.isActive == surface.isActive && direct.isSelected == surface.isSelected && direct.isPinned == surface.isPinned,
+                          direct.isActive == surface.isActive && direct.isSelected == surface.isSelected && direct.isPinned == surface.isPinned &&
+                          direct.isLoading == surface.isLoading,
                           "Single-tab resolver diverged from the browser's live surface list")
             }
         }
@@ -65,8 +66,10 @@ import WebKit
         // even though the URL did not change after commit (Dashlane's sign-in check waits for it).
         try await wait("Browser adapter never reported the page load as complete to tabs.onUpdated") {
             let updates = try? await popup.callAsyncJavaScript("return JSON.stringify((await browser.runtime.sendMessage({kind: \"updates\"})).updates || []);", arguments: [:], contentWorld: .page)
-            guard let text = updates as? String else { return false }
-            return text.contains("\"status\":\"complete\"") && text.contains("extension-test.html")
+            guard let text = updates as? String, let data = text.data(using: .utf8),
+                  let records = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return false }
+            // The changeInfo must carry the status: a title-driven update also reads `status: "complete"` live.
+            return records.contains { ($0["infoStatus"] as? String) == "complete" && ($0["url"] as? String)?.contains("extension-test.html") == true }
         }
         _ = try await popup.evaluateJavaScript("document.getElementById('open-page').click(); true")
         try await wait("Browser adapter did not open its own extension page") { controller.session.tabs.contains { URLInput.extensionURL($0.address) != nil } }

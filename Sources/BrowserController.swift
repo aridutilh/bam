@@ -192,6 +192,9 @@ import QuartzCore
     var isApplyingProfileChange = false { didSet { invalidateExtensionSurfaceTopology() } }
     var extensionStorage: AnyObject?
     var extensionRefreshWork: DispatchWorkItem?
+    /// Tabs whose loading state changed since extensions last saw them; a start and
+    /// finish that land in one turn still produce a `tabs.onUpdated`.
+    var extensionLoadingChanges: Set<UUID> = []
     var extensionSurfaceRevision: UInt64 = 0
     var extensionSurfaceWindow: ObjectIdentifier?
     var extensionTabIndices: [UUID: Int]?
@@ -426,7 +429,10 @@ import QuartzCore
                 guard let self, self.visibleMemberIDs.contains(id) else { return }; self.layoutBrowser()
             } },
             browser.observe(\.isLoading, options: [.new]) { [weak self] _, _ in DispatchQueue.main.async {
-                guard let self, self.visibleMemberIDs.contains(id) else { return }; self.scheduleChromeRefresh()
+                guard let self else { return }
+                // Every loading transition (start, finish, failure, stop) reaches extensions from here.
+                self.noteExtensionLoadingChange(id)
+                guard self.visibleMemberIDs.contains(id) else { return }; self.scheduleChromeRefresh()
             } }
         ]
     }
@@ -1115,8 +1121,6 @@ import QuartzCore
             tabErrors.removeValue(forKey: id); pendingLoads.insert(id)
         }
         if visibleMemberIDs.contains(where: { browsers[$0] === webView }) { scheduleChromeRefresh() }
-        // Extensions see `status: "loading"` as soon as the navigation starts.
-        scheduleExtensionRefresh()
     }
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
         if let id = browsers.first(where: { $0.value === webView })?.key {
@@ -1130,10 +1134,6 @@ import QuartzCore
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         if let id = browsers.first(where: { $0.value === webView })?.key { tabErrors.removeValue(forKey: id); pendingLoads.remove(id) }
         updateMetadata(webView)
-        // The URL rarely changes between commit and finish; the loading flag does,
-        // and extensions (Dashlane's sign-in check among them) wait for the
-        // resulting `tabs.onUpdated` with `status: "complete"`.
-        scheduleExtensionRefresh()
         restoreSleepingPage(webView)
         scheduleFaviconDiscovery(in: webView)
         if let url = webView.url, let profile = profileID(of: webView) { library(for: profile).recordVisit(title: webView.title ?? url.host ?? "Page", address: url.absoluteString) }
@@ -1147,7 +1147,6 @@ import QuartzCore
             if let failed = (error as NSError).userInfo[NSURLErrorFailingURLStringErrorKey] as? String, URLInput.directURL(failed) != nil { requestedAddresses[id] = failed }
             tabErrors[id] = "Couldn’t load page — ⌘R to retry"; refresh()
         }
-        scheduleExtensionRefresh()
     }
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
         tabActivityProbe.invalidate(webView)

@@ -107,6 +107,12 @@ import WebKit
         }
         return extensionSurfaceRevision
     }
+    /// A tab's `isLoading` flipped. Remembered until the next surface list consumes it,
+    /// so `reconcile` reports `.loading` even when the flag already flipped back.
+    func noteExtensionLoadingChange(_ id: UUID) {
+        extensionLoadingChanges.insert(id)
+        scheduleExtensionRefresh()
+    }
     func scheduleExtensionRefresh() {
         // Invalidate synchronously even when event publication is coalesced,
         // disabled, or shutting down.
@@ -135,12 +141,14 @@ import WebKit
     @available(macOS 15.4, *)
     func extensionSurfaces(profileID: UUID) -> [BrowserExtensionSurface] {
         guard !isShuttingDown, !isApplyingProfileChange else { return [] }
-        var result: [BrowserExtensionSurface] = session.tabs.filter { session.profileID(for: $0) == profileID }.map { tab in
+        let members = session.tabs.filter { session.profileID(for: $0) == profileID }
+        var result: [BrowserExtensionSurface] = members.map { tab in
             BrowserExtensionSurface(id: tab.id, title: tab.displayTitle, url: URL(string: tab.address), webView: browsers[tab.id], window: viewIfLoaded?.window,
                 isActive: session.currentProfileID == profileID && focusedTabID == tab.id && peeks[session.activeID]?.isPresented != true,
                 isSelected: session.currentProfileID == profileID && visibleMemberIDs.contains(tab.id), isPinned: tab.isSaved,
-                isLoading: browsers[tab.id]?.isLoading == true)
+                isLoading: browsers[tab.id]?.isLoading == true, loadingChanged: extensionLoadingChanges.contains(tab.id))
         }
+        extensionLoadingChanges.subtract(members.map(\.id))
         for (owner, peek) in peeks {
             guard let web = peek.webView, self.profileID(of: web) == profileID, let id = peekExtensionIDs[owner] else { continue }
             result.append(BrowserExtensionSurface(id: id, title: web.title ?? "Peek", url: web.url, webView: web, window: viewIfLoaded?.window,

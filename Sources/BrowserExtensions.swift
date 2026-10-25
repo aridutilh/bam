@@ -14,6 +14,8 @@ import WebKit
     var isPinned: Bool = false
     /// Live loading state, so `tabs.onUpdated` reports `status: "complete"` when a page finishes.
     var isLoading: Bool = false
+    /// The loading flag changed since the last list, even if it is back where it was.
+    var loadingChanged: Bool = false
 }
 
 struct BrowserExtensionRecord: Codable, Identifiable {
@@ -630,7 +632,7 @@ struct BrowserExtensionPermissionReview {
                 if previous.title != item.title { properties.insert(.title) }
                 if previous.url != item.url || previous.webView !== item.webView { properties.insert(.URL); properties.insert(.loading) }
                 if previous.isPinned != item.isPinned { properties.insert(.pinned) }
-                if previous.isLoading != item.isLoading { properties.insert(.loading) }
+                if previous.isLoading != item.isLoading || item.loadingChanged { properties.insert(.loading) }
                 if !properties.isEmpty { controller.didChangeTabProperties(properties, for: tab) }
             }
         }

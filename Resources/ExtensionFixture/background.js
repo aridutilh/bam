@@ -1,7 +1,9 @@
 // Every tab status change the host reports, so a test can require `status: "complete"`.
 const bamTabUpdates = [];
 browser.tabs.onUpdated.addListener((id, info, tab) => {
-  bamTabUpdates.push({id, info, status: tab.status || "", url: tab.url || ""});
+  // `infoStatus` is present only for a loading-driven update, unlike the live `status`.
+  bamTabUpdates.push({id, infoStatus: info.status || "", status: tab.status || "", url: tab.url || ""});
+  if (bamTabUpdates.length > 50) bamTabUpdates.shift();
   browser.storage.local.set({bamTabUpdates});
 });
 
