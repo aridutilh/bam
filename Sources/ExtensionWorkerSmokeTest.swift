@@ -46,6 +46,8 @@ import WebKit
             let worker = importLine + #"""
             globalThis.fixtureOrder.push('original');
             const api = globalThis.browser || globalThis.chrome;
+            // Registered unconditionally at start, as Proton Pass does; a missing event would stop the worker.
+            chrome.runtime.onUpdateAvailable.addListener(() => {});
             // cookies.onChanged as Chrome extensions use it: the listener reads changeInfo fields.
             const cookieEvents = [];
             chrome.cookies.onChanged.addListener(info => cookieEvents.push({type: typeof info, removed: info?.removed, name: info?.cookie?.name, cause: info?.cause}));
