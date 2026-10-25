@@ -560,7 +560,7 @@ struct BrowserExtensionPermissionReview {
         guard let i = records.firstIndex(where: { $0.id == id }) else { return }
         noteMutation(id, permissions: true); loadGeneration.removeValue(forKey: id)
         records[i].permissions = [:]; records[i].patterns = [:]; records[i].compatibilityGrants = [:]; records[i].nativeHost = nil
-        if let runtime = runtimes[records[i].profileID], let context = runtime.contexts[id] { runtime.disconnectNative(context) }
+        if let runtime = runtimes[records[i].profileID], let context = runtime.contexts[id] { runtime.disconnectNative(context); runtime.compatibility.revoke(context) }
         if let context = context(for: id) { context.grantedPermissions = [:]; context.grantedPermissionMatchPatterns = [:] }
         try persist(); onReloadNeeded?(records[i].profileID); changed()
     }

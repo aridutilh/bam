@@ -37,7 +37,7 @@ import WebKit
             if module { background["type"] = "module" }
             let manifest: [String: Any] = ["manifest_version": 3, "name": module ? "Bam module worker fixture" : "Bam classic worker fixture", "version": "1.0", "description": "Original fixture for Bam service-worker runtime tests",
                 "content_security_policy": ["extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"],
-                "background": background, "permissions": ["storage", "idle", "notifications"], "host_permissions": ["http://127.0.0.1/*", "http://localhost/*"],
+                "background": background, "permissions": ["storage", "idle", "notifications", "offscreen"], "host_permissions": ["http://127.0.0.1/*", "http://localhost/*"],
                 "action": ["default_popup": "popup.html"], "content_scripts": [["matches": ["http://127.0.0.1/*", "http://localhost/*"], "js": ["content.js"], "run_at": "document_end"]]]
             try JSONSerialization.data(withJSONObject: manifest, options: [.sortedKeys]).write(to: package.appendingPathComponent("manifest.json"))
             let dependency = "globalThis.fixtureOrder = [globalThis.__bamCompatibility?.worker === true ? 'adapter' : 'missing-adapter', 'dependency'];\n"
@@ -71,7 +71,22 @@ import WebKit
               catch (error) { return String(error); }
             };
             api.runtime.onMessage.addListener(async message => {
-              if (!message || !['probe','denials','revoked'].includes(message.kind)) return undefined;
+              if (!message || !['probe','denials','revoked','offscreen','offscreen-close'].includes(message.kind)) return undefined;
+              if (message.kind === 'offscreen') {
+                const parameters = {url: 'offscreen.html', reasons: ['DOM_PARSER'], justification: 'Bam fixture'};
+                await api.offscreen.createDocument(parameters);
+                const report = {has: await api.offscreen.hasDocument(), echo: await api.runtime.sendMessage({kind: 'offscreen-echo', value: 'ping'})};
+                try { await api.offscreen.createDocument(parameters); report.second = 'resolved'; } catch (error) { report.second = error.message; }
+                report.contexts = (await api.runtime.getContexts({contextTypes: ['OFFSCREEN_DOCUMENT']})).map(context => context.documentUrl);
+                report.expected = api.runtime.getURL('offscreen.html');
+                return report;
+              }
+              if (message.kind === 'offscreen-close') {
+                await api.offscreen.closeDocument();
+                let missing = '';
+                try { await api.offscreen.closeDocument(); } catch (error) { missing = error.message; }
+                return {has: await api.offscreen.hasDocument(), missing};
+              }
               if (message.kind === 'denials') return {
                 external: await refusal('com.example.not-bam', 'idle.queryState'),
                 undeclared: await refusal('com.ari.bam.compatibility', 'downloads.download'),
@@ -97,6 +112,15 @@ import WebKit
             try Data(dependency.utf8).write(to: package.appendingPathComponent("worker/dependency.js"))
             try Data(worker.utf8).write(to: package.appendingPathComponent("worker/original.js"))
             try Data(content.utf8).write(to: package.appendingPathComponent("content.js"))
+            // The offscreen page answers only its own kind, parsing with a DOM API a worker lacks.
+            try Data("""
+            (globalThis.browser || globalThis.chrome).runtime.onMessage.addListener(message => {
+              if (message?.kind !== 'offscreen-echo') return undefined;
+              const parsed = new DOMParser().parseFromString('<p>' + message.value + '</p>', 'text/html').body.textContent;
+              return Promise.resolve({echo: parsed, path: location.pathname, visible: document.visibilityState});
+            });
+            """.utf8).write(to: package.appendingPathComponent("offscreen.js"))
+            try Data("<!doctype html><meta charset='utf-8'><title>Offscreen fixture</title><script src='offscreen.js'></script>".utf8).write(to: package.appendingPathComponent("offscreen.html"))
             try Data("<!doctype html><meta charset='utf-8'><title>Worker fixture</title><script src='content.js'></script>".utf8).write(to: package.appendingPathComponent("popup.html"))
             return package
         }
@@ -164,6 +188,30 @@ import WebKit
         try check((try? await popupA.evaluateJavaScript("typeof Symbol.dispose + ',' + typeof Symbol.asyncDispose")) as? String == "symbol,symbol",
                   "Extension page lacked Symbol.dispose/asyncDispose")
         try await wait("Module worker did not answer its real action popup") { await result(popupB)?["starts"] as? Int == 1 }
+        // offscreen: a worker creates a hidden page, messages it, and closes it; profiles stay separate.
+        let offscreenReport = await request(popupA, kind: "offscreen")
+        let echo = offscreenReport?["echo"] as? [String: Any]
+        try check(offscreenReport?["has"] as? Bool == true && echo?["echo"] as? String == "ping" && echo?["path"] as? String == "/offscreen.html",
+                  "Worker could not create and message its offscreen document: \(offscreenReport ?? [:])")
+        try check(offscreenReport?["second"] as? String == "Only a single offscreen document may be created.",
+                  "A second offscreen document was not refused with Chrome's message: \(offscreenReport ?? [:])")
+        try check((offscreenReport?["contexts"] as? [String]) == [offscreenReport?["expected"] as? String ?? "missing"],
+                  "runtime.getContexts did not report the offscreen document: \(offscreenReport ?? [:])")
+        try check(runtimeA.compatibility.offscreen.has(contextA.uniqueIdentifier) && !runtimeB.compatibility.offscreen.has(contextB.uniqueIdentifier) &&
+                  runtimeA.compatibility.offscreen.document(for: contextA.uniqueIdentifier)?.window == nil,
+                  "The offscreen document crossed profiles or was attached to a window")
+        weak var offscreenWeb = runtimeA.compatibility.offscreen.document(for: contextA.uniqueIdentifier)
+        let closedReport = await request(popupA, kind: "offscreen-close")
+        try check(closedReport?["has"] as? Bool == false && closedReport?["missing"] as? String == "No current offscreen document.",
+                  "closeDocument did not close the document or report a missing one: \(closedReport ?? [:])")
+        try await wait("A closed offscreen document's web view was retained") { offscreenWeb == nil }
+        for cycle in 0..<5 {
+            let opened = await request(popupA, kind: "offscreen")?["has"] as? Bool, closed = await request(popupA, kind: "offscreen-close")?["has"] as? Bool
+            try check(opened == true && closed == false, "Offscreen create/close cycle \(cycle) failed")
+        }
+        _ = await request(popupA, kind: "offscreen"); _ = await request(popupB, kind: "offscreen")
+        try check(runtimeA.compatibility.offscreen.has(contextA.uniqueIdentifier) && runtimeB.compatibility.offscreen.has(contextB.uniqueIdentifier),
+                  "Offscreen documents were not reopened for the lifecycle checks")
         let denied = await request(popupA, kind: "denials")
         try check(denied?["external"] is String && denied?["undeclared"] is String && denied?["unknown"] is String,
                   "Worker native messaging allowed an external app, undeclared capability or unknown method: \(denied ?? [:])")
@@ -184,6 +232,8 @@ import WebKit
             (await request(popupA)?["events"] as? [[String: String]])?.contains { $0["kind"] == "idle" && $0["value"] == "active" } == true
         }
         try host.revokePermissions(id: idA)
+        try check(!runtimeA.compatibility.offscreen.has(contextA.uniqueIdentifier) && runtimeB.compatibility.offscreen.has(contextB.uniqueIdentifier),
+                  "Revoking one extension did not close only its offscreen document")
         let revokedID = "revoked-" + UUID().uuidString
         runtimeA.compatibility.dispatch("notifications.onClicked", [revokedID], to: contextA.uniqueIdentifier)
         let revokedNative = await runtimeA.compatibility.receiveNativeMessage(["kind": "request", "method": "idle.queryState"], context: contextA)
@@ -194,6 +244,7 @@ import WebKit
         // Unload and recreate both actual worker contexts. WebKit storage belongs
         // to the stable extension identity, while startup executes again.
         try await host.setEnabled(false, id: idA); try await host.setEnabled(false, id: idB)
+        try check(!runtimeB.compatibility.offscreen.has(contextB.uniqueIdentifier), "Disabling an extension left its offscreen document open")
         try await host.setEnabled(true, id: idA); try await host.setEnabled(true, id: idB)
         guard let reloadedA = host.context(for: idA), let reloadedB = host.context(for: idB),
               let newPopupA = reloadedA.action(for: nil)?.popupWebView, let newPopupB = reloadedB.action(for: nil)?.popupWebView else { throw Failure(description: "Worker reload lost its action context") }
