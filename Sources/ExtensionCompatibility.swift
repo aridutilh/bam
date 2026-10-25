@@ -599,27 +599,57 @@ enum ExtensionCompatibility {
       //   runtime.lastError, promise rejections and mutations stay WebKit's. Supplementing never repeats it.
       // - Then a fresh WebKit read runs between a native identity token and a native answer bound to one observed tab
       //   topology; a change in between answers null, and up to 3 attempts are made before WebKit's answer is kept.
-      // - Only url/title fields WebKit blanked are filled, matched by WebKit's own tab id; values WebKit showed are kept.
+      // - Supplementing is computed without touching WebKit's objects and applied only before delivery, within a
+      //   deadline (reads 2 s, events 1 s). Past it the original result is delivered once, and a late answer is
+      //   discarded: nothing is mutated or called back afterwards.
+      // - Only blank url and title fields are filled, each independently, by WebKit's own tab id; a value WebKit showed
+      //   is never replaced. A url/title-filtered query keeps WebKit's own matching objects and adds blanked tabs the
+      //   native answer matched.
       // - Tabs in several Little Bam windows, non-web pages and over-long values stay blank. favIconUrl stays WebKit's.
-      // - Events: every tabs.* and windows.* listener is delivered through one FIFO per document or worker, so their
-      //   order is kept. tabs.onCreated/onUpdated wait for supplementing for at most 1 s (skipped once an event has
-      //   waited 3 s, or 256 are queued), so values are those at delivery. changeInfo.url/title are filled only when
-      //   WebKit sent the key. No event is invented. A removed listener is not called again.
+      // - Events: listeners of the tabs.* and windows.* events listed in `tabEvents`/`windowEvents` (not
+      //   windows.onBoundsChanged) are delivered through one FIFO per document or worker, so their order is kept.
+      //   tabs.onCreated/onUpdated get supplemented copies (shared by that dispatch's listeners; WebKit's own objects
+      //   are never changed) if values arrive within 1 s; supplementing is skipped for an event that waited 3 s. The
+      //   queue holds at most 256 events: one more abandons the supplementing in progress and delivers everything
+      //   queued at once, in order, with WebKit's own values. No event is dropped or invented. Values are those at
+      //   delivery. changeInfo.url/title are filled only when WebKit sent the key. A removed listener is not called.
       const metadataEnabled = provided.has("tabs.metadata");
       const metadataNative = "__bamTabMetadataNative";
+      const readDeadline = 2000, eventDeadline = 1000, queueWait = 3000, queueCap = 256;
+      // Resolves with the promise's value, or null at the deadline (a later value is then ignored by every caller).
+      const deadline = (promise, ms) => new Promise((resolve) => {
+        const timer = setTimeout(() => resolve(null), ms);
+        Promise.resolve(promise).then((value) => { clearTimeout(timer); resolve(value); }, () => { clearTimeout(timer); resolve(null); });
+      });
       const unwrap = (fn) => (fn && fn[metadataNative]) || fn;
+      const hasOwn = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
       const nativeCall = (root, ns, name, args) => {
         const holder = root && root[ns], fn = holder && unwrap(holder[name]);
         if (typeof fn !== "function") return Promise.reject(unsupported(ns + "." + name));
         try { return Promise.resolve(fn.apply(holder, args)); } catch (error) { return Promise.reject(error); }
       };
-      const bridgeValue = (method, params) => bridge(method, params).then((value) => value, () => null);
-      const isRedacted = (tab) => tab && typeof tab === "object" && typeof tab.id === "number" && !tab.url;
-      const timeout = (promise, ms) => new Promise((resolve) => {
-        const timer = setTimeout(() => resolve(null), ms);
-        Promise.resolve(promise).then((value) => { clearTimeout(timer); resolve(value); }, () => { clearTimeout(timer); resolve(null); });
-      });
-      // One bound read: token, fresh WebKit read, window kinds, answer. Returns {tabs, values} or null.
+      // A bounded bridge request: null on error or at the deadline. A document request still pending then is retired
+      // from `pending`, so an unanswered native request leaves nothing behind (a worker's sendNativeMessage can't be
+      // withdrawn; its late reply is ignored).
+      const bridgeValue = (method, params) => {
+        if (isWorker) return deadline(sendNative({ kind: "request", method, params: params === undefined ? null : params }), readDeadline);
+        return new Promise((resolve) => {
+          const handler = globalThis.webkit && globalThis.webkit.messageHandlers && globalThis.webkit.messageHandlers[bridgeName];
+          if (!handler) { resolve(null); return; }
+          const id = nextRequest++;
+          const timer = setTimeout(() => { if (pending.delete(id)) resolve(null); }, readDeadline);
+          pending.set(id, { resolve: (value) => { clearTimeout(timer); resolve(value); }, reject: () => { clearTimeout(timer); resolve(null); } });
+          try { handler.postMessage({ kind: "request", id, method, params: params === undefined ? null : params }); }
+          catch (error) { pending.delete(id); clearTimeout(timer); resolve(null); }
+        });
+      };
+      const blank = (value) => value === undefined || value === null || value === "";
+      // WebKit blanked the url (it also never matches such a tab against a url/title filter).
+      const isRedacted = (tab) => !!tab && typeof tab === "object" && typeof tab.id === "number" && blank(tab.url);
+      // Some field is blank and may be supplemented; each field is considered on its own.
+      const needsFill = (tab) => !!tab && typeof tab === "object" && typeof tab.id === "number" && (blank(tab.url) || blank(tab.title));
+      // One bound read: token, fresh WebKit read, window kinds, answer. Returns {tabs, values} or null. Touches only
+      // the fresh objects it read (and only to look at them).
       const boundRead = async (root, read, collect, filter) => {
         for (let attempt = 0; attempt < 3; attempt++) {
           const token = await bridgeValue("tabs.identityToken", null);
@@ -642,57 +672,70 @@ enum ExtensionCompatibility {
           if (!Array.isArray(answer) || answer.length !== located.length) continue;
           const values = new Map();
           located.forEach((tab, i) => { const v = answer[i]; if (v && typeof v.url === "string") values.set(tab, v); });
-          return { fresh, tabs, values };
+          return { tabs, values };
         }
         return null;
       };
-      const fill = (target, value) => {
-        if (!isRedacted(target) || !value) return;
-        target.url = value.url;
-        if (typeof value.title === "string") target.title = value.title;
-      };
-      // Fill blanked tabs of `baseline` from a bound fresh read of the same WebKit tab ids.
-      const supplementTabs = async (root, baselineTabs, read, collect) => {
-        if (!baselineTabs.some(isRedacted)) return;
-        const result = await boundRead(root, read, collect, null);
-        if (!result) return;
+      // Values by WebKit tab id from a bound fresh read; nothing is applied here.
+      const valuesByID = (root, read, collect) => boundRead(root, read, collect, null).then((result) => {
+        if (!result) return null;
         const byID = new Map();
         for (const tab of result.tabs) if (result.values.has(tab)) byID.set(tab.id, result.values.get(tab));
-        for (const tab of baselineTabs) fill(tab, byID.get(tab && tab.id));
+        return byID;
+      });
+      // Fills each blank field independently; a field WebKit gave a value is kept as WebKit gave it.
+      const fill = (target, value) => {
+        if (!needsFill(target) || !value) return;
+        if (blank(target.url)) target.url = value.url;
+        if (blank(target.title) && typeof value.title === "string") target.title = value.title;
       };
       const tabsOf = (value) => Array.isArray(value) ? value : value && typeof value === "object" ? [value] : [];
       const windowTabs = (value) => tabsOf(value).flatMap((w) => Array.isArray(w && w.tabs) ? w.tabs : []);
-      // Read-style wrappers: how to re-read and supplement each API's own result.
+      // A reader answers a promise of an `apply` function (or null). `apply` runs only if it arrives within the read
+      // deadline, right before delivery, and returns what to deliver.
+      const filling = (root, value, baseline, read, collect) => {
+        if (!baseline.some(needsFill)) return Promise.resolve(null);
+        return valuesByID(root, read, collect).then((byID) => byID && (() => {
+          for (const tab of baseline) if (needsFill(tab)) fill(tab, byID.get(tab.id));
+          return value;
+        }));
+      };
       const readers = {
         "tabs.query": (root, args, value) => {
           const info = args[0] && typeof args[0] === "object" ? args[0] : {};
-          const hasFilter = info.url !== undefined || info.title !== undefined;
-          if (!hasFilter) return supplementTabs(root, tabsOf(value), () => nativeCall(root, "tabs", "query", [info]), tabsOf).then(() => value);
-          // WebKit never matches a url/title filter on a blanked tab: re-run the query without them, evaluate the
-          // filter natively on the real values, keep WebKit's own matches for tabs it could see. Fallback: WebKit's.
+          if (info.url === undefined && info.title === undefined) {
+            return filling(root, value, tabsOf(value), () => nativeCall(root, "tabs", "query", [info]), tabsOf);
+          }
+          // WebKit never matches a url/title filter on a blanked tab: re-run the query without them and let the native
+          // answer evaluate the filter on the real values. WebKit's own matches are kept as WebKit returned them, even
+          // if a tab changed between the reads; only blanked tabs the answer matched are added, in tab order.
           const stripped = { ...info }; delete stripped.url; delete stripped.title;
           const filter = {};
           if (info.url !== undefined) filter.url = info.url;
           if (info.title !== undefined) filter.title = info.title;
-          return boundRead(root, () => nativeCall(root, "tabs", "query", [stripped]), tabsOf, filter).then((result) => {
-            if (!result) return value;
-            const native = new Set(tabsOf(value).map((tab) => tab && tab.id));
-            return result.tabs.filter((tab) => isRedacted(tab) ? result.values.has(tab) : native.has(tab.id))
-              .map((tab) => { if (isRedacted(tab)) fill(tab, result.values.get(tab)); return tab; });
-          });
+          return boundRead(root, () => nativeCall(root, "tabs", "query", [stripped]), tabsOf, filter).then((result) => result && (() => {
+            const native = tabsOf(value), nativeByID = new Map(native.map((tab) => [tab && tab.id, tab]));
+            const out = [], seen = new Set();
+            for (const tab of result.tabs) {
+              if (nativeByID.has(tab.id)) { if (!seen.has(tab.id)) { out.push(nativeByID.get(tab.id)); seen.add(tab.id); } }
+              else if (isRedacted(tab) && result.values.has(tab)) { fill(tab, result.values.get(tab)); out.push(tab); }
+            }
+            for (const tab of native) if (!seen.has(tab && tab.id)) out.push(tab);
+            return out;
+          }));
         },
-        "tabs.get": (root, args, value) => supplementTabs(root, tabsOf(value), () => nativeCall(root, "tabs", "get", [args[0]]), tabsOf).then(() => value),
-        "tabs.getCurrent": (root, args, value) => supplementTabs(root, tabsOf(value), () => nativeCall(root, "tabs", "getCurrent", []), tabsOf).then(() => value),
-        "tabs.create": (root, args, value) => supplementTabs(root, tabsOf(value), () => nativeCall(root, "tabs", "get", [value.id]), tabsOf).then(() => value),
-        "tabs.update": (root, args, value) => supplementTabs(root, tabsOf(value), () => nativeCall(root, "tabs", "get", [value.id]), tabsOf).then(() => value),
-        "windows.create": (root, args, value) => supplementTabs(root, windowTabs(value), () => nativeCall(root, "windows", "get", [value.id, { populate: true }]), windowTabs).then(() => value)
+        "tabs.get": (root, args, value) => filling(root, value, tabsOf(value), () => nativeCall(root, "tabs", "get", [args[0]]), tabsOf),
+        "tabs.getCurrent": (root, args, value) => filling(root, value, tabsOf(value), () => nativeCall(root, "tabs", "getCurrent", []), tabsOf),
+        "tabs.create": (root, args, value) => filling(root, value, tabsOf(value), () => nativeCall(root, "tabs", "get", [value.id]), tabsOf),
+        "tabs.update": (root, args, value) => filling(root, value, tabsOf(value), () => nativeCall(root, "tabs", "get", [value.id]), tabsOf),
+        "windows.create": (root, args, value) => filling(root, value, windowTabs(value), () => nativeCall(root, "windows", "get", [value.id, { populate: true }]), windowTabs)
       };
       for (const name of ["get", "getAll", "getCurrent", "getLastFocused"]) {
         readers["windows." + name] = (root, args, value) => {
           const infoIndex = name === "get" ? 1 : 0;
           const info = args[infoIndex] && typeof args[infoIndex] === "object" ? args[infoIndex] : null;
-          if (!info || !info.populate) return Promise.resolve(value);
-          return supplementTabs(root, windowTabs(value), () => nativeCall(root, "windows", name, args.slice(0, infoIndex + 1)), windowTabs).then(() => value);
+          if (!info || !info.populate) return Promise.resolve(null);
+          return filling(root, value, windowTabs(value), () => nativeCall(root, "windows", name, args.slice(0, infoIndex + 1)), windowTabs);
         };
       }
       const wrapRead = (root, holder, ns, name, native) => {
@@ -700,7 +743,14 @@ enum ExtensionCompatibility {
         const wrapped = function (...args) {
           const receiver = this && typeof this === "object" ? this : holder;
           const callback = typeof args[args.length - 1] === "function" ? args.pop() : null;
-          const supplement = (value) => readers[key](root, args, value).then((v) => v, () => value);
+          const supplement = (value) => {
+            let pending;
+            try { pending = readers[key](root, args, value); } catch (error) { return Promise.resolve(value); }
+            return deadline(pending, readDeadline).then((apply) => {
+              if (typeof apply !== "function") return value;
+              try { return apply(); } catch (error) { return value; }
+            });
+          };
           if (!callback) {
             const result = native.apply(receiver, args);
             return result && typeof result.then === "function" ? result.then((value) => value == null ? value : supplement(value)) : result;
@@ -710,44 +760,88 @@ enum ExtensionCompatibility {
             try { failed = !!(root.runtime && root.runtime.lastError); } catch (error) {}
             // A WebKit error is reported inside WebKit's own callback, where runtime.lastError is set.
             if (failed || results[0] == null) { callback(...results); return; }
-            supplement(results[0]).then((value) => callback(value), () => callback(results[0]));
+            supplement(results[0]).then((value) => callback(value));
           }]);
         };
         Object.defineProperty(wrapped, metadataNative, { value: native });
         return wrapped;
       };
-      // Events: one FIFO per document or worker for every tabs.* and windows.* listener.
+      // Events: one FIFO per document or worker; listener tables per actual event object (browser and chrome event
+      // objects are separate registrations, as in WebKit; aliases of one object share its table).
       const eventQueue = [];
       let draining = false;
-      const listenerTables = new Map();
-      const prepared = new WeakMap();
+      const eventTables = new WeakMap();
+      const pendingValues = new WeakMap(), copies = new WeakMap();
+      let preparing = null;   // the job whose supplementing is awaited (not in eventQueue)
+      let stopWaiting = null; // ends that wait at once (overload flush)
+      // Delivers a job once; a listener removed meanwhile is not called.
+      const deliver = (job, args) => {
+        if (job.delivered) return;
+        job.delivered = true;
+        if (job.table.get(job.listener) !== job.wrapper) return;
+        try { job.listener(...args); } catch (error) { console.error(error); }
+      };
       const drain = async () => {
         if (draining) return;
         draining = true;
         while (eventQueue.length) {
           const job = eventQueue.shift();
-          if (job.prepare && !job.plain && performance.now() - job.at < 3000) await timeout(job.prepare(), 1000);
-          if (listenerTables.get(job.event)?.get(job.listener) !== job.wrapper) continue;
-          try { job.listener(...job.args); } catch (error) { console.error(error); }
+          let args = job.args;
+          const pending = job.prepare && performance.now() - job.at < queueWait ? job.prepare() : null;
+          if (pending) {
+            preparing = job;
+            const make = await Promise.race([deadline(pending, eventDeadline), new Promise((resolve) => { stopWaiting = () => resolve(null); })]);
+            preparing = null; stopWaiting = null;
+            // An overload flush may already have delivered it with WebKit's values; a late answer is then ignored.
+            if (job.delivered) continue;
+            if (typeof make === "function") { try { args = make(); } catch (error) {} }
+          }
+          deliver(job, args);
         }
         draining = false;
       };
-      const prepareTab = (root, tab) => {
-        if (!isRedacted(tab)) return null;
-        if (!prepared.has(tab)) prepared.set(tab, supplementTabs(root, [tab], () => nativeCall(root, "tabs", "get", [tab.id]), tabsOf));
-        return prepared.get(tab);
+      // Queue full: abandon supplementing and deliver the awaited job and everything queued now, in order, with
+      // WebKit's own values (events dispatched by those listeners join the same flush, in order).
+      const flush = () => {
+        if (preparing) { const job = preparing; preparing = null; deliver(job, job.args); }
+        if (stopWaiting) { const stop = stopWaiting; stopWaiting = null; stop(); }
+        while (eventQueue.length) { const job = eventQueue.shift(); deliver(job, job.args); }
       };
+      const enqueue = (job) => {
+        eventQueue.push(job);
+        if (eventQueue.length + (preparing ? 1 : 0) > queueCap) flush(); else drain();
+      };
+      const tabValues = (root, tab) => {
+        if (!needsFill(tab)) return null;
+        if (!pendingValues.has(tab)) pendingValues.set(tab, valuesByID(root, () => nativeCall(root, "tabs", "get", [tab.id]), tabsOf));
+        return pendingValues.get(tab);
+      };
+      // A supplemented copy of a WebKit object, made once per dispatch and shared by its listeners.
+      const copyOf = (original, make) => { if (!copies.has(original)) copies.set(original, make()); return copies.get(original); };
+      const tabCopy = (tab, value) => copyOf(tab, () => { const copy = { ...tab }; fill(copy, value); return copy; });
       const preparers = {
-        "tabs.onCreated": (root, args) => prepareTab(root, args[0]),
+        "tabs.onCreated": (root, args) => {
+          const tab = args[0], pending = tabValues(root, tab);
+          return pending && pending.then((byID) => {
+            const value = byID && byID.get(tab.id);
+            return value ? () => [tabCopy(tab, value), ...args.slice(1)] : null;
+          });
+        },
         "tabs.onUpdated": (root, args) => {
-          const [, changeInfo, tab] = args;
-          const ready = prepareTab(root, tab);
-          if (!ready) return null;
-          const blankURL = changeInfo && Object.prototype.hasOwnProperty.call(changeInfo, "url") && !changeInfo.url;
-          const blankTitle = changeInfo && Object.prototype.hasOwnProperty.call(changeInfo, "title") && !changeInfo.title;
-          return ready.then(() => {
-            if (blankURL && tab.url) changeInfo.url = tab.url;
-            if (blankTitle && typeof tab.title === "string") changeInfo.title = tab.title;
+          const [tabId, changeInfo, tab] = args, pending = tabValues(root, tab);
+          return pending && pending.then((byID) => {
+            const value = byID && byID.get(tab.id);
+            if (!value) return null;
+            return () => {
+              const copy = tabCopy(tab, value);
+              const info = changeInfo && typeof changeInfo === "object" ? copyOf(changeInfo, () => {
+                const next = { ...changeInfo };
+                if (hasOwn(changeInfo, "url") && blank(changeInfo.url) && !blank(copy.url)) next.url = copy.url;
+                if (hasOwn(changeInfo, "title") && blank(changeInfo.title) && typeof copy.title === "string") next.title = copy.title;
+                return next;
+              }) : changeInfo;
+              return [tabId, info, copy, ...args.slice(3)];
+            };
           });
         }
       };
@@ -755,31 +849,30 @@ enum ExtensionCompatibility {
         const key = ns + "." + name;
         const add = unwrap(target.addListener), remove = unwrap(target.removeListener), has = unwrap(target.hasListener);
         if (typeof add !== "function" || typeof remove !== "function") return;
-        const table = listenerTables.get(key) || new Map();
-        listenerTables.set(key, table);
-        const define = (member, fn, native) => {
+        const table = eventTables.get(target) || new Map();
+        eventTables.set(target, table);
+        const install = (member, fn, native) => {
           Object.defineProperty(fn, metadataNative, { value: native });
           try { Object.defineProperty(target, member, { value: fn, writable: true, configurable: true, enumerable: true }); } catch (error) {}
         };
-        define("addListener", function (listener, ...rest) {
+        install("addListener", function (listener, ...rest) {
           if (typeof listener !== "function") return add.call(target, listener, ...rest);
           let wrapper = table.get(listener);
           if (!wrapper) {
             wrapper = (...args) => {
               const prepare = preparers[key] ? () => preparers[key](root, args) : null;
-              eventQueue.push({ event: key, listener, wrapper, args, prepare, at: performance.now(), plain: eventQueue.length >= 256 });
-              drain();
+              enqueue({ table, listener, wrapper, args, prepare, at: performance.now(), delivered: false });
             };
             table.set(listener, wrapper);
           }
           return add.call(target, wrapper, ...rest);
         }, add);
-        define("removeListener", function (listener, ...rest) {
+        install("removeListener", function (listener, ...rest) {
           const wrapper = table.get(listener);
           table.delete(listener);
           return remove.call(target, wrapper || listener, ...rest);
         }, remove);
-        if (typeof has === "function") define("hasListener", function (listener) { return has.call(target, table.get(listener) || listener); }, has);
+        if (typeof has === "function") install("hasListener", function (listener) { return has.call(target, table.get(listener) || listener); }, has);
       };
       const tabEvents = ["onActivated", "onAttached", "onCreated", "onDetached", "onHighlighted", "onMoved", "onRemoved", "onReplaced", "onUpdated", "onZoomChange"];
       const windowEvents = ["onCreated", "onRemoved", "onFocusChanged"];
