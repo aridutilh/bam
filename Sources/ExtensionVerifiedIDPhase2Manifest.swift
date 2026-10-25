@@ -34,9 +34,11 @@ struct ExtensionVerifiedIDPhase2Manifest: Codable, Equatable {
         temporaryDirectory.appendingPathComponent("bam-verified-id-phase2", isDirectory: true)
     }
 
-    /// nil when the manifest may be acted on from `directory`; otherwise the refusal reason.
-    func refusal(directory: URL, root: URL, forbidden: Set<UUID>) -> String? {
+    /// nil when the manifest may be acted on from `directory`; otherwise the refusal reason. `forbidden` holds every
+    /// namespace Bam itself uses (defaults plus every known profile); `probeID` is the probe's fixed synthetic ID.
+    func refusal(directory: URL, root: URL, forbidden: Set<UUID>, probeID expectedProbeID: String) -> String? {
         guard marker == Self.markerValue else { return "The manifest is not a verified-ID phase 2 manifest." }
+        guard probeID == expectedProbeID else { return "The manifest's probe ID is not the probe's synthetic ID." }
         let rootPath = root.standardizedFileURL.resolvingSymlinksInPath().path
         let directoryPath = directory.standardizedFileURL.resolvingSymlinksInPath().path
         guard directoryPath.hasPrefix(rootPath + "/"), directory.lastPathComponent == runID.uuidString.lowercased() else {
@@ -52,6 +54,20 @@ struct ExtensionVerifiedIDPhase2Manifest: Codable, Equatable {
             return "The legacy control ID is not a lowercase UUID."
         }
         return nil
+    }
+
+    /// Profile namespaces named by a Bam session file: profile IDs and Space profile IDs only (nothing else is kept).
+    /// nil when the data is not a readable session, so callers fail closed.
+    static func profileNamespaces(sessionJSON data: Data) -> Set<UUID>? {
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        var found = Set<UUID>()
+        for case let profile as [String: Any] in root["profiles"] as? [Any] ?? [] {
+            if let id = (profile["id"] as? String).flatMap(UUID.init(uuidString:)) { found.insert(id) }
+        }
+        for case let space as [String: Any] in root["spaces"] as? [Any] ?? [] {
+            if let id = (space["profileID"] as? String).flatMap(UUID.init(uuidString:)) { found.insert(id) }
+        }
+        return found
     }
 
     static func isVersion4(_ uuid: UUID) -> Bool {

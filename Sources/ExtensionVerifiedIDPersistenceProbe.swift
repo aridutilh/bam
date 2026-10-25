@@ -14,14 +14,38 @@ import WebKit
     enum Mode: String { case write, read, cleanup }
     struct Refusal: Error, CustomStringConvertible { let description: String }
     static let budget: TimeInterval = 60
-    static var forbiddenNamespaces: Set<UUID> { [PreviewProfile.defaultStoreIdentifier, BrowserProfile.defaultID] }
+    /// Every persistent extension namespace Bam itself uses: the two defaults plus every profile named by the Bam and
+    /// persistent Bam Preview session files (profile and Space profile IDs only) and their Profiles/ folder names.
+    /// Read-only; nothing else from those files is kept. An existing session that cannot be read refuses the run.
+    static func knownBamNamespaces() throws -> Set<UUID> {
+        let fm = FileManager.default
+        var known: Set<UUID> = [PreviewProfile.defaultStoreIdentifier, BrowserProfile.defaultID]
+        let support = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        for name in ["OrbitPrototype", "BamPreview"] {
+            let directory = support.appendingPathComponent(name, isDirectory: true)
+            let session = directory.appendingPathComponent("session.json")
+            if fm.fileExists(atPath: session.path) {
+                let values = try? session.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+                guard values?.isRegularFile == true, (values?.fileSize ?? .max) <= 64 * 1_048_576,
+                      let data = try? Data(contentsOf: session, options: .mappedIfSafe), let ids = Manifest.profileNamespaces(sessionJSON: data) else {
+                    throw Refusal(description: "The \(name) session could not be read to exclude its profiles; nothing was done.")
+                }
+                known.formUnion(ids)
+            }
+            let profiles = directory.appendingPathComponent("Profiles", isDirectory: true)
+            if let names = try? fm.contentsOfDirectory(atPath: profiles.path) { known.formUnion(names.compactMap(UUID.init(uuidString:))) }
+        }
+        return known
+    }
 
     static func run(mode: Mode, runDirectory: URL?, pageURL: URL) async -> Int32 {
         let released = ExtensionVerifiedIDProbe.Released()
         var output: [String: Any] = ["mode": mode.rawValue, "scope": "phase2: persistent extension storage across processes; website stores non-persistent"]
         var complete = false, refused = false, keepDirectory = true, directory: URL?
         do {
-            let (manifest, runDirectory) = try prepare(mode: mode, runDirectory: runDirectory)
+            var excluded = 0
+            defer { output["excludedBamNamespaces"] = excluded }
+            let (manifest, runDirectory) = try prepare(mode: mode, runDirectory: runDirectory, excludedCount: &excluded)
             directory = runDirectory
             output["run"] = runDirectory.path
             output["namespaces"] = [manifest.controllerA.uuidString, manifest.controllerB.uuidString]
@@ -56,14 +80,17 @@ import WebKit
 
     // MARK: Manifest
 
-    private static func prepare(mode: Mode, runDirectory: URL?) throws -> (Manifest, URL) {
+    private static func prepare(mode: Mode, runDirectory: URL?, excludedCount: inout Int) throws -> (Manifest, URL) {
         let fm = FileManager.default, root = Manifest.taskRoot()
+        // Applied in every mode, before any controller exists.
+        let forbidden = try knownBamNamespaces()
+        excludedCount = forbidden.count
         if mode == .write {
             guard runDirectory == nil else { throw Refusal(description: "write creates its own run directory; --run is not accepted") }
             let manifest = Manifest.fresh(probeID: ExtensionVerifiedIDProbe.probeID)
             let directory = root.appendingPathComponent(manifest.runID.uuidString.lowercased(), isDirectory: true)
             try fm.createDirectory(at: directory, withIntermediateDirectories: true)
-            if let reason = manifest.refusal(directory: directory, root: root, forbidden: forbiddenNamespaces) { throw Refusal(description: reason) }
+            if let reason = manifest.refusal(directory: directory, root: root, forbidden: forbidden, probeID: ExtensionVerifiedIDProbe.probeID) { throw Refusal(description: reason) }
             try save(manifest, in: directory)
             return (manifest, directory)
         }
@@ -74,7 +101,7 @@ import WebKit
               let data = try? Data(contentsOf: file), let manifest = try? JSONDecoder.phase2.decode(Manifest.self, from: data) else {
             throw Refusal(description: "No readable task-owned manifest in the run directory.")
         }
-        if let reason = manifest.refusal(directory: directory, root: root, forbidden: forbiddenNamespaces) { throw Refusal(description: reason) }
+        if let reason = manifest.refusal(directory: directory, root: root, forbidden: forbidden, probeID: ExtensionVerifiedIDProbe.probeID) { throw Refusal(description: reason) }
         if mode == .read, !manifest.written { throw Refusal(description: "write did not complete for this run; use cleanup.") }
         return (manifest, directory)
     }
