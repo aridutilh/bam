@@ -25,7 +25,8 @@ import WebKit
         try FileManager.default.createDirectory(at: package, withIntermediateDirectories: true)
         try JSONSerialization.data(withJSONObject: [
             "manifest_version": 3, "name": "Explicit consent fixture", "version": "1.0", "description": "Original",
-            "permissions": ["tabs"], "host_permissions": ["http://127.0.0.1/*"], "optional_host_permissions": ["http://localhost/*"]
+            "permissions": ["tabs"], "optional_permissions": ["alarms", "cookies"],
+            "host_permissions": ["http://127.0.0.1/*"], "optional_host_permissions": ["http://localhost/*"]
         ]).write(to: package.appendingPathComponent("manifest.json"))
 
         let host = BrowserExtensions(storageURL: root.appendingPathComponent("Extensions", isDirectory: true), controllerStorage: .nonPersistent)
@@ -89,6 +90,67 @@ import WebKit
         runtime.webExtensionController(controller, promptForPermissionMatchPatterns: [optionalSite], in: nil, for: context) { value, _ in granted = value }
         try check(reviews.count == 3 && granted == [] && status(optionalPage) != .grantedExplicitly && status(optionalPage) != .deniedExplicitly &&
                   host.siteAccess(id: id)?.state.mode == .withheld, "A stale explicit answer must neither grant nor deny")
+
+        // MARK: Named permissions (permissions.request({permissions})): reviewed, bound to the state shown.
+        func named(_ requested: Set<WKWebExtension.Permission>) -> Set<WKWebExtension.Permission>? {
+            var answered: Set<WKWebExtension.Permission>?
+            runtime.webExtensionController(controller, promptForPermissions: requested, in: nil, for: context) { value, _ in answered = value }
+            return answered
+        }
+        func namedStatus(_ permission: WKWebExtension.Permission) -> WKWebExtensionContext.PermissionStatus { context.permissionStatus(for: permission) }
+        let geolocation = WKWebExtension.Permission(rawValue: "geolocation")
+        reviews.removeAll(); answer = true
+        try check(named([.alarms]) == [.alarms] && reviews.count == 1 && reviews[0].permissions == ["alarms"] && namedStatus(.alarms) == .grantedExplicitly &&
+                  host.records.first { $0.id == id }?.permissions["alarms"] != nil, "An approved named request must be reviewed once and granted")
+        answer = false
+        try check(named([.cookies, geolocation]) == [] && reviews.count == 2 && namedStatus(.cookies) == .deniedExplicitly && namedStatus(geolocation) != .deniedExplicitly,
+                  "A declined named request must deny only what was offered, never an unsupported permission")
+        context.deniedPermissions.removeValue(forKey: .cookies); host.persistPermissions(context)
+        try check(named([geolocation]) == [] && reviews.count == 2 && namedStatus(geolocation) != .deniedExplicitly,
+                  "A request with nothing supported must show no review and record no decision")
+
+        // A Revoke while the review is open: the stale approval must not undo it, and nothing is denied.
+        answer = true
+        duringReview = { try? host.revokePermissions(id: id) }
+        try check(named([.cookies]) == [] && reviews.count == 3, "A named answer made stale by Revoke must grant nothing")
+        try check(namedStatus(.cookies) != .grantedExplicitly && namedStatus(.cookies) != .deniedExplicitly && namedStatus(.alarms) != .grantedExplicitly &&
+                  host.records.first { $0.id == id }?.permissions.isEmpty == true && host.records.first { $0.id == id }?.deniedPermissions["cookies"] == nil,
+                  "Revoke during a named review must stand: no grant restored, no denial added")
+
+        // Another named-permission change while the review is open (approve or decline) is also stale.
+        duringReview = { context.setPermissionStatus(.grantedExplicitly, for: .cookies); host.persistPermissions(context) }
+        try check(named([.alarms]) == [] && reviews.count == 4 && namedStatus(.alarms) != .grantedExplicitly && namedStatus(.alarms) != .deniedExplicitly,
+                  "A named approval made stale by another permission change must grant nothing")
+        answer = false
+        duringReview = { context.deniedPermissions.removeValue(forKey: .cookies); context.grantedPermissions.removeValue(forKey: .cookies); host.persistPermissions(context) }
+        try check(named([.alarms]) == [] && reviews.count == 5 && namedStatus(.alarms) != .deniedExplicitly,
+                  "A stale named decline must deny nothing")
+
+        // MARK: Same-context ABA: All requested → Withheld → All requested during an explicit pattern review restores every
+        // site-access value on the same live context; the permission epoch still makes the answer stale.
+        duringReview = nil
+        guard let beforeAll = host.siteAccess(id: id) else { throw Failure(message: "No snapshot before ABA") }
+        let all = try host.performSiteAccess(id: id, profileID: profile, revision: beforeAll.revision, displayed: declarations, change: .choose(.allRequested))
+        let abaRecord = host.records.first { $0.id == id }
+        answer = true
+        var restored: BrowserExtensionRecord?, restoredSnapshot: BrowserExtensionSiteAccessSnapshot?
+        duringReview = {
+            guard let w = try? host.performSiteAccess(id: id, profileID: profile, revision: all.revision, displayed: declarations, change: .choose(.withheld)) else { return }
+            restoredSnapshot = try? host.performSiteAccess(id: id, profileID: profile, revision: w.revision, displayed: declarations, change: .choose(.allRequested))
+            restored = host.records.first { $0.id == id }
+        }
+        let reviewsBeforeABA = reviews.count
+        granted = nil
+        runtime.webExtensionController(controller, promptForPermissionMatchPatterns: [optionalSite], in: nil, for: context) { value, _ in granted = value }
+        // Captured inside the review, before its answer applies: a real ABA on the same live context.
+        try check(reviews.count == reviewsBeforeABA + 1 && host.context(for: id) === context && restored?.siteAccess == abaRecord?.siteAccess &&
+                  restored?.patterns == abaRecord?.patterns && restored?.timedSiteGrants == abaRecord?.timedSiteGrants && restoredSnapshot?.state == all.state,
+                  "Fixture: the review must span a real ABA on the same context, with every site-access value restored")
+        try check(granted == [] && status(optionalPage) != .grantedExplicitly && status(optionalPage) != .deniedExplicitly &&
+                  host.siteAccess(id: id)?.state == all.state,
+                  "An explicit answer made stale by a same-context ABA must neither grant nor deny")
+        try check(restoredSnapshot.map { $0.revision != all.revision && $0.revision.permissionEpoch > all.revision.permissionEpoch } == true,
+                  "The permission epoch must advance across the ABA")
         return checks
     }
 }

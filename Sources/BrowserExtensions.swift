@@ -718,7 +718,8 @@ struct BrowserExtensionPermissionReview {
     /// change makes it differ.
     private func siteAccessRevision(_ record: BrowserExtensionRecord, context: WKWebExtensionContext?) -> BrowserExtensionSiteAccessSnapshot.Revision {
         .init(stored: record.siteAccess, timed: Self.timed(record), patterns: record.patterns, version: record.version, enabled: record.enabled,
-              context: context.map { ObjectIdentifier($0).hashValue }, declarations: context.map { ExtensionSiteAccess.Declarations($0.webExtension) })
+              context: context.map { ObjectIdentifier($0).hashValue }, declarations: context.map { ExtensionSiteAccess.Declarations($0.webExtension) },
+              permissionEpoch: permissionRevisions[record.id, default: 0])
     }
 
     /// Applies one panel action and returns the authoritative snapshot. The action must name the extension, profile
@@ -780,6 +781,28 @@ struct BrowserExtensionPermissionReview {
     func promptIsCurrent(_ context: WKWebExtensionContext, revision: BrowserExtensionSiteAccessSnapshot.Revision?) -> Bool {
         guard !stopped, let revision, let index = ownedRecordIndex(for: context), !updating.contains(records[index].id) else { return false }
         return siteAccessRevision(records[index], context: context) == revision
+    }
+
+    /// What a named-permission review's answer is bound to. The site-access revision doesn't cover named permissions, so
+    /// this captures them directly: the exact owned context, the permission revision (Revoke and every recorded
+    /// permission change advance it), whether the extension is enabled, and the live and recorded named grants and
+    /// denials. Any difference after the review means the answer is stale.
+    struct NamedPermissionSnapshot: Equatable {
+        let record: UUID
+        let context: ObjectIdentifier
+        let revision: UInt64
+        let enabled: Bool
+        let live: [String: Date], liveDenied: [String: Date]
+        let recorded: [String: Date], recordedDenied: [String: Date]
+    }
+    func namedPermissionSnapshot(for context: WKWebExtensionContext) -> NamedPermissionSnapshot? {
+        guard !stopped, let index = ownedRecordIndex(for: context), !updating.contains(records[index].id) else { return nil }
+        let record = records[index]
+        return NamedPermissionSnapshot(record: record.id, context: ObjectIdentifier(context), revision: permissionRevisions[record.id, default: 0],
+                                       enabled: record.enabled,
+                                       live: Dictionary(uniqueKeysWithValues: context.grantedPermissions.map { ($0.key.rawValue, $0.value) }),
+                                       liveDenied: Dictionary(uniqueKeysWithValues: context.deniedPermissions.map { ($0.key.rawValue, $0.value) }),
+                                       recorded: record.permissions, recordedDenied: record.deniedPermissions)
     }
 
     /// Records a current prompt's approvals with provenance; false (stale, or the choice didn't save) grants nothing.
@@ -1687,13 +1710,19 @@ struct BrowserExtensionPermissionReview {
         completionHandler(window, nil)
     }
     func webExtensionController(_ controller: WKWebExtensionController, promptForPermissions permissions: Set<WKWebExtension.Permission>, in tab: (any WKWebExtensionTab)?, for context: WKWebExtensionContext, completionHandler: @escaping (Set<WKWebExtension.Permission>, Date?) -> Void) {
-        guard authorizes(tab, for: context), let owner else { completionHandler([], nil); return }
+        guard authorizes(tab, for: context), let owner, let before = owner.namedPermissionSnapshot(for: context) else { completionHandler([], nil); return }
         let requested = Set(permissions.map(\.rawValue)), supported = requested.intersection(BrowserExtensions.supportedPermissions)
+        // Only supported permissions are offered; nothing to offer means no review and no decision recorded.
+        guard !supported.isEmpty else { completionHandler([], nil); return }
         let review = BrowserExtensionPermissionReview(name: context.webExtension.displayName ?? "Extension", profileName: owner.profileName?(profileID) ?? "Current profile", permissions: supported.sorted(), websites: [], unsupported: requested.subtracting(supported).sorted(), isOptional: true)
-        let granted = !supported.isEmpty && owner.approve(review) ? Set(supported.map { WKWebExtension.Permission(rawValue: $0) }) : []
-        guard authorizes(tab, for: context) else { completionHandler([], nil); return }
-        for permission in permissions { context.setPermissionStatus(granted.contains(permission) ? .grantedExplicitly : .deniedExplicitly, for: permission) }
-        owner.persistPermissions(context); completionHandler(granted, nil)
+        let approved = owner.approve(review)
+        // Bound to the state the review was shown in: a Revoke, disable, update, reload or other permission change
+        // meanwhile makes the answer stale, and a stale answer neither grants nor denies.
+        guard authorizes(tab, for: context), owner.namedPermissionSnapshot(for: context) == before else { completionHandler([], nil); return }
+        let offered = Set(supported.map { WKWebExtension.Permission(rawValue: $0) })
+        // Only what the user was shown and declined becomes a denial; unsupported permissions get none.
+        for permission in offered { context.setPermissionStatus(approved ? .grantedExplicitly : .deniedExplicitly, for: permission) }
+        owner.persistPermissions(context); completionHandler(approved ? offered : [], nil)
     }
     /// WebKit's *implicit* URL requests: it asks here before tab and window reads, script and CSS injection, cookies,
     /// captureVisibleTab, detectLanguage, getMatchedRules, devtools eval and failed CORS loads, and would grant `*://host/*`

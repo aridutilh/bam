@@ -13,6 +13,10 @@ struct BrowserExtensionSiteAccessSnapshot: Equatable {
         let enabled: Bool
         let context: Int?
         let declarations: ExtensionSiteAccess.Declarations?
+        /// The record's monotonic permission epoch (every Revoke, site access change and recorded permission change
+        /// advances it; it is never reset). A change and change-back on the same live context restores every value above,
+        /// so without it a stale answer would look current (ABA).
+        var permissionEpoch: UInt64 = 0
     }
     let id: UUID
     let profileID: UUID
@@ -74,7 +78,12 @@ enum ExtensionSiteAccessEngine {
         guard let data else { return nil }
         do { return try JSONDecoder().decode(State.self, from: data) } catch { throw Unreadable() }
     }
-    static func encode(_ state: State) -> Data? { try? JSONEncoder().encode(state) }
+    /// Deterministic bytes (sorted keys): equal states always encode equally, so the stored bytes can be compared in a
+    /// revision without spurious changes.
+    static func encode(_ state: State) -> Data? {
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+        return try? encoder.encode(state)
+    }
 
     // MARK: Time-limited grants
 
