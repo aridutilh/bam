@@ -556,19 +556,22 @@ enum ExtensionCompatibility {
         handlerName = "bamCompatibility" + UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
         super.init()
         contentController.add(self, contentWorld: .page, name: handlerName)
-        offscreen = ExtensionOffscreenDocuments(load: { [weak self] owner, url in
+        offscreen = ExtensionOffscreenDocuments(start: { [weak self] owner, url in
             guard let self else { throw ExtensionOffscreenDocuments<WKWebView>.Failure(description: "Extensions are shutting down.") }
-            return try await self.loadOffscreen(owner: owner, url: url)
+            return try self.startOffscreen(owner: owner, url: url)
         }, discard: { [weak self] web in
-            self?.offscreenLoaders.removeValue(forKey: ObjectIdentifier(web))
+            // End the pending wait now and stop the page; releasing the slot's last
+            // reference closes it, so it receives nothing once close has returned.
+            self?.offscreenLoaders.removeValue(forKey: ObjectIdentifier(web))?.cancel()
             web.navigationDelegate = nil; web.stopLoading()
         })
     }
 
-    /// Loads an extension page in a hidden web view built from the context's own
+    /// Starts an extension page in a hidden web view built from the context's own
     /// configuration, so it is an ordinary extension page to WebKit (messaging,
-    /// storage and this layer) in the same profile store. It is never shown.
-    private func loadOffscreen(owner: String, url: URL) async throws -> WKWebView {
+    /// storage and this layer) in the same profile store. It is never shown. The
+    /// returned wait holds only the loader, never the web view.
+    private func startOffscreen(owner: String, url: URL) throws -> (WKWebView, @MainActor () async throws -> Void) {
         guard let context = registrations[owner]?.context, ownsRegisteredContext(context),
               BrowserExtensions.isExtensionURL(url, ownedBy: context), let configuration = context.webViewConfiguration else {
             throw ExtensionOffscreenDocuments<WKWebView>.Failure(description: "Offscreen documents must be pages of this extension.")
@@ -581,8 +584,8 @@ enum ExtensionCompatibility {
         }
         offscreenLoaders[ObjectIdentifier(web)] = loader
         web.navigationDelegate = loader
-        do { try await loader.load(url, in: web); return web }
-        catch { offscreenLoaders.removeValue(forKey: ObjectIdentifier(web)); web.navigationDelegate = nil; web.stopLoading(); throw error }
+        web.load(URLRequest(url: url))
+        return (web, { try await loader.wait() })
     }
     /// Revoked grants close the extension's hidden document immediately.
     func revoke(_ context: WKWebExtensionContext) { offscreen.discard(owner: context.uniqueIdentifier) }
@@ -969,34 +972,38 @@ enum ExtensionCompatibility {
     static let timeout: UInt64 = 30_000_000_000
     let baseURL: URL
     var terminated: (() -> Void)?
-    private var pending: CheckedContinuation<Void, Error>?
+    private var outcome: Result<Void, Error>?
+    private var waiter: CheckedContinuation<Void, Error>?
     init(baseURL: URL) { self.baseURL = baseURL }
     private static func failure(_ message: String) -> Error { ExtensionOffscreenDocuments<WKWebView>.Failure(description: message) }
 
-    func load(_ url: URL, in web: WKWebView) async throws {
+    /// Resolves at the first load's end, on failure, on timeout, or as soon as it is cancelled.
+    func wait() async throws {
+        if let outcome { return try outcome.get() }
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            pending = continuation
-            web.load(URLRequest(url: url))
+            waiter = continuation
             Task { @MainActor [weak self] in
                 try? await Task.sleep(nanoseconds: Self.timeout)
-                self?.finish(Self.failure("The offscreen document did not finish loading."))
+                self?.finish(.failure(Self.failure("The offscreen document did not finish loading.")))
             }
         }
     }
-    private func finish(_ error: Error?) {
-        guard let continuation = pending else { return }
-        pending = nil
-        if let error { continuation.resume(throwing: error) } else { continuation.resume() }
+    func cancel() { finish(.failure(Self.failure(ExtensionOffscreenDocuments<WKWebView>.closedWhileLoading))) }
+    private func finish(_ result: Result<Void, Error>) {
+        guard outcome == nil else { return }
+        outcome = result
+        let continuation = waiter; waiter = nil
+        continuation?.resume(with: result)
     }
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
         guard navigationAction.targetFrame?.isMainFrame != false else { decisionHandler(.allow); return }
         let url = navigationAction.request.url
         decisionHandler(url?.scheme == baseURL.scheme && url?.host == baseURL.host ? .allow : .cancel)
     }
-    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { finish(nil) }
-    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) { finish(error) }
-    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) { finish(error) }
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { finish(.success(())) }
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) { finish(.failure(error)) }
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) { finish(.failure(error)) }
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
-        if pending != nil { finish(Self.failure("The offscreen document stopped while loading.")) } else { terminated?() }
+        if outcome == nil { finish(.failure(Self.failure("The offscreen document stopped while loading."))) } else { terminated?() }
     }
 }

@@ -30,65 +30,111 @@ import Foundation
                       "Invalid offscreen parameters were accepted: \(url) \(reasons) \(justification.debugDescription)")
         }
 
-        // One document per extension, enforced from the start of loading.
-        var loads: [String] = [], discarded: [String] = []
-        var gate: CheckedContinuation<Void, Never>?
-        var holdNextLoad = false, failNextLoad = false
-        let documents = Documents(load: { owner, url in
-            loads.append(owner)
-            if holdNextLoad { holdNextLoad = false; await withCheckedContinuation { gate = $0 } }
-            if failNextLoad { failNextLoad = false; throw Failure(description: "load failed") }
-            return FakeDocument(url)
-        }, discard: { discarded.append($0.url.lastPathComponent) })
+        // A fake host: each document loads until the test finishes it. Discard cancels a
+        // pending load immediately, as the web-view host does; `ignoresCancel` models a
+        // host whose load outcome still arrives late, to prove generations stay separate.
+        final class Load { var waiter: CheckedContinuation<Void, Error>?; var outcome: Result<Void, Error>?; var ignoresCancel = false
+            func finish(_ result: Result<Void, Error>) { guard outcome == nil else { return }; outcome = result; let w = waiter; waiter = nil; w?.resume(with: result) } }
+        var loads: [ObjectIdentifier: Load] = [:], started: [String] = [], discarded: [String] = []
+        var autoFinish = true
+        let documents = Documents(start: { owner, url in
+            started.append(owner + ":" + url.lastPathComponent)
+            let document = FakeDocument(url), load = Load()
+            loads[ObjectIdentifier(document)] = load
+            if autoFinish { load.outcome = .success(()) }
+            return (document, {
+                if let outcome = load.outcome { return try outcome.get() }
+                try await withCheckedThrowingContinuation { load.waiter = $0 }
+            })
+        }, discard: { document in
+            discarded.append(document.url.lastPathComponent)
+            if let load = loads.removeValue(forKey: ObjectIdentifier(document)), !load.ignoresCancel { load.finish(.failure(Failure(description: "cancelled"))) }
+        })
+        func loadOf(_ owner: String) -> Load? { documents.currentDocument(for: owner).flatMap { loads[ObjectIdentifier($0)] } }
+        func settle() async { for _ in 0..<20 { await Task.yield() } }
         let page = base.appendingPathComponent("a.html")
-        holdNextLoad = true
+
+        // One document per extension, enforced from the start of loading.
+        autoFinish = false
         let first = Task { await message { try await documents.create(owner: "A", url: page) } }
-        while gate == nil { await Task.yield() }
+        while loadOf("A")?.waiter == nil { await Task.yield() }
         try check(documents.has("A") && documents.entry(for: "A")?.isLoaded == false, "A loading document was not reported")
         try check(await message { try await documents.create(owner: "A", url: page) } == Documents.alreadyExists,
                   "A concurrent second create did not fail with Chrome's exact message")
+        autoFinish = true
         try check(await message { try await documents.create(owner: "B", url: base.appendingPathComponent("b.html")) } == nil && documents.has("B"),
                   "Another extension's document was blocked by the first")
-        gate?.resume(); gate = nil
+        loadOf("A")?.finish(.success(()))
         try check(await first.value == nil && documents.entry(for: "A")?.isLoaded == true && documents.document(for: "A")?.url == page,
                   "The first create did not finish after loading")
-        try check(loads == ["A", "B"], "A rejected create still loaded a document: \(loads)")
+        try check(started == ["A:a.html", "B:b.html"], "A rejected create started a document: \(started)")
 
         // close: discards exactly that document; a second close reports none.
         try check(await message { try documents.close(owner: "A") } == nil && !documents.has("A") && discarded == ["a.html"], "close did not discard the document")
         try check(await message { try documents.close(owner: "A") } == Documents.noDocument, "Closing a missing document did not fail with Chrome's message")
         try check(documents.has("B"), "Closing one extension's document affected another")
 
-        // A failed load leaves no document behind and allows a retry.
-        failNextLoad = true
-        try check(await message { try await documents.create(owner: "A", url: page) } == "load failed" && !documents.has("A"), "A failed load left a slot behind")
+        // A failed load is discarded, leaves no slot, and allows a retry.
+        autoFinish = false
+        let failing = Task { await message { try await documents.create(owner: "A", url: base.appendingPathComponent("fail.html")) } }
+        while loadOf("A")?.waiter == nil { await Task.yield() }
+        loadOf("A")?.finish(.failure(Failure(description: "load failed")))
+        try check(await failing.value == "load failed" && !documents.has("A") && discarded.last == "fail.html", "A failed load left a slot or a live document")
+        autoFinish = true
         try check(await message { try await documents.create(owner: "A", url: page) } == nil && documents.has("A"), "Create after a failed load was refused")
+        documents.discard(owner: "A")
 
-        // Disable/revoke during loading: the late document is discarded and creation fails.
+        // Close during a stalled load: the document is discarded before close returns, the
+        // pending create rejects at once, and its last reference is gone.
+        autoFinish = false
+        weak var stalled: FakeDocument?
+        let stalledCreate = Task { await message { try await documents.create(owner: "A", url: base.appendingPathComponent("stalled.html")) } }
+        while loadOf("A")?.waiter == nil { await Task.yield() }
+        stalled = documents.currentDocument(for: "A")
+        try documents.close(owner: "A")
+        try check(discarded.last == "stalled.html" && !documents.has("A") && stalled == nil, "Close during loading did not discard and release the pending document")
+        try check(await stalledCreate.value == Documents.closedWhileLoading, "The pending create did not reject after close")
+
+        // Recreate while an old load's outcome is still in flight: the late success must
+        // neither promote nor close the replacement.
+        let lateCreate = Task { await message { try await documents.create(owner: "A", url: base.appendingPathComponent("old.html")) } }
+        while loadOf("A")?.waiter == nil { await Task.yield() }
+        let oldLoad = loadOf("A")!; oldLoad.ignoresCancel = true
         documents.discard(owner: "A")
-        holdNextLoad = true
-        let interrupted = Task { await message { try await documents.create(owner: "A", url: base.appendingPathComponent("late.html")) } }
-        while gate == nil { await Task.yield() }
+        let replacement = Task { await message { try await documents.create(owner: "A", url: base.appendingPathComponent("new.html")) } }
+        while loadOf("A")?.waiter == nil { await Task.yield() }
+        oldLoad.finish(.success(()))
+        try check(await lateCreate.value == Documents.closedWhileLoading, "A replaced generation's late success was not rejected")
+        await settle()
+        try check(documents.currentDocument(for: "A")?.url.lastPathComponent == "new.html" && documents.entry(for: "A")?.isLoaded == false,
+                  "A late outcome changed the replacement document")
+        loadOf("A")?.finish(.success(()))
+        try check(await replacement.value == nil && documents.document(for: "A")?.url.lastPathComponent == "new.html", "The replacement did not open")
         documents.discard(owner: "A")
-        try check(!documents.has("A"), "Discard during loading kept the slot")
-        gate?.resume(); gate = nil
-        try check(await interrupted.value == Documents.closedWhileLoading && discarded.last == "late.html" && !documents.has("A"),
-                  "A document finishing after discard was kept")
+
+        // Revocation (discard) mid-load behaves like close; so does profile shutdown.
+        let revoked = Task { await message { try await documents.create(owner: "A", url: base.appendingPathComponent("revoked.html")) } }
+        while loadOf("A")?.waiter == nil { await Task.yield() }
+        documents.discard(owner: "A")
+        let revokedOutcome = await revoked.value
+        try check(!documents.has("A") && discarded.last == "revoked.html" && revokedOutcome == Documents.closedWhileLoading, "Revocation during loading left the document")
+        let shutdown = Task { await message { try await documents.create(owner: "E", url: base.appendingPathComponent("shutdown.html")) } }
+        while loadOf("E")?.waiter == nil { await Task.yield() }
+        documents.discardAll()
+        let shutdownOutcome = await shutdown.value
+        try check(!documents.has("E") && !documents.has("B") && shutdownOutcome == Documents.closedWhileLoading, "discardAll left a loading or open document")
+        autoFinish = true
 
         // The host losing its document frees the slot; a stale report does not.
         try await documents.create(owner: "A", url: page)
-        let stale = FakeDocument(page)
-        documents.documentEnded(stale, owner: "A")
+        documents.documentEnded(FakeDocument(page), owner: "A")
         try check(documents.has("A"), "A stale termination report closed the live document")
         documents.documentEnded(documents.document(for: "A")!, owner: "A")
         try check(!documents.has("A"), "Terminated document remained registered")
 
-        // Profile shutdown discards everything; repeated cycles do not accumulate.
-        for cycle in 0..<20 { try await documents.create(owner: "C", url: page); try documents.close(owner: "C"); _ = cycle }
-        try check(!documents.has("C"), "Create/close cycles left a document")
-        try await documents.create(owner: "A", url: page)
-        documents.discardAll()
-        try check(!documents.has("A") && !documents.has("B"), "discardAll left documents open")
+        // Repeated cycles do not accumulate, and a discarded document is released.
+        for _ in 0..<20 { try await documents.create(owner: "C", url: page); try documents.close(owner: "C") }
+        try check(!documents.has("C") && loads.isEmpty, "Create/close cycles left documents or loads behind")
         weak var released: FakeDocument?
         do { try await documents.create(owner: "D", url: page); released = documents.document(for: "D"); documents.discard(owner: "D") }
         try check(released == nil, "A discarded document was retained")
