@@ -508,12 +508,24 @@ import JavaScriptCore
             try { chrome.declarativeNetRequest.updateSessionRules({addRules: [unsafe]}, function () { out.unsafeCallbackRan = true; }); out.callbackForm = 'returned'; }
             catch (error) { out.callbackForm = error.message; }
             out.removeOnly = browser.declarativeNetRequest.updateDynamicRules({removeRuleIds: [7]}) === nativeResult;
+            // G2: any non-empty request-method condition is refused, whatever the action; empty lists reach WebKit.
+            var methodRule = {id: 9, priority: 1, action: {type: 'allow'}, condition: {urlFilter: '/m', requestMethods: ['get']}};
+            var excludedMethodRule = {id: 10, priority: 1, action: {type: 'block'}, condition: {urlFilter: '/n', excludedRequestMethods: ['post']}};
+            var callsBeforeMethods = nativeCalls.length;
+            browser.declarativeNetRequest.updateSessionRules({addRules: [safe, methodRule]}).then(function () { out.methodPromise = 'resolved'; }, function (error) { out.methodPromise = error.message; });
+            try { chrome.declarativeNetRequest.updateDynamicRules({addRules: [excludedMethodRule]}, function () { out.methodCallbackRan = true; }); out.methodCallback = 'returned'; }
+            catch (error) { out.methodCallback = error.message; }
+            out.methodNativeCalls = nativeCalls.length - callsBeforeMethods;
+            out.emptyMethods = browser.declarativeNetRequest.updateDynamicRules({addRules: [{id: 11, priority: 1, action: {type: 'block'}, condition: {urlFilter: '/e', requestMethods: []}}]}) === nativeResult;
             """)
         try check(guardErrors.isEmpty && guardJS.evaluateScript("out.promiseReturn && out.validCalls")!.toBool(),
                   "A valid DNR update did not reach the native method with its receiver, arguments, callback and return value: \(guardJS.evaluateScript("JSON.stringify(out)")!)")
         let refusal = "Rule with id 7 excludes every resource type this browser supports, so it would match all requests here."
-        try check(guardJS.evaluateScript("out.promise === '\(refusal)' && out.callbackForm === '\(refusal)' && out.unsafeCallbackRan === undefined && out.removeOnly && nativeCalls.length === 1 && nativeCalls[0].args[0].removeRuleIds[0] === 7")!.toBool(),
+        try check(guardJS.evaluateScript("out.promise === '\(refusal)' && out.callbackForm === '\(refusal)' && out.unsafeCallbackRan === undefined && out.removeOnly && nativeCalls.length === 2 && nativeCalls[0].args[0].removeRuleIds[0] === 7")!.toBool(),
                   "An unsafe DNR update reached WebKit or was not refused in promise (reject) and callback (synchronous throw) forms: \(guardJS.evaluateScript("JSON.stringify([out, nativeCalls.length])")!)")
+        let methodRefusal = " has a request-method condition (requestMethods or excludedRequestMethods), which this browser does not enforce as written."
+        try check(guardJS.evaluateScript("out.methodPromise === 'Rule with id 9\(methodRefusal)' && out.methodCallback === 'Rule with id 10\(methodRefusal)' && out.methodCallbackRan === undefined && out.methodNativeCalls === 0 && out.emptyMethods")!.toBool(),
+                  "A method-conditioned DNR update reached WebKit or was not refused in both forms: \(guardJS.evaluateScript("JSON.stringify(out)")!)")
         guardJS.evaluateScript(ExtensionCompatibility.workerScript(manifest: ["permissions": ["declarativeNetRequest"]], browserVersion: "test"))
         try check(guardJS.evaluateScript("browser.declarativeNetRequest.updateDynamicRules.__bamDNRGuard === true && browser.declarativeNetRequest.updateDynamicRules({removeRuleIds: []}) === nativeResult")!.toBool(),
                   "Re-running the adapter wrapped the DNR guard twice")

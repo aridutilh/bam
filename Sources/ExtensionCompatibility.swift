@@ -499,9 +499,11 @@ enum ExtensionCompatibility {
         managedStorage = ns;
       }
 
-      // declarativeNetRequest: refuse added rules that WebKit would apply more broadly than written. Measured:
-      // a rule whose excludedResourceTypes covers every type WebKit supports matched an XHR (WebKit does not
-      // validate exclusions and writes an empty resource-type list). Valid updates reach WebKit's own method with
+      // declarativeNetRequest: refuse added rules that WebKit does not enforce as written. Measured on canonical
+      // runs: a rule whose excludedResourceTypes covers every type WebKit supports matched an XHR (WebKit does not
+      // validate exclusions and writes an empty resource-type list); with compiled sentinels and server counts,
+      // requestMethods ['get'] and excludedRequestMethods ['post'] rules blocked POST, and requestMethods ['post']
+      // never blocked POST, so request-method conditions are refused whatever their action. Valid updates reach WebKit's own method with
       // the original receiver, arguments, callback and return value. A refused update never reaches WebKit:
       // the promise form rejects; the callback form throws synchronously, because Bam cannot set
       // runtime.lastError and a callback without an error would look like success.
@@ -510,6 +512,12 @@ enum ExtensionCompatibility {
         const excluded = rule && rule.condition && rule.condition.excludedResourceTypes;
         if (Array.isArray(excluded) && webkitResourceTypes.every((type) => excluded.includes(type))) {
           return "Rule with id " + (rule && rule.id) + " excludes every resource type this browser supports, so it would match all requests here.";
+        }
+        // Empty or non-array values are left to WebKit's own validation.
+        const condition = rule && rule.condition;
+        const listed = (value) => Array.isArray(value) && value.length > 0;
+        if (condition && (listed(condition.requestMethods) || listed(condition.excludedRequestMethods))) {
+          return "Rule with id " + (rule && rule.id) + " has a request-method condition (requestMethods or excludedRequestMethods), which this browser does not enforce as written.";
         }
         return null;
       };

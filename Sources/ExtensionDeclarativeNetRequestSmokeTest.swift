@@ -160,6 +160,23 @@ import WebKit
         let unfiltered = await outcome(webA, "/bam-dnr/excluded-all")
         try check(unfiltered.hasPrefix("reached"), "A refused rule still filtered its path: \(unfiltered)")
 
+        // G2: request-method conditions are not enforced as written (canonical 1f837bb/483c54f with compiled
+        // sentinels and server counts: get-only and excluded-post rules blocked POST; post-only rules never blocked
+        // POST). Adding such a rule is refused before WebKit in both forms, and its path stays unfiltered.
+        let methodRefusal = "request-method condition"
+        for label in ["postMethod", "getMethod", "excludedPostMethod", "uppercaseMethod"] {
+            try check(((edges[label] as? [String: Any])?["add"] as? String)?.contains(methodRefusal) == true,
+                      "The method-conditioned rule \(label) was not refused: \(edges[label] ?? "nil")")
+        }
+        let methodCallback = await dnr("""
+            try { chrome.declarativeNetRequest.updateSessionRules({addRules: [{id: 298, priority: 1, action: {type: 'block'}, condition: {urlFilter: '/bam-dnr/get-only', requestMethods: ['get'], resourceTypes: ['xmlhttprequest']}}]}, () => {}); return 'returned'; }
+            catch (error) { return 'threw: ' + error.message; }
+            """)
+        try check(methodCallback.hasPrefix("threw: ") && methodCallback.contains(methodRefusal),
+                  "A method-conditioned session rule was not refused synchronously in callback form: \(methodCallback)")
+        let methodPath = await outcome(webA, "/bam-dnr/get-only?after-refusal", method: "POST")
+        try check(methodPath.hasPrefix("reached"), "A refused method-conditioned rule still filtered its path: \(methodPath)")
+
         // Disabling the extension removes its rules.
         try await host.setEnabled(false, id: id)
         try await wait("Disabling the extension left its static rule blocking") { await outcome(webA, "/bam-dnr/static-blocked").hasPrefix("reached") }
