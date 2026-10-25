@@ -139,10 +139,11 @@ import Foundation
             }
             // Theme shape and contrast only, never color values.
             for theme in session.spaces.compactMap(\.theme) {
-                let contrast = [false, true].map { dark in
-                    theme.canvasStops(dark: dark).map { $0.contrast(with: (dark ? theme.dark : theme.light).title) }.min() ?? 0
+                let contrast = [false, true].map { dark -> String in
+                    guard let stops = theme.canvasStops(dark: dark) else { return "flat fallback" }
+                    return String(format: "%.1f", stops.map { $0.contrast(with: BamInk.primary(dark: dark)) }.min() ?? 0)
                 }
-                print("theme: gradient stops \(theme.gradient.count), min text contrast light \(String(format: "%.1f", contrast[0])) dark \(String(format: "%.1f", contrast[1]))")
+                print("theme: gradient stops \(theme.gradient.count), min Bam ink contrast light \(contrast[0]) dark \(contrast[1])")
             }
             print("themes imported \(report.importedThemes), unreadable \(report.approximatedThemes)")
             print("tabs \(report.importedTabs), folders \(report.importedFolders), profiles new \(report.newProfiles.count), easel refs \(report.easelReferences), easels unplaced \(report.easels), live \(report.liveFolders), overflow \(report.favoriteOverflow), unattached \(report.unattachedProfiles)/\(report.unattachedFavorites), invalid \(report.invalidAddresses), missing \(report.missingItems), unknown \(report.unknownItems), depth \(report.depthLimited), refused \(report.refusal != nil)")
@@ -526,20 +527,39 @@ import Foundation
 
         // Drawing: readable text over every gradient color in both appearances,
         // a real two-color gradient, a dark window in dark, accent visible.
-        for dark in [false, true] {
-            let roles = dark ? theme.dark : theme.light, stops = theme.canvasStops(dark: dark)
-            expect(stops.count == 2 && stops[0] != stops[1], "Two distinct gradient colors (dark: \(dark))")
-            expect(stops.allSatisfy { $0.contrast(with: roles.title) >= SpaceTheme.minimumTextContrast }, "Title text stays readable over the gradient (dark: \(dark))")
-            expect(stops.allSatisfy { $0.contrast(with: theme.accent(dark: dark)) >= SpaceTheme.minimumIconContrast - 0.001 }, "The Space accent stands out (dark: \(dark))")
+        // Contrast is checked against the ink the sidebar actually draws (BamInk).
+        func readable(_ stops: [SpaceTheme.RGBA]?, dark: Bool) -> Bool {
+            guard let stops else { return false }
+            return stops.allSatisfy { $0.contrast(with: BamInk.primary(dark: dark)) >= SpaceTheme.minimumInkContrast
+                && $0.contrast(with: BamInk.secondary(dark: dark)) >= SpaceTheme.minimumSecondaryContrast }
         }
-        expect(theme.canvasStops(dark: true).allSatisfy { $0.luminance < 0.2 } && theme.canvasStops(dark: false).allSatisfy { $0.luminance > 0.5 },
+        for dark in [false, true] {
+            let stops = theme.canvasStops(dark: dark)
+            expect(stops?.count == 2 && stops?[0] != stops?[1], "Two distinct gradient colors (dark: \(dark))")
+            expect(readable(stops, dark: dark), "Bam's sidebar text stays readable over the gradient (dark: \(dark))")
+            expect(theme.accent(dark: dark).map { accent in stops!.allSatisfy { $0.contrast(with: accent) >= SpaceTheme.minimumIconContrast - 0.001 } } == true,
+                   "The Space accent stands out (dark: \(dark))")
+        }
+        expect(theme.canvasStops(dark: true)!.allSatisfy { $0.luminance < 0.2 } && theme.canvasStops(dark: false)!.allSatisfy { $0.luminance > 0.5 },
                "Dark mode gets a dark window, light mode a light one")
         let gray = try ArcImport.parse({ let f = Fixture(); f.space("Gray", profile: nil, windowTheme: arcTheme(gradient: [(0.5, 0.5, 0.5), (0.45, 0.45, 0.45)])); return f.json() }())
         let grayTheme = gray.spaces[0].theme!
         for dark in [false, true] {
-            expect(grayTheme.canvasStops(dark: dark).allSatisfy { $0.contrast(with: (dark ? grayTheme.dark : grayTheme.light).title) >= SpaceTheme.minimumTextContrast },
-                   "A mid-gray gradient is eased until text reads (dark: \(dark))")
+            expect(readable(grayTheme.canvasStops(dark: dark), dark: dark), "A mid-gray gradient is eased until text reads (dark: \(dark))")
         }
+        // Review case: a valid theme whose light palette has a dark background
+        // and white title would put Bam's dark ink on dark. That appearance
+        // falls back to the flat Space color (and flat tint); the other keeps the theme.
+        var inverted = arcTheme()
+        var semantic = inverted["semanticColorPalette"] as! [String: Any], byAppearance = semantic["appearanceBased"] as! [String: Any]
+        var lightRoles = byAppearance["light"] as! [String: Any]
+        lightRoles["background"] = ["red": 0.12, "green": 0.12, "blue": 0.14, "alpha": 1.0, "colorSpace": "extendedSRGB"]
+        lightRoles["title"] = ["red": 1.0, "green": 1.0, "blue": 1.0, "alpha": 1.0, "colorSpace": "extendedSRGB"]
+        byAppearance["light"] = lightRoles; semantic["appearanceBased"] = byAppearance; inverted["semanticColorPalette"] = semantic
+        let invertedTheme = ArcImport.spaceTheme(inverted)!
+        expect(invertedTheme.canvasStops(dark: false) == nil && invertedTheme.accent(dark: false) == nil,
+               "Where Bam's ink can't be read over the theme, that appearance uses the flat Space color")
+        expect(readable(invertedTheme.canvasStops(dark: true), dark: true) && invertedTheme.accent(dark: true) != nil, "The other appearance still wears the theme")
 
         // Fallbacks: unknown color space, unknown background variant, partial theme.
         let p3 = try ArcImport.parse({ let f = Fixture(); f.space("P3", profile: nil, windowTheme: arcTheme(colorSpace: "displayP3")); return f.json() }())
@@ -548,7 +568,7 @@ import Foundation
                && p3Report.notices.contains { $0.contains("couldn’t be read") }, "An unknown color space falls back to the flat color, with a notice")
         let image = try ArcImport.parse({ let f = Fixture(); f.space("Image", profile: nil, windowTheme: arcTheme(blended: false)); return f.json() }())
         let imageTheme = image.spaces[0].theme
-        expect(imageTheme?.gradient.isEmpty == true && imageTheme.map { $0.canvasStops(dark: false)[0] == $0.light.background.mixed(toward: $0.light.background, by: 1) } == true,
+        expect(imageTheme?.gradient.isEmpty == true && imageTheme.map { $0.canvasStops(dark: false)?[0] == $0.light.background.mixed(toward: $0.light.background, by: 1) } == true,
                "An unknown background variant keeps the theme's colors over its own backgrounds")
         var partial = arcTheme(); partial["semanticColorPalette"] = ["appearanceBased": ["light": (arcTheme()["semanticColorPalette"] as! [String: Any])]]
         expect(ArcImport.spaceTheme(partial) == nil && ArcImport.spaceTheme(["primaryColorPalette": ["midTone": ["red": 2.0, "green": 0, "blue": 0]]]) == nil,

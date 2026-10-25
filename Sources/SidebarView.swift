@@ -180,7 +180,9 @@ struct SidebarExtensionItem {
         let definitions = Array(definitions.filter { seen.insert($0.id).inserted }.prefix(32))
         guard !definitions.isEmpty else { return }
         guard !definitions.elementsEqual(spaceDefinitions, by: {
+            // The theme counts: a theme-only change (import upgrade, undo) must re-tint icons and rows.
             $0.id == $1.id && $0.name == $1.name && $0.symbol == $1.symbol && $0.colorIndex == $1.colorIndex && $0.emoji == $1.emoji
+                && $0.theme == $1.theme
         }) else { return }
         spaceDefinitions = definitions
         let ids = Set(definitions.map(\.id))
@@ -892,8 +894,11 @@ extension NSPasteboard.PasteboardType {
 enum ArkPalette {
     private static func white(_ alpha: CGFloat) -> NSColor { NSColor(white: 1, alpha: alpha) }
     private static func black(_ alpha: CGFloat) -> NSColor { NSColor(white: 0, alpha: alpha) }
-    static let ink = NSColor.chrome(light: NSColor(white: 0.11, alpha: 1), dark: NSColor(white: 0.94, alpha: 1))
-    static let secondary = NSColor.chrome(light: NSColor(white: 0.38, alpha: 1), dark: NSColor(white: 0.73, alpha: 1))
+    // Shared with imported Space themes' contrast checks (BamInk).
+    static let ink = NSColor.chrome(light: NSColor(srgbRed: BamInk.lightPrimary, green: BamInk.lightPrimary, blue: BamInk.lightPrimary, alpha: 1),
+                                    dark: NSColor(srgbRed: BamInk.darkPrimary, green: BamInk.darkPrimary, blue: BamInk.darkPrimary, alpha: 1))
+    static let secondary = NSColor.chrome(light: NSColor(srgbRed: BamInk.lightSecondary, green: BamInk.lightSecondary, blue: BamInk.lightSecondary, alpha: 1),
+                                          dark: NSColor(srgbRed: BamInk.darkSecondary, green: BamInk.darkSecondary, blue: BamInk.darkSecondary, alpha: 1))
     /// Hover wash for rows and icon buttons.
     static let hover = NSColor.chrome(light: black(0.055), dark: white(0.07))
     static let pressed = NSColor.chrome(light: black(0.10), dark: white(0.20))
@@ -915,7 +920,11 @@ enum ArkPalette {
     static func spaceTint(for space: BrowserSpace) -> NSColor {
         guard let theme = space.theme else { return spaceTint(space.colorIndex) }
         if let cached = themedTints[theme] { return cached }
-        let tint = NSColor.chrome(light: NSColor(spaceTheme: theme.accent(dark: false)), dark: NSColor(spaceTheme: theme.accent(dark: true)))
+        // Where the theme can't be shown (the window falls back to the flat
+        // color in that appearance), the flat tint goes with it.
+        let flat = spaceTint(space.colorIndex)
+        let tint = NSColor.chrome(light: theme.accent(dark: false).map(NSColor.init(spaceTheme:)) ?? flat,
+                                  dark: theme.accent(dark: true).map(NSColor.init(spaceTheme:)) ?? flat)
         if themedTints.count > 64 { themedTints.removeAll() }
         themedTints[theme] = tint   // one instance per theme keeps identity comparisons stable
         return tint
@@ -1280,8 +1289,12 @@ private final class ArkNewTabButton: ArkHoverButton {
     }
 }
 
+/// Sidebar views drawn in their Space's tint; tests read the tint they hold.
+@MainActor protocol SpaceTinted: AnyObject { var displayedSpaceTint: NSColor { get } }
+
 @MainActor
-private final class ArkSpaceButton: ArkHoverButton {
+private final class ArkSpaceButton: ArkHoverButton, SpaceTinted {
+    var displayedSpaceTint: NSColor { tint }
     let index: Int
     private var name = ""
     private var symbolName = "globe"
@@ -1337,7 +1350,8 @@ private final class ArkSpaceButton: ArkHoverButton {
 }
 
 @MainActor
-private final class ArkSpaceHeading: ArkHoverButton {
+private final class ArkSpaceHeading: ArkHoverButton, SpaceTinted {
+    var displayedSpaceTint: NSColor { tint }
     private var name = "Studio"
     private var symbolName = "sparkles"
     private var emoji: String?
@@ -1362,7 +1376,8 @@ private final class ArkSpaceHeading: ArkHoverButton {
 }
 
 @MainActor
-private final class ArkTabRow: ArkFlippedView, NSDraggingSource {
+private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted {
+    var displayedSpaceTint: NSColor { spaceTint }
     override func resetCursorRects() {
         super.resetCursorRects()
         addCursorRect(bounds, cursor: .pointingHand)

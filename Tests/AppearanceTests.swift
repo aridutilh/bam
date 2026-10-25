@@ -89,6 +89,25 @@ import AppKit
                 "The accent is the theme's own, different in light and dark")
         require(ArkPalette.spaceTint(for: BrowserSpace(id: 6, name: "Plain", symbol: "globe", colorIndex: 2)) === ArkPalette.spaceTint(2),
                 "An unthemed Space keeps its flat tint")
+        // The sidebar draws exactly the ink the theme contrast checks use.
+        for (name, dark) in [(NSAppearance.Name.aqua, false), (.darkAqua, true)] {
+            let ink = resolved(ArkPalette.ink, name), secondary = resolved(ArkPalette.secondary, name)
+            let expectedInk = BamInk.primary(dark: dark), expectedSecondary = BamInk.secondary(dark: dark)
+            require(abs(ink.redComponent - expectedInk.red) < 0.002 && abs(secondary.redComponent - expectedSecondary.red) < 0.002,
+                    "Sidebar ink matches the theme contrast reference (dark: \(dark))")
+        }
+        // A theme Bam's ink can't be read over in light falls back to the flat
+        // canvas and flat tint there, and keeps both in dark.
+        let invertedLight = SpaceTheme(gradient: theme.gradient,
+                                       light: .init(background: rgba(0.12, 0.12, 0.14), backgroundExtra: nil, title: rgba(1, 1, 1), subtitle: nil),
+                                       dark: theme.dark, accent: theme.accent, accentLight: theme.accentLight, accentDark: theme.accentDark)!
+        let inverted = BrowserSpace(id: 7, name: "Inverted", symbol: "globe", colorIndex: 2, theme: invertedLight)
+        require(NSColor.themedCanvas(invertedLight, colorIndex: 2, dark: false) == nil && NSColor.themedCanvas(invertedLight, colorIndex: 2, dark: true) != nil,
+                "An unreadable light theme draws Bam's flat light background")
+        let invertedTint = ArkPalette.spaceTint(for: inverted)
+        require(resolved(invertedTint, .aqua).isEqualIgnoringAlpha(resolved(ArkPalette.spaceTint(2), .aqua))
+                && !resolved(invertedTint, .darkAqua).isEqualIgnoringAlpha(resolved(ArkPalette.spaceTint(2), .darkAqua)),
+                "The tint follows: flat where the canvas is flat, themed where it's themed")
         print("PASS: \(checks) appearance preference and color token checks")
     }
 }

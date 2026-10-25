@@ -273,12 +273,16 @@ struct SpaceTheme: Codable, Hashable {
     }
     private enum CodingKeys: String, CodingKey { case gradient, light, dark, accent, accentLight, accentDark }
 
-    /// Readable text needs at least this contrast with every gradient color.
-    static let minimumTextContrast = 4.5
-    /// The two window gradient colors for one appearance. Arc's colors are
-    /// eased toward that appearance's background (a little in light, a lot in
-    /// dark) and further until its title color reads at `minimumTextContrast`.
-    func canvasStops(dark isDark: Bool) -> [RGBA] {
+    /// Bam's sidebar text (`BamInk`) needs at least these contrasts with every
+    /// gradient color: main text and secondary text.
+    static let minimumInkContrast = 7.0
+    static let minimumSecondaryContrast = 4.5
+    /// The two window gradient colors for one appearance, or nil when this
+    /// theme can't be made readable there (the window then uses Bam's own
+    /// flat Space color for that appearance). Arc's colors are eased toward
+    /// the appearance's background (a little in light, a lot in dark) and
+    /// further until Bam's actual sidebar ink reads over them.
+    func canvasStops(dark isDark: Bool) -> [RGBA]? {
         let roles = isDark ? dark : light
         let base: [RGBA]
         switch gradient.count {
@@ -286,32 +290,50 @@ struct SpaceTheme: Codable, Hashable {
         case 1: base = [gradient[0], gradient[0]]
         default: base = Array(gradient.prefix(2))
         }
+        let primary = BamInk.primary(dark: isDark), secondary = BamInk.secondary(dark: isDark)
+        func readable(_ color: RGBA) -> Bool {
+            color.contrast(with: primary) >= Self.minimumInkContrast && color.contrast(with: secondary) >= Self.minimumSecondaryContrast
+        }
         let start = isDark ? 0.7 : 0.25
-        return base.map { stop in
+        var stops: [RGBA] = []
+        for stop in base {
             var amount = start
             var color = stop.mixed(toward: roles.background, by: amount)
-            while color.contrast(with: roles.title) < Self.minimumTextContrast, amount < 1 {
+            while !readable(color), amount < 1 {
                 amount = min(1, amount + 0.05); color = stop.mixed(toward: roles.background, by: amount)
             }
-            return color
+            guard readable(color) else { return nil }
+            stops.append(color)
         }
+        return stops
     }
     /// Icons need at least this contrast with the window behind them.
     static let minimumIconContrast = 3.0
     /// The Space's accent (selected icons, Space icon) for one appearance:
     /// Arc's lighter variant in dark, its shaded variant in light, moved toward
-    /// the title color until it stands out from that appearance's background.
-    func accent(dark isDark: Bool) -> RGBA {
-        let roles = isDark ? dark : light
+    /// Bam's ink until it stands out from the gradient. Nil when the window
+    /// uses the flat Space color there (the flat tint then applies too).
+    func accent(dark isDark: Bool) -> RGBA? {
+        guard let behind = canvasStops(dark: isDark) else { return nil }
         let base = (isDark ? accentLight : accentDark) ?? accent
-        let behind = canvasStops(dark: isDark)
+        let ink = BamInk.primary(dark: isDark)
         func worst(_ color: RGBA) -> Double { behind.map { color.contrast(with: $0) }.min() ?? 21 }
-        var amount = 0.0, color = base.mixed(toward: roles.title, by: 0)
+        var amount = 0.0, color = base.mixed(toward: ink, by: 0)
         while worst(color) < Self.minimumIconContrast, amount < 1 {
-            amount = min(1, amount + 0.05); color = base.mixed(toward: roles.title, by: amount)
+            amount = min(1, amount + 0.05); color = base.mixed(toward: ink, by: amount)
         }
-        return color
+        return worst(color) >= Self.minimumIconContrast ? color : nil
     }
+}
+
+/// Bam's sidebar text colors (gray levels). The sidebar draws with these and
+/// imported Space themes are checked against them, so the two can't drift.
+enum BamInk {
+    static let lightPrimary = 0.11, lightSecondary = 0.38
+    static let darkPrimary = 0.94, darkSecondary = 0.73
+    static func primary(dark: Bool) -> SpaceTheme.RGBA { gray(dark ? darkPrimary : lightPrimary) }
+    static func secondary(dark: Bool) -> SpaceTheme.RGBA { gray(dark ? darkSecondary : lightSecondary) }
+    private static func gray(_ level: Double) -> SpaceTheme.RGBA { SpaceTheme.RGBA(red: level, green: level, blue: level)! }
 }
 
 struct BrowserSpace: Codable, Equatable, Identifiable {

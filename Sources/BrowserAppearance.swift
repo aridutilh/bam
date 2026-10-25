@@ -54,10 +54,12 @@ extension NSColor {
         self.init(srgbRed: color.red, green: color.green, blue: color.blue, alpha: color.alpha)
     }
     /// The window gradient for a Space with an imported theme, or nil when the
-    /// Space uses its flat color (no theme, or Prism/Clear).
+    /// Space uses its flat color (no theme, Prism/Clear, or a theme Bam's
+    /// sidebar text can't be read over in this appearance).
     static func themedCanvas(_ theme: SpaceTheme?, colorIndex: Int, dark: Bool) -> [NSColor]? {
-        guard let theme, (0..<BrowserSpace.flatColorCount).contains(colorIndex) else { return nil }
-        return theme.canvasStops(dark: dark).map(NSColor.init(spaceTheme:))
+        guard let theme, (0..<BrowserSpace.flatColorCount).contains(colorIndex),
+              let stops = theme.canvasStops(dark: dark) else { return nil }
+        return stops.map(NSColor.init(spaceTheme:))
     }
 }
 
