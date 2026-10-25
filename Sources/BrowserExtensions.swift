@@ -811,8 +811,16 @@ struct BrowserExtensionPermissionReview {
             // bulk grant replacement). First reset, one by one through the public per-pattern API, every live grant the
             // target no longer includes, so WebKit takes its per-pattern removal path for each; then apply the exact
             // target as before. No denial is added, nothing is widened, and no shared controller script is touched.
+            // Order matters: WebKit coalesces all-host injection under the canonical `*://*/*` key, and removing an
+            // all-host pattern re-adds content for the all-host grants that remain. So specific patterns go first, then
+            // other all-host forms (`<all_urls>`, `https://*/*`, …), and the canonical `*://*/*` strictly last.
             let kept = Set(target.keys)
-            for pattern in Array(context.grantedPermissionMatchPatterns.keys) where !kept.contains(pattern.string) {
+            let withdrawn = context.grantedPermissionMatchPatterns.keys.filter { !kept.contains($0.string) }
+            func removalRank(_ pattern: WKWebExtension.MatchPattern) -> Int {
+                if pattern.string == "*://*/*" { return 2 }
+                return pattern.matchesAllHosts || pattern.matchesAllURLs ? 1 : 0
+            }
+            for pattern in withdrawn.sorted(by: { (removalRank($0), $0.string) < (removalRank($1), $1.string) }) {
                 context.setPermissionStatus(.unknown, for: pattern)
             }
             context.deniedPermissionMatchPatterns = Self.matchPatterns(records[index].deniedPatterns)
