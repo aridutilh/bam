@@ -166,6 +166,100 @@ import AppKit
         ArkHover.pointerLocation = { _ in nil }
         withExtendedLifetime(hoverWindow) {}
 
+        // MARK: Folder focus: a pointer click keeps focus (AX, arrows) but draws no keyboard ring.
+        let focusSidebar = SidebarView(frame: NSRect(x: 0, y: 0, width: 240, height: 600))
+        let focusWindow = NSWindow(contentRect: focusSidebar.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        focusWindow.contentView = focusSidebar
+        let folderID = UUID(), insideID = UUID(), selectedID = UUID()
+        var tree = [SidebarTabItem(id: folderID, title: "Merge", subtitle: "", symbol: "folder", isPinned: true, isActive: false, isFolder: true, isExpanded: false),
+                    SidebarTabItem(id: selectedID, title: "Selected page", subtitle: "", symbol: "globe", isPinned: false, isActive: true)]
+        @MainActor func showTree() {
+            focusSidebar.update(tabs: tree, space: 0, canGoBack: false, canGoForward: false, isLoading: false); focusSidebar.layoutSubtreeIfNeeded()
+        }
+        focusSidebar.onToggleFolder = { _ in
+            tree[0].isExpanded.toggle()
+            if tree[0].isExpanded {
+                tree.insert(SidebarTabItem(id: insideID, title: "Inside", subtitle: "", symbol: "globe", isPinned: true, isActive: false, depth: 1, parentFolderID: folderID), at: 1)
+            } else { tree.removeAll { $0.id == insideID } }
+            showTree()
+        }
+        showTree()
+        @MainActor func folderRow() -> NSView { descendants(focusSidebar).first { $0.identifier?.rawValue == "tab-row-\(folderID.uuidString)" }! }
+        @MainActor func mouse(_ type: NSEvent.EventType) -> NSEvent {
+            NSEvent.mouseEvent(with: type, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: focusWindow.windowNumber,
+                               context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
+        }
+        @MainActor func key(_ code: UInt16, to view: NSView) {
+            view.keyDown(with: NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: focusWindow.windowNumber,
+                                                context: nil, characters: "", charactersIgnoringModifiers: "", isARepeat: false, keyCode: code)!)
+        }
+        folderRow().mouseDown(with: mouse(.leftMouseDown)); folderRow().mouseUp(with: mouse(.leftMouseUp))
+        let clicked = folderRow()
+        require(tree[0].isExpanded && focusWindow.firstResponder === clicked, "A click opens the folder and keeps it focused (arrows, VoiceOver)")
+        let clickedPixels = pixels(clicked)
+        focusWindow.makeFirstResponder(nil)
+        let unfocusedPixels = pixels(folderRow())
+        require(clickedPixels == unfocusedPixels, "No focus ring after a pointer click, including after the folder's reload")
+        focusWindow.makeFirstResponder(folderRow())   // keyboard/programmatic focus (Focus Sidebar, arrows)
+        require(pixels(folderRow()) != unfocusedPixels, "Keyboard focus still draws a visible ring")
+        folderRow().mouseDown(with: mouse(.leftMouseDown)); folderRow().mouseUp(with: mouse(.leftMouseUp))
+        require(!tree[0].isExpanded && focusWindow.firstResponder === folderRow() && pixels(folderRow()) == pixels(folderRow()),
+                "Clicking the keyboard-focused folder closes it and keeps focus")
+        let closedClicked = pixels(folderRow())
+        focusWindow.makeFirstResponder(nil)
+        require(closedClicked == pixels(folderRow()), "Pointer input hides a ring the keyboard had shown")
+        // Pointer-focused, then a key: focus becomes visible (Down moves to the row below, with its ring).
+        folderRow().mouseDown(with: mouse(.leftMouseDown)); folderRow().mouseUp(with: mouse(.leftMouseUp))
+        key(125, to: focusWindow.firstResponder as! NSView)
+        let inside = descendants(focusSidebar).first { $0.identifier?.rawValue == "tab-row-\(insideID.uuidString)" }!
+        let insideFocused = pixels(inside)
+        require(focusWindow.firstResponder === inside, "Down from the clicked folder focuses the row inside")
+        focusWindow.makeFirstResponder(nil)
+        require(insideFocused != pixels(inside), "Arrow-key focus draws its ring")
+        // Review: View ▸ Focus Sidebar on the row that is already first responder from a pointer click must show
+        // the ring (AppKit doesn't call becomeFirstResponder again for the same row).
+        tree = [SidebarTabItem(id: folderID, title: "Merge", subtitle: "", symbol: "folder", isPinned: true, isActive: false, isFolder: true, isExpanded: false),
+                SidebarTabItem(id: insideID, title: "Unselected page", subtitle: "", symbol: "globe", isPinned: false, isActive: false)]
+        showTree()
+        folderRow().mouseDown(with: mouse(.leftMouseDown)); folderRow().mouseUp(with: mouse(.leftMouseUp))
+        let pointerFocused = folderRow()
+        let pointerPixels = pixels(pointerFocused)
+        focusWindow.makeFirstResponder(nil); let restingPixels = pixels(folderRow())
+        require(pointerPixels == restingPixels, "Fixture: the click left pointer-mode focus (no ring)")
+        folderRow().mouseDown(with: mouse(.leftMouseDown)); folderRow().mouseUp(with: mouse(.leftMouseUp))
+        let sameRow = focusWindow.firstResponder as? NSView
+        require(sameRow === folderRow() && pixels(folderRow()) == pixels(folderRow()), "Fixture: the folder is first responder after the click")
+        let clickedAgain = pixels(folderRow())
+        require(focusSidebar.focusTabList() && focusWindow.firstResponder === sameRow, "Focus Sidebar lands on that same row (no new first responder)")
+        let viaFocusSidebar = pixels(folderRow())
+        require(viaFocusSidebar != clickedAgain, "Focus Sidebar shows the keyboard ring even on the already-focused row")
+        // And the reload after a click still restores pointer mode (no ring), while keyboard mode survives a reload.
+        key(124, to: focusWindow.firstResponder as! NSView)   // → opens the folder (a reload) with keyboard focus
+        let afterKeyboardReload = pixels(folderRow())
+        focusWindow.makeFirstResponder(nil)
+        require(focusWindow.firstResponder !== folderRow() && afterKeyboardReload != pixels(folderRow()), "Keyboard-mode focus keeps its ring through a reload")
+        withExtendedLifetime(focusWindow) {}
+
+        // MARK: Folder glyph: Bam's own vector folder, tinted, distinct open and closed.
+        @MainActor func glyphPixels(_ open: Bool, scale: Int) -> NSBitmapImageRep {
+            let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 16 * scale, pixelsHigh: 16 * scale, bitsPerSample: 8, samplesPerPixel: 4,
+                                       hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+            rep.size = NSSize(width: 16, height: 16)
+            NSGraphicsContext.saveGraphicsState(); NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+            ArkFolderGlyph.image(open: open, tint: NSColor(srgbRed: 0.2, green: 0.25, blue: 0.95, alpha: 1)).draw(in: NSRect(x: 0, y: 0, width: 16, height: 16))
+            NSGraphicsContext.restoreGraphicsState()
+            return rep
+        }
+        let closedGlyph = glyphPixels(false, scale: 2), openGlyph = glyphPixels(true, scale: 2)
+        require(closedGlyph.tiffRepresentation != openGlyph.tiffRepresentation, "Open and closed folders look different")
+        var tinted = 0, covered = 0
+        for x in 0..<32 { for y in 0..<32 {
+            guard let c = closedGlyph.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB), c.alphaComponent > 0.5 else { continue }
+            covered += 1; if c.blueComponent > c.redComponent + 0.4 { tinted += 1 }
+        } }
+        require(covered > 32 * 32 / 3 && tinted > covered / 2, "The folder is a filled shape in the Space's tint, not a thin outline (\(tinted)/\(covered))")
+        require(glyphPixels(false, scale: 3).pixelsWide == 48, "Vector glyph renders at any scale")
+
         print("PASS: \(checks) sidebar morning checks")
     }
 }

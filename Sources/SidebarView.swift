@@ -611,7 +611,8 @@ struct SidebarExtensionItem {
         // was removed, focus moves to the row now in its place (nothing opens).
         let focusedRow = (window?.firstResponder as? ArkTabRow).flatMap { $0.isDescendant(of: table) ? $0 : nil }
         let focusedID = focusedRow?.item.id, focusedIndex = focusedRow.map { table.row(for: $0) } ?? -1
-        defer { if let focusedID { restoreFocus(to: focusedID, near: focusedIndex) } }
+        let focusRingShown = focusedRow?.showsFocusRing ?? true
+        defer { if let focusedID { restoreFocus(to: focusedID, near: focusedIndex, ring: focusRingShown) } }
         tabs = items
         configureAppearance(space: space, destinations: destinations)
         let deepest = items.map { max($0.depth, $0.treeDepth) }.max() ?? 0
@@ -654,10 +655,10 @@ struct SidebarExtensionItem {
     /// Keyboard navigation moves a focus ring, never the selection: Up/Down
     /// visit tab and folder rows without opening (or waking) anything.
     /// Return/Space open the focused tab or toggle the focused folder.
-    @discardableResult func moveKeyboardFocus(from row: Int, by delta: Int) -> Bool {
+    @discardableResult func moveKeyboardFocus(from row: Int, by delta: Int, ring: Bool = true) -> Bool {
         var target = row + delta
         while entries.indices.contains(target) {
-            if case .tab = entries[target] { focusRow(target); return true }
+            if case .tab = entries[target] { focusRow(target, ring: ring); return true }
             target += delta
         }
         return false
@@ -669,11 +670,13 @@ struct SidebarExtensionItem {
         // No rows yet: the list itself takes focus, so arrows are harmless no-ops.
         window?.makeFirstResponder(table); return false
     }
-    private func restoreFocus(to id: UUID, near index: Int) {
-        if rowByID[id] != nil { focusRow(withID: id); return }
+    /// `ring`: whether the focus being restored was showing its keyboard ring (a pointer-focused folder that
+    /// reloads after its click must not gain one).
+    private func restoreFocus(to id: UUID, near index: Int, ring: Bool) {
+        if rowByID[id] != nil { focusRow(withID: id, ring: ring); return }
         // Removed: the nearest focusable row at or above its old position, else the list.
         let start = min(max(index, 0), max(entries.count - 1, 0))
-        if moveKeyboardFocus(from: start - 1, by: 1) || moveKeyboardFocus(from: start + 1, by: -1) { return }
+        if moveKeyboardFocus(from: start - 1, by: 1, ring: ring) || moveKeyboardFocus(from: start + 1, by: -1, ring: ring) { return }
         window?.makeFirstResponder(table)
     }
     /// ← on a row inside a folder moves focus to that folder.
@@ -686,14 +689,25 @@ struct SidebarExtensionItem {
         let row = table.row(for: focused)
         return row >= 0 ? row : nil
     }
-    private func focusRow(_ row: Int) {
+    /// `ring`: keyboard focus (arrows, Focus Sidebar, ←-to-parent) shows its ring, also on a row that was
+    /// already first responder from a pointer click (AppKit doesn't call becomeFirstResponder again). Only a
+    /// reload restoring pointer-mode focus passes false.
+    private func focusRow(_ row: Int, ring: Bool = true) {
         guard entries.indices.contains(row) else { return }
         table.scrollRowToVisible(row)
-        if let cell = table.view(atColumn: 0, row: row, makeIfNecessary: true) as? SidebarTabCell { window?.makeFirstResponder(cell.row) }
+        guard let cell = table.view(atColumn: 0, row: row, makeIfNecessary: true) as? SidebarTabCell else { return }
+        if window?.firstResponder !== cell.row {
+            ArkTabRow.nextFocusIsFromPointer = !ring
+            window?.makeFirstResponder(cell.row)
+            ArkTabRow.nextFocusIsFromPointer = false
+        }
+        if ring { cell.row.showKeyboardFocus() }
     }
-    private func focusRow(withID id: UUID) {
-        guard let row = rowByID[id], window?.firstResponder !== (table.view(atColumn: 0, row: row, makeIfNecessary: false) as? SidebarTabCell)?.row else { return }
-        focusRow(row)
+    private func focusRow(withID id: UUID, ring: Bool = true) {
+        guard let row = rowByID[id] else { return }
+        // A restore onto the row that kept focus leaves its modality as it was.
+        if !ring, window?.firstResponder === (table.view(atColumn: 0, row: row, makeIfNecessary: false) as? SidebarTabCell)?.row { return }
+        focusRow(row, ring: ring)
     }
     /// Arrows while the list itself has focus: continue from the focused row,
     /// else the selected row, else enter from the edge in the arrow's direction.
@@ -926,9 +940,6 @@ enum ArkPalette {
                                     dark: NSColor(srgbRed: BamInk.darkPrimary, green: BamInk.darkPrimary, blue: BamInk.darkPrimary, alpha: 1))
     static let secondary = NSColor.chrome(light: NSColor(srgbRed: BamInk.lightSecondary, green: BamInk.lightSecondary, blue: BamInk.lightSecondary, alpha: 1),
                                           dark: NSColor(srgbRed: BamInk.darkSecondary, green: BamInk.darkSecondary, blue: BamInk.darkSecondary, alpha: 1))
-    /// Folder glyphs: Bam's ink, slightly softened.
-    static let folderGlyph = NSColor.chrome(light: NSColor(srgbRed: BamInk.lightPrimary, green: BamInk.lightPrimary, blue: BamInk.lightPrimary, alpha: 0.85),
-                                            dark: NSColor(srgbRed: BamInk.darkPrimary, green: BamInk.darkPrimary, blue: BamInk.darkPrimary, alpha: 0.85))
     /// Hover wash for rows and icon buttons.
     static let hover = NSColor.chrome(light: black(0.055), dark: white(0.07))
     static let pressed = NSColor.chrome(light: black(0.10), dark: white(0.20))
@@ -1488,11 +1499,44 @@ private final class ArkNewTabButton: ArkHoverButton {
     }
 }
 
-/// Folder chevron opacity (Bam's ink) at rest and when hovered or keyboard-
-/// focused. Even the resting chevron keeps at least 3:1 against the sidebar.
+/// Folder chevron opacity (Bam's ink). The folder glyph itself shows open or closed (as in Arc), so the chevron
+/// is hidden at rest and appears on hover or visible keyboard focus as the disclosure affordance.
 enum ArkTabRowChevron {
-    static let rest: CGFloat = 0.5
+    static let rest: CGFloat = 0
     static let emphasized: CGFloat = 0.85
+}
+
+/// Bam's own folder glyph, drawn as vectors at whatever scale it lands on: a filled folder in the Space's
+/// tint (the back panel and tab lighter), with the front flap tilted forward when open. Original geometry;
+/// no system or third-party artwork.
+@MainActor enum ArkFolderGlyph {
+    static let side: CGFloat = 16
+    static func image(open: Bool, tint: NSColor) -> NSImage {
+        let image = NSImage(size: NSSize(width: side, height: side), flipped: false) { _ in
+            // Back panel with its tab (top-left), lighter than the front.
+            let back = NSBezierPath(roundedRect: NSRect(x: 1, y: 2.5, width: 14, height: 10.5), xRadius: 2.2, yRadius: 2.2)
+            back.append(NSBezierPath(roundedRect: NSRect(x: 1, y: 10.5, width: 6.2, height: 3.6), xRadius: 1.6, yRadius: 1.6))
+            tint.withAlphaComponent(0.55).setFill(); back.fill()
+            // Front: a flat face when closed; tilted forward (a parallelogram) when open.
+            let front = NSBezierPath()
+            if open {
+                front.move(to: NSPoint(x: 1.2, y: 2.5)); front.line(to: NSPoint(x: 13.4, y: 2.5))
+                front.line(to: NSPoint(x: 15.6, y: 9.4)); front.line(to: NSPoint(x: 3.6, y: 9.4)); front.close()
+                front.lineJoinStyle = .round
+            } else {
+                front.append(NSBezierPath(roundedRect: NSRect(x: 1, y: 2.5, width: 14, height: 8.6), xRadius: 2.2, yRadius: 2.2))
+            }
+            tint.setFill(); front.fill()
+            // A hairline edge keeps a pale tint readable on a pale sidebar.
+            NSColor.black.withAlphaComponent(0.16).setStroke()
+            back.lineWidth = 0.6; back.stroke()
+            front.lineWidth = 0.6; front.stroke()
+            return true
+        }
+        image.isTemplate = false
+        image.accessibilityDescription = open ? "Open folder" : "Folder"
+        return image
+    }
 }
 
 /// Sidebar views drawn in their Space's tint; tests read the tint they hold.
@@ -1688,7 +1732,7 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted, Ar
         }
         if first || old.subtitle != item.subtitle { subtitleLabel.stringValue = item.subtitle }
         if item.isFolder {
-            if first || !old.isFolder || old.isExpanded != item.isExpanded { favicon = nil; iconView.image = NSImage(systemSymbolName: "folder", accessibilityDescription: nil); iconView.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 15, weight: .regular) }
+            if first || !old.isFolder || old.isExpanded != item.isExpanded { favicon = nil; showFolderGlyph() }
         } else if favicon == nil, first || old.symbol != item.symbol || old.monogram != item.monogram || old.isFolder { showFallbackIcon() }
         if first || old.isActive != item.isActive || old.isFolder != item.isFolder { applyIconTint() }
         if first || old.isSplit != item.isSplit || old.isPinned != item.isPinned || old.isFolder != item.isFolder {
@@ -1731,6 +1775,12 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted, Ar
         }
         applyIconTint()
     }
+    /// Folders: Bam's open/closed folder in the Space's tint.
+    private func showFolderGlyph() {
+        iconView.symbolConfiguration = nil
+        iconView.image = ArkFolderGlyph.image(open: item.isExpanded, tint: spaceTint)
+        iconView.identifier = NSUserInterfaceItemIdentifier(item.isExpanded ? "folder-glyph-open" : "folder-glyph")
+    }
     /// Without a favicon: the page's monogram (Space-tinted disc) or its symbol.
     private func showFallbackIcon() {
         if let mark = item.monogram {
@@ -1744,8 +1794,8 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted, Ar
         }
     }
     private func applyIconTint() {
-        // Folder glyphs carry the row in Bam's ink (Yab), not a faint gray.
-        if item.isFolder { iconView.contentTintColor = ArkPalette.folderGlyph; return }
+        // Folder glyphs carry their own Space-tinted colors.
+        if item.isFolder { iconView.contentTintColor = nil; return }
         iconView.contentTintColor = favicon == nil ? (item.isActive ? spaceTint : ArkPalette.secondary) : nil
     }
     func configureSpace(id: Int, tint: NSColor, destinations: [BrowserSpace]) {
@@ -1754,12 +1804,26 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted, Ar
         currentSpace = id; spaceTint = tint; self.destinations = destinations
         // A monogram's disc carries the Space tint, so it is redrawn with it.
         if tintChanged, favicon == nil, !item.isFolder, item.monogram != nil { showFallbackIcon() }
+        if tintChanged, item.isFolder { showFolderGlyph() }
         applyIconTint()
     }
     override var acceptsFirstResponder: Bool { true }
-    override func becomeFirstResponder() -> Bool { needsDisplay = true; updateChevronEmphasis(focused: true); return true }
-    override func resignFirstResponder() -> Bool { needsDisplay = true; updateChevronEmphasis(focused: false); return true }
+    /// Input modality: focus that came from the keyboard (arrows, Focus Sidebar, Tab, a key pressed while
+    /// focused) draws a ring; a pointer press keeps first responder (so arrows keep working and assistive
+    /// tech follows) but draws none, as macOS controls do.
+    fileprivate static var nextFocusIsFromPointer = false
+    private(set) var showsFocusRing = false {
+        didSet { if oldValue != showsFocusRing { needsDisplay = true; updateChevronEmphasis(focused: showsFocusRing) } }
+    }
+    fileprivate func hideFocusRing() { showsFocusRing = false }
+    fileprivate func showKeyboardFocus() { if window?.firstResponder === self { showsFocusRing = true } }
+    override func becomeFirstResponder() -> Bool {
+        showsFocusRing = !Self.nextFocusIsFromPointer; Self.nextFocusIsFromPointer = false
+        needsDisplay = true; updateChevronEmphasis(focused: showsFocusRing); return true
+    }
+    override func resignFirstResponder() -> Bool { showsFocusRing = false; needsDisplay = true; updateChevronEmphasis(focused: false); return true }
     override func keyDown(with event: NSEvent) {
+        showsFocusRing = true
         // Return/Enter/Space open a tab or toggle a folder; →/← open and close
         // folders; ← elsewhere goes to the containing folder; Esc returns to the page.
         if [36, 76, 49].contains(event.keyCode) { activate() }
@@ -1793,7 +1857,7 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted, Ar
         let hidden = item.isFolder || item.isUnloaded || (!hovered && !item.isActive)
         if closeButton.isHidden != hidden { closeButton.isHidden = hidden; needsLayout = true }
         if chevronView.isHidden != !item.isFolder { chevronView.isHidden = !item.isFolder; needsLayout = true }
-        updateChevronEmphasis(focused: window?.firstResponder === self)
+        updateChevronEmphasis(focused: window?.firstResponder === self && showsFocusRing)
     }
     /// Trailing fade: a horizontal gradient mask on the title's layer. Only the
     /// mask moves (to clear the close button on hover); the text never shifts.
@@ -1822,7 +1886,7 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted, Ar
         if chevronView.alphaValue != alpha { chevronView.alphaValue = alpha }
     }
     override func draw(_ dirtyRect: NSRect) {
-        if window?.firstResponder === self {
+        if window?.firstResponder === self && showsFocusRing {
             NSColor.keyboardFocusIndicatorColor.setStroke()
             let ring = NSBezierPath(roundedRect: bounds.insetBy(dx: 1.5, dy: 1.5), xRadius: 8, yRadius: 8); ring.lineWidth = 2; ring.stroke()
         }
@@ -1882,7 +1946,13 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted, Ar
         // dragging never selects or wakes anything. The pressed identity is
         // captured now in case the view is reused before release.
         dragOrigin = convert(event.locationInWindow, from: nil); didDrag = false; pressedID = item.id
-        if item.isFolder { window?.makeFirstResponder(self) }
+        // Pointer input: no row shows a keyboard ring now (also one that kept focus from earlier arrows).
+        (window?.firstResponder as? ArkTabRow)?.hideFocusRing()
+        if item.isFolder, window?.firstResponder !== self {
+            Self.nextFocusIsFromPointer = true
+            window?.makeFirstResponder(self)
+            Self.nextFocusIsFromPointer = false
+        }
     }
     override func mouseDragged(with event: NSEvent) {
         guard let origin = dragOrigin, !didDrag, let source = pressedID, source == item.id else { return }
