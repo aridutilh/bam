@@ -50,7 +50,9 @@ enum ExtensionWindowTargeting {
         return nil
     }
 
-    /// WebKit passes requested bounds with NaN for every component that was not requested.
+    /// WebKit passes requested bounds with NaN for every component that was not requested. Only detectable requests can
+    /// be refused: WebKit flips `top` using the requested height, so `top` without `height` arrives as NaN and is
+    /// indistinguishable from no request (that popup opens at Little Bam's normal placement).
     static func requestsBounds(_ frame: CGRect) -> Bool {
         !frame.isNull && [frame.origin.x, frame.origin.y, frame.size.width, frame.size.height].contains { $0.isFinite }
     }

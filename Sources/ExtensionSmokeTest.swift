@@ -45,6 +45,8 @@ import WebKit
         let urlA = pageURL.appending(queryItems: [URLQueryItem(name: "profile", value: "profile-A")])
         let urlB = pageURL.appending(queryItems: [URLQueryItem(name: "profile", value: "profile-B")])
         var extensionPages: [UUID: WKWebView] = [:]
+        // Creation order: surfaces (and so WebKit's tab indices) must not depend on dictionary order.
+        var extensionPageOrder: [UUID] = []
         var includeProfileATab = true
         // Single-page popup windows opened through windows.create (Little Bam stand-ins: one page, own window).
         var popupWindows: [(id: UUID, window: NSWindow, web: WKWebView)] = []
@@ -52,7 +54,7 @@ import WebKit
         var peekPage: (id: UUID, web: WKWebView)?
         var createTabCalls = 0, createWindowCalls = 0
         host.surfaces = { profile in
-            if profile == profileA { return (includeProfileATab ? [BrowserExtensionSurface(id: tabA, title: "Profile A", url: urlA, webView: webA, window: window, isActive: true, isSelected: true)] : []) + extensionPages.map { BrowserExtensionSurface(id: $0.key, title: "Extension page", url: $0.value.url, webView: $0.value, window: window) }
+            if profile == profileA { return (includeProfileATab ? [BrowserExtensionSurface(id: tabA, title: "Profile A", url: urlA, webView: webA, window: window, isActive: true, isSelected: true)] : []) + extensionPageOrder.compactMap { id in extensionPages[id].map { BrowserExtensionSurface(id: id, title: "Extension page", url: $0.url, webView: $0, window: window) } }
                 + (peekPage.map { [BrowserExtensionSurface(id: $0.id, title: "Peek", url: $0.web.url, webView: $0.web, window: window, isPeek: true)] } ?? [])
                 + popupWindows.map { BrowserExtensionSurface(id: $0.id, title: "Popup", url: $0.web.url, webView: $0.web, window: $0.window, isActive: true, isSelected: true, isSinglePage: true) } }
             if profile == profileB { return [BrowserExtensionSurface(id: tabB, title: "Profile B", url: urlB, webView: webB, window: window)] }
@@ -72,7 +74,7 @@ import WebKit
             createTabCalls += 1
             guard let host, profile == profileA, let configuration = host.configuration(forExtensionURL: url, profileID: profile) else { return nil }
             let web = WKWebView(frame: webA.frame, configuration: configuration), id = UUID()
-            extensionPages[id] = web; container.addSubview(web); web.isHidden = true
+            extensionPages[id] = web; extensionPageOrder.append(id); container.addSubview(web); web.isHidden = true
             web.load(URLRequest(url: url)); return id
         }
         host.reconcile()
@@ -332,6 +334,7 @@ import WebKit
         // The Peek and the tab added for this check leave before the remaining checks.
         peekPage = nil
         for (id, web) in extensionPages where !pagesBefore.contains(id) { web.stopLoading(); web.removeFromSuperview(); extensionPages.removeValue(forKey: id) }
+        extensionPageOrder.removeAll { extensionPages[$0] == nil }
         // The popup leaves the topology before the remaining checks.
         for popup in popupWindows { popup.web.stopLoading(); popup.window.orderOut(nil); popup.window.close() }
         popupWindows.removeAll(); host.reconcile()
@@ -359,7 +362,7 @@ import WebKit
         }
         try await Task.sleep(nanoseconds: 150_000_000)
         try check(await result(webB) == nil, "Disabled extension still injected on a fresh page")
-        for web in extensionPages.values { web.stopLoading(); web.removeFromSuperview() }; extensionPages.removeAll(); host.reconcile()
+        for web in extensionPages.values { web.stopLoading(); web.removeFromSuperview() }; extensionPages.removeAll(); extensionPageOrder.removeAll(); host.reconcile()
         try await host.remove(id: extensionA)
         try check(host.items(profileID: profileA).isEmpty && !FileManager.default.fileExists(atPath: host.storageURL.appendingPathComponent(extensionA.uuidString).path), "Remove retained its registry/package")
         return checks
