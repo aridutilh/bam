@@ -325,6 +325,8 @@ import QuartzCore
     var tabErrors: [UUID: String] = [:]
     var pendingHome: Set<UUID> = []
     var pendingLoads: Set<UUID> = []
+    /// Main tab views only: the visit each view's current document recorded, so its late title can correct that entry.
+    var historyTitleFollowUps: [UUID: HistoryTitleFollowUp] = [:]
     var requestedAddresses: [UUID: String] = [:]
     let tabActivityProbe = TabActivityProbe()
     let tabResourcePolicy = TabResourcePolicy()
@@ -528,7 +530,7 @@ import QuartzCore
     }
     func load(_ address: String, in browser: WKWebView, id: UUID) {
         guard let tab = session.tabs.first(where: { $0.id == id }), browsers[id] === browser else { return }
-        invalidateFaviconDocument(id)
+        invalidateFaviconDocument(id); historyTitleFollowUps.removeValue(forKey: id)
         let profile = session.profileID(for: tab), token = UUID()
         navigationTokens[id] = token
         tabActivityProbe.invalidate(browser); sleepRestores.removeValue(forKey: id)
@@ -739,6 +741,7 @@ import QuartzCore
     func updateMetadata(_ web: WKWebView) {
         guard let pair = browsers.first(where: { $0.value === web }), let i = session.tabs.firstIndex(where: { $0.id == pair.key }) else { return }
         guard !pendingLoads.contains(pair.key), tabErrors[pair.key] == nil else { return }
+        applyHistoryTitle(web, id: pair.key)
         let previous = session.tabs[i]
         if let url = web.url, ["https", "http"].contains(url.scheme ?? "") || allowsExtensionPage(url, profileID: session.profileID(for: session.tabs[i])) {
             session.tabs[i].address = url.absoluteString
@@ -753,6 +756,15 @@ import QuartzCore
         let tab = session.tabs[i]
         if tab.isFavorite || tab.space == session.space || tab.space == pagingTarget { scheduleChromeRefresh() }
         scheduleSave()
+    }
+    /// The current document's title, which WebKit often reports after didFinish, corrects the visit that
+    /// document recorded. Memory only: the profile's library is already loaded (it recorded the visit) and
+    /// is never created here. No new visit, event, time or order; bounded by HistoryTitleFollowUp.
+    private func applyHistoryTitle(_ web: WKWebView, id: UUID) {
+        guard !isShuttingDown, var followUp = historyTitleFollowUps[id] else { return }
+        if followUp.apply(url: web.url, title: web.title, profileID: profileID(of: web), library: profileLibraries[followUp.profileID]) {
+            historyTitleFollowUps[id] = followUp.isSpent ? nil : followUp
+        }
     }
     private func scheduleChromeRefresh() {
         guard chromeRefreshWork == nil, !isShuttingDown else { return }
@@ -807,7 +819,7 @@ import QuartzCore
     /// Peek and floating video. Used when a tab closes, and when a tab that had
     /// a page becomes an Arc Easel reference again (which has no page).
     func teardownPage(_ id: UUID) {
-        invalidateFaviconDocument(id)
+        invalidateFaviconDocument(id); historyTitleFollowUps.removeValue(forKey: id)
         peeks[id]?.dismiss()
         observations.removeValue(forKey: id)
         let web = browsers.removeValue(forKey: id)
@@ -1226,7 +1238,7 @@ import QuartzCore
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
         tabActivityProbe.invalidate(webView)
         if let id = browsers.first(where: { $0.value === webView })?.key {
-            invalidateFaviconDocument(id)
+            invalidateFaviconDocument(id); historyTitleFollowUps.removeValue(forKey: id)
             tabErrors.removeValue(forKey: id); pendingLoads.insert(id)
         }
         if visibleMemberIDs.contains(where: { browsers[$0] === webView }) { scheduleChromeRefresh() }
@@ -1245,14 +1257,19 @@ import QuartzCore
         updateMetadata(webView)
         restoreSleepingPage(webView)
         scheduleFaviconDiscovery(in: webView)
-        if let url = webView.url, let profile = profileID(of: webView) { library(for: profile).recordVisit(title: webView.title ?? url.host ?? "Page", address: url.absoluteString) }
+        if let id = browsers.first(where: { $0.value === webView })?.key { historyTitleFollowUps.removeValue(forKey: id) }
+        if let url = webView.url, let profile = profileID(of: webView),
+           let visit = library(for: profile).recordVisit(title: webView.title ?? url.host ?? "Page", address: url.absoluteString),
+           let id = browsers.first(where: { $0.value === webView })?.key {
+            historyTitleFollowUps[id] = HistoryTitleFollowUp(profileID: profile, visit: visit)
+        }
     }
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) { showError(error, web: webView) }
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) { showError(error, web: webView) }
     func showError(_ error: Error, web: WKWebView) {
         guard (error as NSError).code != NSURLErrorCancelled else { return }
         if let id = browsers.first(where: { $0.value === web })?.key {
-            pendingLoads.remove(id); pendingNonGetDocuments.removeValue(forKey: id)
+            pendingLoads.remove(id); pendingNonGetDocuments.removeValue(forKey: id); historyTitleFollowUps.removeValue(forKey: id)
             if let failed = (error as NSError).userInfo[NSURLErrorFailingURLStringErrorKey] as? String, URLInput.directURL(failed) != nil { requestedAddresses[id] = failed }
             tabErrors[id] = "Couldn’t load page — ⌘R to retry"; refresh()
         }
@@ -1260,6 +1277,7 @@ import QuartzCore
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
         tabActivityProbe.invalidate(webView)
         guard let id = browsers.first(where: { $0.value === webView })?.key else { return }
+        historyTitleFollowUps.removeValue(forKey: id)
         if nonGetDocuments.contains(id) {
             if pictureInPicture.references(webView) { pictureInPicture.restore() }
             pendingLoads.remove(id)
