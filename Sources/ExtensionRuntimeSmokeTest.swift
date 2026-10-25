@@ -6,13 +6,18 @@ import WebKit
     private var watchdog: Timer?
     private var finished = false
     private var task: Task<Void, Never>?
+    /// Each focused selector reports under its own label, so a diagnostic can never read as a full Extensions pass.
     private var suiteName: String {
-        CommandLine.arguments.contains("--extension-site-access-only") ? "Extension site access diagnostic" : "Extensions"
+        let arguments = CommandLine.arguments
+        if arguments.contains("--extension-site-access-only") { return "Extension site access diagnostic" }
+        if arguments.contains("--extension-fetch-only") { return "Extension fetch diagnostic" }
+        if arguments.contains("--extension-metadata-only") { return "Extension metadata diagnostic" }
+        return "Extensions"
     }
 
     func start() {
         guard #available(macOS 15.4, *) else {
-            print("SKIP: Extensions — macOS 15.4 or later is required")
+            print("SKIP: \(suiteName) — macOS 15.4 or later is required")
             fflush(stdout); exit(0)
         }
         watchdog = Timer.scheduledTimer(withTimeInterval: 300, repeats: false) { [weak self] _ in
@@ -88,6 +93,31 @@ import WebKit
                     self.finish(true, "\(checks) (site access only; not a full extension run)")
                     return
                 }
+                // Separately labelled diagnostics, each in a fresh ephemeral controller and extension host; the default
+                // full run still includes both fixtures (inside BrowserExtensionSmokeTest).
+                if CommandLine.arguments.contains("--extension-fetch-only") {
+                    // A brand-new, otherwise empty profile, so the never-granted control is not confounded by other
+                    // extensions. Its premises are asserted and the withdrawal stages are measurements: this is a
+                    // diagnostic, not security acceptance (the strict withheld-fetch assertion stays in the full run).
+                    let checks = try await Self.withFreshHost { controller, host in
+                        guard let profile = controller.session.createProfile(name: "Fetch diagnostic"),
+                              controller.session.createSpace(name: "Fetch diagnostic", symbol: "briefcase", colorIndex: 1, profileID: profile) != nil else {
+                            throw ExtensionSmokeTest.Failure(description: "Could not create the fetch diagnostic profile")
+                        }
+                        let config = WKWebViewConfiguration(); config.websiteDataStore = controller.profileStores.store(for: profile)
+                        host.configure(config, profileID: profile)
+                        return try await ExtensionFetchAccessProbe.run(controller: controller, host: host, profile: profile, pageURL: page)
+                    }
+                    self.finish(true, "\(checks) (fetch diagnostic only: premises asserted, withdrawal stages measured; not security acceptance or a full extension run)")
+                    return
+                }
+                if CommandLine.arguments.contains("--extension-metadata-only") {
+                    let checks = try await Self.withFreshHost { controller, host in
+                        try await ExtensionTabMetadataSmokeTest.run(controller: controller, host: host, pageURL: page)
+                    }
+                    self.finish(true, "\(checks) (tab metadata only; not a full extension run)")
+                    return
+                }
                 // Diagnostic modifier: `--extension-test --extension-dnr-only` runs only the
                 // declarativeNetRequest suite. The full run (no modifier) always includes it.
                 if CommandLine.arguments.contains("--extension-dnr-only") {
@@ -106,6 +136,26 @@ import WebKit
                 self.finish(true, "\(checks)")
             } catch { self.finish(false, String(describing: error)) }
         }
+    }
+
+    /// A fresh ephemeral browser with a window and its extension host, set up like the integrated fixture, torn down on
+    /// every exit. Nothing is persisted.
+    @available(macOS 15.4, *)
+    private static func withFreshHost<T>(_ body: (BrowserController, BrowserExtensions) async throws -> T) async throws -> T {
+        let controller = BrowserController(sessionURL: FileManager.default.temporaryDirectory.appendingPathComponent("unused-extension-diagnostic-\(UUID().uuidString).json"), ephemeral: true)
+        controller.session.tabs.removeAll(); controller.automaticallyShowsVideo = false
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 920, height: 650), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false; window.contentViewController = controller
+        window.setContentSize(NSSize(width: 920, height: 650))
+        controller.view.frame = NSRect(x: 0, y: 0, width: 920, height: 650)
+        window.makeKeyAndOrderFront(nil)
+        controller.layoutBrowser(); controller.view.layoutSubtreeIfNeeded()
+        defer { controller.prepareToClose(persistSession: false); window.orderOut(nil); window.close() }
+        let host = controller.browserExtensions
+        host.permissionPrompt = { _ in true }; host.onReloadNeeded = nil
+        let config = WKWebViewConfiguration(); config.websiteDataStore = controller.profileStores.store(for: controller.session.currentProfileID)
+        host.configure(config, profileID: controller.session.currentProfileID)
+        return try await body(controller, host)
     }
 
     private func finish(_ success: Bool, _ message: String) {
