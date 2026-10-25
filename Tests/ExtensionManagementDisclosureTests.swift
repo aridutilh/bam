@@ -78,6 +78,14 @@ import Foundation
         }
         try check(rowText(audited).contains("Network rules: see details") && !rowText(legacy).contains("Network rules"),
                   "The row marker was missing for the audited install or shown for the earlier one: \(rowText(audited)) | \(rowText(legacy))")
+        // A capability Bam now provides for a declared permission, never reviewed: listed as not granted, first.
+        var earlier = BrowserExtensionRecord(id: UUID(), profileID: profile, name: "Earlier", version: "1", packageName: "package")
+        earlier.compatibility = ["bookmarks", "idle"]; earlier.compatibilityGrants = ["idle": .distantFuture]
+        let earlierDetails = ExtensionManagement.details(earlier) ?? ""
+        try check(earlierDetails.hasPrefix("Not granted: bookmarks (read-only") && !earlierDetails.contains("idle") && earlierDetails.contains("Disable and enable the extension to review"),
+                  "An ungranted bookmarks capability was not disclosed, or a granted one was listed: \(earlierDetails)")
+        earlier.compatibilityGrants?["bookmarks"] = .distantFuture
+        try check(ExtensionManagement.details(earlier) == nil, "A fully granted install still showed a not-granted note")
         return checks
     }
 }

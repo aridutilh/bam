@@ -27,7 +27,7 @@ enum ExtensionCompatibility {
     }
 
     /// Permissions WebKit's engine does not implement and this layer can stand in for.
-    static let bridgedPermissions: [String] = ["notifications", "idle", "privacy", "management", "downloads", "offscreen", "fontSettings"]
+    static let bridgedPermissions: [String] = ["notifications", "idle", "privacy", "management", "downloads", "offscreen", "fontSettings", "bookmarks"]
     /// Members the layer always offers when the host namespace exists but the member does not.
     static let runtimeExtras: [String] = ["runtime.getBrowserInfo", "runtime.onSuspend", "runtime.requestUpdateCheck", "runtime.getContexts",
                                           "webNavigation.onCreatedNavigationTarget", "storage.managed", "commands", "action.getUserSettings",
@@ -47,7 +47,8 @@ enum ExtensionCompatibility {
 
     /// Names shown in the permission review for a bridged permission list.
     static func reviewLabel(_ permissions: [String]) -> String {
-        permissions.joined(separator: ", ")
+        permissions.map { $0 == "bookmarks" ? "bookmarks (read-only: getTree of this profile's Favorites and kept tabs; no changes or events)" : $0 }
+            .joined(separator: ", ")
     }
 
     /// Builds the document-start script for one extension context.
@@ -274,6 +275,16 @@ enum ExtensionCompatibility {
         registerEvent(ns, "onStateChanged", "idle.onStateChanged");
         define(ns, "IdleState", { ACTIVE: "active", IDLE: "idle", LOCKED: "locked" });
         define(api, "idle", ns);
+      }
+
+      // bookmarks: read-only getTree only, from Bam's saved items in this login profile, when the manifest declares
+      // the permission and no engine namespace exists. No mutation methods and no events are defined. Access is
+      // checked natively on every call against an explicit grant; a denial arrives asynchronously, so the promise
+      // form rejects and the callback form logs the error and calls back with no tree (no empty tree is invented).
+      if (provided.has("bookmarks") && !api.bookmarks) {
+        const ns = {};
+        define(ns, "getTree", call(async () => await bridge("bookmarks.getTree", null)));
+        define(api, "bookmarks", ns);
       }
 
       // privacy: every setting reads as not controllable by the extension.
@@ -768,6 +779,10 @@ enum ExtensionCompatibility {
     /// Returns a delivery error, or nil when the notification was posted natively.
     var postNotification: ((String, String, String, [String], @MainActor () -> Bool) async -> String?)?
     var isNotificationDeliveryAvailable: (() -> Bool)?
+    /// This profile's saved items for bookmarks.getTree; nil when unavailable. Never called for private hosts.
+    var bookmarkInput: (() -> ExtensionBookmarkTree.Input?)?
+    var isPrivateHost = false
+    static let bookmarksNotGranted = "Bam has not been granted bookmarks access for this extension. Disable and enable it in Manage Extensions to review access."
     let browserVersion: String
 
     init(controller: WKWebExtensionController, dataStore: WKWebsiteDataStore, contentController: WKUserContentController, browserVersion: String) {
@@ -1000,10 +1015,22 @@ enum ExtensionCompatibility {
     private func handle(method: String, params: [String: Any], context: WKWebExtensionContext, web: WKWebView?) async -> (Any?, String?) {
         let methods = ["idle.queryState": "idle", "notifications.permissionLevel": "notifications", "notifications.create": "notifications",
                        "notifications.clear": "notifications", "downloads.download": "downloads",
-                       "fontSettings.getFontList": "fontSettings",
+                       "fontSettings.getFontList": "fontSettings", "bookmarks.getTree": "bookmarks",
                        "offscreen.createDocument": "offscreen", "offscreen.closeDocument": "offscreen", "offscreen.hasDocument": "offscreen", "offscreen.contexts": "offscreen"]
-        guard let permission = methods[method], permits(permission, for: context) else { return (nil, "This compatibility capability is not available to the extension.") }
+        guard let permission = methods[method], permits(permission, for: context) else {
+            if method.hasPrefix("bookmarks.") { return (nil, Self.bookmarksNotGranted) }
+            return (nil, "This compatibility capability is not available to the extension.")
+        }
         switch method {
+        case "bookmarks.getTree":
+            // The profile is this bridge's own (the context was matched to its registration above); nothing the
+            // caller sends selects a profile.
+            if isPrivateHost { return (nil, "Bookmarks are not available to extensions in private windows.") }
+            guard let input = bookmarkInput?() else { return (nil, "Bam's bookmarks are not available right now.") }
+            switch ExtensionBookmarkTree.tree(input) {
+            case .success(let root): return ([root], nil)
+            case .failure(let failure): return (nil, failure.description)
+            }
         case "idle.queryState":
             let threshold = max(15, (params["threshold"] as? Double) ?? 60)
             let idle = idleSeconds()

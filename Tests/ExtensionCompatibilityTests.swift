@@ -477,6 +477,42 @@ import JavaScriptCore
         engineBounds.evaluateScript(ExtensionCompatibility.workerScript(manifest: [:], browserVersion: "test"))
         try check(engineBounds.evaluateScript("browser.windows.onBoundsChanged === engineEvent")!.toBool(), "An engine-provided windows.onBoundsChanged was replaced")
 
+        // bookmarks: read-only getTree only, when declared and absent; access is decided natively per call.
+        let marks = JSContext()!
+        var marksErrors: [String] = []
+        marks.exceptionHandler = { _, error in marksErrors.append(error?.toString() ?? "JavaScript error") }
+        marks.evaluateScript("""
+            var location = {origin: 'webkit-extension://fixture', href: 'webkit-extension://fixture/worker.js'}, logged = [], console = {error: function (a, b) { logged.push(String(a) + ' ' + String(b && b.message || b)); }}, performance = {now: function() { return 0; }};
+            var granted = true, requests = [], tree = [{id: '0', title: '', children: [{id: 'favorites', parentId: '0', index: 0, title: 'Favorites', children: []}]}];
+            function Runtime() {}
+            Runtime.prototype.getURL = function (p) { return 'webkit-extension://fixture' + p; }; Runtime.prototype.getManifest = function () { return {permissions: ['bookmarks']}; };
+            Runtime.prototype.sendNativeMessage = function (app, body) { requests.push(body); return granted ? Promise.resolve(tree) : Promise.reject(new Error('Bam has not been granted bookmarks access for this extension.')); };
+            var browser = {runtime: new Runtime()}, chrome = browser;
+            """)
+        marks.evaluateScript(ExtensionCompatibility.workerScript(manifest: ["permissions": ["bookmarks"]], browserVersion: "test"))
+        marks.evaluateScript("""
+            var out = {keys: Object.keys(chrome.bookmarks).join(',')};
+            chrome.bookmarks.getTree().then(function (value) { out.promise = value === tree; out.request = JSON.stringify(requests.filter(function (r) { return r.kind === 'request'; })[0]); });
+            """)
+        marks.evaluateScript("""
+            granted = false;
+            chrome.bookmarks.getTree().then(function () { out.denied = 'resolved'; }, function (error) { out.denied = error.message; });
+            try { out.syncReturn = chrome.bookmarks.getTree(function () { out.callbackArgs = arguments.length; }); out.threw = false; } catch (error) { out.threw = true; }
+            """)
+        try check(marksErrors.isEmpty && marks.evaluateScript("""
+            out.keys === 'getTree' && out.promise === true && out.request === '{"kind":"request","method":"bookmarks.getTree","params":null}'
+            && out.denied === 'Bam has not been granted bookmarks access for this extension.' && out.threw === false && out.syncReturn === undefined
+            && out.callbackArgs === 0 && logged.some(function (line) { return line.indexOf('not been granted') >= 0; })
+            """)!.toBool(), "bookmarks.getTree shape, pass-through or denial contract was wrong: \(marks.evaluateScript("JSON.stringify([out, logged])")!) \(marksErrors)")
+        let undeclared = JSContext()!
+        undeclared.evaluateScript("var location = {origin: 'webkit-extension://fixture', href: 'x'}, console = {error: function() {}}, performance = {now: function() { return 0; }}; var browser = {runtime: {getURL: function (p) { return p; }, getManifest: function () { return {}; }}};")
+        undeclared.evaluateScript(ExtensionCompatibility.workerScript(manifest: [:], browserVersion: "test"))
+        let engineMarks = JSContext()!
+        engineMarks.evaluateScript("var location = {origin: 'webkit-extension://fixture', href: 'x'}, console = {error: function() {}}, performance = {now: function() { return 0; }}; var engine = {getTree: function () {}}; var browser = {runtime: {getURL: function (p) { return p; }, getManifest: function () { return {}; }}, bookmarks: engine};")
+        engineMarks.evaluateScript(ExtensionCompatibility.workerScript(manifest: ["permissions": ["bookmarks"]], browserVersion: "test"))
+        try check(undeclared.evaluateScript("browser.bookmarks === undefined")!.toBool() && engineMarks.evaluateScript("browser.bookmarks === engine")!.toBool(),
+                  "bookmarks appeared without the declared permission, or replaced an engine namespace")
+
         // declarativeNetRequest guard: unsafe added rules are refused before WebKit; valid calls pass through untouched.
         let guardJS = JSContext()!
         var guardErrors: [String] = []

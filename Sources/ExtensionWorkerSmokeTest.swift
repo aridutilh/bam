@@ -38,7 +38,7 @@ import WebKit
             if module { background["type"] = "module" }
             let manifest: [String: Any] = ["manifest_version": 3, "name": module ? "Bam module worker fixture" : "Bam classic worker fixture", "version": "1.0", "description": "Original fixture for Bam service-worker runtime tests",
                 "content_security_policy": ["extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"],
-                "background": background, "permissions": ["storage", "idle", "notifications", "offscreen", "fontSettings", "cookies"], "host_permissions": ["http://127.0.0.1/*", "http://localhost/*", "https://127.0.0.1/*"],
+                "background": background, "permissions": ["storage", "idle", "notifications", "offscreen", "fontSettings", "cookies", "bookmarks"], "host_permissions": ["http://127.0.0.1/*", "http://localhost/*", "https://127.0.0.1/*"],
                 "action": ["default_popup": "popup.html"], "content_scripts": [["matches": ["http://127.0.0.1/*", "http://localhost/*"], "js": ["content.js"], "run_at": "document_end"]]]
             try JSONSerialization.data(withJSONObject: manifest, options: [.sortedKeys]).write(to: package.appendingPathComponent("manifest.json"))
             let dependency = "globalThis.fixtureOrder = [globalThis.__bamCompatibility?.worker === true ? 'adapter' : 'missing-adapter', 'dependency'];\n"
@@ -89,6 +89,10 @@ import WebKit
                 const shimmed = await new Promise(resolve => chrome.fontSettings.setFont({genericFamily: 'serif', fontId: 'Fixture'}, () => resolve(chrome.runtime.lastError ? String(chrome.runtime.lastError.message) : null)));
                 const relay = await new Promise(resolve => chrome.runtime.sendNativeMessage('com.ari.bam.compatibility', {kind: 'lastError-measurement'}, () => resolve(chrome.runtime.lastError ? String(chrome.runtime.lastError.message) : null)));
                 return {lastError: shimmed, relay};
+              }
+              if (message?.kind === 'bookmarks') {
+                try { const tree = await chrome.bookmarks.getTree(); return {tree, keys: Object.keys(chrome.bookmarks)}; }
+                catch (error) { return {error: String(error?.message || error)}; }
               }
               if (message?.kind === 'bounds') {
                 const windows = await chrome.windows.getAll({populate: false});
@@ -234,6 +238,17 @@ import WebKit
         }
         func exercise() async throws -> Int {
         host.permissionPrompt = { _ in true }; host.reconcile()
+        // bookmarks.getTree source: each profile's own saved items, built through the published input contract.
+        var snapshotCalls: [UUID] = []
+        host.bookmarkSnapshot = { profile in
+            snapshotCalls.append(profile)
+            let label = profile == profileA ? "A" : "B", folder = UUID()
+            var builder = ExtensionBookmarkTree.Builder()
+            builder.addFavorite(.init(id: UUID(), title: "\(label) favorite", address: "https://\(label.lowercased()).example/"))
+            builder.addSpace(id: profile == profileA ? 1 : 2, name: "\(label) space", children: [.folder(folder)])
+            builder.addFolder(id: folder, name: "Nested", children: [.page(.init(id: UUID(), title: "Deep \(label)", address: "https://deep.example/\(label)"))])
+            return builder.result
+        }
         let idA = try await host.importPackage(at: fixture(false), profileID: profileA)
         let idB = try await host.importPackage(at: fixture(true), profileID: profileB)
         guard let contextA = host.context(for: idA), let contextB = host.context(for: idB) else { throw Failure(description: "Worker fixtures failed to load: \(host.errors)") }
@@ -343,6 +358,26 @@ import WebKit
                       flushedA.events.suffix(2).contains { $0["width"] as? Int == Int(onlyA.frame.width) },
                       "The flush after the resize did not report each final bound once: \(flushedA.events) signals=\(runtimeA.boundsSignalCount - heldBefore.0)")
         }
+
+        // bookmarks.getTree: granted at install review; each worker sees only its own profile's saved items.
+        func bookmarkTitles(_ report: [String: Any]?) -> [String] {
+            var titles: [String] = []
+            func walk(_ node: [String: Any]) { titles.append(node["title"] as? String ?? "?"); (node["children"] as? [[String: Any]] ?? []).forEach(walk) }
+            (report?["tree"] as? [[String: Any]] ?? []).forEach(walk)
+            return titles
+        }
+        let marksA = await request(popupA, kind: "bookmarks"), marksB = await request(popupB, kind: "bookmarks")
+        try check(bookmarkTitles(marksA) == ["", "Favorites", "A favorite", "A space", "Nested", "Deep A"] && bookmarkTitles(marksB) == ["", "Favorites", "B favorite", "B space", "Nested", "Deep B"] &&
+                  marksA?["keys"] as? [String] == ["getTree"] && Set(snapshotCalls) == [profileA, profileB],
+                  "bookmarks.getTree did not return each profile's own tree only: A=\(marksA ?? [:]) B=\(marksB ?? [:])")
+        // A forged request: profile B's context at profile A's bridge (with a caller-chosen profile) is refused unread;
+        // a caller-chosen profile at the owner's own bridge is ignored.
+        let callsBeforeForgery = snapshotCalls.count
+        let forged = await runtimeA.compatibility.receiveNativeMessage(["kind": "request", "method": "bookmarks.getTree", "params": ["profileID": profileA.uuidString]], context: contextB)
+        let steered = await runtimeB.compatibility.receiveNativeMessage(["kind": "request", "method": "bookmarks.getTree", "params": ["profileID": profileA.uuidString]], context: contextB)
+        let steeredTitle = ((steered.0 as? [[String: Any]])?.first?["children"] as? [[String: Any]])?.last?["title"] as? String
+        try check(forged.1 != nil && forged.0 == nil && snapshotCalls.count == callsBeforeForgery + 1 && snapshotCalls.last == profileB && steeredTitle == "B space",
+                  "A cross-profile bookmarks request was served, or a caller-chosen profile was honored: forged=\(String(describing: forged.1)) steered=\(steeredTitle ?? "nil")")
 
         // offscreen: a worker creates a hidden page, messages it, and closes it; profiles stay separate.
         let offscreenReport = await request(popupA, kind: "offscreen")
@@ -499,6 +534,11 @@ import WebKit
         runtimeA.compatibility.dispatch("notifications.onClicked", [revokedID], to: contextA.uniqueIdentifier)
         let revokedNative = await runtimeA.compatibility.receiveNativeMessage(["kind": "request", "method": "idle.queryState"], context: contextA)
         let revoked = await request(popupA, kind: "revoked")
+        let revokedMarks = await request(popupA, kind: "bookmarks")
+        let revokedMarksNative = await runtimeA.compatibility.receiveNativeMessage(["kind": "request", "method": "bookmarks.getTree"], context: contextA)
+        try check((revokedMarks?["error"] as? String)?.contains("not been granted bookmarks access") == true && revokedMarks?["tree"] == nil &&
+                  revokedMarksNative.0 == nil && revokedMarksNative.1 != nil,
+                  "Revoked bookmarks access still returned a tree: \(revokedMarks ?? [:])")
         try check(revokedNative.1 != nil && revoked?["requestDenied"] is String &&
                   (revoked?["events"] as? [[String: String]])?.contains { $0["value"] == revokedID } == false,
                   "Revoked worker grants still allowed native requests or event delivery")
@@ -544,6 +584,12 @@ import WebKit
             installs.append(Install(id: id, profile: profile, store: store, package: package, backup: backup, manifest: manifest,
                                     vendor: try Data(contentsOf: package.appendingPathComponent(source)), label: label))
         }
+        // Installs reviewed before Bam provided bookmarks: their stored grants lack it. It must not be granted silently.
+        let registryFile = registryURL.appendingPathComponent("registry.json")
+        if var stored = try JSONSerialization.jsonObject(with: Data(contentsOf: registryFile)) as? [[String: Any]] {
+            for index in stored.indices { if var grants = stored[index]["compatibilityGrants"] as? [String: Any] { grants.removeValue(forKey: "bookmarks"); stored[index]["compatibilityGrants"] = grants } }
+            try JSONSerialization.data(withJSONObject: stored).write(to: registryFile, options: .atomic)
+        }
         func relaunch(refreshing: Bool, minimumStarts: Int, expectedVersion: String) async throws -> (BrowserExtensions, [UUID: Int], [UUID: BrowserExtensionRecord]) {
             let relaunched = BrowserExtensions(storageURL: registryURL)
             relaunched.refreshesWorkerAdapters = refreshing
@@ -568,6 +614,14 @@ import WebKit
             return (relaunched, starts, records)
         }
         let (agedHost, agedStarts, agedRecords) = try await relaunch(refreshing: false, minimumStarts: 3, expectedVersion: older)
+        for install in installs {
+            guard let context = agedHost.context(for: install.id), let runtime = context.webExtensionController?.delegate as? BrowserExtensionRuntime,
+                  let record = agedHost.records.first(where: { $0.id == install.id }) else { throw Failure(description: "The relaunched \(install.label) context is missing") }
+            let earlier = await runtime.compatibility.receiveNativeMessage(["kind": "request", "method": "bookmarks.getTree"], context: context)
+            try check(earlier.0 == nil && earlier.1?.localizedDescription == ExtensionCompatibilityBridge.bookmarksNotGranted && record.compatibilityGrants?["bookmarks"] == nil &&
+                      record.compatibility?.contains("bookmarks") == true && ExtensionManagement.details(record)?.contains("Not granted: bookmarks") == true,
+                      "An earlier \(install.label) install gained bookmarks access without review, or the missing grant was not shown: \(String(describing: earlier.1))")
+        }
         agedHost.shutdown()
         let (upgradedHost, upgradedStarts, upgradedRecords) = try await relaunch(refreshing: true, minimumStarts: 4, expectedVersion: BrowserExtensions.browserVersion)
         defer { upgradedHost.shutdown() }

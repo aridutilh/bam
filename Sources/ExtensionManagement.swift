@@ -243,7 +243,12 @@ import UniformTypeIdentifiers
     /// The selected extension's disclosure: the static-rule warning first (it can affect what the extension does),
     /// then preparation notes, then reload guidance. Nil when there is nothing extension-specific to say.
     static func details(_ record: BrowserExtensionRecord) -> String? {
-        let parts = [record.staticRuleAudit?.note, record.compatibilityNote].compactMap { $0 }
+        // Capabilities Bam now provides for what the extension declares but that were never reviewed (installs from
+        // an earlier Bam) or were revoked: listed, never granted silently.
+        let now = Date()
+        let ungranted = (record.compatibility ?? []).filter { (record.compatibilityGrants?[$0] ?? .distantPast) <= now }
+        let access = ungranted.isEmpty ? nil : "Not granted: \(ExtensionCompatibility.reviewLabel(ungranted)). Disable and enable the extension to review this access."
+        let parts = [access, record.staticRuleAudit?.note, record.compatibilityNote].compactMap { $0 }
         return parts.isEmpty ? nil : (parts + ["Reload open pages after changing access."]).joined(separator: "\n\n")
     }
     static func statusText(headline: String?, details: String?, guidance: String) -> String {
@@ -258,7 +263,7 @@ import UniformTypeIdentifiers
         if let note = review.compatibilityNote { lines += ["Compatibility preparation:", note, ""] }
         if !review.permissions.isEmpty { lines += ["Browser capabilities:", review.permissions.joined(separator: ", "), ""] }
         if !review.websites.isEmpty { lines += ["Websites:"] + review.websites + [""] }
-        if !review.bridged.isEmpty { lines += ["Provided by Bam’s compatibility layer (limited):", review.bridged.joined(separator: ", "), ""] }
+        if !review.bridged.isEmpty { lines += ["Provided by Bam’s compatibility layer (limited):", ExtensionCompatibility.reviewLabel(review.bridged), ""] }
         if review.nativeCompanionAvailable { lines += ["Desktop app (separate approval required):", "The verified 1Password extension can request a connection from Manage Extensions. Enabling website access does not approve it.", ""] }
         if !review.unsupported.isEmpty { lines += ["Unavailable in Bam (not granted):", review.unsupported.joined(separator: ", "), ""] }
         lines += ["Desktop-app access is reviewed separately in Manage Extensions and currently supports only the verified Chrome build of 1Password. Other native hosts and full Chrome compatibility remain unavailable. Reload existing pages after changing access."]
