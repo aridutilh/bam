@@ -40,6 +40,10 @@ import WebKit
     private var reviewEvents: [[String: Any]] = []
     /// IDs seeded by BAM_VENDOR_SEED_BOOKMARKS (empty when off), for the no-loaded-views check.
     private var seededBookmarkIDs: [UUID] = []
+    /// The two seeded bookmark pages' exact addresses (empty when off): the only non-extension URLs an extension
+    /// may open in this probe, and only while the seed is on. Every other external request stays blocked.
+    private var seededDestinations: Set<String> = []
+    private var seededNavigations: [[String: Any]] = []
     /// Opt-in normal-profile mode (`BAM_VENDOR_PROFILE=normal`): this run's own identities,
     /// directory and isolated website store; nil in today's default private mode.
     private struct NormalRun {
@@ -216,6 +220,7 @@ import WebKit
             if case .seed(let origin) = seedDecision, let run = normalRun {
                 let seeded = BookmarkVendorSeed.seed(into: &browser.session, profileID: run.ids.profile, space: 0, origin: origin)
                 seededBookmarkIDs = Array(seeded.ids.values)
+                seededDestinations = Set(seeded.destinations)
                 observations["bookmark_seed"] = ["items": seeded.itemCount, "bookmark_pages": seeded.bookmarkPages,
                                                  "ids": seeded.ids.mapValues(\.uuidString)]
             }
@@ -254,18 +259,27 @@ import WebKit
         }
         let create = host.createTab
         host.createTab = { [weak self, weak host] url, profile, active in
-            guard host?.allowsExtensionURL(url, profileID: profile) == true else {
-                self?.recordBlocked(url, operation: "createTab"); return nil
+            guard let self else { return nil }
+            if host?.allowsExtensionURL(url, profileID: profile) == true { return create?(url, profile, active) }
+            guard BookmarkVendorSeed.allowsSeededNavigation(url, destinations: self.seededDestinations) else {
+                self.recordBlocked(url, operation: "createTab"); return nil
             }
-            return create?(url, profile, active)
+            let tab = create?(url, profile, active)
+            self.recordSeededNavigation(url, operation: "createTab", accepted: tab != nil)
+            return tab
         }
         let navigate = host.navigateTab
         host.navigateTab = { [weak self, weak host] id, url in
-            guard let browser = self?.controller, let tab = browser.session.tabs.first(where: { $0.id == id }),
-                  host?.allowsExtensionURL(url, profileID: browser.session.profileID(for: tab)) == true else {
+            guard let self, let browser = self.controller, let tab = browser.session.tabs.first(where: { $0.id == id }) else {
                 self?.recordBlocked(url, operation: "navigateTab"); return false
             }
-            return navigate?(id, url) ?? false
+            if host?.allowsExtensionURL(url, profileID: browser.session.profileID(for: tab)) == true { return navigate?(id, url) ?? false }
+            guard BookmarkVendorSeed.allowsSeededNavigation(url, destinations: self.seededDestinations) else {
+                self.recordBlocked(url, operation: "navigateTab"); return false
+            }
+            let accepted = navigate?(id, url) ?? false
+            self.recordSeededNavigation(url, operation: "navigateTab", accepted: accepted)
+            return accepted
         }
         let profile = browser.session.currentProfileID
         let configuration = WKWebViewConfiguration()
@@ -506,6 +520,10 @@ import WebKit
         default: return value
         }
     }
+    private func recordSeededNavigation(_ url: URL, operation: String, accepted: Bool) {
+        guard seededNavigations.count < 20 else { return }
+        seededNavigations.append(["operation": operation, "url": sanitizedURL(url), "accepted": accepted])
+    }
     private func recordBlocked(_ url: URL, operation: String) {
         guard blockedNavigations.count < 20 else { return }
         blockedNavigations.append(["operation": operation, "url": sanitizedURL(url)])
@@ -595,6 +613,14 @@ import WebKit
         if !seededBookmarkIDs.isEmpty, let browser = controller {
             // Seeded items stay dormant unless the extension or the operator opens one.
             observations["bookmark_seed_views_loaded_at_end"] = seededBookmarkIDs.filter { browser.browsers[$0] != nil }.count
+            // Requests accepted by the gate and live renderer URLs observed at the seeded destinations.
+            // URL observation alone does not prove page completion or rendered content.
+            observations["bookmark_seed_navigations"] = seededNavigations
+            observations["bookmark_seed_page_urls_observed_at_end"] = browser.session.tabs.filter { tab in
+                guard browser.browsers[tab.id] != nil else { return false }
+                guard let current = browser.browsers[tab.id]?.url?.absoluteString else { return false }
+                return seededDestinations.contains(current)
+            }.count
         }
         if let run = normalRun {
             observations["opened_persistent_store_ids"] = run.stores.openedPersistentIdentifiers.map(\.uuidString)
