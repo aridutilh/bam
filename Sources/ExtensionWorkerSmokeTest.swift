@@ -81,7 +81,11 @@ import WebKit
             };
             api.runtime.onMessage.addListener(async message => {
               if (message?.kind === 'last-error') {
-                return new Promise(resolve => chrome.fontSettings.setFont({genericFamily: 'serif', fontId: 'Fixture'}, () => resolve({lastError: chrome.runtime.lastError ? String(chrome.runtime.lastError.message) : null})));
+                // relay: a real native call failing in callback form (Bam's internal transport answers an unknown
+                // kind with an error), to learn whether WebKit's own lastError would carry Bam's text.
+                const shimmed = await new Promise(resolve => chrome.fontSettings.setFont({genericFamily: 'serif', fontId: 'Fixture'}, () => resolve(chrome.runtime.lastError ? String(chrome.runtime.lastError.message) : null)));
+                const relay = await new Promise(resolve => chrome.runtime.sendNativeMessage('com.ari.bam.compatibility', {kind: 'lastError-measurement'}, () => resolve(chrome.runtime.lastError ? String(chrome.runtime.lastError.message) : null)));
+                return {lastError: shimmed, relay};
               }
               if (message?.kind === 'cookie-diagnostics') {
                 const describe = async details => { try { const list = await chrome.cookies.getAll(details); return {count: list.length, hasFixture: list.some(c => c.name === 'bam-fixture-cookie')}; } catch (error) { return 'error: ' + String(error?.message || error); } };
@@ -354,8 +358,8 @@ import WebKit
         let pageLastError = (try? await popupA.callAsyncJavaScript("""
             return await new Promise(resolve => chrome.fontSettings.setFont({genericFamily: 'serif', fontId: 'Fixture'}, () => resolve(chrome.runtime.lastError ? String(chrome.runtime.lastError.message) : null)));
             """, arguments: [:], contentWorld: .page)) ?? nil
-        let workerLastError = await request(popupA, kind: "last-error")?["lastError"]
-        print("EXTENSION_LASTERROR page=\(String(describing: pageLastError)) worker=\(String(describing: workerLastError))"); fflush(stdout)
+        let workerReport = await request(popupA, kind: "last-error")
+        print("EXTENSION_LASTERROR page=\(String(describing: pageLastError)) worker=\(String(describing: workerReport?["lastError"])) relay=\(String(describing: workerReport?["relay"]))"); fflush(stdout)
         // cookies.onChanged on real WebKit: a loopback cookie set and deleted in profile A's own store
         // reaches A's worker as Chrome-shaped changeInfo; profile B's worker sees nothing.
         let fixtureCookie = HTTPCookie(properties: [.name: "bam-fixture-cookie", .value: "1", .domain: "127.0.0.1", .path: "/"])!
