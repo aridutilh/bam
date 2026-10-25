@@ -9,8 +9,9 @@ import WebKit
 /// `contentWindow.focus()`, child timer), or `c` (pointer-click positive control). Real keys and clicks are root's only.
 /// Page-side evidence is passive and reaches the host only through a run-unique host-world script message handler; the
 /// host evaluates no page JavaScript. Results are observations; nothing here attributes a cause to WebKit or Bam.
-/// `BAM_FOCUS_HOST=plain` hosts the same page in a bare WKWebView (no BrowserController) with the same kind of owned
-/// transient extension host, to compare Bam's browser layer against WebKit alone.
+/// `BAM_FOCUS_HOST=plain` hosts the same page in a bare WKWebView (no BrowserController or UI) with the same kind of owned
+/// transient extension host. It still uses Bam's extension host, runtime and compatibility layer, so it isolates the
+/// BrowserController/UI layer only; it is not a pure-WebKit control.
 @available(macOS 15.4, *)
 @MainActor final class ExtensionFocusProbe {
     private static var current: ExtensionFocusProbe?
@@ -428,7 +429,9 @@ import WebKit
         self.hostMode = hostMode
         observations["host"] = hostMode.rawValue
         if hostMode == .plain {
-            observations["scope"] = "original MV3 fixture (content script and one web-accessible child page; no API permissions) on the loopback page; PLAIN host: a bare WKWebView in its own window registered as the extension host's only tab surface (no BrowserController, sidebar, overlays or Bam navigation/UI delegates); owned transient extension host with a non-persistent controller and data store; passive host-world observation; no page JavaScript evaluated by the host; measurement only, no WebKit or Bam root-cause attribution"
+            observations["scope"] = "original MV3 fixture (content script and one web-accessible child page; no API permissions) on the loopback page; PLAIN host: a bare WKWebView in its own window registered as the extension host's only tab surface, with no BrowserController, sidebar, overlays or Bam navigation/UI delegates; still Bam's BrowserExtensions host, extension runtime and compatibility layer (owned transient storage, non-persistent controller and data store), so a matching result excludes the BrowserController/UI layer only and is not a pure-WebKit control; same warm-up (unmarked page, then observer, then probe page); passive host-world observation; no page JavaScript evaluated by the host; measurement only, no root-cause attribution"
+        } else {
+            observations["scope"] = "original MV3 fixture (content script and one web-accessible child page; no API permissions) on the loopback page; BAM host: a real Bam window and tab (BrowserController) with Bam's extension host, runtime and compatibility layer; ephemeral profile; passive host-world observation; no page JavaScript evaluated by the host; measurement only, no root-cause attribution"
         }
         guard let structure = Rules.parseStructure(env["BAM_FOCUS_STRUCTURE"]) else {
             throw BrowserExtensions.failure("BAM_FOCUS_STRUCTURE must be none, vimium, vimium-minus-<factor> or a comma list of " +
@@ -530,10 +533,10 @@ import WebKit
             probePageURL = probePage
             browser.navigatePane(tab, address: probePage.absoluteString)
         } else {
-            // Plain: we own the configuration, so the observer is installed before the first (probe-page) load. The web view
-            // is registered as the host's one tab surface so the extension runtime sees it as a tab.
+            // Plain: the same warm-up sequence as the Bam host. First the unmarked loopback page (the content script stays
+            // inert), wait for it to finish, then install the observer, then navigate to the probe page, so the probe page is
+            // not the web view's first document in either host. The web view is registered as the host's one tab surface.
             opened = UUID(); tabID = opened
-            installObserver(configuration.userContentController)
             let web = WKWebView(frame: NSRect(x: 0, y: 0, width: 900, height: 640), configuration: configuration)
             plainWeb = web
             main.contentView = web
@@ -542,9 +545,14 @@ import WebKit
                 return [BrowserExtensionSurface(id: opened, title: "Focus probe", url: web.url, webView: web, window: main, isActive: true, isSelected: true)]
             }
             host.reconcile()
+            main.makeFirstResponder(web)
+            web.load(URLRequest(url: page))
+            guard try await poll(until: setupDeadline, { web.url == page && !web.isLoading }) else {
+                throw BrowserExtensions.failure("The loopback fixture page did not load")
+            }
+            installObserver(web.configuration.userContentController)
             probePageURL = probePage
             web.load(URLRequest(url: probePage))
-            main.makeFirstResponder(web)
         }
 
         // Handshake before READY: the child's ready acknowledgement and the parent's armed record, both preloaded. With
