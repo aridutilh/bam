@@ -431,6 +431,23 @@ import Security
         try await rejects("cws-id-mismatch", containing: "not the expected") { try await fetch.fetch(storeCandidate, into: root.appendingPathComponent("stage-mismatch")) }
         try check(!fm.fileExists(atPath: root.appendingPathComponent("stage-mismatch/package").path), "A failed verification leaves no unpacked package")
 
+        // A store build must be a CRX3 signed for exactly its listing ID: a plain ZIP, a missing or
+        // malformed ID, or an unsigned payload never reaches unpacking (or the installer).
+        let storeZIP = "https://clients2.googleusercontent.com/crx/blobs/AVDNL_z/\(key.id.uppercased())_1_0_0.crx"
+        client.routes[storeZIP] = .init(status: 200, body: payload)
+        let zipStore = ExtensionBuildCandidate(source: .chromeWebStore, upstreamID: key.id, name: key.id, publisher: "", version: "1.0.0", downloadURL: URL(string: storeZIP)!)
+        try await rejects("cws-plain-zip", containing: "plain ZIP") { try await fetch.fetch(zipStore, into: root.appendingPathComponent("stage-cws-zip")) }
+        try check(!fm.fileExists(atPath: root.appendingPathComponent("stage-cws-zip/package").path), "A store ZIP was unpacked before rejection")
+        for (label, id) in [("missing", nil), ("malformed", "not-an-id"), ("uppercase-out-of-range", String(repeating: "Z", count: 32))] as [(String, String?)] {
+            var unnamed = storeCandidate; unnamed.upstreamID = id; unnamed.downloadURL = URL(string: crxURL)!
+            try await rejects("cws-id-\(label)", containing: "must name its extension ID") { try await fetch.fetch(unnamed, into: root.appendingPathComponent("stage-cws-\(label)")) }
+            try check(!fm.fileExists(atPath: root.appendingPathComponent("stage-cws-\(label)/package").path), "A store build without a valid ID was unpacked (\(label))")
+        }
+        var uppercaseID = storeCandidate; uppercaseID.upstreamID = key.id.uppercased(); uppercaseID.downloadURL = URL(string: crxURL)!
+        let uppercaseFetched = try await fetch.fetch(uppercaseID, into: root.appendingPathComponent("stage-cws-upper"))
+        try check(uppercaseFetched.provenance == .crx3SignatureVerified(id: key.id) && uppercaseFetched.candidate.upstreamID == key.id,
+                  "A store ID differing only in case did not verify to the canonical lowercase ID")
+
         let directCRX = "https://downloads.example.com/releases/tool.crx"
         client.routes[directCRX] = .init(status: 200, body: signed)
         let direct = try await fetch.fetch(.direct(URL(string: directCRX)!), into: root.appendingPathComponent("stage-direct-crx"))
