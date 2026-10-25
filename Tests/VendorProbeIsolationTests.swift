@@ -155,6 +155,58 @@ import Foundation
         result = await cleanup(fake, store: I.zero, reserved: reserved)
         check(result.refused != nil && fake.removeCalls.isEmpty, "the zero identifier is refused")
 
+        // Release gate: removal never runs while anything still holds the store.
+        fake = FakeStores(present: [store])
+        var gated = await I.removeOwnedStoreAfterRelease(store, reserved: reserved, isReleased: { false }, releaseTimeout: 0.2, pollInterval: 0.02,
+                                                         remove: fake.remove, list: fake.list, timeout: 0.3, retryDelay: 0.05)
+        check(!gated.released && gated.removal == nil && !gated.clean && fake.removeCalls.isEmpty && fake.present.contains(store),
+              "release never happens: no removal call, not clean, even though remove/list would have succeeded")
+        fake = FakeStores(present: [store])
+        let releaseAt = Date().addingTimeInterval(0.1)
+        gated = await I.removeOwnedStoreAfterRelease(store, reserved: reserved, isReleased: { Date() >= releaseAt }, releaseTimeout: 2, pollInterval: 0.02,
+                                                     remove: fake.remove, list: fake.list, timeout: 0.3, retryDelay: 0.05)
+        check(gated.released && gated.clean && fake.removeCalls == [store], "a late release is waited for, then only the owned store is removed")
+        fake = FakeStores(present: [store]); fake.outcomes = ["busy", "busy"]
+        gated = await I.removeOwnedStoreAfterRelease(store, reserved: reserved, isReleased: { true }, releaseTimeout: 1, pollInterval: 0.02,
+                                                     remove: fake.remove, list: fake.list, timeout: 0.3, retryDelay: 0.05)
+        check(gated.released && gated.removal?.attempts == 2 && !gated.clean, "released but the store still listed is not clean")
+
+        // Stable document identity across rounds.
+        func doc(_ id: String?, _ json: String) -> Any? {
+            var object = (try? JSONSerialization.jsonObject(with: Data(json.utf8))) as? [String: Any] ?? [:]
+            if let id { object["doc"] = id }
+            return object
+        }
+        let good = #"{"state":"done","inIncognitoContext":false,"allowedIncognitoAccess":false,"windowIncognito":[false],"tabIncognito":[false]}"#
+        let privateOne = #"{"state":"done","inIncognitoContext":true,"allowedIncognitoAccess":false,"windowIncognito":[true],"tabIncognito":[true]}"#
+        let unfinishedJSON = #"{"state":"started","inIncognitoContext":false}"#
+        func roundVerdict(_ rounds: [[Any?]]) -> I.Verdict {
+            I.verdict(rounds: rounds, controllerConfigurationPersistent: false, openedStores: [store], expectedStore: store, refusedProfiles: [])
+        }
+        check(roundVerdict([[doc("a", unfinishedJSON), doc("b", unfinishedJSON)], [doc("b", good), doc("a", good)]]) == .normal,
+              "documents reordered between rounds still match by ID; all ended complete → normal")
+        let swapped = I.documents(fromRounds: [[doc("a", privateOne), doc("b", good)], [doc("b", good), doc("a", good)]])
+        check(swapped.count == 2 && swapped.first(where: { $0.id == "a" })?.firstIncognito != nil && swapped.first(where: { $0.id == "b" })?.firstIncognito == nil,
+              "a reorder does not move one document's private answer onto another")
+        if case .notNormal = roundVerdict([[doc("a", privateOne), doc("b", good)], [doc("b", good), doc("a", good)]]) {} else {
+            check(false, "an earlier private answer is retained even after the document later answers normally")
+        }
+        checks += 1
+        if case .notNormal = roundVerdict([[doc("a", good), doc("p", privateOne)], [doc("a", good)]]) {} else {
+            check(false, "a private answer from a document that has since closed is retained")
+        }
+        checks += 1
+        if case .unmeasured = roundVerdict([[doc("a", good), doc("c", unfinishedJSON)], [doc("a", good)]]) {} else {
+            check(false, "a document that closed before answering completely leaves the run unmeasured")
+        }
+        checks += 1
+        if case .unmeasured = roundVerdict([[doc(nil, good)], [doc(nil, good)], ["not an object"]]) {} else {
+            check(false, "results without a document ID never merge; an unreadable one is an unfinished document")
+        }
+        checks += 1
+        check(I.documents(fromRounds: [[doc(nil, good)], [doc(nil, good)]]).count == 2, "unidentified results are separate documents")
+        check(roundVerdict([]) == .unmeasured("no extension document was measured"), "no rounds is unmeasured")
+
         // Bounded: late callbacks are ignored, first value wins.
         let late: Int? = await I.bounded(0.1) { done in DispatchQueue.global().asyncAfter(deadline: .now() + 0.4) { done(1) } }
         check(late == nil, "a late callback is ignored after the bound")

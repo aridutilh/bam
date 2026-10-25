@@ -46,8 +46,9 @@ import WebKit
         let stores: WebsiteProfileStore
     }
     private var normalRun: NormalRun?
-    /// Latest incognito answers per extension document (from VendorProbeIsolation.measurementScript).
-    private var modeMeasurements: [Int: [String: Any]] = [:]
+    /// Every evaluation round of VendorProbeIsolation.measurementScript: one entry per live extension
+    /// document. Positions can change between rounds; documents are matched by their own random ID.
+    private var modeRounds: [[[String: Any]]] = []
     private var controllerConfigurationPersistent: Bool?
     /// The action popup's page, so its release can be confirmed before the owned store is removed.
     private weak var lastPopupWebView: WKWebView?
@@ -490,49 +491,48 @@ import WebKit
         blockedNavigations.append(["operation": operation, "url": sanitizedURL(url)])
     }
 
-    /// Keeps the latest result per extension document; each evaluation returns one JSON string per live document.
-    /// A document whose result isn't a parsable object is kept as an unfinished sample, never skipped.
+    /// Keeps one whole round per evaluation (one JSON string per live document). A document whose result isn't a
+    /// parsable object is kept as an unfinished sample, never skipped.
     private func recordModeMeasurements(_ results: [String]) {
-        for (index, text) in results.enumerated() {
+        modeRounds.append(results.map { text in
             if let data = text.data(using: .utf8),
-               let object = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) as? [String: Any] {
-                modeMeasurements[index] = object
-            } else {
-                modeMeasurements[index] = ["state": "unparsed", "raw": String(text.prefix(200))]
-            }
-        }
+               let object = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) as? [String: Any] { return object }
+            return ["state": "unparsed", "raw": String(text.prefix(200))]
+        })
     }
     /// After the views are released: remove only the run's own website store (bounded, confirmed by the
     /// store list), then the run directory. Never lists-and-deletes anything else.
     private func cleanUpNormalRun(_ run: NormalRun, controllerReleased: @escaping () -> Bool,
                                   livePages: @escaping () -> Int) async -> (clean: Bool, report: [String: Any]) {
         var report: [String: Any] = [:]
-        // WebKit requires every WKWebView using a store to be released before that store is removed.
-        var releasedInTime = false
-        for _ in 0..<100 {
-            if controllerReleased() && livePages() == 0 { releasedInTime = true; break }
-            try? await Task.sleep(nanoseconds: 100_000_000)
-        }
-        report["controller_released"] = controllerReleased()
-        report["owned_pages_still_alive"] = livePages()
+        // No persistent store can be (re)opened from here on; pages still holding one keep it until released.
         run.stores.releaseStores()
-        var storeRemoved = false
-        if !releasedInTime {
-            report["store_removal"] = ["not_attempted": "the controller or an owned page was still alive after 10 s; store \(run.ids.store.uuidString) left for manual removal"]
-        } else if run.stores.allowedStoreIdentifiers == [run.ids.store] {
-            let result = await VendorProbeIsolation.removeOwnedStore(
+        var released = false, storeRemoved = false
+        if run.stores.allowedStoreIdentifiers == [run.ids.store] {
+            // WebKit requires every WKWebView using a store to be released before that store is removed:
+            // the gate polls the controller and every tracked owned page, and never removes otherwise.
+            let gated = await VendorProbeIsolation.removeOwnedStoreAfterRelease(
                 run.ids.store, reserved: Self.reservedIdentifiers,
+                isReleased: { controllerReleased() && livePages() == 0 }, releaseTimeout: 10, pollInterval: 0.1,
                 remove: { id, done in
                     Task { @MainActor in WKWebsiteDataStore.remove(forIdentifier: id) { error in done(error.map { Self.sanitize($0.localizedDescription) }) } }
                 },
                 list: { done in Task { @MainActor in WKWebsiteDataStore.fetchAllDataStoreIdentifiers { done($0) } } },
                 timeout: 10, retryDelay: 1)
-            storeRemoved = result.removed
-            report["store_removal"] = ["attempts": result.attempts, "error": result.removalError ?? "none", "timed_out": result.removalTimedOut,
-                                       "confirmed_absent": result.confirmedAbsent, "refused": result.refused ?? "no"]
+            released = gated.released
+            storeRemoved = gated.clean
+            if let result = gated.removal {
+                report["store_removal"] = ["attempts": result.attempts, "error": result.removalError ?? "none", "timed_out": result.removalTimedOut,
+                                           "confirmed_absent": result.confirmedAbsent, "refused": result.refused ?? "no"]
+            } else {
+                report["store_removal"] = ["not_attempted": "the controller or an owned page was still alive after 10 s; store \(run.ids.store.uuidString) left for manual removal"]
+            }
         } else {
             report["store_removal"] = ["refused": "the isolated store allowlist is not exactly the run's store"]
         }
+        report["controller_released"] = controllerReleased()
+        report["owned_pages_still_alive"] = livePages()
+        report["released_before_removal"] = released
         report["store_removed"] = storeRemoved
         let fm = FileManager.default
         if fm.fileExists(atPath: run.directory.path) { try? fm.removeItem(at: run.directory) }
@@ -541,7 +541,7 @@ import WebKit
         report["extension_controller_storage"] = "non-persistent; nothing on disk to remove"
         // Clean only when the controller and every owned page were released first, the owned store
         // was removed and confirmed absent, and the run directory is gone.
-        return (releasedInTime && storeRemoved && directoryClean, report)
+        return (released && storeRemoved && directoryClean, report)
     }
 
     private func finish(_ requested: Bool, reason raw: String) {
@@ -560,16 +560,20 @@ import WebKit
         observations["pages"] = pages
         observations["permission_reviews"] = reviewEvents
         observations["blocked_external_tab_requests"] = blockedNavigations
-        let samples = modeMeasurements.keys.sorted().compactMap { modeMeasurements[$0] }
-        observations["incognito_measurements"] = samples
+        // Evidence per document (by the document's own random ID) across every round.
+        let rounds: [[Any?]] = modeRounds.map { $0.map { $0 as Any? } }
+        observations["incognito_measurement_rounds"] = modeRounds.count
+        observations["incognito_measurements"] = modeRounds.last ?? []
+        observations["incognito_documents"] = VendorProbeIsolation.documents(fromRounds: rounds).map { doc in
+            ["samples": doc.samples, "latest_complete": doc.latest.complete, "ever_incognito": doc.firstIncognito != nil] as [String: Any]
+        }
         // Normal mode is only claimed when measured; otherwise it is reported as not normal or unmeasured.
         var modeValid = true
         if let run = normalRun {
             observations["opened_persistent_store_ids"] = run.stores.openedPersistentIdentifiers.map(\.uuidString)
             observations["unlisted_profile_requests"] = run.stores.unlistedProfileRequests.map(\.uuidString)
-            // One sample per measured document; nothing is dropped (an unreadable one counts as unfinished).
-            let measured = samples.map { VendorProbeIsolation.measurement(from: $0) ?? VendorProbeIsolation.IncognitoMeasurement(finished: false) }
-            let verdict = VendorProbeIsolation.verdict(measured,
+            // Nothing is dropped: an unreadable result counts as an unfinished document of its own.
+            let verdict = VendorProbeIsolation.verdict(rounds: rounds,
                                                        controllerConfigurationPersistent: controllerConfigurationPersistent,
                                                        openedStores: run.stores.openedPersistentIdentifiers, expectedStore: run.ids.store,
                                                        refusedProfiles: run.stores.unlistedProfileRequests)

@@ -80,6 +80,47 @@ enum VendorProbeIsolation {
         /// Nothing complete was measured, so the mode can't be claimed.
         case unmeasured(String)
     }
+    /// Everything observed for one extension document across all evaluation rounds.
+    struct DocumentEvidence: Equatable {
+        /// The document's own random ID (set once by `measurementScript`), or a unique placeholder for a
+        /// result without one, which therefore never merges with another result.
+        let id: String
+        var samples = 0
+        /// The document's most recent answers; must be complete for a normal verdict.
+        var latest: IncognitoMeasurement
+        /// The first answer that reported private browsing, kept even if later answers differ.
+        var firstIncognito: IncognitoMeasurement?
+    }
+    /// Groups rounds of results (one entry per live document per round, in any order) by document ID.
+    /// Order within a round never matters; a document that has closed keeps its evidence.
+    static func documents(fromRounds rounds: [[Any?]]) -> [DocumentEvidence] {
+        var order: [String] = [], byID: [String: DocumentEvidence] = [:]
+        for (r, round) in rounds.enumerated() {
+            for (i, raw) in round.enumerated() {
+                let sample = measurement(from: raw) ?? IncognitoMeasurement(finished: false)
+                let given = ((raw as? [String: Any])?["doc"] as? String).flatMap { $0.isEmpty || $0.count > 64 ? nil : $0 }
+                let id = given ?? "unidentified-\(r + 1)-\(i + 1)"
+                var evidence = byID[id] ?? { order.append(id); return DocumentEvidence(id: id, latest: sample) }()
+                evidence.samples += 1
+                evidence.latest = sample
+                if sample.saysIncognito, evidence.firstIncognito == nil { evidence.firstIncognito = sample }
+                byID[id] = evidence
+            }
+        }
+        return order.compactMap { byID[$0] }
+    }
+    /// The run-level verdict from every round: any document that ever reported private browsing makes it not
+    /// normal; otherwise every document ever seen must have ended with complete explicit answers.
+    static func verdict(rounds: [[Any?]], controllerConfigurationPersistent: Bool?,
+                        openedStores: [UUID], expectedStore: UUID, refusedProfiles: [UUID]) -> Verdict {
+        let docs = documents(fromRounds: rounds)
+        if let doc = docs.first(where: { $0.firstIncognito != nil }), let marked = doc.firstIncognito {
+            return .notNormal("an extension document reported private browsing during the run (inIncognitoContext \(String(describing: marked.inIncognitoContext)), allowedIncognitoAccess \(String(describing: marked.allowedIncognitoAccess)), windows \(marked.windowIncognito ?? []), tabs \(marked.tabIncognito ?? []))")
+        }
+        return verdict(docs.map(\.latest), controllerConfigurationPersistent: controllerConfigurationPersistent,
+                       openedStores: openedStores, expectedStore: expectedStore, refusedProfiles: refusedProfiles)
+    }
+    /// `samples`: one entry per document, all of which must be complete with explicit answers.
     static func verdict(_ samples: [IncognitoMeasurement], controllerConfigurationPersistent: Bool?,
                         openedStores: [UUID], expectedStore: UUID, refusedProfiles: [UUID]) -> Verdict {
         if controllerConfigurationPersistent == true { return .notNormal("the extension controller configuration is persistent") }
@@ -102,7 +143,11 @@ enum VendorProbeIsolation {
     (() => {
       const g = globalThis;
       if (g.__bamModeProbe) return g.__bamModeProbe;
-      const r = g.__bamModeProbe = { state: "started" };
+      // A random ID fixed for this document's lifetime, so rounds can be matched per document.
+      let doc = null;
+      try { doc = g.crypto && g.crypto.randomUUID ? g.crypto.randomUUID() : null; } catch (e) {}
+      if (!doc) doc = "d" + Date.now().toString(36) + Math.random().toString(36).slice(2, 12);
+      const r = g.__bamModeProbe = { state: "started", doc };
       const api = (typeof chrome === "object" && chrome) ? chrome : undefined;
       const note = (key, error) => { r[key] = String((error && error.message) || error).slice(0, 200); };
       // Only explicit booleans are recorded; anything missing or of another type is null.
@@ -155,6 +200,33 @@ enum VendorProbeIsolation {
         }
         return result
     }
+    struct GatedCleanup: Equatable {
+        /// The controller and every owned page were released within the bound.
+        var released = false
+        /// nil when removal was not attempted because something was still alive.
+        var removal: CleanupResult?
+        var clean: Bool { released && removal?.removed == true }
+    }
+    /// WebKit requires every WKWebView using a store to be released before the store is removed. Polls
+    /// `isReleased` until it holds or `releaseTimeout` passes; only then removes `store` via `removeOwnedStore`.
+    /// If release never holds, `remove` and `list` are never called.
+    static func removeOwnedStoreAfterRelease(_ store: UUID, reserved: Set<UUID>,
+                                             isReleased: @escaping () -> Bool, releaseTimeout: TimeInterval, pollInterval: TimeInterval,
+                                             remove: @escaping (UUID, @escaping (String?) -> Void) -> Void,
+                                             list: @escaping (@escaping ([UUID]) -> Void) -> Void,
+                                             timeout: TimeInterval, retryDelay: TimeInterval) async -> GatedCleanup {
+        var gated = GatedCleanup()
+        let deadline = Date().addingTimeInterval(max(0, releaseTimeout))
+        while true {
+            if isReleased() { gated.released = true; break }
+            guard Date() < deadline else { break }
+            try? await Task.sleep(nanoseconds: UInt64(max(0.001, pollInterval) * 1_000_000_000))
+        }
+        guard gated.released else { return gated }
+        gated.removal = await removeOwnedStore(store, reserved: reserved, remove: remove, list: list, timeout: timeout, retryDelay: retryDelay)
+        return gated
+    }
+
     /// Delivers the first callback value, or nil after `seconds`. Late callbacks are ignored.
     final class Once: @unchecked Sendable {
         private let lock = NSLock(); private var done = false
