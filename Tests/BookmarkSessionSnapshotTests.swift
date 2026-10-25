@@ -145,6 +145,24 @@ import Foundation
                 "Each session collection is scanned exactly once, however many folders: \(wideWork)")
         require(wideWork.containersExpanded == 2 + 2 + 1_000,
                 "One expansion per Space and per reachable folder (2 Spaces + Projects/Nested + 1,000), not per tab: \(wideWork)")
+
+        // Review of 4731e41: every retained saved tab counts, Split secondaries included, before allocation;
+        // a corrupt session of only secondaries over the budget is refused in the tab pass.
+        var secondariesOnly = session
+        let orphans = (0...Tree.maximumInputItems).map { kept("Pane \($0)", "https://pane.example/\($0)", space: alpha) }
+        secondariesOnly.tabs += orphans
+        secondariesOnly.splits = (secondariesOnly.splits ?? []) + orphans.map { BrowserSplit(primaryID: UUID(), secondaryID: $0.id) }
+        var orphanWork = BookmarkSessionSnapshot.Work()
+        require(BookmarkSessionSnapshot.input(from: secondariesOnly, profileID: profileA, work: &orphanWork) == nil
+                && orphanWork.splitsIndexed == 0 && orphanWork.containersExpanded == 0,
+                "Over 10k saved Split secondaries: nil before any split is indexed or container expanded: \(orphanWork)")
+        // Irrelevant splits are scanned but not indexed: only pairs touching a retained tab are kept.
+        var noisySplits = session
+        noisySplits.splits = (noisySplits.splits ?? []) + (0..<20_000).map { _ in BrowserSplit(primaryID: UUID(), secondaryID: UUID()) }
+        var noisyWork = BookmarkSessionSnapshot.Work()
+        let noisyInput = BookmarkSessionSnapshot.input(from: noisySplits, profileID: profileA, work: &noisyWork)
+        require(noisyInput == Self.reference(noisySplits, profileA) && noisyWork.splitsScanned == 20_002 && noisyWork.splitsIndexed == 2,
+                "20,000 unrelated splits: scanned once, only this profile's 2 pairs indexed, same result: \(noisyWork)")
         print("PASS: \(checks) bookmark session snapshot checks")
     }
     /// The straightforward algorithm (session.keptChildren per container): the semantics the index must keep.
