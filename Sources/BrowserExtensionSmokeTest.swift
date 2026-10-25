@@ -879,16 +879,49 @@ import Darwin
             try check(refusal == .notRequested && host.siteAccess(id: extensionID)?.revision == withheld.revision, "An unrequested site was not refused")
             let listed = try perform(withheld, .addSite(input: "127.0.0.1", includeSubdomains: false))
             try check(listed.state.mode == .specific(["http://127.0.0.1/*"]) && granted(ip) && !granted(newSite), "Adding a site must grant just that site")
+            // Diagnostics (instrumentation only; work/site-access-shortened-grant-diagnosis.md): every website prompt from
+            // this re-enable through the shortened-grant assertion, with the existing prompt's own answer unchanged. A nil
+            // prompt stays nil (Bam would then ask through its own review), so wrapping never changes behavior.
+            func diagnose(_ line: String) { print("SITE_ACCESS_DIAG " + line); fflush(stdout) }
+            let diagnosticFormatter = ISO8601DateFormatter(); diagnosticFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            func describe(_ date: Date?) -> String {
+                guard let date else { return "none" }
+                return date >= Date.distantFuture.addingTimeInterval(-86_400) ? "permanent(\(diagnosticFormatter.string(from: date)))" : diagnosticFormatter.string(from: date)
+            }
+            func loopbackKeys(_ context: WKWebExtensionContext?) -> String {
+                guard let context else { return "no-context" }
+                let granted = context.grantedPermissionMatchPatterns.filter { $0.key.string.contains("127.0.0.1") }
+                    .map { "\($0.key.string)=\(describe($0.value))" }.sorted()
+                let denied = context.deniedPermissionMatchPatterns.filter { $0.key.string.contains("127.0.0.1") }
+                    .map { "\($0.key.string)=\(describe($0.value))" }.sorted()
+                return "granted=\(granted) denied=\(denied) status(\(ipPattern.string))=\(context.permissionStatus(for: ipPattern).rawValue)"
+            }
+            let promptBeforeDiagnostics = host.permissionPrompt
+            if let promptBeforeDiagnostics {
+                host.permissionPrompt = { review in
+                    let answer = promptBeforeDiagnostics(review)
+                    diagnose("prompt websites=\(review.websites) permissions=\(review.permissions) optional=\(review.isOptional) answer=\(answer)")
+                    return answer
+                }
+            } else { diagnose("prompt closure is nil; not wrapped") }
             try await host.setEnabled(false, id: extensionID); try await host.setEnabled(true, id: extensionID)
             try check(host.siteAccess(id: extensionID)?.state.mode == .specific(["http://127.0.0.1/*"]) && granted(ip) && !granted(newSite),
                 "Re-enabling must keep the narrower choice, never re-grant every requested site")
             // An explicit finite expiry on a permanent site constrains it until a fresh approval, across a reload.
             guard let live = host.context(for: extensionID) else { throw ExtensionSmokeTest.Failure(description: "Re-enable failed") }
-            live.setPermissionStatus(.grantedExplicitly, for: ipPattern, expirationDate: Date(timeIntervalSinceNow: 3_600))
+            let desiredExpiry = Date(timeIntervalSinceNow: 3_600)
+            let snapshotBefore = host.siteAccess(id: extensionID)
+            diagnose("snapshot-before mode=\(String(describing: snapshotBefore?.state.mode)) timedRequested=\(String(describing: snapshotBefore?.timed.requested))")
+            diagnose("native-before \(loopbackKeys(live)) desired=\(describe(desiredExpiry))")
+            live.setPermissionStatus(.grantedExplicitly, for: ipPattern, expirationDate: desiredExpiry)
+            let nativeExpiryAfter = live.grantedPermissionMatchPatterns[ipPattern]
+            diagnose("native-after-set \(loopbackKeys(live)) desired=\(describe(desiredExpiry))")
             host.persistPermissions(live)
             let shortened = host.siteAccess(id: extensionID)
+            diagnose("native-after-persist \(loopbackKeys(live)) snapshot mode=\(String(describing: shortened?.state.mode)) timedRequested=\(String(describing: shortened?.timed.requested))")
+            host.permissionPrompt = promptBeforeDiagnostics
             try check(shortened?.state.mode == .withheld && isFinite(shortened?.timed.requested[ipPattern.string]),
-                "A shortened grant must leave the permanent choice as time-limited requested access: \(String(describing: shortened?.state))")
+                "A shortened grant must leave the permanent choice as time-limited requested access: \(String(describing: shortened?.state)); native \(ipPattern.string) expiry after set=\(describe(nativeExpiryAfter)), desired=\(describe(desiredExpiry))")
             try await host.setEnabled(false, id: extensionID); try await host.setEnabled(true, id: extensionID)
             try check(isFinite(host.context(for: extensionID)?.grantedPermissionMatchPatterns[ipPattern]) && granted(ip),
                 "A reload restored a shortened grant to permanent")
