@@ -655,6 +655,13 @@ private class ArkFlippedView: NSView { override var isFlipped: Bool { true } }
 
 @MainActor
 private class ArkHoverButton: NSButton {
+    override var isEnabled: Bool {
+        didSet { if oldValue != isEnabled { window?.invalidateCursorRects(for: self) } }
+    }
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        if isEnabled { addCursorRect(bounds, cursor: .pointingHand) }
+    }
     var handler: (() -> Void)?
     var hovered = false
     private var area: NSTrackingArea?
@@ -925,6 +932,10 @@ private final class ArkSpaceHeading: ArkHoverButton {
 
 @MainActor
 private final class ArkTabRow: ArkFlippedView {
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        addCursorRect(bounds, cursor: .pointingHand)
+    }
     private(set) var item: SidebarTabItem
     var select: (() -> Void)?
     var close: (() -> Void)?
