@@ -46,9 +46,9 @@ import Foundation
                 }
             }
         }
-        mutating func type(in frame: String, input: Bool = false, value: String? = nil) {
+        mutating func type(in frame: String, input: Bool = false, value: String? = nil, valuePhase: String = "typing", valueTrusted: Bool = true) {
             for key in ["b", "a", "m"] { add(frame, "keydown", "typing", ["key": key, "trusted": true, "targetIsInput": input]) }
-            if let value { add("child", "input", "typing", ["value": value]) }
+            if let value { add("child", "input", valuePhase, ["value": value, "trusted": valueTrusted]) }
         }
     }
 
@@ -114,9 +114,74 @@ import Foundation
         check(control.evaluate().complete, "the positive control with typing in the child input is measured")
         var failedControl = Run(probeCase: R.Case(frame: .ex, pattern: .c)); failedControl.handshake()
         failedControl.add("child", "pointer", "pointer", ["trusted": true, "onInput": true]); failedControl.type(in: "parent")
-        check(failedControl.evaluate().problems.contains("positive control: typing did not reach the child input"), "a positive control without child typing is incomplete")
+        check(failedControl.evaluate().problems.contains("positive control: not every typed key reached the child input"), "a positive control without child typing is incomplete")
         var noPointer = Run(probeCase: R.Case(frame: .ex, pattern: .c)); noPointer.handshake(); noPointer.type(in: "child", input: true, value: "bam")
         check(noPointer.evaluate().problems.contains { $0.contains("trusted pointer") }, "the control needs the trusted pointer")
+        // The review's regressions: keys split between frames, keys in the child but not on its input, and a value that
+        // is unphased or untrusted must all leave the positive control incomplete.
+        func controlRun(_ build: (inout Run) -> Void) -> R.Evaluation {
+            var run = Run(probeCase: R.Case(frame: .ex, pattern: .c)); run.handshake()
+            run.add("child", "pointer", "pointer", ["trusted": true, "onInput": true]); build(&run); return run.evaluate()
+        }
+        let split = controlRun { run in
+            run.add("child", "keydown", "typing", ["key": "b", "trusted": true, "targetIsInput": true])
+            run.add("parent", "keydown", "typing", ["key": "a", "trusted": true]); run.add("parent", "keydown", "typing", ["key": "m", "trusted": true])
+            run.add("child", "input", "typing", ["value": "bam", "trusted": true])
+        }
+        check(split.problems.contains("positive control: not every typed key reached the child input"), "keys split between parent and child are incomplete")
+        let offInput = controlRun { run in run.type(in: "child", input: false, value: "bam") }
+        check(offInput.problems.contains("positive control: not every typed key reached the child input"), "child keys not on the input are incomplete")
+        let unphased = controlRun { run in run.type(in: "child", input: true, value: "bam", valuePhase: "pointer") }
+        check(unphased.problems.contains { $0.contains("no trusted child input value") }, "a value seen outside the typing phase is incomplete")
+        let untrustedValue = controlRun { run in run.type(in: "child", input: true, value: "bam", valueTrusted: false) }
+        check(untrustedValue.problems.contains { $0.contains("no trusted child input value") }, "an untrusted input event is incomplete")
+        let wrongValue = controlRun { run in run.type(in: "child", input: true, value: "ba") }
+        check(wrongValue.problems.contains { $0.contains("no trusted child input value") }, "a value without the text is incomplete")
+        check(controlRun { run in run.type(in: "child", input: true, value: "bam") }.complete, "all keys on the child input plus a trusted in-phase value is complete")
+
+        // Protocol validation: exact integers, unique identities, unique scheduled readings.
+        check(R.Record.strictInt(3) == 3 && R.Record.strictInt(NSNumber(value: 3.0)) == 3, "integers and integral doubles are exact")
+        check(R.Record.strictInt(NSNumber(value: 1.5)) == nil && R.Record.strictInt(true) == nil && R.Record.strictInt(Double.infinity) == nil
+              && R.Record.strictInt(NSNumber(value: 1e300)) == nil && R.Record.strictInt("3") == nil, "fractions, booleans, non-finite, huge and strings are refused")
+        var fractional = Run(probeCase: R.Case(frame: .xo, pattern: .p1)); fractional.handshake()
+        fractional.records.append(["frame": "child", "kind": "sample", "seq": 2.5, "t": 1, "run": "RUN-1", "case": "xo:p1", "role": "xo"])
+        check(R.records(fromState: fractional.state, run: "RUN-1", case: R.Case(frame: .xo, pattern: .p1), firstSeen: [:]).malformed == 1,
+              "a fractional seq is malformed, not truncated")
+        var duplicateIdentity = Run(probeCase: R.Case(frame: .xo, pattern: .p1)); duplicateIdentity.handshake()
+        duplicateIdentity.records.append(duplicateIdentity.records[1])   // the child's ready again, same frame:seq
+        let duplicateParse = R.records(fromState: duplicateIdentity.state, run: "RUN-1", case: R.Case(frame: .xo, pattern: .p1), firstSeen: [:])
+        check(duplicateParse.records.count == 3 && duplicateParse.malformed == 1, "a repeated frame:seq is malformed and only the first is kept")
+        var ledger = Run(probeCase: R.Case(frame: .xo, pattern: .p1)); ledger.handshake()
+        ledger.records.append(["frame": "child", "kind": "ready", "seq": 60, "t": 1, "run": "OTHER", "case": "xo:p1", "role": "xo"])
+        ledger.records.append(["frame": "child", "kind": "ready", "seq": 61, "t": 1, "run": "RUN-1", "case": "xo:p1", "role": "so"])
+        ledger.records.append(ledger.records[0])
+        check(R.validIdentities(fromState: ledger.state, run: "RUN-1", case: R.Case(frame: .xo, pattern: .p1)) == ["child:1", "child:2", "parent:1"],
+              "only validated, unique identities may enter the phase ledger")
+        var duplicateSample = Run(probeCase: R.Case(frame: .xo, pattern: .p1)); duplicateSample.handshake(); duplicateSample.trigger(); duplicateSample.samples()
+        duplicateSample.add("child", "sample", "trigger", ["after_ms": 100, "actual_ms": 101, "hasFocus": false, "activeIsInput": false])
+        duplicateSample.add("child", "focus_attempt", "trigger", ["trigger": "timer-17ms"]); duplicateSample.type(in: "parent")
+        let duplicateResult = duplicateSample.evaluate()
+        check(duplicateResult.problems == ["child reading +100ms duplicated"], "a duplicated scheduled reading is a problem, and doesn't trap")
+        var unscheduled = Run(probeCase: R.Case(frame: .xo, pattern: .p1)); unscheduled.handshake(); unscheduled.trigger(); unscheduled.samples()
+        unscheduled.add("parent", "sample", "trigger", ["after_ms": 7, "actual_ms": 7, "hasFocus": true])
+        unscheduled.add("child", "focus_attempt", "trigger", ["trigger": "timer-17ms"]); unscheduled.type(in: "parent")
+        check(unscheduled.evaluate().problems == ["parent reading with an unscheduled or malformed offset"], "an unscheduled offset is a problem")
+        var fractionalOffset = Run(probeCase: R.Case(frame: .xo, pattern: .p1)); fractionalOffset.handshake(); fractionalOffset.trigger(); fractionalOffset.samples()
+        fractionalOffset.add("child", "sample", "trigger", ["after_ms": 20.5, "actual_ms": 20, "hasFocus": false, "activeIsInput": false])
+        fractionalOffset.add("child", "focus_attempt", "trigger", ["trigger": "timer-17ms"]); fractionalOffset.type(in: "parent")
+        check(fractionalOffset.evaluate().problems == ["child reading with an unscheduled or malformed offset"], "a fractional offset is malformed, not rounded")
+
+        // Cleanup: confirmed fixture removal is required.
+        let removed: [String: Any] = ["host_temporary_storage_removed": true, "run_directory_removed": true, "fixture_removed": true]
+        check(R.cleanupIsClean(removed, fixtureInstalled: true), "confirmed removal plus removed storage is clean")
+        check(!R.cleanupIsClean(removed.merging(["fixture_removed": false]) { _, n in n }, fixtureInstalled: true), "unconfirmed removal is not clean")
+        check(!R.cleanupIsClean(removed.merging(["fixture_removal_timed_out": true]) { _, n in n }, fixtureInstalled: true), "a removal timeout is not clean")
+        check(!R.cleanupIsClean(removed.merging(["fixture_removal_error": "x"]) { _, n in n }, fixtureInstalled: true), "a removal error is not clean")
+        check(!R.cleanupIsClean(["host_temporary_storage_removed": true, "run_directory_removed": true], fixtureInstalled: true), "missing removal evidence is not clean")
+        check(!R.cleanupIsClean(removed.merging(["host_temporary_storage_removed": "not a temporary path; left untouched"]) { _, n in n }, fixtureInstalled: true),
+              "storage left untouched is not clean")
+        check(R.cleanupIsClean(["host_temporary_storage_removed": "no host was created", "run_directory_removed": true], fixtureInstalled: false),
+              "nothing installed and nothing created is clean")
 
         // Binding: records from another run, case or role, unknown kinds and malformed shapes are dropped and counted.
         var bound = Run(probeCase: R.Case(frame: .xo, pattern: .p1)); bound.handshake()

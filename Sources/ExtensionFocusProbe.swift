@@ -70,7 +70,7 @@ import WebKit
       input.addEventListener("blur", () => send("input_blur", state()), passive);
       window.addEventListener("keydown", (event) => send("keydown", {key: String(event.key).slice(0, 12), trusted: event.isTrusted === true,
                                                                       targetIsInput: event.target === input, hasFocus: document.hasFocus()}), passive);
-      input.addEventListener("input", () => send("input", {value: input.value.slice(0, 32)}), passive);
+      input.addEventListener("input", (event) => send("input", {value: input.value.slice(0, 32), trusted: event.isTrusted === true}), passive);
       window.addEventListener("pointerdown", (event) => send("pointer", {trusted: event.isTrusted === true, onInput: event.target === input,
                                                                           activation: activation()}), passive);
       window.addEventListener("message", (event) => {
@@ -267,10 +267,10 @@ import WebKit
         guard let text = body["state"] as? String, text.utf8.count <= 200_000, let data = text.data(using: .utf8),
               let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { rejectedHostMessages += 1; return }
         pageState = value
-        for case let record as [String: Any] in value["records"] as? [Any] ?? [] {
-            guard let frame = record["frame"] as? String, let seq = Rules.Record.strictInt(record["seq"]) else { continue }
-            let key = "\(frame):\(seq)"
-            if firstSeen[key] == nil { firstSeen[key] = currentPhase }
+        // Only records already validated for this run, case and role (bounded, unique identity) enter the phase ledger.
+        guard let probeCase else { return }
+        for key in Rules.validIdentities(fromState: value, run: runToken, case: probeCase) where firstSeen[key] == nil {
+            firstSeen[key] = currentPhase
         }
     }
     private func records() -> [Rules.Record] {
@@ -532,7 +532,10 @@ import WebKit
             let gone = !fm.fileExists(atPath: directory.path)
             report["run_directory_removed"] = gone; clean = clean && gone
         }
-        return (clean, report)
+        // Confirmed fixture removal is required too (no timeout, no error, no longer listed or loaded).
+        let confirmed = Rules.cleanupIsClean(report, fixtureInstalled: extensionID != nil)
+        report["clean_requires"] = "temporary storage and run folder removed, and confirmed fixture removal"
+        return (clean && confirmed, report)
     }
     private static func jsonSafe(_ value: Any) -> Any {
         switch value {

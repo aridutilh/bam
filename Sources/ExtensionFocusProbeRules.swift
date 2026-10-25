@@ -46,9 +46,12 @@ enum ExtensionFocusProbeRules {
             guard let value, CFGetTypeID(value as CFTypeRef) == CFBooleanGetTypeID() else { return nil }
             return value as? Bool
         }
+        /// An exact integer only: booleans, fractions, non-finite and out-of-range numbers are refused (no truncation).
         static func strictInt(_ value: Any?) -> Int? {
-            guard let value, value is NSNumber, CFGetTypeID(value as CFTypeRef) != CFBooleanGetTypeID() else { return nil }
-            return (value as? NSNumber)?.intValue
+            guard let value, let number = value as? NSNumber, CFGetTypeID(value as CFTypeRef) != CFBooleanGetTypeID() else { return nil }
+            let double = number.doubleValue
+            guard double.isFinite, double.rounded() == double, abs(double) <= 9_007_199_254_740_991 else { return nil }
+            return Int(double)
         }
     }
 
@@ -57,16 +60,35 @@ enum ExtensionFocusProbeRules {
     static func records(fromState state: [String: Any], run: String, case expected: Case, firstSeen: [String: String]) -> (records: [Record], malformed: Int) {
         guard state["run"] as? String == run, state["case"] as? String == expected.label,
               let raw = state["records"] as? [Any] else { return ([], 0) }
-        var records: [Record] = [], malformed = 0
+        var records: [Record] = [], malformed = 0, identities = Set<String>()
+        malformed += max(0, raw.count - maximumRecords)
         for item in raw.prefix(maximumRecords) {
             guard let object = item as? [String: Any], let frame = object["frame"] as? String, ["parent", "child"].contains(frame),
                   let kind = object["kind"] as? String, recordKinds.contains(kind), let seq = Record.strictInt(object["seq"]), seq >= 1,
                   object["run"] as? String == run, object["case"] as? String == expected.label,
                   object["role"] as? String == (frame == "parent" ? "parent" : expected.frame.rawValue),
                   Record.strictInt(object["t"]) != nil else { malformed += 1; continue }
+            // A repeated identity (frame + seq) is malformed: only the first is kept.
+            guard identities.insert("\(frame):\(seq)").inserted else { malformed += 1; continue }
             records.append(Record(frame: frame, kind: kind, seq: seq, hostPhase: firstSeen["\(frame):\(seq)"], fields: object))
         }
         return (records, malformed)
+    }
+    /// The identities (`frame:seq`) of the valid records in a state for this run and case: the only ones the native
+    /// phase ledger may stamp.
+    static func validIdentities(fromState state: [String: Any], run: String, case expected: Case) -> [String] {
+        records(fromState: state, run: run, case: expected, firstSeen: [:]).records.map(\.key)
+    }
+
+    /// Cleanup is clean only when the run's temporary storage and folder are gone **and**, if a fixture was installed, its
+    /// removal was confirmed (no timeout, no error, no longer listed or loaded).
+    static func cleanupIsClean(_ report: [String: Any], fixtureInstalled: Bool) -> Bool {
+        let storage = report["host_temporary_storage_removed"]
+        let storageClean = (storage as? Bool) == true || (storage as? String) == "no host was created"
+        let directoryClean = report["run_directory_removed"] == nil || Record.strictBool(report["run_directory_removed"]) == true
+        let removal = !fixtureInstalled || (Record.strictBool(report["fixture_removed"]) == true && report["fixture_removal_timed_out"] == nil
+                                            && report["fixture_removal_error"] == nil)
+        return storageClean && directoryClean && removal
     }
 
     struct Evaluation {
@@ -111,9 +133,15 @@ enum ExtensionFocusProbeRules {
             if first("child", "pointer", phase: "pointer", { $0.bool("trusted") == true && $0.bool("onInput") == true }) == nil {
                 problems.append("trusted pointer on the child input not observed in the pointer phase")
             }
-            if childTyped.isEmpty || !childValue.lowercased().contains(typedText) {
-                problems.append("positive control: typing did not reach the child input")
+            // Every typed key, trusted, on the child input, in the typing phase; and a trusted input event in the typing
+            // phase whose value contains the text. Keys anywhere else, or an unphased or untrusted value, don't count.
+            let childInputKeys = Set(childTyped.filter { $0.bool("targetIsInput") == true }.compactMap { $0.string("key")?.lowercased() })
+            if !Self.typedKeys.allSatisfy(childInputKeys.contains) {
+                problems.append("positive control: not every typed key reached the child input")
             }
+            let trustedValue = records.contains { $0.frame == "child" && $0.kind == "input" && $0.hostPhase == "typing" && $0.bool("trusted") == true
+                && ($0.string("value") ?? "").lowercased().contains(typedText) }
+            if !trustedValue { problems.append("positive control: no trusted child input value containing \(typedText) in the typing phase") }
             return Evaluation(problems: problems, outcome: outcome)
         }
 
@@ -129,9 +157,14 @@ enum ExtensionFocusProbeRules {
             problems.append("child show acknowledgement missing"); return Evaluation(problems: problems, outcome: outcome)
         }
         for frame in ["child", "parent"] {
+            let all = records.filter { $0.frame == frame && $0.kind == "sample" }
+            if all.contains(where: { $0.int("after_ms").map { !sampleDelaysMilliseconds.contains($0) } ?? true }) {
+                problems.append("\(frame) reading with an unscheduled or malformed offset")
+            }
             for delay in sampleDelaysMilliseconds {
-                let samples = records.filter { $0.frame == frame && $0.kind == "sample" && $0.int("after_ms") == delay }
+                let samples = all.filter { $0.int("after_ms") == delay }
                 guard let sample = samples.first else { problems.append("\(frame) reading +\(delay)ms missing"); continue }
+                if samples.count > 1 { problems.append("\(frame) reading +\(delay)ms duplicated"); continue }
                 guard sample.int("actual_ms") != nil, sample.bool("hasFocus") != nil else { problems.append("\(frame) reading +\(delay)ms malformed"); continue }
                 if sample.hostPhase != "trigger" { problems.append("\(frame) reading +\(delay)ms received outside the trigger phase") }
             }
@@ -140,10 +173,14 @@ enum ExtensionFocusProbeRules {
             problems.append("child timer focus attempt not recorded")
         }
         let childSamples = records.filter { $0.frame == "child" && $0.kind == "sample" }
-        outcome["child_input_focused_by_ms"] = Dictionary(uniqueKeysWithValues: childSamples.compactMap { sample -> (String, Bool)? in
-            guard let delay = sample.int("after_ms"), let focused = sample.bool("activeIsInput"), let has = sample.bool("hasFocus") else { return nil }
-            return ("\(delay)", focused && has)
-        })
+        // First reading per offset only (duplicates are already reported as problems above); never traps.
+        var focusedByOffset: [String: Bool] = [:]
+        for sample in childSamples {
+            guard let delay = sample.int("after_ms"), focusedByOffset["\(delay)"] == nil,
+                  let focused = sample.bool("activeIsInput"), let has = sample.bool("hasFocus") else { continue }
+            focusedByOffset["\(delay)"] = focused && has
+        }
+        outcome["child_input_focused_by_ms"] = focusedByOffset
         outcome["child_focus_attempt_recorded"] = first("child", "focus_attempt") != nil
         return Evaluation(problems: problems, outcome: outcome)
     }
