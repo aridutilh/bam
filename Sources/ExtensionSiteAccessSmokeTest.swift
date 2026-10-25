@@ -4,8 +4,9 @@ import WebKit
 /// Site Access lifecycle on real WebKit content scripts: an original fixture extension marks every document it can
 /// inject into (a DOM attribute from JS and a CSS custom property from its stylesheet). Each step proves a NEW document
 /// by the page's own per-document identity, then reads both markers:
-///   allow → markers; withhold → no access → controller.load (the Reload Pages path) → no markers;
-///   web.reload() (toolbar/previews) → no markers; allow again → markers return.
+///   allow → markers; withhold → no access (global and in the exact tab) → controller.load (the Reload Pages path),
+///   web.reload() (toolbar/previews), a fresh-query navigation, and a brand-new tab → no markers in any new document;
+///   allow again → markers return.
 /// Runtime prompts while withheld are declined and recorded. Native only (root wires the call into the extension
 /// suite); no account, no vendor code, an ephemeral controller and an owned temporary package per variant.
 ///
@@ -13,7 +14,8 @@ import WebKit
 ///   - all-host: host_permissions `*://*/*`, content scripts on `<all_urls>` (the shape Dark Reader requests),
 ///     visiting only the loopback page;
 ///   - single-host control: host_permissions and content scripts on `http://127.0.0.1/*`.
-/// Diagnostics include access and permission status both globally and for the exact extension tab adapter.
+/// Both variants always run. Withheld findings don't stop a variant (its restoration control still runs); every
+/// finding from every variant is reported together, and the suite fails if there is any.
 @MainActor @available(macOS 15.4, *)
 enum ExtensionSiteAccessSmokeTest {
     static let jsMarker = "bamSiteAccessMarker"
@@ -29,25 +31,36 @@ enum ExtensionSiteAccessSmokeTest {
 
     /// `pageURL` is any page on the loopback fixture origin; this suite uses its own `/site-access-lifecycle.html`.
     static func run(pageURL: URL) async throws -> Int {
-        var checks = 0
-        for variant in [Variant.allHost, .singleHost] { checks += try await run(pageURL: pageURL, variant: variant) }
+        var checks = 0, failures: [String] = []
+        for variant in [Variant.allHost, .singleHost] {
+            do {
+                let (passed, findings) = try await run(pageURL: pageURL, variant: variant)
+                checks += passed
+                failures += findings.map { "(\(variant.name)) \($0)" }
+            } catch { failures.append("(\(variant.name)) \(error)") }
+        }
+        guard failures.isEmpty else {
+            throw ExtensionSmokeTest.Failure(description: "Site access lifecycle: \(failures.count) finding(s):\n- " + failures.joined(separator: "\n- "))
+        }
         return checks
     }
 
-    static func run(pageURL: URL, variant: Variant) async throws -> Int {
-        var checks = 0
+    /// Returns the variant's passed checks and its findings (withheld-step failures). Setup and navigation failures throw.
+    static func run(pageURL: URL, variant: Variant) async throws -> (Int, [String]) {
+        var checks = 0, findings: [String] = []
         var prompts: [BrowserExtensionPermissionReview] = []
         var reloadOffers = 0
-        func check(_ condition: Bool, _ message: @autoclosure () -> String) throws {
-            guard condition else { throw ExtensionSmokeTest.Failure(description: "Site access lifecycle (\(variant.name)): " + message()) }; checks += 1
-        }
+        /// The live granted keys just before withholding (broad-pattern coalescing diagnosis).
+        var preWithholdGranted: [String] = []
+        func fail(_ message: String) -> ExtensionSmokeTest.Failure { .init(description: "Site access lifecycle (\(variant.name)): " + message) }
 
         // MARK: Page URL on the same fixture origin.
         var components = URLComponents(url: pageURL, resolvingAgainstBaseURL: false)!
         components.path = "/site-access-lifecycle.html"; components.query = nil; components.fragment = nil
         guard let page = components.url, page.scheme == "http", page.host == "127.0.0.1" else {
-            throw ExtensionSmokeTest.Failure(description: "Site access lifecycle: needs the loopback fixture origin, got \(pageURL)")
+            throw fail("needs the loopback fixture origin, got \(pageURL)")
         }
+        func query(_ value: String) -> URL { page.appending(queryItems: [URLQueryItem(name: "fresh", value: value)]) }
 
         // MARK: Original fixture package in an owned temporary directory.
         let package = FileManager.default.temporaryDirectory.appendingPathComponent("bam-site-access-lifecycle-\(variant.name)-\(UUID().uuidString)", isDirectory: true)
@@ -81,7 +94,7 @@ enum ExtensionSiteAccessSmokeTest {
         host.configure(configuration, profileID: profile)
         let extensionID = try await host.importPackage(at: package, profileID: profile)
         guard let context = host.context(for: extensionID) else {
-            throw ExtensionSmokeTest.Failure(description: "Site access lifecycle: fixture did not load: \(host.errors[extensionID] ?? host.lastError ?? "no error")")
+            throw fail("fixture did not load: \(host.errors[extensionID] ?? host.lastError ?? "no error")")
         }
         let runtime = configuration.webExtensionController?.delegate as? BrowserExtensionRuntime
         // After install, any runtime prompt is unexpected here: record and decline it.
@@ -102,85 +115,100 @@ enum ExtensionSiteAccessSmokeTest {
             return DocumentState(document: value["document"] ?? "", js: value["js"] ?? "", css: value["css"] ?? "",
                                  readyState: value["readyState"] ?? "", url: value["url"] ?? "")
         }
-        var observedTabID: UUID?
-        func diagnostics(_ web: WKWebView?, _ state: DocumentState?) -> String {
-            let snapshot = host.siteAccess(id: extensionID)
+        /// Access in the exact extension tab (runtime adapter), or nil when the adapter is missing.
+        func tabAccess(_ tabID: UUID) -> (access: Bool, status: Int)? {
             host.reconcile()
-            let adapter = observedTabID.flatMap { runtime?.tabs[$0] }
-            let scoped = adapter.map { "tabAccess=\(context.hasAccess(to: page, in: $0)) tabStatus=\(context.permissionStatus(for: page, in: $0).rawValue)" } ?? "tabAdapter=missing"
+            guard let adapter = runtime?.tabs[tabID] else { return nil }
+            return (context.hasAccess(to: page, in: adapter), context.permissionStatus(for: page, in: adapter).rawValue)
+        }
+        func diagnostics(_ tabID: UUID?, _ state: DocumentState?) -> String {
+            let web = tabID.flatMap { controller.browsers[$0] }
+            let snapshot = host.siteAccess(id: extensionID)
+            let scoped = tabID.flatMap(tabAccess).map { "tabAccess=\($0.access) tabStatus=\($0.status)" } ?? "tabAdapter=missing"
             let granted = context.grantedPermissionMatchPatterns.keys.map(\.string).sorted()
             let denied = context.deniedPermissionMatchPatterns.keys.map(\.string).sorted()
             return "[state: \(state.map(String.init(describing:)) ?? "unreadable"); webURL=\(web?.url?.absoluteString ?? "nil") isLoading=\(web?.isLoading ?? false)"
                 + "; hasAccess=\(context.hasAccess(to: page)) status=\(context.permissionStatus(for: page).rawValue) \(scoped) granted=\(granted) denied=\(denied)"
                 + "; mode=\(snapshot.map { String(describing: $0.state.mode) } ?? "nil") effective=\(snapshot?.effective ?? [])"
-                + "; hasInjectedContent(for:)=\(context.hasInjectedContent(for: page)) prompts=\(prompts.map(\.websites)) reloadOffers=\(reloadOffers)]"
+                + "; hasInjectedContent(for:)=\(context.hasInjectedContent(for: page)) prompts=\(prompts.map(\.websites)) reloadOffers=\(reloadOffers)"
+                + "; preWithholdGranted=\(preWithholdGranted)]"
         }
-        /// Waits until the tab shows a fully loaded document other than `previous` (the page's own identity), then
-        /// returns its markers. Navigation completion is the evidence; polling only waits for it.
-        func newDocument(after previous: String?, in tabID: UUID, _ step: String) async throws -> (WKWebView, DocumentState) {
+        /// Waits until the tab shows a fully loaded document other than `previous` (the page's own identity) whose URL
+        /// starts with `expected`, then returns its markers. Navigation completion is the evidence; polling only waits.
+        func newDocument(after previous: String?, in tabID: UUID, expected: URL, _ step: String) async throws -> DocumentState {
             let deadline = ProcessInfo.processInfo.systemUptime + 15
             var last: DocumentState?
             while ProcessInfo.processInfo.systemUptime < deadline {
                 if let web = controller.browsers[tabID], !web.isLoading, let state = await read(web) {
                     last = state
-                    if !state.document.isEmpty, state.document != previous, state.readyState == "complete", state.url.hasPrefix(page.absoluteString) {
-                        checks += 1; return (web, state)
+                    if !state.document.isEmpty, state.document != previous, state.readyState == "complete", state.url.hasPrefix(expected.absoluteString) {
+                        checks += 1; return state
                     }
                 }
                 try await Task.sleep(nanoseconds: 40_000_000)
             }
-            throw ExtensionSmokeTest.Failure(description: "Site access lifecycle (\(variant.name)): \(step): no new completed document " + diagnostics(controller.browsers[tabID], last))
+            throw fail("\(step): no new completed document " + diagnostics(tabID, last))
         }
         func injected(_ state: DocumentState) -> Bool { state.js == "js" && state.css == "injected" }
         func absent(_ state: DocumentState) -> Bool { state.js.isEmpty && state.css.isEmpty }
+        /// A withheld step: no access globally or in the exact tab, and no marker in its new document. Findings are
+        /// recorded with full diagnostics; the variant continues so the restoration control still runs.
+        func expectWithheld(_ state: DocumentState, in tabID: UUID, _ step: String) {
+            var problems: [String] = []
+            if context.hasAccess(to: page) { problems.append("global access") }
+            if let scoped = tabAccess(tabID) { if scoped.access { problems.append("access in the exact tab") } } else { problems.append("no tab adapter to check tab access") }
+            if !state.js.isEmpty { problems.append("JS marker present") }
+            if !state.css.isEmpty { problems.append("CSS property present") }
+            if problems.isEmpty { checks += 1 } else { findings.append("\(step): " + problems.joined(separator: ", ") + " " + diagnostics(tabID, state)) }
+        }
 
         // MARK: 1. Allowed: the first document is marked (positive control: the harness sees injection).
-        try check(host.siteAccess(id: extensionID)?.state.mode == .allRequested && context.hasAccess(to: page),
-                  "the install did not allow the fixture site " + diagnostics(nil, nil))
-        guard let openedTab = controller.openProfileTab(page, profileID: profile, active: true) else {
-            throw ExtensionSmokeTest.Failure(description: "Site access lifecycle (\(variant.name)): could not open the fixture page")
+        guard host.siteAccess(id: extensionID)?.state.mode == .allRequested, context.hasAccess(to: page) else {
+            throw fail("the install did not allow the fixture site " + diagnostics(nil, nil))
         }
-        observedTabID = openedTab
-        let tabID = openedTab
-        let (_, allowed) = try await newDocument(after: nil, in: tabID, "allowed")
-        try check(injected(allowed), "allowed document lacks the JS marker or the CSS property " + diagnostics(controller.browsers[tabID], allowed))
+        guard let tabID = controller.openProfileTab(page, profileID: profile, active: true) else { throw fail("could not open the fixture page") }
+        let allowed = try await newDocument(after: nil, in: tabID, expected: page, "allowed")
+        guard injected(allowed) else { throw fail("allowed document lacks the JS marker or the CSS property " + diagnostics(tabID, allowed)) }
+        checks += 1
 
         // MARK: 2. Withhold through the real engine API.
-        guard let before = host.siteAccess(id: extensionID), let shown = before.declarations else {
-            throw ExtensionSmokeTest.Failure(description: "Site access lifecycle: no editable snapshot " + diagnostics(nil, nil))
-        }
+        guard let before = host.siteAccess(id: extensionID), let shown = before.declarations else { throw fail("no editable snapshot " + diagnostics(tabID, nil)) }
+        preWithholdGranted = context.grantedPermissionMatchPatterns.keys.map(\.string).sorted()
         let withheld = try host.performSiteAccess(id: extensionID, profileID: profile, revision: before.revision, displayed: shown, change: .choose(.withheld))
-        try check(withheld.state.mode == .withheld && !context.hasAccess(to: page),
-                  "withholding did not remove access " + diagnostics(controller.browsers[tabID], nil))
+        guard withheld.state.mode == .withheld else { throw fail("the engine did not withhold " + diagnostics(tabID, nil)) }
+        checks += 1
 
-        // MARK: 3. The Reload Pages path: controller.load(tab.address, in:, id:) → new document, no markers.
-        guard let web = controller.browsers[tabID], let tab = controller.session.tabs.first(where: { $0.id == tabID }) else {
-            throw ExtensionSmokeTest.Failure(description: "Site access lifecycle: the fixture tab disappeared")
-        }
+        // MARK: 3–6. Withheld documents: Reload Pages path, toolbar reload, fresh query, brand-new tab.
+        guard let tab = controller.session.tabs.first(where: { $0.id == tabID }), let web = controller.browsers[tabID] else { throw fail("the fixture tab disappeared") }
         controller.load(tab.address, in: web, id: tabID)
-        let (_, reloaded) = try await newDocument(after: allowed.document, in: tabID, "withheld load")
-        try check(absent(reloaded), "after withholding, a new document loaded through controller.load still has injected content "
-                  + diagnostics(controller.browsers[tabID], reloaded))
+        let reloaded = try await newDocument(after: allowed.document, in: tabID, expected: page, "withheld controller.load")
+        expectWithheld(reloaded, in: tabID, "controller.load (Reload Pages path)")
 
-        // MARK: 4. web.reload() (toolbar, previews) → another new document, still no markers.
         controller.browsers[tabID]?.reload()
-        let (_, toolbar) = try await newDocument(after: reloaded.document, in: tabID, "withheld reload")
-        try check(absent(toolbar), "after withholding, a document from web.reload() still has injected content " + diagnostics(controller.browsers[tabID], toolbar))
-        try check(!context.hasAccess(to: page), "access returned while withheld " + diagnostics(controller.browsers[tabID], toolbar))
+        let toolbar = try await newDocument(after: reloaded.document, in: tabID, expected: page, "withheld web.reload")
+        expectWithheld(toolbar, in: tabID, "web.reload (toolbar)")
 
-        // MARK: 5. Allow again → a new document is marked again.
-        guard let current = host.siteAccess(id: extensionID), let declarations = current.declarations else {
-            throw ExtensionSmokeTest.Failure(description: "Site access lifecycle: no snapshot to allow again " + diagnostics(nil, nil))
-        }
+        let fresh = query("withheld")
+        if let current = controller.browsers[tabID] { controller.load(fresh.absoluteString, in: current, id: tabID) }
+        let queried = try await newDocument(after: toolbar.document, in: tabID, expected: fresh, "withheld fresh query")
+        expectWithheld(queried, in: tabID, "fresh query navigation")
+
+        let newTabURL = query("new-tab")
+        guard let newTab = controller.openProfileTab(newTabURL, profileID: profile, active: true) else { throw fail("could not open a new tab " + diagnostics(tabID, nil)) }
+        let newTabDocument = try await newDocument(after: nil, in: newTab, expected: newTabURL, "withheld new tab")
+        expectWithheld(newTabDocument, in: newTab, "brand-new tab (new web view)")
+
+        // MARK: 7. Allow again → new documents are marked again (restoration control; runs whatever was found).
+        guard let current = host.siteAccess(id: extensionID), let declarations = current.declarations else { throw fail("no snapshot to allow again " + diagnostics(tabID, nil)) }
         let restored = try host.performSiteAccess(id: extensionID, profileID: profile, revision: current.revision, displayed: declarations, change: .choose(.allRequested))
-        try check(restored.state.mode == .allRequested && context.hasAccess(to: page), "allowing again did not restore access " + diagnostics(controller.browsers[tabID], nil))
-        guard let again = controller.browsers[tabID] else { throw ExtensionSmokeTest.Failure(description: "Site access lifecycle: the fixture tab disappeared") }
+        guard restored.state.mode == .allRequested, context.hasAccess(to: page) else { throw fail("allowing again did not restore access " + diagnostics(tabID, nil)) }
+        guard let again = controller.browsers[tabID] else { throw fail("the fixture tab disappeared") }
         controller.load(tab.address, in: again, id: tabID)
-        let (_, reallowed) = try await newDocument(after: toolbar.document, in: tabID, "allowed again")
-        try check(injected(reallowed), "after allowing again, the new document isn't marked " + diagnostics(controller.browsers[tabID], reallowed))
+        let reallowed = try await newDocument(after: queried.document, in: tabID, expected: page, "allowed again")
+        if injected(reallowed) { checks += 1 } else { findings.append("after allowing again, the new document isn't marked " + diagnostics(tabID, reallowed)) }
 
         // Prompts while withheld were declined and are reported, not asserted.
-        print("BAM_SITE_ACCESS_LIFECYCLE " + "{\"variant\":\"\(variant.name)\",\"prompts_while_withheld\":\(prompts.count),\"reload_offers\":\(reloadOffers),\"documents\":4}"); fflush(stdout)
-        return checks
+        print("BAM_SITE_ACCESS_LIFECYCLE " + "{\"variant\":\"\(variant.name)\",\"pre_withhold_granted\":\(preWithholdGranted),\"findings\":\(findings.count),\"prompts_while_withheld\":\(prompts.count),\"reload_offers\":\(reloadOffers),\"documents\":6}"); fflush(stdout)
+        return (checks, findings)
     }
 }
