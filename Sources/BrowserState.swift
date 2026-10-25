@@ -347,13 +347,22 @@ enum Monogram {
     }
     private static func first(in text: String) -> String? {
         for character in text {
-            let emoji = character.unicodeScalars.contains { $0.properties.isEmojiPresentation }
+            let emoji = isEmoji(character)
             guard character.isLetter || character.isNumber || emoji else { continue }
             if emoji { return String(character) }
             let upper = String(character).uppercased()
             return upper.count == 1 ? upper : String(character)
         }
         return nil
+    }
+    /// Whether a whole grapheme displays as an emoji: emoji-presentation
+    /// scalars, or emoji-capable ones made emoji by VS16 (❤️), a keycap (1️⃣)
+    /// or a ZWJ sequence. A plain digit or "#" alone stays text.
+    static func isEmoji(_ character: Character) -> Bool {
+        let scalars = character.unicodeScalars
+        if scalars.contains(where: { $0.properties.isEmojiPresentation }) { return true }
+        guard scalars.contains(where: { $0.properties.isEmoji }) else { return false }
+        return scalars.contains { $0.value == 0xFE0F || $0.value == 0x20E3 || $0.value == 0x200D }
     }
 }
 
