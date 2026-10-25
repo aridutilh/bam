@@ -1032,14 +1032,22 @@ import Darwin
                 const got = !!(await browser.tabs.get(tab.id));
                 const windows = (await browser.windows.getAll({populate: true})).length;
                 const injected = await (async () => { \(injection) })();
-                const fetched = await fetch(target, {credentials: 'include'}).then((r) => 'read:' + r.status, (e) => 'refused');
-                return {found: !!tab, read, got, windows, injected, fetched};
+                let fetchDetail = null;
+                const fetched = await fetch(target, {credentials: 'include', cache: 'no-store'}).then(async (r) => {
+                  const body = await r.text();
+                  fetchDetail = {status: r.status, type: r.type, url: r.url, acao: r.headers.get('access-control-allow-origin'), length: body.length};
+                  return 'read:' + r.status;
+                }, (e) => { fetchDetail = {error: String(e && e.message || e)}; return 'refused'; });
+                return {found: !!tab, read, got, windows, injected, fetched, fetchDetail};
                 """, ["target": consentTabURL.absoluteString])
             try check(withheldUse["found"] as? Bool == true && withheldUse["got"] as? Bool == true && reviewsShown == 0 &&
                 (withheldUse["injected"] as? String)?.hasPrefix("refused:") == true && withheldUse["fetched"] as? String == "refused" &&
                 !granted(ip) && deniedKeys(ip).isEmpty && undecided(consentTabURL) && recordState() == recordBefore &&
                 host.siteAccess(id: extensionID)?.state.mode == .withheld && host.siteAccess(id: extensionID)?.revision == consentBase.revision,
-                "Using a withheld requested site prompted, granted, denied or changed Site Access: shown=\(reviewsShown), \(withheldUse)")
+                "Using a withheld requested site prompted, granted, denied or changed Site Access: shown=\(reviewsShown), \(withheldUse); " +
+                "native status=\(liveContext.permissionStatus(for: consentTabURL).rawValue) hasAccess=\(liveContext.hasAccess(to: consentTabURL)) " +
+                "granted127=\(liveContext.grantedPermissionMatchPatterns.keys.filter { $0.string.contains("127.0.0.1") }.map(\.string).sorted()) " +
+                "denied127=\(liveContext.deniedPermissionMatchPatterns.keys.filter { $0.string.contains("127.0.0.1") }.map(\.string).sorted())")
             // activeTab on the withheld site: a user gesture in the tab lets injection run with no review and no lasting grant.
             guard let consentAdapter = promptRuntime.tabs[consentTab] else { throw ExtensionSmokeTest.Failure(description: "No adapter for the consent tab") }
             liveContext.userGesturePerformed(in: consentAdapter)
@@ -1186,6 +1194,8 @@ import Darwin
             "Approved update did not activate its final package")
         guard let updatedPopup = host.context(for: extensionID)?.action(for: nil)?.popupWebView else { throw ExtensionSmokeTest.Failure(description: "Updated package has no popup") }
         try await wait("Updated extension still looked for scripts at the staging URL") { (try? await updatedPopup.evaluateJavaScript("document.title")) as? String == "Bam fixture ready" }
+        // Diagnostic: CORS fetch access across grant, withdrawal, new page and new context (FETCH_ACCESS lines).
+        checks += try await ExtensionFetchAccessProbe.run(controller: controller, host: host, profile: profile, pageURL: pageURL)
         try await checkExplicitConsent()
         try await checkSiteAccess()
         try await host.setEnabled(false, id: extensionID)
