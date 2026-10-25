@@ -5,7 +5,7 @@ import WebKit
 /// Resolves one store ID to a CRX-named URL whose body is whatever the test supplies.
 final class StoreZIPClient: ExtensionHTTPClient, @unchecked Sendable {
     let id: String, body: Data
-    var downloads = 0
+    var downloads = 0, destinations: [URL] = []
     init(id: String, body: Data) { self.id = id; self.body = body }
     func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) { throw URLError(.unsupportedURL) }
     func response(for request: URLRequest, followingRedirects: Bool) async throws -> (Data, HTTPURLResponse) {
@@ -13,7 +13,7 @@ final class StoreZIPClient: ExtensionHTTPClient, @unchecked Sendable {
         return (Data(), HTTPURLResponse(url: request.url!, statusCode: 302, httpVersion: "HTTP/1.1", headerFields: ["Location": location])!)
     }
     func download(for request: URLRequest, to destination: URL, byteLimit: Int) async throws -> HTTPURLResponse {
-        downloads += 1
+        downloads += 1; destinations.append(destination)
         try body.write(to: destination)
         return HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: nil)!
     }
@@ -272,11 +272,20 @@ func storedZIP(_ files: [(String, Data)]) -> Data {
         let storeConfiguration = WKWebViewConfiguration(); storeConfiguration.websiteDataStore = .nonPersistent()
         storeHost.configure(storeConfiguration, profileID: profile)
         let installer = ExtensionInstaller(host: storeHost, client: storeClient, bamVersion: "test")
+        // A caller-owned staging root receives the per-install folder, which is gone when install ends.
+        let ownedStaging = FileManager.default.temporaryDirectory.appendingPathComponent("bam-enumeration-staging-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: ownedStaging, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: ownedStaging) }
+        installer.stagingRoot = ownedStaging
         var installError = ""
         do { _ = try await installer.install(ExtensionBuildCandidate(source: .chromeWebStore, upstreamID: storeID, name: "Unsigned store fixture", publisher: "", version: "1.0.0"), profileID: profile) }
         catch { installError = error.localizedDescription }
         try check(installError.contains("plain ZIP") && storeClient.downloads == 1 && !reviewReached && storeHost.records.isEmpty && storeHost.items(profileID: profile).isEmpty,
                   "An unsigned Chrome Web Store ZIP reached review or import: error=\(installError) downloads=\(storeClient.downloads) review=\(reviewReached) records=\(storeHost.records.count)")
+        let downloaded = storeClient.destinations.first?.standardizedFileURL.path ?? ""
+        try check(downloaded.hasPrefix(ownedStaging.standardizedFileURL.path + "/bam-extension-install-") &&
+                  (try FileManager.default.contentsOfDirectory(atPath: ownedStaging.path)).isEmpty,
+                  "Install staging did not use the owned root or was left behind: \(downloaded) remaining=\((try? FileManager.default.contentsOfDirectory(atPath: ownedStaging.path)) ?? [])")
         print("PASS: Extension enumeration — \(checks)")
     }
 
