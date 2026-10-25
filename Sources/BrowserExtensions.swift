@@ -1138,9 +1138,15 @@ struct BrowserExtensionPermissionReview {
         var indices: [UUID: Int]
         var activeID: UUID?
         var adapters: [any WKWebExtensionTab]
+        var isSinglePage: Bool
     }
     private var topologyCache: (revision: UInt64, windows: [ObjectIdentifier: WindowTopology])?
     private var topologyMutation: UInt64 = 0
+    /// Records every computed topology (cache hits return that same computation): per window, its adapter, kind and
+    /// ordered tab adapters. Every window and index WebKit is served comes from a recorded computation, so a change and
+    /// change-back between two observations (ABA), a replaced adapter or a membership change advances it. An unstable
+    /// computation (the host changed during it) is never cached, so the next read records the real state.
+    private var metadataGeneration = ExtensionTabMetadata.Generation()
     weak var popupAnchor: NSView?
     var popupTabID: UUID?
     var popupContextID: String?
@@ -1319,7 +1325,8 @@ struct BrowserExtensionPermissionReview {
         for (key, members) in grouped {
             let ids = members.map(\.id)
             let indices = Dictionary(ids.enumerated().map { ($0.element, $0.offset) }, uniquingKeysWith: { first, _ in first })
-            result[key] = WindowTopology(ids: ids, indices: indices, activeID: windows[key]?.activeID(in: members), adapters: [])
+            result[key] = WindowTopology(ids: ids, indices: indices, activeID: windows[key]?.activeID(in: members), adapters: [],
+                                         isSinglePage: members.contains(where: \.isSinglePage))
         }
         // A host callback is allowed to change its revision while producing data.
         // Do not retain a result from a changing or unversioned host.
@@ -1334,9 +1341,87 @@ struct BrowserExtensionPermissionReview {
         if let revision, stable {
             topologyCache = (revision, result)
         } else { topologyCache = nil }
+        // A window or tab without an adapter is recorded by its window key, which no adapter can equal.
+        // Adapter replacement that reuses an address is still caught by the mutation counter in the token's binding.
+        metadataGeneration.record(result.map { key, topology in
+            ExtensionTabMetadata.ObservedWindow(adapter: (windows[key].map(ObjectIdentifier.init) ?? key).hashValue, isSinglePage: topology.isSinglePage,
+                                                tabs: topology.ids.map { (tabs[$0].map(ObjectIdentifier.init) ?? key).hashValue })
+        })
         return result
     }
     func tabIDs(in key: ObjectIdentifier) -> [UUID] { topology()[key]?.ids ?? [] }
+    /// The window and index of a tab from one observed topology (never the live surface), so `windowId` and `index`
+    /// that WebKit reports come from the same observation the metadata generation records.
+    func placement(of id: UUID) -> (key: ObjectIdentifier, index: Int)? {
+        for (key, topology) in topology() { if let index = topology.indices[id] { return (key, index) } }
+        return nil
+    }
+    func isSinglePageWindow(_ key: ObjectIdentifier) -> Bool { topology()[key]?.isSinglePage ?? singlePageWindows.contains(key) }
+
+    // MARK: Tab metadata (read-only; see work/chrome-tab-metadata-api.md)
+
+    /// Only an owned, loaded context holding `tabs`, within the private-data boundary. Nothing else is granted or checked.
+    private func allowsTabMetadata(_ context: WKWebExtensionContext) -> Bool {
+        owns(context) && context.hasPermission(.tabs) && (owner?.isPrivate != true || context.hasAccessToPrivateData)
+    }
+    private func metadataBinding(_ context: WKWebExtensionContext) -> ExtensionTabMetadata.Binding {
+        ExtensionTabMetadata.Binding(context: context.uniqueIdentifier, runtime: ObjectIdentifier(self).hashValue, profile: profileID,
+                                     generation: metadataGeneration.value, mutation: topologyMutation)
+    }
+    /// The binding a token is issued for: forces an observation first. nil when metadata isn't allowed.
+    func tabMetadataBinding(for context: WKWebExtensionContext) -> ExtensionTabMetadata.Binding? {
+        guard allowsTabMetadata(context) else { return nil }
+        _ = topology()
+        return metadataBinding(context)
+    }
+    /// Answers a redeemed request from the observation its token was issued for: per entry, the tab adapter's own
+    /// `url(for:)`/`title(for:)` (what WebKit would show with host access) when admissible, else nil (left redacted).
+    /// With a filter, only matching tabs get a value (WebKit semantics: a tab it can't evaluate never matches).
+    /// nil for the whole request (fall back to WebKit's answer) when: metadata isn't allowed any more; the observation,
+    /// adapters, context, runtime or profile differ from `issued`, including after reading values (which calls the
+    /// host); window kinds are ambiguous; the title budget runs out; or a filtered answer wouldn't fit the response.
+    func answerTabMetadata(for context: WKWebExtensionContext, issued: ExtensionTabMetadata.Binding,
+                           request: ExtensionTabMetadata.Request) -> [ExtensionTabMetadata.Value?]? {
+        guard allowsTabMetadata(context) else { return nil }
+        let observed = topology()
+        guard metadataBinding(context) == issued else { return nil }
+        let normal = observed.values.filter { !$0.isSinglePage }, popups = observed.values.filter(\.isSinglePage)
+        guard normal.count == request.normalCount, request.normalCount <= 1, popups.count == request.popupCount else { return nil }
+        let normalIDs = normal.first?.ids ?? []
+        // Several Little Bam windows can't be told apart by WebKit window ID here: their tabs stay redacted.
+        let popupIDs = popups.count == 1 && popups[0].ids.count == 1 ? popups[0].ids : []
+        let urlPatterns = request.filter?.urlPatterns?.compactMap { try? WKWebExtension.MatchPattern(string: $0) }
+        var budget = ExtensionTabMetadata.titleMatchBudget
+        var values: [ExtensionTabMetadata.Value?] = []
+        values.reserveCapacity(request.entries.count)
+        for entry in request.entries {
+            let id: UUID?
+            switch entry.window {
+            case .normal: id = normalIDs.indices.contains(entry.index) ? normalIDs[entry.index] : nil
+            case .popup: id = entry.index == 0 ? popupIDs.first : nil
+            }
+            guard let id, let tab = tabs[id], let url = tab.url(for: context),
+                  let value = ExtensionTabMetadata.admissible(url: url, title: tab.title(for: context)) else { values.append(nil); continue }
+            if let filter = request.filter {
+                // An unparseable URL pattern is skipped, as WebKit does; no valid pattern then matches nothing.
+                if filter.urlPatterns != nil, !(urlPatterns ?? []).contains(where: { $0.matches(url) }) { values.append(nil); continue }
+                if let title = filter.title {
+                    switch ExtensionTabMetadata.titleMatches(title, value.title ?? "", budget: &budget) {
+                    case .match: break
+                    case .noMatch: values.append(nil); continue
+                    case .exhausted: return nil
+                    }
+                }
+            }
+            values.append(value)
+        }
+        if request.filter != nil, !ExtensionTabMetadata.responseFits(values) { return nil }
+        // Reading values called the host: answer only if the observation is still the issued one.
+        _ = topology()
+        guard allowsTabMetadata(context), metadataBinding(context) == issued else { return nil }
+        return values
+    }
+
     func tabAdapters(in key: ObjectIdentifier) -> [any WKWebExtensionTab] { topology()[key]?.adapters ?? [] }
     func tabIndex(_ id: UUID, in key: ObjectIdentifier) -> Int { topology()[key]?.indices[id] ?? NSNotFound }
     func activeTabID(in key: ObjectIdentifier) -> UUID? { topology()[key]?.activeID }
@@ -1605,14 +1690,16 @@ struct BrowserExtensionPermissionReview {
         return surface
     }
     private func valid(_ context: WKWebExtensionContext) -> Bool { authorizedSurface(context) != nil }
+    // Window and index come from the runtime's observed topology (one recorded observation), not the live surface;
+    // the live surface still authorizes the read.
     func window(for context: WKWebExtensionContext) -> (any WKWebExtensionWindow)? {
-        guard let surface = authorizedSurface(context), let runtime else { return nil }
-        return runtime.windows[runtime.windowKey(surface)]
+        guard authorizedSurface(context) != nil, let runtime, let placement = runtime.placement(of: id) else { return nil }
+        return runtime.windows[placement.key]
     }
     func indexInWindow(for context: WKWebExtensionContext) -> Int {
-        guard let surface = authorizedSurface(context), let runtime,
-              let window = runtime.windows[runtime.windowKey(surface)] else { return NSNotFound }
-        return runtime.tabIndex(id, in: window.key)
+        guard authorizedSurface(context) != nil, let runtime, let placement = runtime.placement(of: id),
+              runtime.windows[placement.key] != nil else { return NSNotFound }
+        return placement.index
     }
     func webView(for context: WKWebExtensionContext) -> WKWebView? {
         guard let web = authorizedSurface(context)?.webView,
@@ -1720,7 +1807,7 @@ struct BrowserExtensionPermissionReview {
     func tabs(for context: WKWebExtensionContext) -> [any WKWebExtensionTab] { guard runtime?.owns(context) == true else { return [] }; return runtime?.tabAdapters(in: key) ?? [] }
     func activeTab(for context: WKWebExtensionContext) -> (any WKWebExtensionTab)? { guard runtime?.owns(context) == true else { return nil }; return activeID.flatMap { runtime?.tabs[$0] } }
     func isPrivate(for context: WKWebExtensionContext) -> Bool { runtime?.owner?.isPrivate == true }
-    func windowType(for context: WKWebExtensionContext) -> WKWebExtension.WindowType { runtime?.singlePageWindows.contains(key) == true ? .popup : .normal }
+    func windowType(for context: WKWebExtensionContext) -> WKWebExtension.WindowType { runtime?.isSinglePageWindow(key) == true ? .popup : .normal }
     func windowState(for context: WKWebExtensionContext) -> WKWebExtension.WindowState { native?.isMiniaturized == true ? .minimized : .normal }
     func frame(for context: WKWebExtensionContext) -> CGRect { native?.frame ?? .null }
     func screenFrame(for context: WKWebExtensionContext) -> CGRect { native?.screen?.frame ?? .null }
