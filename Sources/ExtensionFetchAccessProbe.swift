@@ -50,9 +50,13 @@ import WebKit
             try Data("<!doctype html><meta charset='utf-8'><title>fetch access page</title>".utf8).write(to: folder.appendingPathComponent("page.html"))
             return try await host.importPackage(at: folder, profileID: profile)
         }
-        func page(_ id: UUID) async throws -> WKWebView {
+        /// Every probe-owned extension page, weakly, so the closed-pages stage can observe that each one was released.
+        final class TrackedPage { weak var web: WKWebView?; let label: String; init(_ web: WKWebView, _ label: String) { self.web = web; self.label = label } }
+        var tracked: [TrackedPage] = []
+        func page(_ id: UUID, _ name: String) async throws -> WKWebView {
             guard let context = host.context(for: id), let configuration = context.webViewConfiguration else { throw Failure(description: "Fetch access: no context for \(id)") }
             let web = WKWebView(frame: NSRect(x: 0, y: 0, width: 320, height: 240), configuration: configuration)
+            tracked.append(TrackedPage(web, "\(name)#\(tracked.count)"))
             web.load(URLRequest(url: context.baseURL.appendingPathComponent("page.html")))
             try await wait("an extension page did not load") { web.title == "fetch access page" }
             return web
@@ -88,31 +92,61 @@ import WebKit
         let requestedID = try await install("requested", ["host_permissions": ["http://127.0.0.1/*"]])
         // On a failure these fixtures stay in the caller's ephemeral controller until it shuts down; on success they are
         // removed below.
-        var optionalPage = try await page(optionalID)
+        var optionalPage: WKWebView? = try await page(optionalID, "optional")
         // Premise: a host this extension was never granted is refused (no CORS headers; WebKit enforces CORS here).
-        let fresh = try await measure("optional-fresh", optionalID, optionalPage)
+        let fresh = try await measure("optional-fresh", optionalID, optionalPage!)
         try check(fresh == "refused", "a never-granted loopback page was readable by fetch, so the server or engine does not enforce CORS here and the consent fetch check has no valid premise")
-        let requested = try await js(optionalPage, "return {granted: await browser.permissions.request({origins: ['http://127.0.0.1/*']})};")
-        let afterRequest = try await measure("optional-after-request(granted=\(requested["granted"] ?? "?"))", optionalID, optionalPage)
+        let requested = try await js(optionalPage!, "return {granted: await browser.permissions.request({origins: ['http://127.0.0.1/*']})};")
+        let afterRequest = try await measure("optional-after-request(granted=\(requested["granted"] ?? "?"))", optionalID, optionalPage!)
         try check(requested["granted"] as? Bool == true && afterRequest == "read", "a granted loopback host was not readable by fetch (positive control)")
-        let removed = try await js(optionalPage, "return {removed: await browser.permissions.remove({origins: ['http://127.0.0.1/*']})};")
-        _ = try await measure("optional-after-remove(removed=\(removed["removed"] ?? "?"))-same-page", optionalID, optionalPage)
-        optionalPage.stopLoading(); optionalPage = try await page(optionalID)
-        _ = try await measure("optional-after-remove-new-page", optionalID, optionalPage)
-        optionalPage.stopLoading()
+        let removed = try await js(optionalPage!, "return {removed: await browser.permissions.remove({origins: ['http://127.0.0.1/*']})};")
+        _ = try await measure("optional-after-remove(removed=\(removed["removed"] ?? "?"))-same-page", optionalID, optionalPage!)
+        optionalPage?.stopLoading(); optionalPage = try await page(optionalID, "optional")
+        _ = try await measure("optional-after-remove-new-page", optionalID, optionalPage!)
+        optionalPage?.stopLoading()
 
-        var requestedPage = try await page(requestedID)
-        _ = try await measure("requested-granted", requestedID, requestedPage)
+        var requestedPage: WKWebView? = try await page(requestedID, "requested")
+        _ = try await measure("requested-granted", requestedID, requestedPage!)
         guard let snapshot = host.siteAccess(id: requestedID), let declarations = snapshot.declarations else { throw Failure(description: "Fetch access: no Site Access snapshot") }
         _ = try host.performSiteAccess(id: requestedID, profileID: profile, revision: snapshot.revision, displayed: declarations, change: .choose(.withheld))
-        _ = try await measure("requested-withheld-same-page", requestedID, requestedPage)
-        requestedPage.stopLoading(); requestedPage = try await page(requestedID)
-        _ = try await measure("requested-withheld-new-page", requestedID, requestedPage)
-        requestedPage.stopLoading()
+        _ = try await measure("requested-withheld-same-page", requestedID, requestedPage!)
+        requestedPage?.stopLoading(); requestedPage = try await page(requestedID, "requested")
+        _ = try await measure("requested-withheld-new-page", requestedID, requestedPage!)
+        requestedPage?.stopLoading()
         try await host.setEnabled(false, id: requestedID); try await host.setEnabled(true, id: requestedID)
-        requestedPage = try await page(requestedID)
-        _ = try await measure("requested-withheld-new-context", requestedID, requestedPage)
-        requestedPage.stopLoading()
+        requestedPage = try await page(requestedID, "requested")
+        _ = try await measure("requested-withheld-new-context", requestedID, requestedPage!)
+        requestedPage?.stopLoading()
+
+        // F1 discriminator: the same withheld state, but in a context loaded after every probe-owned extension page has
+        // left the extension origin and been released (stopLoading alone keeps a document; a reassigned page used to be
+        // released only after its successor existed). Separates "a held old client keeps the process and its CORS
+        // allowlist" from "a context with no old clients". Nothing is deleted and no identity changes.
+        var closeFailures: [String] = []
+        for (name, web) in [("optional", optionalPage), ("requested", requestedPage)] {
+            guard let web else { continue }
+            web.stopLoading()
+            web.load(URLRequest(url: URL(string: "about:blank")!))
+            let deadline = ProcessInfo.processInfo.systemUptime + 5
+            while ProcessInfo.processInfo.systemUptime < deadline, !(web.url?.absoluteString == "about:blank" && !web.isLoading) {
+                try await Task.sleep(nanoseconds: 40_000_000)
+            }
+            if !(web.url?.absoluteString == "about:blank" && !web.isLoading) {
+                closeFailures.append("\(name) did not leave the extension origin within 5 s (url=\(web.url?.absoluteString ?? "nil"), loading=\(web.isLoading))")
+            }
+        }
+        optionalPage = nil; requestedPage = nil
+        let releaseDeadline = ProcessInfo.processInfo.systemUptime + 5
+        while ProcessInfo.processInfo.systemUptime < releaseDeadline, tracked.contains(where: { $0.web != nil }) {
+            try await Task.sleep(nanoseconds: 40_000_000)
+        }
+        let alive = tracked.filter { $0.web != nil }.map(\.label)
+        if !alive.isEmpty { closeFailures.append("pages still allocated after release: \(alive)") }
+        print("FETCH_ACCESS_CLOSE pages=\(tracked.count) released=\(tracked.count - alive.count) failures=\(closeFailures)"); fflush(stdout)
+        try await host.setEnabled(false, id: requestedID); try await host.setEnabled(true, id: requestedID)
+        let closedPagesPage = try await page(requestedID, "requested-after-close")
+        _ = try await measure("requested-withheld-closed-pages-new-context(closeFailures=\(closeFailures.count))", requestedID, closedPagesPage)
+        closedPagesPage.stopLoading()
 
         try await host.remove(id: optionalID)
         try await host.remove(id: requestedID)
