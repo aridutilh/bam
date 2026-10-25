@@ -73,7 +73,14 @@ import WebKit
             if fromOrigin { web.reloadFromOrigin() } else { web.reload() }
             return true
         }
-        value.createTab = { [weak self] url, profile, active in self?.openProfileTab(url, profileID: profile, active: active) }
+        value.createTab = { [weak self, weak value] url, profile, active in
+            self?.openProfileTab(url, profileID: profile, active: active, kept: value?.createsKeptTab == true)
+        }
+        value.setTabPinned = { [weak self] id, profile, pinned in
+            // nil is success: never coalesce it into a refusal.
+            guard let self else { return "This tab cannot be pinned or unpinned." }
+            return self.setExtensionTabPinned(id, profileID: profile, pinned: pinned)
+        }
         // Only windows an extension opened may be closed by one; user-opened Little Bam windows are not.
         final class OpenedWindows { var ids = Set<ObjectIdentifier>() }
         let opened = OpenedWindows()

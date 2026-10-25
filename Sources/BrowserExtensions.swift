@@ -105,6 +105,17 @@ struct BrowserExtensionPermissionReview {
     var navigateTab: ((UUID, URL) -> Bool)?
     var reloadTab: ((UUID, Bool) -> Bool)?
     var createTab: ((URL, UUID, Bool) -> UUID?)?
+    /// True only while `createTab` runs for a pinned `tabs.create`: the browser then creates the tab kept in the
+    /// same step, before anything can publish it as ordinary. A pinned request travels through the same
+    /// `createTab` hook, so whatever wraps or gates that hook (a fixture's allowed addresses) still applies.
+    private(set) var createsKeptTab = false
+    func createTab(_ url: URL, profileID: UUID, active: Bool, kept: Bool) -> UUID? {
+        createsKeptTab = kept; defer { createsKeptTab = false }
+        return createTab?(url, profileID, active)
+    }
+    /// `tabs.update({pinned})` for one tab of a profile (tab, profile, pinned): nil when the tab now has the
+    /// requested state, otherwise the reason Bam refused. See ExtensionPinnedPolicy.
+    var setTabPinned: ((UUID, UUID, Bool) -> String?)?
     /// Opens a separate window (Little Bam) in the profile; returns its native window.
     var createWindow: ((URL?, UUID, Bool) -> NSWindow?)?
     /// Saved items of one login profile for bookmarks.getTree (see ExtensionBookmarkTree's input contract).
@@ -864,7 +875,7 @@ struct BrowserExtensionPermissionReview {
         for task in preparation.values { task.cancel() }; preparation.removeAll()
         for runtime in runtimes.values { for context in runtime.contexts.values { runtime.closePopup(for: context); try? runtime.controller.unload(context) }; runtime.contexts.removeAll(); runtime.shutdown() }
         runtimes.removeAll()
-        surfaces = nil; selectTab = nil; closeTab = nil; navigateTab = nil; reloadTab = nil; createTab = nil; createWindow = nil; bookmarkSnapshot = nil; historySnapshot = nil; closeWindow = nil; startDownload = nil
+        surfaces = nil; selectTab = nil; closeTab = nil; navigateTab = nil; reloadTab = nil; createTab = nil; setTabPinned = nil; createWindow = nil; bookmarkSnapshot = nil; historySnapshot = nil; closeWindow = nil; startDownload = nil
         if ownsTemporaryStorage { try? FileManager.default.removeItem(at: storageURL) }
     }
     static func failure(_ message: String) -> NSError { NSError(domain: "BamExtensions", code: 1, userInfo: [NSLocalizedDescriptionKey: message]) }
@@ -1203,10 +1214,21 @@ struct BrowserExtensionPermissionReview {
                 landing: members.filter { !$0.isPeek }.count, windowTabCount: (targetWindow ?? nil).map { tabIDs(in: $0.key).count } ?? 0) {
             completionHandler(nil, BrowserExtensions.failure(refusal)); return
         }
+        // Pinned means a Bam kept tab (never a Favorite), at the end like any other new tab.
+        let pinned = configuration.shouldBePinned
+        if owns(context), let url = configuration.url, let refusal = ExtensionPinnedPolicy.creationRefusal(url: url, pinned: pinned) {
+            completionHandler(nil, BrowserExtensions.failure(refusal)); return
+        }
         guard owns(context), let url = configuration.url, (["http", "https"].contains(url.scheme?.lowercased() ?? "") || BrowserExtensions.isExtensionURL(url, ownedBy: context)),
-              !configuration.shouldBePinned, !configuration.shouldBeMuted, !configuration.shouldReaderModeBeActive,
-              let id = owner?.createTab?(url, profileID, configuration.shouldBeActive) else {
+              !configuration.shouldBeMuted, !configuration.shouldReaderModeBeActive,
+              let id = owner?.createTab(url, profileID: profileID, active: configuration.shouldBeActive, kept: pinned) else {
             completionHandler(nil, BrowserExtensions.failure("Bam can open ordinary HTTP/HTTPS pages or this extension’s own pages in this profile only.")); return
+        }
+        // A host that did not keep the tab must not leave an ordinary one behind a pinned request.
+        // Checked against the live host before this runtime publishes the tab to any extension.
+        if pinned, currentSurface(id)?.isPinned != true {
+            _ = owner?.closeTab?(id)
+            completionHandler(nil, BrowserExtensions.failure("Bam could not keep the new tab, so it was not opened.")); return
         }
         reconcile(); guard let tab = tabs[id] else { completionHandler(nil, BrowserExtensions.failure("The new tab is not in this extension’s profile.")); return }
         completionHandler(tab, nil)
@@ -1417,7 +1439,18 @@ struct BrowserExtensionPermissionReview {
         guard valid(context), (["http", "https"].contains(url.scheme?.lowercased() ?? "") || BrowserExtensions.isExtensionURL(url, ownedBy: context)), runtime?.owner?.navigateTab?(id, url) == true else { completionHandler(BrowserExtensions.failure("Only HTTP/HTTPS or this extension’s own pages in this profile are supported.")); return }; completionHandler(nil)
     }
     func reload(fromOrigin: Bool, for context: WKWebExtensionContext, completionHandler: @escaping (Error?) -> Void) { completionHandler(valid(context) && runtime?.owner?.reloadTab?(id, fromOrigin) == true ? nil : BrowserExtensions.failure("This page cannot be reloaded.")) }
-    func setPinned(_ pinned: Bool, for context: WKWebExtensionContext, completionHandler: @escaping (Error?) -> Void) { completionHandler(BrowserExtensions.failure("Extensions cannot change saved tabs in Bam.")) }
+    /// Pinned is Bam's kept state; see ExtensionPinnedPolicy for what an extension may change.
+    func setPinned(_ pinned: Bool, for context: WKWebExtensionContext, completionHandler: @escaping (Error?) -> Void) {
+        guard let surface = authorizedSurface(context), let runtime else { completionHandler(BrowserExtensions.failure("This tab cannot be pinned or unpinned.")); return }
+        guard !surface.isPeek, !surface.isSinglePage else {
+            completionHandler(BrowserExtensions.failure("Only tabs in Bam’s sidebar can be pinned or unpinned.")); return
+        }
+        guard let apply = runtime.owner?.setTabPinned else { completionHandler(BrowserExtensions.failure("This tab cannot be pinned or unpinned.")); return }
+        if let refusal = apply(id, runtime.profileID, pinned) { completionHandler(BrowserExtensions.failure(refusal)); return }
+        // Publish the change (tabs.onUpdated pinned) before WebKit reads the updated tab back.
+        runtime.reconcile()
+        completionHandler(nil)
+    }
     func setSelected(_ selected: Bool, for context: WKWebExtensionContext, completionHandler: @escaping (Error?) -> Void) { completionHandler(BrowserExtensions.failure("Extension multi-selection is not supported.")) }
     func setMuted(_ muted: Bool, for context: WKWebExtensionContext, completionHandler: @escaping (Error?) -> Void) { completionHandler(BrowserExtensions.failure("Extension mute controls are not supported.")) }
     func setReaderModeActive(_ active: Bool, for context: WKWebExtensionContext, completionHandler: @escaping (Error?) -> Void) { completionHandler(BrowserExtensions.failure("Reader mode is not supported.")) }

@@ -330,6 +330,184 @@ import Darwin
             // The changeInfo must carry the status: a title-driven update also reads `status: "complete"` live.
             return records.contains { ($0["infoStatus"] as? String) == "complete" && ($0["url"] as? String)?.contains("extension-test.html") == true }
         }
+        // Chrome `pinned` is a Bam kept tab. This extension's profile is in the background here (the window shows
+        // `other`), so creating or changing pinned tabs must leave the window's Space, profile and selection alone.
+        do {
+            func pinnedPage(_ query: String) -> URL {
+                var components = URLComponents(url: url, resolvingAgainstBaseURL: false)!
+                components.path = "/next.html"; components.query = query
+                return components.url!
+            }
+            func pinnedCall(_ body: String, _ arguments: [String: Any]) async throws -> [String: Any] {
+                let text = try await popup.callAsyncJavaScript(body, arguments: arguments, contentWorld: .page) as? String
+                guard let data = text?.data(using: .utf8), let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                    throw ExtensionSmokeTest.Failure(description: "Pinned-tab probe returned \(text ?? "nil")")
+                }
+                return value
+            }
+            // One update and the tabs.onUpdated `pinned` it produced (waited for only when a change is expected).
+            let updateScript = """
+                let event = null;
+                const listener = (tabId, info) => { if (tabId === id && 'pinned' in info) event = info.pinned; };
+                browser.tabs.onUpdated.addListener(listener);
+                try {
+                  let result;
+                  try { const tab = await browser.tabs.update(id, {pinned}); result = {ok: true, pinned: tab ? tab.pinned : null}; }
+                  catch (error) { result = {ok: false, error: String(error?.message || error)}; }
+                  const deadline = Date.now() + wait;
+                  while (event === null && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 20));
+                  result.event = event;
+                  result.after = (await browser.tabs.get(id)).pinned;
+                  return JSON.stringify(result);
+                } finally { browser.tabs.onUpdated.removeListener(listener); }
+                """
+            func update(_ tabID: Int, pinned: Bool, changes: Bool) async throws -> [String: Any] {
+                try await pinnedCall(updateScript, ["id": tabID, "pinned": pinned, "wait": changes ? 3000 : 300])
+            }
+            let place = (space: controller.session.space, profile: controller.session.currentProfileID, active: controller.session.activeID)
+            func placeKept() -> Bool {
+                controller.session.space == place.space && controller.session.currentProfileID == place.profile && controller.session.activeID == place.active
+            }
+            try check(place.profile == other, "Pinned-tab checks did not start with the extension's profile in the background")
+            let pinnedURL = pinnedPage("pinned")
+            let created = try await pinnedCall("""
+                const tab = await browser.tabs.create({url: address, pinned: true, active: false});
+                const members = await browser.tabs.query({windowId: tab.windowId});
+                return JSON.stringify({id: tab.id, pinned: tab.pinned, active: tab.active, index: tab.index, last: members.length - 1});
+                """, ["address": pinnedURL.absoluteString])
+            guard let pinnedJS = created["id"] as? Int,
+                  let pinnedID = controller.session.tabs.first(where: { $0.address == pinnedURL.absoluteString })?.id else {
+                throw ExtensionSmokeTest.Failure(description: "tabs.create({pinned: true}) did not create a Bam tab: \(created)")
+            }
+            func pinnedTab() -> BrowserTab? { controller.session.tabs.first { $0.id == pinnedID } }
+            guard let made = pinnedTab() else { throw ExtensionSmokeTest.Failure(description: "Pinned tab vanished") }
+            try check(created["pinned"] as? Bool == true && created["active"] as? Bool == false, "tabs.create did not report a pinned background tab: \(created)")
+            try check(made.saved?.kind == .kept && made.saved?.address == pinnedURL.absoluteString && made.folderID == nil
+                      && made.saved?.customTitle == nil && controller.session.profileID(for: made) == profile,
+                      "A pinned tab was not created as a kept tab at its Space's root in the extension's profile")
+            try check(created["index"] as? Int == created["last"] as? Int, "A pinned tab was not appended at the end of its window: \(created)")
+            try check(placeKept(), "Creating a background pinned tab moved the window's Space, profile or selection")
+            try await wait("Pinned tab did not load") { controller.browsers[pinnedID]?.url == pinnedURL && controller.browsers[pinnedID]?.isLoading == false }
+            let tabCount = controller.session.tabs.count
+            let ownPage = try await pinnedCall("""
+                try { await browser.tabs.create({url: browser.runtime.getURL('page.html'), pinned: true, active: false}); return JSON.stringify({ok: true}); }
+                catch (error) { return JSON.stringify({ok: false, error: String(error?.message || error)}); }
+                """, [:])
+            try check(ownPage["ok"] as? Bool == false && (ownPage["error"] as? String)?.contains("HTTP and HTTPS") == true
+                      && controller.session.tabs.count == tabCount, "A pinned extension page was created or refused untruthfully: \(ownPage)")
+            // The session as it would be written to disk.
+            func persisted() throws -> BrowserTab? {
+                var restored = try JSONDecoder().decode(BrowserSession.self, from: JSONEncoder().encode(controller.session)); restored.sanitize()
+                return restored.tabs.first { $0.id == pinnedID }
+            }
+            try check(try persisted()?.saved?.kind == .kept && persisted()?.saved?.address == pinnedURL.absoluteString, "The pinned tab was not saved as kept")
+
+            // A wrapper around createTab (a fixture's allowed addresses) sees the kept intent while it runs and can refuse;
+            // the intent never outlives that call.
+            let installedCreate = host.createTab
+            var wrappedKept: [Bool] = []
+            host.createTab = { [weak host] _, _, _ in wrappedKept.append(host?.createsKeptTab == true); return nil }
+            let wrapped = try await pinnedCall("""
+                const outcome = [];
+                for (const pinned of [true, false]) {
+                  try { await browser.tabs.create({url: address, pinned, active: false}); outcome.push('created'); }
+                  catch (error) { outcome.push('refused'); }
+                }
+                return JSON.stringify({outcome});
+                """, ["address": pinnedPage("wrapped").absoluteString])
+            host.createTab = installedCreate
+            try check(wrappedKept == [true, false] && !host.createsKeptTab && wrapped["outcome"] as? [String] == ["refused", "refused"]
+                      && controller.session.tabs.count == tabCount && placeKept(),
+                      "A wrapped create did not see, refuse or reset the kept intent: \(wrappedKept) \(wrapped)")
+
+            // A background kept tab for a profile whose Space is empty: selecting that Space adds a blank fallback
+            // tab, and the new tab must take its place rather than leave it behind.
+            guard let emptyProfile = controller.session.createProfile(name: "Pinned empty"),
+                  let emptySpace = controller.session.createSpace(name: "Pinned empty", symbol: "briefcase", colorIndex: 2, profileID: emptyProfile) else {
+                throw ExtensionSmokeTest.Failure(description: "Could not create an empty target Space")
+            }
+            let emptyURL = pinnedPage("pinned-empty")
+            guard let emptyTab = host.createTab(emptyURL, profileID: emptyProfile, active: false, kept: true) else {
+                throw ExtensionSmokeTest.Failure(description: "Bam did not create a background kept tab in an empty Space")
+            }
+            let emptyMembers = controller.session.tabs.filter { $0.space == emptySpace }
+            try check(emptyMembers.map(\.id) == [emptyTab] && emptyMembers.first?.saved?.kind == .kept && emptyMembers.first?.address == emptyURL.absoluteString
+                      && controller.session.lastSelectedTabIDsBySpace?[emptySpace] == emptyTab && placeKept() && !host.createsKeptTab,
+                      "A background kept tab in an empty Space left a blank tab, lost its selection or moved the window: \(emptyMembers.map(\.address))")
+            _ = controller.session.setRetention(id: emptyTab, kind: nil); _ = host.closeTab?(emptyTab)
+            try check(controller.session.deleteSpace(id: emptySpace, movingTabsTo: place.space) && !controller.session.tabs.contains { $0.id == emptyTab } && placeKept(),
+                      "The empty-Space fixture was not cleaned up")
+
+            // Unpin with nothing to lose, then pin again: the page stays, and the event matches the returned tab.
+            var result = try await update(pinnedJS, pinned: false, changes: true)
+            try check(result["ok"] as? Bool == true && result["pinned"] as? Bool == false && result["event"] as? Bool == false && result["after"] as? Bool == false,
+                      "Unpinning a plain kept tab failed or disagreed with tabs.onUpdated: \(result)")
+            try check(pinnedTab()?.saved == nil && pinnedTab()?.address == pinnedURL.absoluteString && controller.browsers[pinnedID]?.url == pinnedURL && placeKept()
+                      && persisted() != nil && persisted()?.saved == nil, "Unpinning did not leave (and save) an ordinary tab on the same page in place")
+            result = try await update(pinnedJS, pinned: true, changes: true)
+            try check(result["ok"] as? Bool == true && result["pinned"] as? Bool == true && result["event"] as? Bool == true
+                      && pinnedTab()?.saved?.kind == .kept && pinnedTab()?.saved?.address == pinnedURL.absoluteString && placeKept()
+                      && persisted()?.saved?.kind == .kept, "Pinning an ordinary tab did not keep (and save) it on its page: \(result)")
+            // pinned:true on a kept tab is a no-op.
+            result = try await update(pinnedJS, pinned: true, changes: false)
+            try check(result["ok"] as? Bool == true && result["event"] is NSNull && pinnedTab()?.saved?.kind == .kept, "pinned:true changed a kept tab: \(result)")
+
+            // Bam-only state refuses an unpin and survives it: custom name, folder, a different current page.
+            _ = controller.session.updateSavedTab(id: pinnedID, customTitle: "Pinned fixture", customSymbol: nil)
+            result = try await update(pinnedJS, pinned: false, changes: false)
+            try check(result["ok"] as? Bool == false && (result["error"] as? String)?.contains("custom name") == true && result["after"] as? Bool == true
+                      && pinnedTab()?.saved?.customTitle == "Pinned fixture", "Unpinning discarded a custom name: \(result)")
+            _ = controller.session.updateSavedTab(id: pinnedID, customTitle: nil, customSymbol: nil)
+            guard let space = pinnedTab()?.space,
+                  let folder = controller.session.createFolder(name: "Pinned fixture", space: space, containing: [pinnedID]) else {
+                throw ExtensionSmokeTest.Failure(description: "Could not put the pinned tab in a folder")
+            }
+            result = try await update(pinnedJS, pinned: false, changes: false)
+            try check(result["ok"] as? Bool == false && (result["error"] as? String)?.contains("folder") == true
+                      && pinnedTab()?.folderID == folder && pinnedTab()?.saved?.kind == .kept, "Unpinning took a kept tab out of its folder: \(result)")
+            _ = controller.session.ungroupFolder(id: folder)
+            let movedURL = pinnedPage("pinned-moved")
+            controller.navigatePane(pinnedID, address: movedURL.absoluteString)
+            try await wait("Pinned tab did not navigate") {
+                controller.browsers[pinnedID]?.url == movedURL && controller.browsers[pinnedID]?.isLoading == false && pinnedTab()?.address == movedURL.absoluteString
+            }
+            result = try await update(pinnedJS, pinned: false, changes: false)
+            try check(result["ok"] as? Bool == false && (result["error"] as? String)?.contains("different page") == true
+                      && pinnedTab()?.saved?.address == pinnedURL.absoluteString && pinnedTab()?.address == movedURL.absoluteString,
+                      "Unpinning forgot the kept page or moved the current one: \(result)")
+
+            // A split refuses before either pane changes.
+            controller.session.splits = (controller.session.splits ?? []) + [BrowserSplit(primaryID: id, secondaryID: pinnedID)]
+            let pageJS = try await pinnedCall("return JSON.stringify({id: (await browser.tabs.query({})).find(tab => tab.url === address)?.id ?? null});",
+                                              ["address": url.absoluteString])["id"] as? Int
+            guard let pageJS else { throw ExtensionSmokeTest.Failure(description: "The adapter page was not visible to its extension") }
+            result = try await update(pinnedJS, pinned: false, changes: false)
+            let pageResult = try await update(pageJS, pinned: true, changes: false)
+            try check(result["ok"] as? Bool == false && (result["error"] as? String)?.contains("split") == true
+                      && pageResult["ok"] as? Bool == false && (pageResult["error"] as? String)?.contains("split") == true
+                      && pinnedTab()?.saved?.kind == .kept && controller.session.tabs.first(where: { $0.id == id })?.saved == nil
+                      && controller.session.split(for: pinnedID)?.primaryID == id, "A split pane's pinned state changed: \(result) \(pageResult)")
+            controller.session.removeSplit(containing: pinnedID)
+
+            // A Favorite is reported pinned; pinned:true leaves it a Favorite, and unpinning it is refused.
+            try check(controller.session.setRetention(id: pinnedID, kind: .favorite), "Could not make the fixture tab a Favorite")
+            controller.refresh()
+            result = try await update(pinnedJS, pinned: true, changes: false)
+            try check(result["ok"] as? Bool == true && result["after"] as? Bool == true && pinnedTab()?.isFavorite == true, "pinned:true demoted a Favorite: \(result)")
+            result = try await update(pinnedJS, pinned: false, changes: false)
+            try check(result["ok"] as? Bool == false && (result["error"] as? String)?.contains("Favorite") == true && pinnedTab()?.isFavorite == true && placeKept(),
+                      "Unpinning a Favorite was not refused truthfully: \(result)")
+            try check(controller.setExtensionTabPinned(pinnedID, profileID: other, pinned: false) != nil && pinnedTab()?.isFavorite == true,
+                      "Another profile changed this profile's tab")
+
+            // Demoting a Favorite needs its profile showing (Bam's own rule); restore the window afterwards.
+            controller.session.changeSpace(space)
+            _ = controller.session.setRetention(id: pinnedID, kind: nil)
+            _ = host.closeTab?(pinnedID)
+            controller.session.changeSpace(place.space); controller.showActive(); controller.refresh()
+            try check(pinnedTab() == nil && controller.session.currentProfileID == other, "The pinned fixture tab outlived its cleanup")
+            host.reconcile()
+        }
         // Measurement, not a pass/fail: idle-callback availability in the three page-side worlds
         // (Proton Pass and uBOL page scripts call requestIdleCallback without a feature check).
         let idlePage = (try? await controller.browsers[id]?.evaluateJavaScript("typeof requestIdleCallback + ',' + typeof cancelIdleCallback")) as? String ?? "unknown"

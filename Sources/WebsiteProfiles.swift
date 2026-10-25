@@ -15,11 +15,25 @@ import WebKit
            let tab = session.tabs.first(where: { $0.id == id }) { return session.profileID(for: tab) }
         return nil
     }
-    @discardableResult func openProfileTab(_ url: URL, profileID: UUID, active: Bool) -> UUID? {
+    /// `kept` creates a Bam kept tab at the root of the profile's Space (an extension's pinned tab): it is
+    /// kept in the same step it is added, before anything refreshes or publishes it, and never a Favorite.
+    @discardableResult func openProfileTab(_ url: URL, profileID: UUID, active: Bool, kept: Bool = false) -> UUID? {
         guard URLInput.directURL(url.absoluteString) != nil || allowsExtensionPage(url, profileID: profileID) else { return nil }
+        // Refuse before anything changes, so a refused pinned request leaves no ordinary tab behind.
+        if kept, ExtensionPinnedPolicy.creationRefusal(url: url, pinned: true) != nil { return nil }
         let previousSpace = session.space, previousTab = session.activeID
+        let existing = Set(session.tabs.map(\.id))
         guard selectSpace(forProfile: profileID) else { return nil }
+        // Selecting an empty Space adds its blank fallback tab. The requested tab takes its place,
+        // so opening a tab in another profile (by an extension or a ⌘-click) never leaves an extra blank behind.
+        let fallback = session.tabs.filter { !existing.contains($0.id) && $0.isHome && !$0.isSaved }.map(\.id)
+        func discardFallback() { for blank in fallback { _ = session.close(blank); teardownPage(blank) } }
         let id = session.add(address: url.absoluteString)
+        if kept, !session.setRetention(id: id, kind: .kept) {
+            _ = session.close(id); session.changeSpace(previousSpace); session.select(previousTab); discardFallback()
+            refresh(); return nil
+        }
+        discardFallback()
         if active { select(id); view.window?.makeKeyAndOrderFront(nil) }
         else {
             session.changeSpace(previousSpace); session.select(previousTab)
@@ -27,6 +41,30 @@ import WebKit
             refresh(); save()
         }
         return id
+    }
+    /// An extension's `tabs.update({pinned})`: nil when the tab now has the requested state, otherwise why Bam
+    /// refused. Changes only this tab's kept state; it never navigates, switches Space or profile, or touches a Favorite.
+    func setExtensionTabPinned(_ id: UUID, profileID: UUID, pinned: Bool) -> String? {
+        guard let tab = session.tabs.first(where: { $0.id == id }), session.profileID(for: tab) == profileID else {
+            return "This tab is not in this extension’s profile."
+        }
+        let state = ExtensionPinnedPolicy.Tab(
+            retention: tab.isFavorite ? .favorite : tab.isSaved ? .kept : .ordinary,
+            address: tab.address, savedAddress: tab.saved?.address, inFolder: tab.folderID != nil,
+            hasCustomTitle: tab.saved?.customTitle != nil, hasCustomSymbol: tab.saved?.customSymbol != nil,
+            isUnloaded: tab.isUnloaded, isSplitMember: session.split(for: id) != nil)
+        let kind: SavedTabKind?
+        switch ExtensionPinnedPolicy.update(state, pinned: pinned) {
+        case .unchanged: return nil
+        case .refuse(let reason): return reason
+        case .keep: kind = .kept
+        case .release: kind = nil
+        }
+        // For ordinary and kept tabs (never a Favorite here) setRetention keeps the tab in its own Space
+        // and leaves the current Space, profile and selection as they are.
+        guard session.setRetention(id: id, kind: kind) else { return "Bam could not change this tab’s kept state." }
+        refresh(); refreshPaletteResults(); save()
+        return nil
     }
     func library(for profileID: UUID) -> BrowserLibrary {
         if let existing = profileLibraries[profileID] {
