@@ -11,14 +11,15 @@ import WebKit
         if let existing = stores[profileID] { return existing }
         let store: WKWebsiteDataStore
         if ephemeral { store = .nonPersistent() }
-        else if profileID == BrowserProfile.defaultID { store = .default() }
-        else { store = WKWebsiteDataStore(forIdentifier: profileID) }
+        else if let identifier = PreviewProfile.persistentIdentifier(for: profileID) { store = WKWebsiteDataStore(forIdentifier: identifier) }
+        else { store = .default() }
         stores[profileID] = store
         return store
     }
     func profileID(for store: WKWebsiteDataStore) -> UUID? {
         if let match = stores.first(where: { $0.value === store })?.key { return match }
-        if !ephemeral, let identifier = store.identifier, stores[identifier] != nil { return identifier }
+        if !ephemeral, let identifier = store.identifier,
+           let profile = stores.keys.first(where: { PreviewProfile.persistentIdentifier(for: $0) == identifier }) { return profile }
         return nil
     }
 }
