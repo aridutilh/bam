@@ -50,10 +50,14 @@ import WebKit
     /// document. Positions can change between rounds; documents are matched by their own random ID.
     private var modeRounds: [[[String: Any]]] = []
     private var controllerConfigurationPersistent: Bool?
-    /// The action popup's page, so its release can be confirmed before the owned store is removed.
-    private weak var lastPopupWebView: WKWebView?
     /// A weak handle on an owned page; nil once WebKit has released it.
     private final class WeakView { weak var view: WKWebView?; init(_ view: WKWebView) { self.view = view } }
+    /// Every action popup page seen during the run, so each one's release can be confirmed before the
+    /// owned store is removed.
+    private var observedPopups: [WeakView] = []
+    private func notePopup(_ view: WKWebView) {
+        if !observedPopups.contains(where: { $0.view === view }) { observedPopups.append(WeakView(view)) }
+    }
     private static var reservedIdentifiers: Set<UUID> { [BrowserProfile.defaultID, PreviewProfile.defaultStoreIdentifier] }
 
     /// Normal semantics with only task-owned storage: a non-private controller on a new random profile whose
@@ -343,6 +347,7 @@ import WebKit
                 }
             }
             if invokedAction?.popupPopover?.isShown == true { observations["action_popup_presented"] = true }
+            if let popup = invokedAction?.popupWebView { notePopup(popup) }
             if !fallbackOpened && elapsed >= 5 {
                 fallbackOpened = true
                 let options = manifest["options_ui"] as? [String: Any]
@@ -372,7 +377,7 @@ import WebKit
                 if let action = invokedAction ?? context.action(for: nil) {
                     observations["action_has_popup"] = action.presentsPopup
                     observations["action_popup_is_shown"] = action.popupPopover?.isShown == true
-                    if let popup = action.popupWebView { lastPopupWebView = popup; samplePage(popup, key: "action_popup", context: context) }
+                    if let popup = action.popupWebView { notePopup(popup); samplePage(popup, key: "action_popup", context: context) }
                 }
                 for (tabID, web) in browser.browsers where web.url.map({ BrowserExtensions.isExtensionURL($0, ownedBy: context) }) == true {
                     samplePage(web, key: "tab_\(tabID.uuidString)", context: context)
@@ -592,14 +597,20 @@ import WebKit
             ownedViews += browser.littleWindows.values.compactMap(\.webView).map(WeakView.init)
             ownedViews += browser.peeks.values.compactMap(\.webView).map(WeakView.init)
         }
-        if let popup = lastPopupWebView { ownedViews.append(WeakView(popup)) }
-        observations["tracked_owned_pages"] = ownedViews.count
         var temporaryStorage: URL?
         if #available(macOS 15.4, *), let browser = controller {
             let host = browser.browserExtensions
             temporaryStorage = host.storageURL
             if let id = extensionID {
                 if let context = host.context(for: id) {
+                    // Extension-owned pages reachable before host shutdown: the offscreen document (loading or
+                    // open) and the action popups (default and per tab). The background page is WebKit-internal
+                    // and not reachable; its release is covered only by the controller's.
+                    let runtime = context.webExtensionController?.delegate as? BrowserExtensionRuntime
+                    if let offscreen = runtime?.compatibility.offscreen?.currentDocument(for: context.uniqueIdentifier) {
+                        ownedViews.append(WeakView(offscreen))
+                    }
+                    if let popup = context.action(for: nil)?.popupWebView { notePopup(popup) }
                     observations["context_errors"] = context.errors.prefix(20).map(errorDescription)
                     observations["context_error_count"] = context.errors.count
                 }
@@ -607,6 +618,9 @@ import WebKit
                 observations["native_companion_granted"] = host.items(profileID: browser.session.currentProfileID).first { $0.id == id }?.nativeHost != nil
             }
         }
+        ownedViews += observedPopups
+        observations["tracked_owned_pages"] = ownedViews.count
+        observations["untracked_owned_pages"] = "the extension background page is WebKit-internal; only the controller's release covers it"
         controller?.prepareToClose(persistSession: false)
         let fm = FileManager.default
         // The private host deletes its temporary package storage on shutdown;
