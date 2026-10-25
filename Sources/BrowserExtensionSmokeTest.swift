@@ -330,6 +330,12 @@ import Darwin
             // The changeInfo must carry the status: a title-driven update also reads `status: "complete"` live.
             return records.contains { ($0["infoStatus"] as? String) == "complete" && ($0["url"] as? String)?.contains("extension-test.html") == true }
         }
+        // Measurement, not a pass/fail: idle-callback availability in the three page-side worlds
+        // (Proton Pass and uBOL page scripts call requestIdleCallback without a feature check).
+        let idlePage = (try? await controller.browsers[id]?.evaluateJavaScript("typeof requestIdleCallback + ',' + typeof cancelIdleCallback")) as? String ?? "unknown"
+        let idleContent = (try? await controller.browsers[id]?.evaluateJavaScript("document.documentElement.dataset.bamContentIdle || 'unreported'")) as? String ?? "unknown"
+        let idleExtension = (try? await popup.evaluateJavaScript("typeof requestIdleCallback + ',' + typeof cancelIdleCallback")) as? String ?? "unknown"
+        print("EXTENSION_ENVIRONMENT requestIdleCallback,cancelIdleCallback page=\(idlePage) content=\(idleContent) extensionPage=\(idleExtension) macOS=\(ProcessInfo.processInfo.operatingSystemVersionString)"); fflush(stdout)
         // tabs.detectLanguage (Dashlane): page text first, then the declaration, in callback and promise forms.
         guard let languageWeb = controller.browsers[id] else { throw ExtensionSmokeTest.Failure(description: "Missing tabs.detectLanguage page") }
         _ = try await languageWeb.evaluateJavaScript("""

@@ -138,18 +138,27 @@ import WebKit
             // HTTPS, not HTTP: an extension page is a secure context, so a plain-HTTP image is
             // blocked as mixed content and would not hold the load. The silent listener accepts
             // the connection and never answers the TLS handshake, so the image stays pending.
-            let stallState = 'none';
+            let stallState = 'none', stallSource = '';
             // A policy block reports itself instead of looking like a network error.
             document.addEventListener('securitypolicyviolation', event => { if (stall) stallState = 'csp:' + event.effectiveDirective + ':' + event.blockedURI; });
             if (stall) {
               const image = new Image(); stallState = 'pending';
               image.onload = () => { stallState = 'loaded'; }; image.onerror = () => { if (!stallState.startsWith('csp:')) stallState = 'error'; };
-              image.src = 'https://127.0.0.1:' + stall + '/stall.png'; document.documentElement.append(image);
+              image.src = 'https://127.0.0.1:' + stall + '/stall.png'; stallSource = image.src; document.documentElement.append(image);
             }
             (globalThis.browser || globalThis.chrome).runtime.onMessage.addListener(message => {
+              if (message?.kind === 'offscreen-fetch-diagnostic') {
+                // Diagnostic only: how this page's own request to the stall URL ends.
+                const started = performance.now(), controller = new AbortController();
+                setTimeout(() => controller.abort(), 2000);
+                return fetch(message.url, {signal: controller.signal, cache: 'no-store'})
+                  .then(response => ({outcome: 'response ' + response.status, ms: Math.round(performance.now() - started)}),
+                        error => ({outcome: String(error && error.name) + ': ' + String(error && error.message), ms: Math.round(performance.now() - started)}));
+              }
               if (message?.kind !== 'offscreen-echo') return undefined;
               const parsed = new DOMParser().parseFromString('<p>' + message.value + '</p>', 'text/html').body.textContent;
-              return Promise.resolve({echo: parsed, path: location.pathname, visible: document.visibilityState, stall: stallState, readyState: document.readyState});
+              return Promise.resolve({echo: parsed, path: location.pathname, visible: document.visibilityState, stall: stallState, readyState: document.readyState,
+                                      href: location.href, stallPort: stall || '', stallSource});
             });
             """.utf8).write(to: package.appendingPathComponent("offscreen.js"))
             try Data("<!doctype html><meta charset='utf-8'><title>Offscreen fixture</title><script src='offscreen.js'></script>".utf8).write(to: package.appendingPathComponent("offscreen.html"))
@@ -248,11 +257,25 @@ import WebKit
         stallParameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: .any)
         let stallListener = try NWListener(using: stallParameters)
         var stalledConnections: [NWConnection] = []
+        var listenerState = "setup"
+        stallListener.stateUpdateHandler = { state in listenerState = "\(state)" }
         stallListener.newConnectionHandler = { connection in stalledConnections.append(connection); connection.start(queue: .main) }
         stallListener.start(queue: .main)
         defer { stallListener.cancel(); for connection in stalledConnections { connection.cancel() } }
-        try await wait("Stalling loopback listener did not start") { stallListener.port != nil }
+        // `port` can report the requested `.any` (0) before the listener is bound; wait for a
+        // ready listener with its real port, then prove it accepts a plain loopback connection
+        // before any WebKit request is judged against it.
+        try await wait("Stalling loopback listener did not become ready with a bound port") {
+            listenerState == "ready" && (stallListener.port?.rawValue ?? 0) != 0
+        }
         let stallPort = Int(stallListener.port!.rawValue)
+        let selfCheck = NWConnection(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: UInt16(stallPort))!, using: .tcp)
+        selfCheck.start(queue: .main)
+        try await wait("The silent listener on port \(stallPort) did not accept a direct loopback connection (state \(listenerState))") { !stalledConnections.isEmpty }
+        selfCheck.cancel()
+        for connection in stalledConnections { connection.cancel() }
+        stalledConnections.removeAll()
+        print("EXTENSION_STALL_LISTENER port=\(stallPort) state=\(listenerState) directConnection=accepted"); fflush(stdout)
         func stalledOffscreen(_ popup: WKWebView) async -> [String: Any]? {
             try? await popup.callAsyncJavaScript("return await (globalThis.browser || globalThis.chrome).runtime.sendMessage({kind: 'offscreen-stall', port});",
                 arguments: ["port": stallPort], in: nil, contentWorld: .page) as? [String: Any]
@@ -270,9 +293,18 @@ import WebKit
         // reached the silent listener, and the image is still pending.
         try check(stalledEcho?["echo"] as? String == "stalled" && stalledReport?["has"] as? Bool == true,
                   "The stalled offscreen page did not run or answer: \(stalledReport ?? [:])")
-        try await wait("The stalled offscreen page's request never reached the silent listener (\(stallAccess)): \(stalledReport ?? [:])") { !stalledConnections.isEmpty }
+        try check(stalledEcho?["stallSource"] as? String == stallURL.absoluteString,
+                  "The offscreen page requested \(stalledEcho?["stallSource"] ?? "nothing") instead of the proven listener URL \(stallURL.absoluteString)")
+        do {
+            try await wait("The stalled offscreen page's request never reached the silent listener") { !stalledConnections.isEmpty }
+        } catch {
+            // Describe where the request ended before failing: the page's own fetch of the same URL.
+            let fetchProbe = try? await popupA.callAsyncJavaScript("return await (globalThis.browser || globalThis.chrome).runtime.sendMessage({kind: 'offscreen-fetch-diagnostic', url});",
+                arguments: ["url": stallURL.absoluteString], in: nil, contentWorld: .page)
+            throw Failure(description: "The stalled offscreen page's request never reached the proven silent listener on port \(stallPort) (\(stallAccess), listener \(listenerState), connectionsAfterFetch=\(stalledConnections.count)): report=\(stalledReport ?? [:]) fetch=\(String(describing: fetchProbe))")
+        }
         try check(stalledEcho?["stall"] as? String == "pending" && stalledEcho?["readyState"] as? String != "complete",
-                  "The stalling image did not stay pending (fixture did not stall; \(stallAccess)): \(stalledReport ?? [:])")
+                  "The stalling image did not stay pending (fixture did not stall; port \(stallPort), \(stallAccess)): \(stalledReport ?? [:])")
         try check(runtimeA.compatibility.offscreen.entry(for: contextA.uniqueIdentifier)?.isLoaded == false,
                   "A document whose load is still pending was reported loaded: \(stalledReport ?? [:])")
         weak var stalledWeb = runtimeA.compatibility.offscreen.currentDocument(for: contextA.uniqueIdentifier)

@@ -1,5 +1,7 @@
 (async () => {
   document.documentElement.dataset.bamExtensionStarted = "injected";
+  // Measurement only: whether this isolated content-script world has idle callbacks.
+  document.documentElement.dataset.bamContentIdle = typeof requestIdleCallback + "," + typeof cancelIdleCallback;
   if (!document.body.dataset.bamFixtureToken) return;
   try {
     const result = await browser.runtime.sendMessage({kind: "fixture", token: document.body.dataset.bamFixtureToken});
