@@ -38,6 +38,12 @@ import WebKit
                 guard let page = components.url else {
                     throw ExtensionSmokeTest.Failure(description: "Could not construct the local extension test page URL")
                 }
+                if CommandLine.arguments.contains("--extension-identity-probe") {
+                    // Measurement only, not a suite: the probe owns its 45 s budget, output, cleanup and exit.
+                    self.watchdog?.invalidate(); self.watchdog = nil
+                    ExtensionIdentityProbe.start()
+                    return
+                }
                 if CommandLine.arguments.contains("--extension-gesture-probe") {
                     // Measurement only, not a suite: the probe owns its 60 s budget, output, cleanup and exit.
                     self.watchdog?.invalidate(); self.watchdog = nil
