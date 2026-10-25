@@ -9,6 +9,8 @@ import WebKit
 /// using the same ID; and whether storage follows the ID or the base URL when a context is reloaded under a new UUID
 /// host, with a UUID-ID control. Original task-owned package, loopback page only, bounded awaits, released and
 /// removed state. Prints EXTENSION_VERIFIED_ID_PROBE and MEASUREMENT; never a suite PASS line.
+/// Phase 1 scope: non-persistent controllers and website stores in ONE process. It says nothing about durable or
+/// relaunch persistence (a later phase with owned persistent stores across processes).
 @available(macOS 15.4, *)
 @MainActor enum ExtensionVerifiedIDProbe {
     /// Chrome-shaped (32 letters a–p), clearly synthetic; never a real publisher's ID.
@@ -47,27 +49,34 @@ import WebKit
         let pending = released.pending
         if pending.isEmpty { try? fm.removeItem(at: root) }
         let removed = !fm.fileExists(atPath: root.path)
-        let required = ["pageA", "contentA", "pageB", "storageA", "storageBBefore", "storageAAfterB", "reloadSameID", "reloadUUIDControl"]
+        // Complete needs every record and a valid transport for every storage call. A semantic negative (for example
+        // an absent value) is still a valid measurement; a script or transport error is not.
+        let storageKeys = ["storageA", "storageBBefore", "storageBWrite", "storageAAfterB", "reloadSameID", "reloadUUIDControl"]
+        let required = ["pageA", "contentA", "pageB"] + storageKeys
         let missing = required.filter { record[$0] == nil }
-        let complete = failure == nil && missing.isEmpty && pending.isEmpty && removed
+        let invalidTransport = storageKeys.filter { ((record[$0] as? [String: Any])?["ok"] as? Bool) != true }
+        let complete = failure == nil && missing.isEmpty && invalidTransport.isEmpty && pending.isEmpty && removed
         var summary = record
-        summary["stage"] = stage; summary["failure"] = failure ?? NSNull(); summary["missing"] = missing
+        summary["stage"] = stage; summary["failure"] = failure ?? NSNull(); summary["missing"] = missing; summary["invalidStorageTransport"] = invalidTransport
         summary["notReleased"] = pending; summary["folderRemoved"] = removed; summary["preservedFolder"] = removed ? NSNull() : root.path as Any
         summary["probeID"] = probeID
+        summary["scope"] = "phase1: non-persistent controllers and website stores, same process only; no durable/relaunch claim"
         let json = (try? JSONSerialization.data(withJSONObject: summary, options: [.sortedKeys])).flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
         print("EXTENSION_VERIFIED_ID_PROBE \(json)")
-        print("MEASUREMENT \(complete ? "complete" : "incomplete")\(failure.map { ": stopped at \(stage): \($0)" } ?? "")\(missing.isEmpty ? "" : " missing \(missing)")\(pending.isEmpty && removed ? "" : " (cleanup not confirmed: \(pending); folder \(removed ? "removed" : "kept at \(root.path)"))")")
+        print("MEASUREMENT \(complete ? "complete" : "incomplete")\(failure.map { ": stopped at \(stage): \($0)" } ?? "")\(missing.isEmpty ? "" : " missing \(missing)")\(invalidTransport.isEmpty ? "" : " invalid storage transport \(invalidTransport)")\(pending.isEmpty && removed ? "" : " (cleanup not confirmed: \(pending); folder \(removed ? "removed" : "kept at \(root.path)"))")")
         fflush(stdout)
         return (complete, json)
     }
 
     private static func measure(root: URL, pageURL: URL, released: Released, record: inout [String: Any], failure: inout String?, stage: inout String) async {
         var controllers: [WKWebExtensionController] = [], contexts: [(WKWebExtensionController, WKWebExtensionContext)] = [], views: [WKWebView] = []
+        // Each "profile" owns an explicit non-persistent website store; nothing falls back to WKWebsiteDataStore.default().
+        var stores: [ObjectIdentifier: WKWebsiteDataStore] = [:]
         defer {
             for view in views { view.stopLoading() }
             views.removeAll()
             for (controller, context) in contexts where context.isLoaded { try? controller.unload(context) }
-            contexts.removeAll(); controllers.removeAll()
+            contexts.removeAll(); controllers.removeAll(); stores.removeAll()
         }
         let deadline = ProcessInfo.processInfo.systemUptime + budget
         do {
@@ -75,7 +84,18 @@ import WebKit
             try writePackage(package, pageURL: pageURL)
             stage = "controllers"
             func controller(_ name: String) -> WKWebExtensionController {
-                let made = WKWebExtensionController(configuration: .nonPersistent()); controllers.append(made); released.track(name, made); return made
+                let store = WKWebsiteDataStore.nonPersistent()
+                let configuration = WKWebExtensionController.Configuration.nonPersistent()
+                configuration.defaultWebsiteDataStore = store
+                configuration.webViewConfiguration.websiteDataStore = store
+                let made = WKWebExtensionController(configuration: configuration)
+                controllers.append(made); stores[ObjectIdentifier(made)] = store
+                released.track(name, made); released.track("\(name) website store", store)
+                return made
+            }
+            func store(of controller: WKWebExtensionController) throws -> WKWebsiteDataStore {
+                guard let store = stores[ObjectIdentifier(controller)] else { throw Failure(description: "no owned website store for a controller") }
+                return store
             }
             func load(_ controller: WKWebExtensionController, id: String, host: UUID, name: String) async throws -> WKWebExtensionContext {
                 guard let ext = try await bounded(10, by: deadline, "\(name) package", { try? await WKWebExtension(resourceBaseURL: package) }) else {
@@ -92,19 +112,29 @@ import WebKit
                 return context
             }
             func page(_ context: WKWebExtensionContext, name: String) async throws -> (WKWebView, [String: Any]) {
-                guard let configuration = context.webViewConfiguration else { throw Failure(description: "\(name): no extension page configuration") }
+                guard let configuration = context.webViewConfiguration, let controller = context.webExtensionController else { throw Failure(description: "\(name): no extension page configuration") }
+                configuration.websiteDataStore = try store(of: controller)
                 let view = WKWebView(frame: NSRect(x: 0, y: 0, width: 400, height: 300), configuration: configuration)
                 views.append(view); released.track("\(name) page", view)
                 view.load(URLRequest(url: context.baseURL.appendingPathComponent("page.html")))
                 return (view, try await poll(view, key: "bamIdentity", name: name, deadline: deadline))
             }
-            func storage(_ view: WKWebView, set value: String?, name: String) async throws -> Any {
-                let script = value.map { "await (globalThis.browser || globalThis.chrome).storage.local.set({probe: \(ExtensionCompatibilityBridge.json($0))});" } ?? ""
-                let answer: Any?? = try await bounded(5, by: deadline, "\(name) storage") {
-                    try? await view.callAsyncJavaScript(script + " const got = await (globalThis.browser || globalThis.chrome).storage.local.get('probe'); return got.probe === undefined ? '(absent)' : got.probe;",
-                                                        arguments: [:], in: nil, contentWorld: .page)
+            /// {ok: true, value} (value "(absent)" when unset, plus wrote when a write happened) or {ok: false, error}.
+            /// Script errors and transport errors are kept distinct from a legitimate absent value.
+            func storage(_ view: WKWebView, set value: String?, name: String) async throws -> [String: Any] {
+                let write = value.map { "await api.storage.local.set({probe: \(ExtensionCompatibilityBridge.json($0))}); wrote = true;" } ?? ""
+                let script = """
+                    const api = globalThis.browser || globalThis.chrome; let wrote = false;
+                    try { \(write) const got = await api.storage.local.get('probe');
+                          return {ok: true, wrote, value: got.probe === undefined ? '(absent)' : String(got.probe)}; }
+                    catch (error) { return {ok: false, stage: 'script', error: String(error && error.message || error)}; }
+                    """
+                let answer: [String: Any]? = try await bounded(5, by: deadline, "\(name) storage") { [weak view] in
+                    guard let view else { return ["ok": false, "stage": "transport", "error": "page released"] }
+                    do { return try await view.callAsyncJavaScript(script, arguments: [:], in: nil, contentWorld: .page) as? [String: Any] ?? ["ok": false, "stage": "transport", "error": "non-object reply"] }
+                    catch { return ["ok": false, "stage": "transport", "error": String(describing: error)] }
                 }
-                return (answer ?? nil) ?? "(no answer)"
+                return answer ?? ["ok": false, "stage": "transport", "error": "no reply"]
             }
 
             let hostA = UUID(), hostB = UUID(), hostA2 = UUID(), hostC = UUID()
@@ -116,7 +146,7 @@ import WebKit
             record["pageA"] = reportA
             record["storageA"] = try await storage(pageA, set: "A", name: "A")
             stage = "content A"
-            let webConfiguration = WKWebViewConfiguration(); webConfiguration.websiteDataStore = .nonPersistent(); webConfiguration.webExtensionController = controllerA
+            let webConfiguration = WKWebViewConfiguration(); webConfiguration.websiteDataStore = try store(of: controllerA); webConfiguration.webExtensionController = controllerA
             let web = WKWebView(frame: NSRect(x: 0, y: 0, width: 400, height: 300), configuration: webConfiguration)
             views.append(web); released.track("web page", web)
             web.load(URLRequest(url: pageURL))
@@ -128,7 +158,7 @@ import WebKit
             let (pageB, reportB) = try await page(contextB, name: "page B")
             record["pageB"] = reportB
             record["storageBBefore"] = try await storage(pageB, set: nil, name: "B before")
-            _ = try await storage(pageB, set: "B", name: "B set")
+            record["storageBWrite"] = try await storage(pageB, set: "B", name: "B set")
             record["storageAAfterB"] = try await storage(pageA, set: nil, name: "A after B")
 
             stage = "reload"
@@ -175,7 +205,8 @@ import WebKit
         try Data("bam-verified-id-war".utf8).write(to: package.appendingPathComponent("war.txt"))
         try Data("""
             const api = globalThis.browser || globalThis.chrome;
-            const who = (sender) => ({id: api.runtime.id, senderId: sender ? sender.id : null, senderUrl: sender && sender.url || null, senderOrigin: sender && sender.origin || null, base: api.runtime.getURL('/')});
+            const who = (sender) => ({id: api.runtime.id, browserId: globalThis.browser && globalThis.browser.runtime ? globalThis.browser.runtime.id : null,
+              chromeId: globalThis.chrome && globalThis.chrome.runtime ? globalThis.chrome.runtime.id : null, senderId: sender ? sender.id : null, senderUrl: sender && sender.url || null, senderOrigin: sender && sender.origin || null, base: api.runtime.getURL('/')});
             api.runtime.onMessage.addListener((message, sender, reply) => { if (message && message.kind === 'who') { reply(who(sender)); } });
             api.runtime.onConnect.addListener((port) => {
               port.onMessage.addListener((message) => { if (message && message.kind === 'who') port.postMessage(Object.assign(who(port.sender), {name: port.name})); });
@@ -190,6 +221,19 @@ import WebKit
               try { out.own = await (await fetch(out.url)).text(); } catch (error) { out.own = 'error: ' + error; }
               try { out.message = await api.runtime.sendMessage({kind: 'who'}); } catch (error) { out.message = {error: String(error)}; }
               try { out.selfById = await api.runtime.sendMessage(api.runtime.id, {kind: 'who'}); } catch (error) { out.selfById = {error: String(error)}; }
+              out.callbackSelf = await new Promise((resolve) => {
+                const timer = setTimeout(() => resolve({timeout: true}), 4000);
+                try { (c || b).runtime.sendMessage(api.runtime.id, {kind: 'who'}, (reply) => { clearTimeout(timer); const lastError = (c || b).runtime.lastError; resolve({reply: reply === undefined ? null : reply, lastError: lastError ? String(lastError.message) : null}); }); }
+                catch (error) { clearTimeout(timer); resolve({error: String(error)}); }
+              });
+              const connect = (args, name) => new Promise((resolve) => {
+                try {
+                  const port = api.runtime.connect(...args), timer = setTimeout(() => resolve({timeout: true}), 4000);
+                  port.onMessage.addListener((message) => { clearTimeout(timer); resolve(message); port.disconnect(); });
+                  port.postMessage({kind: 'who'});
+                } catch (error) { resolve({error: String(error)}); }
+              });
+              out.portById = await connect([api.runtime.id, {name: 'probe-by-id'}]);
               out.port = await new Promise((resolve) => {
                 try {
                   const port = api.runtime.connect({name: 'probe'}), timer = setTimeout(() => resolve({timeout: true}), 4000);
@@ -202,7 +246,9 @@ import WebKit
             """.utf8).write(to: package.appendingPathComponent("page.js"))
         try Data("""
             (async () => {
-              const api = globalThis.browser || globalThis.chrome, out = {id: api.runtime.id, url: api.runtime.getURL('/war.txt')};
+              const api = globalThis.browser || globalThis.chrome, out = {id: api.runtime.id, url: api.runtime.getURL('/war.txt'),
+                browserId: globalThis.browser && globalThis.browser.runtime ? globalThis.browser.runtime.id : null,
+                chromeId: globalThis.chrome && globalThis.chrome.runtime ? globalThis.chrome.runtime.id : null};
               try { out.message = await api.runtime.sendMessage({kind: 'who'}); } catch (error) { out.message = {error: String(error)}; }
               try { out.war = await (await fetch(out.url)).text(); } catch (error) { out.war = 'error: ' + error; }
               document.documentElement.dataset.bamIdentityContent = JSON.stringify(out);
