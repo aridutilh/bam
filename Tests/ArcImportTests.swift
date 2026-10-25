@@ -522,7 +522,8 @@ import Foundation
                "Theme keeps both gradient colors, separate light/dark roles and accent variants")
         expect(space.colorIndex == 2 && plain.theme == nil, "A themed Space keeps the nearest flat color as fallback; an unthemed one has none")
         expect(report.importedThemes == 1 && report.approximatedThemes == 0
-               && report.notices.contains { $0.contains("1 Space keeps its Arc theme colors and gradient") && $0.contains("grain and vibrancy aren’t reproduced") },
+               && report.notices.contains { $0.contains("1 Space keeps its Arc theme colors") && $0.contains("grain and vibrancy aren’t reproduced") }
+               && report.themesWithoutGradient == 0 && !report.notices.contains { $0.contains("can’t draw") },
                "The preview says the theme comes over and what doesn't")
 
         // Drawing: readable text over every gradient color in both appearances,
@@ -568,6 +569,10 @@ import Foundation
                && p3Report.notices.contains { $0.contains("couldn’t be read") }, "An unknown color space falls back to the flat color, with a notice")
         let image = try ArcImport.parse({ let f = Fixture(); f.space("Image", profile: nil, windowTheme: arcTheme(blended: false)); return f.json() }())
         let imageTheme = image.spaces[0].theme
+        let imageReport = ArcImport.apply(image, to: BrowserSession.fresh()).report
+        expect(imageReport.importedThemes == 1 && imageReport.themesWithoutGradient == 1
+               && imageReport.notices.contains { $0.contains("background Bam can’t draw") },
+               "A theme without a readable gradient is described as colors only, without promising a gradient")
         expect(imageTheme?.gradient.isEmpty == true && imageTheme.map { $0.canvasStops(dark: false)?[0] == $0.light.background.mixed(toward: $0.light.background, by: 1) } == true,
                "An unknown background variant keeps the theme's colors over its own backgrounds")
         var partial = arcTheme(); partial["semanticColorPalette"] = ["appearanceBased": ["light": (arcTheme()["semanticColorPalette"] as! [String: Any])]]
