@@ -413,6 +413,64 @@ import AppKit
         stable.mouseDown(with: mouse(.leftMouseDown)); stable.mouseDragged(with: drag)
         require(started.count == 1 && "tab-row-\(started[0].uuidString)" == stableID, "Without a reload the pressed row is dragged")
         sidebar.onRowDragWillBegin = nil
+
+        // Accessibility, pointer and keyboard model for rows.
+        let navFolder = UUID(), navChild = UUID(), navKept = UUID(), navToday = UUID(), navOther = UUID()
+        let navItems = [
+            SidebarTabItem(id: navFolder, title: "Work", subtitle: "", symbol: "folder", isPinned: true, isActive: false, isFolder: true, isExpanded: true),
+            SidebarTabItem(id: navChild, title: "Inside work", subtitle: "", symbol: "globe", isPinned: true, isActive: false, isUnloaded: true,
+                           depth: 1, parentFolderID: navFolder),
+            SidebarTabItem(id: navKept, title: "Kept", subtitle: "", symbol: "globe", isPinned: true, isActive: false, isUnloaded: true),
+            SidebarTabItem(id: navToday, title: "Today", subtitle: "", symbol: "globe", isPinned: false, isActive: true),
+            SidebarTabItem(id: navOther, title: "Other", subtitle: "", symbol: "globe", isPinned: false, isActive: false)
+        ]
+        var navSelected: [UUID] = [], pageFocused = 0
+        sidebar.onSelectTab = { navSelected.append($0) }
+        sidebar.onToggleFolder = { _ in }
+        sidebar.onFocusPage = { pageFocused += 1 }
+        update(0, navItems)
+        let navTable = table(in: 0)   // rows: Work, Inside work, Kept, divider, New Tab, Today, Other
+        func focusedID() -> String? { (window.firstResponder as? NSView)?.identifier?.rawValue }
+        func rowID(_ id: UUID) -> String { "tab-row-\(id.uuidString)" }
+        let folderView = row(navTable, 0), childView = row(navTable, 1)
+        require(folderView.isAccessibilityElement() && childView.isAccessibilityElement(), "Rows are real accessibility elements, not just table cells")
+        require(folderView.accessibilityRole() == .disclosureTriangle && folderView.accessibilityRoleDescription() == "folder"
+                && childView.accessibilityRole() == .button && childView.accessibilityLabel() == "Inside work",
+                "Folders announce as disclosure controls; tabs as buttons with their titles")
+        // Pointer: nothing opens on mouse-down; release opens; a drag never does.
+        childView.mouseDown(with: mouse(.leftMouseDown))
+        require(navSelected.isEmpty, "Mouse-down alone neither selects nor wakes a dormant tab")
+        childView.mouseUp(with: mouse(.leftMouseUp))
+        require(navSelected == [navChild], "Releasing without a drag opens the tab")
+        navSelected.removeAll()
+        sidebar.onRowDragWillBegin = { _ in false }
+        childView.mouseDown(with: mouse(.leftMouseDown)); childView.mouseDragged(with: drag); childView.mouseUp(with: mouse(.leftMouseUp))
+        require(navSelected.isEmpty, "Dragging a tab never selects or wakes it")
+        sidebar.onRowDragWillBegin = nil
+        // Keyboard entry (View ▸ Focus Sidebar) and navigation without selection.
+        window.makeFirstResponder(nil)
+        require(sidebar.focusTabList() && focusedID() == rowID(navToday) && navSelected.isEmpty,
+                "Focus Sidebar lands on the selected tab's row without selecting anything")
+        key(126, to: window.firstResponder as! NSView)
+        require(focusedID() == rowID(navKept) && navSelected.isEmpty, "Up moves focus past the divider to a kept row; nothing opens")
+        key(126, to: window.firstResponder as! NSView)
+        require(focusedID() == rowID(navChild) && navSelected.isEmpty, "Arrows reach rows inside folders without opening them")
+        key(123, to: window.firstResponder as! NSView)
+        require(focusedID() == rowID(navFolder), "Left from a row in a folder moves focus to the folder")
+        key(125, to: window.firstResponder as! NSView); key(125, to: window.firstResponder as! NSView)
+        require(focusedID() == rowID(navKept), "Down continues row by row")
+        key(36, to: window.firstResponder as! NSView)
+        require(navSelected == [navKept], "Return opens the focused tab (only then is it woken)")
+        key(53, to: window.firstResponder as! NSView)
+        require(pageFocused == 1, "Escape hands focus back to the page")
+        // A list with no selected row (active page is a Favorite) still has an entry point.
+        update(0, navItems.map { item in
+            SidebarTabItem(id: item.id, title: item.title, subtitle: item.subtitle, symbol: item.symbol, isPinned: item.isPinned, isActive: false,
+                           isUnloaded: item.isUnloaded, depth: item.depth, isFolder: item.isFolder, isExpanded: item.isExpanded,
+                           parentFolderID: item.parentFolderID)
+        })
+        window.makeFirstResponder(nil)
+        require(sidebar.focusTabList() && focusedID() == rowID(navFolder), "With no selection, Focus Sidebar starts at the first row")
         print("PASS: \(checks) sidebar virtualization, identity, scrolling, paging and extension action checks")
         window.contentView = nil
     }

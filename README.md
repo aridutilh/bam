@@ -74,6 +74,7 @@ Every one of those is a working subset, not a finished browser feature — the [
 | Action | Control |
 |---|---|
 | Choose / activate palette result | ↑ / ↓, then Return; Escape cancels |
+| Move around the sidebar from the keyboard | ⌃⌘S to focus it, ↑ / ↓ to move (nothing opens), Return to open, → / ← to open or close a folder (← also jumps to the folder you're in), Escape back to the page |
 | Close / reopen tab | ⌘W / ⇧⌘T |
 | Open link in background / foreground tab | ⌘-click / ⇧⌘-click |
 | Open link in Little Bam | ⌥⌘-click |
