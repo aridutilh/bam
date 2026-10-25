@@ -48,6 +48,13 @@ import Foundation
         try check(!manager.status.isEditable && manager.status.isSelectable && manager.status.acceptsFirstResponder &&
                   manager.status.accessibilityLabel() == "Selected extension status and compatibility details",
                   "The details view is not read-only, selectable, focusable and labelled")
+        // A persistent extension error (WebKit context errors arrive through setError) leads, and the full warning
+        // still follows it in the same scrollable area.
+        host.setError(NSError(domain: "Fixture", code: 1, userInfo: [NSLocalizedDescriptionKey: "Fixture context error that stays until fixed."]), for: audited)
+        manager.refresh()
+        let withError = manager.status.string
+        try check(withError.hasPrefix("Fixture context error that stays until fixed.") && withError.contains(note) && withError.contains(preparation),
+                  "A persistent error hid the disclosure: \(withError.prefix(200))")
         func rowText(_ id: UUID) -> String {
             guard let index = manager.items(for: id), let cell = manager.tableView(manager.table, viewFor: nil, row: index),
                   let label = cell.subviews.first as? NSTextField else { return "" }

@@ -108,8 +108,10 @@ import UniformTypeIdentifiers
         updateButton.toolTip = safari ? "Review the current signed extension in its installed app, without contacting the store. Keeps its Bam identity and settings. Update the containing app in the App Store first when needed."
             : updatable ? "Ask \(selected?.catalog?.sourceLabel ?? "the store") for a newer version of this build. Updates keep the extension’s identity and storage and never switch stores." : "Only store-installed extensions can check for updates."
         let guidance = "Reload already open pages after enabling, disabling, or revoking access. Code injected into a page cannot be removed until that page reloads. Extension storage stays local to this profile."
-        status.string = pendingStatus ?? selected.flatMap { host?.errors[$0.id] } ?? (selected == nil ? host?.lastError : nil)
-            ?? selected.flatMap(Self.details) ?? guidance
+        // A message or error leads; the selected extension's full disclosure always follows it, so a persistent
+        // error never hides the static-rule warning the row points to.
+        let headline = pendingStatus ?? selected.flatMap { host?.errors[$0.id] } ?? (selected == nil ? host?.lastError : nil)
+        status.string = Self.statusText(headline: headline, details: selected.flatMap(Self.details), guidance: guidance)
         status.scrollToBeginningOfDocument(nil)
         pendingStatus = nil
         statusScroll.toolTip = guidance
@@ -235,6 +237,10 @@ import UniformTypeIdentifiers
     static func details(_ record: BrowserExtensionRecord) -> String? {
         let parts = [record.staticRuleAudit?.note, record.compatibilityNote].compactMap { $0 }
         return parts.isEmpty ? nil : (parts + ["Reload open pages after changing access."]).joined(separator: "\n\n")
+    }
+    static func statusText(headline: String?, details: String?, guidance: String) -> String {
+        let parts = [headline, details].compactMap { $0 }
+        return parts.isEmpty ? guidance : parts.joined(separator: "\n\n")
     }
     static func reviewPermissions(_ review: BrowserExtensionPermissionReview) -> Bool {
         let alert = NSAlert()
