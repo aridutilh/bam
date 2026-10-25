@@ -118,7 +118,8 @@ import UniformTypeIdentifiers
 
         // Jobs capture the imported site and profile at commit; completion revalidates.
         let jobs = ArcIconImport.jobs(for: added, in: after)
-        require(jobs.count == added.count, "Every added web tab gets a job")
+        require(jobs.count == added.filter { item in !(after.tabs.first { $0.id == item.tabID }?.isArcEasel ?? false) }.count,
+                "Every added web tab gets a job (Easel references have no site icon)")
         let todayJob = jobs.first { job in after.tabs.first { $0.id == job.tabID }?.saved == nil }!
         let todayOrigin = todayJob.origin
         var navigated = after

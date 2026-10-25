@@ -82,9 +82,14 @@ import WebKit
     func navigatePane(_ id: UUID, address: String) {
         returnPaneVideo(id)
         guard let i = session.tabs.firstIndex(where: { $0.id == id }) else { return }
+        // An Easel row shows a native view; giving it a web address (e.g. an
+        // extension's tabs.update) must make the new page the visible host.
+        let leavingNativeView = session.tabs[i].isArcEasel
         session.tabs[i].address = address
         session.tabs[i].title = URL(string: address)?.host ?? "New tab"
-        load(address, in: webView(for: session.tabs[i]), id: id); refresh(); save()
+        load(address, in: webView(for: session.tabs[i]), id: id)
+        if leavingNativeView && id == session.activeID { showActive() } else { refresh() }
+        save()
     }
     func openSplit(adopting web: WKWebView, beside owner: UUID) {
         guard let primary = session.tabs.first(where: { $0.id == owner }) else { _ = adoptWebView(web); return }
@@ -115,8 +120,15 @@ import WebKit
     @objc func splitWithNewPage(_ sender: Any?) {
         let primary = session.activeID
         if session.split(for: primary) != nil || session.active?.isFavorite == true { return }
-        let id = session.add()
-        session.makeSplit(primary: primary, secondary: id); showActive(); save()
+        // All or nothing: a refused Split (e.g. an Arc Easel reference, which
+        // has no page) must not leave a new blank tab created and selected.
+        var draft = session
+        let id = draft.add()
+        guard draft.makeSplit(primary: primary, secondary: id) else {
+            if session.active?.isArcEasel == true { pageFeedback.show("Easels can’t be in a Split", symbol: "rectangle.split.2x1", in: webHost) }
+            return
+        }
+        session = draft; showActive(); save()
         splitCoordinators[primary]?.focusAddress(.right)
     }
     @objc func unsplitCurrent(_ sender: Any?) { unsplit(session.activeID) }

@@ -164,6 +164,7 @@ import WebKit
         try await runPageCommands()
         try await runEditableSpaces()
         try await runSavedTabs()
+        try await runEaselReferences()
     }
     func finish(_ success: Bool, _ detail: String) {
         controller?.prepareToClose()

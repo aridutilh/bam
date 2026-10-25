@@ -47,6 +47,16 @@ import AppKit
         check(memory.popClosed()?.tabs == [home], "Closed records reopen last-in first-out")
         check(memory.popClosed()?.tabs == [first, second] && memory.popClosed() == nil, "A split consumes one archive record containing both panes")
 
+        // A closed (Today/unkept) Arc Easel reference can be reopened, and survives a restart.
+        let easelFile = root.appendingPathComponent("easel/library.json")
+        let easelLibrary = BrowserLibrary(storageURL: easelFile)
+        let easel = tab(ArcEaselReference.address(for: UUID()), "Canvas from Arc")
+        easelLibrary.recordClosed(tabs: [easel], split: false)
+        check(easelLibrary.closedRecords.first?.tabs == [easel], "A closed Easel reference is archived for reopening")
+        check(BrowserLibrary(storageURL: easelFile).popClosed()?.tabs == [easel], "Its archive survives restart and reopens unchanged")
+        easelLibrary.recordClosed(tabs: [tab("orbit://arc-easel/not-a-uuid", "Bad")], split: false)
+        check(easelLibrary.closedRecords.count == 1, "Malformed reference addresses are still refused")
+
         let customFile = root.appendingPathComponent("custom-spaces/library.json")
         let custom = BrowserLibrary(storageURL: customFile)
         let customLeft = tab("https://example.com/custom", "Custom Space", space: 1042)

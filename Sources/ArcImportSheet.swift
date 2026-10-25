@@ -173,6 +173,7 @@ import UniformTypeIdentifiers
             if space.todayTabs > 0 { parts.append("\(space.todayTabs) Today") }
             if space.favorites > 0 { parts.append("\(space.favorites) Favorite\(space.favorites == 1 ? "" : "s")") }
             if space.splits > 0 { parts.append("\(space.splits) Split\(space.splits == 1 ? "" : "s")") }
+            if space.easels > 0 { parts.append("\(space.easels) Easel reference\(space.easels == 1 ? "" : "s")") }
             let name = [space.emoji, space.title].compactMap { $0 }.joined(separator: " ")
             let row = label("\(name) — \(parts.isEmpty ? "nothing new" : parts.joined(separator: " · "))\(space.isNew ? "" : "  (adds to existing Space)")")
             row.setAccessibilityLabel("\(space.title): \(parts.isEmpty ? "nothing new" : parts.joined(separator: ", "))")
