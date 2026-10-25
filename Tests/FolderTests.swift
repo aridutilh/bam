@@ -67,6 +67,8 @@ import Foundation
         session.select(c.id)
         expect(session.visibleKeptLayout(in: 0, revealing: session.activeID).map(\.id) == [b.id, c.id, a.id, work], "Unselected children stay hidden")
         expect(session.visibleTabs.contains { $0.id == today.id }, "Collapsed tabs remain part of the Space for search and cycling")
+        expect((session.keptLayout(in: 0).map(\.depth).max() ?? 0) >= 1 && session.visibleKeptLayout(in: 0, revealing: c.id).map(\.depth).max() == 0,
+               "The whole-tree depth (used for a stable sidebar indent) still counts collapsed children")
 
         // Unkeeping removes a tab from its folder; closing a kept tab only unloads it.
         session.setFolderCollapsed(id: work, collapsed: false)

@@ -242,7 +242,93 @@ import AppKit
         sidebar.setFrameSize(NSSize(width: 228, height: 720)); update(0, nested)
         let wideTitle = descendants(row(table(in: 0), 12)).compactMap { $0 as? NSTextField }.first { $0.stringValue == "Deep leaf page title" }!
         require(wideTitle.frame.width >= 64 && wideTitle.frame.minX > narrowIndent, "Wider sidebars restore deeper indentation: \(wideTitle.frame)")
+        // Visual review: one indent step per list, so every level stays distinct
+        // at the narrowest width (depth 1 and depth 5 never line up).
+        for width in [164, 200, 240] as [CGFloat] {
+            let xs = (0...5).map { ArkRowLayout(width: width, height: 34, depth: $0, listMaxDepth: 5, isFolder: false, showsClose: true).title.minX }
+            require(zip(xs, xs.dropFirst()).allSatisfy { $1 - $0 >= 5 }, "Every folder level indents further at \(width)pt: \(xs)")
+            let deepest = ArkRowLayout(width: width, height: 34, depth: 5, listMaxDepth: 5, isFolder: false, showsClose: true)
+            require(deepest.title.width >= ArkMetrics.minimumTitleWidth - 0.5, "Deepest title keeps its minimum with the close button showing at \(width)pt")
+        }
+        // A hidden close button gives its room back to the title.
+        let quiet = ArkRowLayout(width: 240, height: 34, depth: 1, listMaxDepth: 1, isFolder: false, showsClose: false)
+        let busy = ArkRowLayout(width: 240, height: 34, depth: 1, listMaxDepth: 1, isFolder: false, showsClose: true)
+        require(quiet.title.width >= busy.title.width + 20 && quiet.title.maxX <= 240 - ArkMetrics.trailingGap + 0.5,
+                "Titles run to the edge when the close button is hidden: \(quiet.title.width) vs \(busy.title.width)")
+        let leafNow = row(table(in: 0), 12)
+        let leafTitle = descendants(leafNow).compactMap { $0 as? NSTextField }.first { $0.stringValue == "Deep leaf page title" }!
+        let closeShown = descendants(leafNow).first { !$0.isHidden && ["Close tab", "Unload tab"].contains($0.accessibilityLabel() ?? "") }
+        require(closeShown != nil && leafTitle.frame.maxX <= closeShown!.frame.minX, "The selected row's title stops before its close button")
+
+        // Saved rows that haven't been opened (every fresh import) read at full
+        // contrast; only memory-slept pages are quieted, and only slightly.
+        require(ArkRowInk.title(sleeping: false) == ArkPalette.ink && ArkRowInk.iconAlpha(sleeping: false) == 1
+                && ArkRowInk.iconAlpha(sleeping: true) >= 0.75, "Dormant saved rows are not dimmed")
+        let dormantItems = Array(nested.dropLast()) + [SidebarTabItem(id: leaf, title: "Deep leaf page title", subtitle: "https://deep.invalid", symbol: "globe",
+                                                                         isPinned: true, isActive: false, isUnloaded: true, depth: 12, parentFolderID: folderIDs.last)]
+        update(0, dormantItems)
+        let dormantRow = row(table(in: 0), 12)
+        let dormantTitle = descendants(dormantRow).compactMap { $0 as? NSTextField }.first { $0.stringValue == "Deep leaf page title" }!
+        let dormantIcon = descendants(dormantRow).compactMap { $0 as? NSImageView }.first { $0.identifier?.rawValue != "folder-chevron" }!
+        require(dormantTitle.textColor == ArkPalette.ink && dormantIcon.alphaValue == 1, "An unloaded saved row keeps full ink and icon")
+        update(0, nested)
+
         let folderRow = row(deepTable, 0)
+        // Folders show a disclosure chevron that follows their state.
+        let chevron = descendants(folderRow).first { $0.identifier?.rawValue == "folder-chevron" } as? NSImageView
+        require(chevron?.isHidden == false && chevron?.image?.name() == nil, "Folder rows show a chevron")
+        require(descendants(leafNow).first { $0.identifier?.rawValue == "folder-chevron" }?.isHidden != false, "Tab rows show no chevron")
+        let folderTitle = descendants(folderRow).compactMap { $0 as? NSTextField }.first { $0.stringValue.hasPrefix("Folder level 0") }!
+        require(chevron.map { folderTitle.frame.maxX <= $0.frame.minX } == true, "Folder titles stop before the chevron")
+        // Visual review P2: a materialized row reused between an unloaded tab and
+        // a folder (same depth, close hidden in both) must re-lay out its title.
+        // Scrolling recycles cells, so a row that was an unloaded tab comes back
+        // as a folder and vice versa (period 3 ensures both directions).
+        let flipIDs = (0..<400).map { _ in UUID() }
+        let flipList = flipIDs.enumerated().map { index, id in
+            let folder = index % 3 == 0
+            return SidebarTabItem(id: id, title: "Flip row \(index) with a fairly long title", subtitle: "", symbol: folder ? "folder" : "globe",
+                                  isPinned: true, isActive: false, isUnloaded: !folder, depth: 1, isFolder: folder, treeDepth: 1)
+        }
+        update(0, flipList)
+        let flipTable = table(in: 0)
+        var kindByRow: [ObjectIdentifier: Bool] = [:]
+        var reusedTabAsFolder = 0, reusedFolderAsTab = 0
+        @MainActor func checkMaterialized(_ label: String) {
+            prepare(flipTable)
+            let range = flipTable.rows(in: flipTable.visibleRect)
+            for index in range.location..<(range.location + range.length) {
+                guard let cell = flipTable.view(atColumn: 0, row: index, makeIfNecessary: false),
+                      let flipRow = descendants(cell).first(where: { $0.identifier?.rawValue.hasPrefix("tab-row-") == true }),
+                      let title = descendants(flipRow).compactMap({ $0 as? NSTextField }).first(where: { $0.stringValue.hasPrefix("Flip row ") }),
+                      let chevronView = descendants(flipRow).first(where: { $0.identifier?.rawValue == "folder-chevron" }) else { continue }
+                cell.layoutSubtreeIfNeeded()
+                let isFolder = !chevronView.isHidden
+                if let was = kindByRow[ObjectIdentifier(flipRow)], was != isFolder {
+                    if isFolder { reusedTabAsFolder += 1 } else { reusedFolderAsTab += 1 }
+                }
+                kindByRow[ObjectIdentifier(flipRow)] = isFolder
+                if isFolder {
+                    require(title.frame.maxX <= chevronView.frame.minX, "\(label): folder title stops before its chevron: \(title.frame) vs \(chevronView.frame)")
+                } else {
+                    require(title.frame.maxX >= flipRow.bounds.width - ArkMetrics.trailingGap - 0.5, "\(label): tab title reaches the edge: \(title.frame)")
+                }
+            }
+        }
+        checkMaterialized("top")
+        for target in stride(from: 40, to: 400, by: 37) { flipTable.scrollRowToVisible(target); checkMaterialized("row \(target)") }
+        require(reusedTabAsFolder > 0 && reusedFolderAsTab > 0,
+                "Scrolling reused cells in both directions (tab→folder \(reusedTabAsFolder), folder→tab \(reusedFolderAsTab))")
+        // Collapsing the deepest branch doesn't shift the remaining rows sideways:
+        // the indent step comes from the whole tree, not just the visible rows.
+        let stableShallow = [SidebarTabItem(id: flipIDs[0], title: "Flip row 0 with a fairly long title", subtitle: "", symbol: "globe",
+                                            isPinned: true, isActive: false, depth: 1, treeDepth: 8)]
+        update(0, stableShallow)
+        let shallowX = descendants(row(table(in: 0), 0)).compactMap { $0 as? NSTextField }.first { $0.stringValue.hasPrefix("Flip row 0 ") }!.frame.minX
+        let expectedX = ArkRowLayout(width: row(table(in: 0), 0).bounds.width, height: 34, depth: 1, listMaxDepth: 8, isFolder: false, showsClose: false).title.minX
+        require(abs(shallowX - expectedX) < 0.5, "Indent follows the whole tree depth even when deep rows are hidden: \(shallowX) vs \(expectedX)")
+        update(0, nested)
+
         selected.removeAll()
         _ = folderRow.accessibilityPerformPress()
         require(toggled == [folderIDs[0]] && selected.isEmpty, "Pressing a folder toggles it and selects nothing")

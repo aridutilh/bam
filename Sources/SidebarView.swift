@@ -42,6 +42,10 @@ struct SidebarTabItem: Equatable {
     var canNestFolder: Bool = true
     /// Whether a tab can be wrapped in a new folder (it must be keepable).
     var canWrapInFolder: Bool = true
+    /// Deepest level in the Space's whole kept tree, collapsed folders
+    /// included. It sets one indent step for the list that doesn't change
+    /// when a folder opens or closes, so rows never shift sideways.
+    var treeDepth: Int = 0
 }
 
 /// A destination offered by Move to Folder menus.
@@ -526,6 +530,8 @@ struct SidebarExtensionItem {
     private var destinations: [BrowserSpace] = []
     private var synchronizingSelection = false
     private(set) var tabs: [SidebarTabItem] = []
+    /// Deepest folder level in this list; sets the shared indent step.
+    private(set) var maxDepth = 0
 
     override init(frame: NSRect) {
         super.init(frame: frame); wantsLayer = true
@@ -579,6 +585,15 @@ struct SidebarExtensionItem {
         defer { if let focusedID { restoreFocus(to: focusedID, near: focusedIndex) } }
         tabs = items
         configureAppearance(space: space, destinations: destinations)
+        let deepest = items.map { max($0.depth, $0.treeDepth) }.max() ?? 0
+        if deepest != maxDepth {
+            // One indent step for the whole list: every visible row re-lays out.
+            maxDepth = deepest
+            table.enumerateAvailableRowViews { [weak self] _, index in
+                guard let self, let cell = self.table.view(atColumn: 0, row: index, makeIfNecessary: false) as? SidebarTabCell else { return }
+                cell.row.listMaxDepth = deepest
+            }
+        }
         if structureChanged || entries.isEmpty {
             entries = []; rowByID = [:]
             let kept = tabs.indices.filter { tabs[$0].isPinned }
@@ -713,6 +728,7 @@ struct SidebarExtensionItem {
         let row = cell.row
         if row.item.id != item.id, let focused = window?.firstResponder as? NSView,
            focused === row || focused.isDescendant(of: row) { window?.makeFirstResponder(table) }
+        row.listMaxDepth = maxDepth
         row.update(item)
         row.setFavicon(superview == nil || item.isSplit ? nil : faviconProvider?(item.id))
         if let spaceAppearance { row.configureSpace(id: spaceAppearance.id, tint: ArkPalette.spaceTint(spaceAppearance.colorIndex), destinations: destinations) }
@@ -935,12 +951,45 @@ enum ArkPalette {
     static let favoriteHeight: CGFloat = 46
     static let favoriteGap: CGFloat = 8
     static let rowRadius: CGFloat = 9
-    /// Per-level indent for a row of `width` at `depth`, never squeezing the title below the minimum.
-    static func indentStep(depth: Int, width: CGFloat) -> CGFloat {
-        guard depth > 0 else { return 0 }
-        let available = max(0, width - 72 - minimumTitleWidth)
-        return min(folderIndent, available / CGFloat(depth))
+    /// Leading icon column and the trailing gap a row always keeps.
+    static let leadingInset: CGFloat = 36
+    static let trailingGap: CGFloat = 10
+    /// Room the close button (or folder chevron) takes when it is showing.
+    static let trailingControl: CGFloat = 24
+    /// One per-level indent for the whole list, chosen from its deepest row so
+    /// every level stays visibly distinct (depth 1 never lines up with depth 5)
+    /// while the deepest titles keep at least `minimumTitleWidth`, even with
+    /// the close button showing.
+    static func indentStep(maxDepth: Int, width: CGFloat) -> CGFloat {
+        guard maxDepth > 0 else { return folderIndent }
+        let available = max(0, width - leadingInset - trailingGap - trailingControl - minimumTitleWidth)
+        return min(folderIndent, available / CGFloat(maxDepth))
     }
+}
+
+/// Frames inside a sidebar row. Pure geometry so it can be tested directly.
+@MainActor struct ArkRowLayout {
+    let icon: NSRect, title: NSRect, close: NSRect, chevron: NSRect
+    let indent: CGFloat
+    init(width: CGFloat, height: CGFloat, depth: Int, listMaxDepth: Int, isFolder: Bool, showsClose: Bool) {
+        let step = ArkMetrics.indentStep(maxDepth: max(listMaxDepth, depth), width: width)
+        indent = CGFloat(max(0, depth)) * step
+        icon = NSRect(x: 10 + indent, y: (height - 16) / 2, width: 16, height: 16)
+        close = NSRect(x: width - 30, y: (height - 24) / 2, width: 24, height: 24)
+        chevron = NSRect(x: width - 24, y: (height - 12) / 2, width: 12, height: 12)
+        // The title runs to the trailing control when one shows, else to the edge.
+        let titleEnd = isFolder ? chevron.minX - 4 : showsClose ? close.minX - 4 : width - ArkMetrics.trailingGap
+        let titleX = ArkMetrics.leadingInset + indent
+        title = NSRect(x: titleX, y: (height - 20) / 2, width: max(0, titleEnd - titleX), height: 20)
+    }
+}
+
+/// Row contrast. Like Arc, a saved tab that hasn't been opened yet (every
+/// freshly imported row) reads at full contrast; only a page Bam put to sleep
+/// to save memory is quieted, and only slightly.
+@MainActor enum ArkRowInk {
+    static func title(sleeping: Bool) -> NSColor { sleeping ? ArkPalette.secondary : ArkPalette.ink }
+    static func iconAlpha(sleeping: Bool) -> CGFloat { sleeping ? 0.8 : 1 }
 }
 
 /// A Space's icon: its emoji when it has one, otherwise its tinted symbol.
@@ -1167,12 +1216,14 @@ private final class ArkFavoriteButton: ArkHoverButton {
             let size = NSSize(width: image.size.width * scale, height: image.size.height * scale)
             image.draw(in: NSRect(x: (bounds.width - size.width) / 2, y: (bounds.height - size.height) / 2,
                                  width: size.width, height: size.height), from: .zero, operation: .sourceOver,
-                       fraction: item.isUnloaded || item.isSleeping ? 0.66 : 1, respectFlipped: true, hints: nil)
+                       fraction: ArkRowInk.iconAlpha(sleeping: item.isSleeping), respectFlipped: true, hints: nil)
         } else {
             symbol(item.symbol, rect: NSRect(x: (bounds.width - 19) / 2, y: (bounds.height - 19) / 2, width: 19, height: 19),
-                   color: item.isUnloaded || item.isSleeping ? ArkPalette.secondary.withAlphaComponent(0.66) : ArkPalette.ink, size: 18)
+                   color: ArkPalette.ink.withAlphaComponent(ArkRowInk.iconAlpha(sleeping: item.isSleeping)), size: 18)
         }
-        if item.isUnloaded || item.isSleeping {
+        // Only pages put to sleep to save memory get the moon; a saved
+        // Favorite that simply hasn't been opened yet looks like any other.
+        if item.isSleeping {
             symbol("moon", rect: NSRect(x: bounds.width - 13, y: bounds.height - 13, width: 8, height: 8), color: ArkPalette.secondary, size: 8)
         }
     }
@@ -1328,12 +1379,16 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource {
     var escape: (() -> Void)?
     var canMoveEarlier = false
     var canMoveLater = false
+    /// The deepest row in this list; sets one indent step for every row.
+    var listMaxDepth = 0 { didSet { if oldValue != listMaxDepth { needsLayout = true } } }
     private var currentSpace = 0
     private var destinations: [BrowserSpace] = []
     private var spaceTint = ArkPalette.spaceTint(0)
     private let titleLabel: NSTextField
     private let subtitleLabel: NSTextField
     private let iconView = NSImageView()
+    /// Folders show a small disclosure chevron at the trailing edge.
+    private let chevronView = NSImageView()
     private var favicon: NSImage?
     private let closeButton = ArkIconButton(symbol: "xmark", label: "Close tab", glyphSize: 12)
     private var hovered = false
@@ -1354,11 +1409,14 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource {
         iconView.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 16, weight: .regular)
         iconView.imageScaling = .scaleProportionallyUpOrDown
         iconView.contentTintColor = item.isActive ? spaceTint : ArkPalette.secondary
-        for view in [titleLabel, subtitleLabel, iconView, closeButton] as [NSView] { addSubview(view) }
+        for view in [titleLabel, subtitleLabel, iconView, chevronView, closeButton] as [NSView] { addSubview(view) }
         closeButton.isHidden = !item.isActive
         closeButton.handler = { [weak self] in self?.close?() }
-        // The row is one accessible control; its label and icon are not separate elements.
-        for view in [titleLabel, subtitleLabel, iconView] as [NSView] { view.setAccessibilityElement(false) }
+        chevronView.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 9, weight: .semibold)
+        chevronView.contentTintColor = ArkPalette.secondary; chevronView.isHidden = true
+        chevronView.identifier = NSUserInterfaceItemIdentifier("folder-chevron")
+        // The row is one accessible control; its label and icons are not separate elements.
+        for view in [titleLabel, subtitleLabel, iconView, chevronView] as [NSView] { view.setAccessibilityElement(false) }
         // A plain NSView is not an accessibility element by default; without
         // this, assistive tech sees only the table cell's raw subviews.
         setAccessibilityElement(true)
@@ -1384,10 +1442,10 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource {
             setAccessibilityLabel(titleLabel.stringValue)
         }
         if first || old.isActive != item.isActive || old.isFolder != item.isFolder { titleLabel.font = ArkType.rowFont(active: item.isActive, folder: item.isFolder) }
-        if first || old.depth != item.depth { needsLayout = true }
+        if first || old.depth != item.depth || old.isFolder != item.isFolder { needsLayout = true }
         if first || old.isUnloaded != item.isUnloaded || old.isSleeping != item.isSleeping {
-            titleLabel.textColor = item.isUnloaded || item.isSleeping ? ArkPalette.secondary : ArkPalette.ink
-            iconView.alphaValue = item.isUnloaded || item.isSleeping ? 0.55 : 1
+            titleLabel.textColor = ArkRowInk.title(sleeping: item.isSleeping)
+            iconView.alphaValue = ArkRowInk.iconAlpha(sleeping: item.isSleeping)
         }
         if first || old.subtitle != item.subtitle { subtitleLabel.stringValue = item.subtitle }
         if item.isFolder {
@@ -1399,7 +1457,10 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource {
             closeButton.setAccessibilityHelp(item.isSplit ? "Saved panes unload and remain in the sidebar; ordinary panes close." : nil)
             setAccessibilityHelp(item.isSplit ? "Split. Closing unloads saved panes and keeps their saved tabs; ordinary panes close." : item.isPinned ? "Kept tab. Closing unloads its page and keeps the saved tab." : "Tab")
         }
-        closeButton.isHidden = item.isFolder || item.isUnloaded || (!hovered && !item.isActive)
+        updateTrailingControls()
+        if item.isFolder, first || !old.isFolder || old.isExpanded != item.isExpanded {
+            chevronView.image = NSImage(systemSymbolName: item.isExpanded ? "chevron.down" : "chevron.right", accessibilityDescription: nil)
+        }
         setAccessibilityDisclosureLevel(item.depth)
         // Recycled cells must not keep a folder's disclosure state.
         setAccessibilityDisclosed(item.isFolder && item.isExpanded)
@@ -1458,14 +1519,23 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource {
     }
     override func layout() {
         super.layout()
-        let indent = CGFloat(item.depth) * ArkMetrics.indentStep(depth: item.depth, width: bounds.width)
-        iconView.frame = NSRect(x: 10 + indent, y: (bounds.height - 16) / 2, width: 16, height: 16)
-        let textWidth = max(0, bounds.width - 72 - indent + (item.isFolder ? 28 : 0))
-        let hasSubtitle = false
-        titleLabel.frame = NSRect(x: 36 + indent, y: (bounds.height - 20) / 2, width: textWidth, height: 20)
-        subtitleLabel.frame = NSRect(x: 37 + indent, y: 23, width: textWidth, height: 12)
-        subtitleLabel.isHidden = !hasSubtitle
-        closeButton.frame = NSRect(x: bounds.width - 30, y: (bounds.height - 24) / 2, width: 24, height: 24)
+        let frames = ArkRowLayout(width: bounds.width, height: bounds.height, depth: item.depth, listMaxDepth: listMaxDepth,
+                                  isFolder: item.isFolder, showsClose: !closeButton.isHidden)
+        iconView.frame = frames.icon
+        titleLabel.frame = frames.title
+        subtitleLabel.frame = NSRect(x: frames.title.minX + 1, y: 23, width: frames.title.width, height: 12)
+        subtitleLabel.isHidden = true
+        closeButton.frame = frames.close
+        chevronView.frame = frames.chevron
+    }
+    /// The close button shows on the selected or hovered tab; the title takes
+    /// its room back whenever it is hidden.
+    private func updateTrailingControls() {
+        // The title's end depends on both trailing controls, so a change to
+        // either (including a reused cell switching tab ↔ folder) re-lays out.
+        let hidden = item.isFolder || item.isUnloaded || (!hovered && !item.isActive)
+        if closeButton.isHidden != hidden { closeButton.isHidden = hidden; needsLayout = true }
+        if chevronView.isHidden != !item.isFolder { chevronView.isHidden = !item.isFolder; needsLayout = true }
     }
     override func draw(_ dirtyRect: NSRect) {
         if window?.firstResponder === self {
@@ -1500,8 +1570,8 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource {
         addTrackingArea(next)
         area = next
     }
-    override func mouseEntered(with event: NSEvent) { hovered = true; closeButton.isHidden = item.isUnloaded || item.isFolder; needsDisplay = true }
-    override func mouseExited(with event: NSEvent) { hovered = false; closeButton.isHidden = item.isUnloaded || item.isFolder || !item.isActive; needsDisplay = true }
+    override func mouseEntered(with event: NSEvent) { hovered = true; updateTrailingControls(); needsDisplay = true }
+    override func mouseExited(with event: NSEvent) { hovered = false; updateTrailingControls(); needsDisplay = true }
     override func hitTest(_ point: NSPoint) -> NSView? {
         guard let hit = super.hitTest(point) else { return nil }
         // Labels and symbols belong to the row's selection target; the close
