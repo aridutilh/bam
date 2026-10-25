@@ -1569,7 +1569,7 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted {
         }
         if first || old.subtitle != item.subtitle { subtitleLabel.stringValue = item.subtitle }
         if item.isFolder {
-            if first || !old.isFolder || old.isExpanded != item.isExpanded { favicon = nil; iconView.image = NSImage(systemSymbolName: item.isExpanded ? "folder" : "folder.fill", accessibilityDescription: nil); iconView.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 15, weight: .regular) }
+            if first || !old.isFolder || old.isExpanded != item.isExpanded { favicon = nil; iconView.image = NSImage(systemSymbolName: "folder", accessibilityDescription: nil); iconView.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 15, weight: .regular) }
         } else if favicon == nil, first || old.symbol != item.symbol || old.monogram != item.monogram || old.isFolder { showFallbackIcon() }
         if first || old.isActive != item.isActive || old.isFolder != item.isFolder { applyIconTint() }
         if first || old.isSplit != item.isSplit || old.isPinned != item.isPinned || old.isFolder != item.isFolder {
