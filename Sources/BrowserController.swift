@@ -192,6 +192,9 @@ import QuartzCore
     var isApplyingProfileChange = false { didSet { invalidateExtensionSurfaceTopology() } }
     var extensionStorage: AnyObject?
     var extensionRefreshWork: DispatchWorkItem?
+    /// Tabs whose loading state changed since extensions last saw them; a start and
+    /// finish that land in one turn still produce a `tabs.onUpdated`.
+    var extensionLoadingChanges: Set<UUID> = []
     var extensionSurfaceRevision: UInt64 = 0
     var extensionSurfaceWindow: ObjectIdentifier?
     var extensionTabIndices: [UUID: Int]?
@@ -444,7 +447,10 @@ import QuartzCore
                 guard let self, self.visibleMemberIDs.contains(id) else { return }; self.layoutBrowser()
             } },
             browser.observe(\.isLoading, options: [.new]) { [weak self] _, _ in DispatchQueue.main.async {
-                guard let self, self.visibleMemberIDs.contains(id) else { return }; self.scheduleChromeRefresh()
+                guard let self else { return }
+                // Every loading transition (start, finish, failure, stop) reaches extensions from here.
+                self.noteExtensionLoadingChange(id)
+                guard self.visibleMemberIDs.contains(id) else { return }; self.scheduleChromeRefresh()
             } }
         ]
     }

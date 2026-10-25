@@ -1,3 +1,12 @@
+// Every tab status change the host reports, so a test can require `status: "complete"`.
+const bamTabUpdates = [];
+browser.tabs.onUpdated.addListener((id, info, tab) => {
+  // `infoStatus` is present only for a loading-driven update, unlike the live `status`.
+  bamTabUpdates.push({id, infoStatus: info.status || "", status: tab.status || "", url: tab.url || ""});
+  if (bamTabUpdates.length > 50) bamTabUpdates.shift();
+  browser.storage.local.set({bamTabUpdates});
+});
+
 const menusReady = (async () => {
   await browser.contextMenus.removeAll();
   await new Promise((resolve, reject) => {
@@ -14,6 +23,8 @@ browser.contextMenus.onClicked.addListener((info, tab) => {
 });
 
 browser.runtime.onMessage.addListener((message) => {
+  if (message?.kind === "ping") return Promise.resolve({pong: message.via});
+  if (message?.kind === "updates") return browser.storage.local.get("bamTabUpdates").then(value => ({updates: value.bamTabUpdates || []}));
   if (!message || !["fixture", "popup"].includes(message.kind)) return;
   return (async () => {
     await menusReady;
@@ -24,7 +35,8 @@ browser.runtime.onMessage.addListener((message) => {
     }
     const tabs = await browser.tabs.query({});
     return {token: value.token, visits: value.visits, lastMenu: value.lastMenu, urls: tabs.map(tab => tab.url || ""),
-      encoding: globalThis["bamCaf\u00e9"] || "absent", nativeMessagingExposed: typeof browser.runtime.sendNativeMessage !== "undefined"};
+      encoding: globalThis["bamCaf\u00e9"] || "absent", nativeMessagingExposed: typeof browser.runtime.sendNativeMessage !== "undefined",
+      compat: await (globalThis.bamCompatProbe || "absent")};
   })();
 });
 

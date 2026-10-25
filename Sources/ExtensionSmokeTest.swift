@@ -141,14 +141,33 @@ import WebKit
         guard var mv2Manifest = try JSONSerialization.jsonObject(with: Data(contentsOf: mv2ManifestURL)) as? [String: Any] else { throw Failure(description: "Original fixture manifest is not an object") }
         mv2Manifest["manifest_version"] = 2
         let mv2Hosts = mv2Manifest.removeValue(forKey: "host_permissions") as? [String] ?? []
-        mv2Manifest["permissions"] = (mv2Manifest["permissions"] as? [String] ?? []).filter { $0 != "scripting" } + mv2Hosts
+        // Firefox-style builds request APIs WebKit lacks; Bam's compatibility layer stands in.
+        mv2Manifest["permissions"] = (mv2Manifest["permissions"] as? [String] ?? []).filter { $0 != "scripting" } + ["notifications", "idle"] + mv2Hosts
         mv2Manifest["optional_permissions"] = mv2Manifest.removeValue(forKey: "optional_host_permissions")
         mv2Manifest["browser_action"] = mv2Manifest.removeValue(forKey: "action")
-        mv2Manifest["background"] = ["scripts": ["nonascii.js", "background.js"], "persistent": false]
+        mv2Manifest["background"] = ["scripts": ["nonascii.js", "compat.js", "background.js"], "persistent": false]
         let originalManifest = try JSONSerialization.data(withJSONObject: mv2Manifest, options: [.sortedKeys, .prettyPrinted])
         try originalManifest.write(to: mv2ManifestURL)
         let nonASCII = Data("globalThis.bamCafé = \"naïve ☕\";\n".utf8)
         try nonASCII.write(to: mv2Fixture.appendingPathComponent("nonascii.js"))
+        // Exercises callback and promise styles of the shimmed namespaces from a real background page.
+        let compatProbe = """
+        globalThis.bamCompatProbe = (async () => {
+          const api = globalThis.browser || globalThis.chrome;
+          const out = { notifications: typeof api.notifications?.create, idle: typeof api.idle?.queryState,
+            navigationTarget: typeof api.webNavigation?.onCreatedNavigationTarget?.addListener, downloads: typeof api.downloads, management: typeof api.management };
+          try {
+            out.idleState = await new Promise(resolve => api.idle.queryState(60, resolve));
+            out.level = await api.notifications.getPermissionLevel();
+            out.browser = (await api.runtime.getBrowserInfo()).name;
+            out.updateCheck = (await api.runtime.requestUpdateCheck())[0];
+            out.self = (await api.management.getSelf()).name;
+            api.notifications.onClicked.addListener(() => {});
+          } catch (error) { out.error = String(error); }
+          return out;
+        })();
+        """
+        try Data(compatProbe.utf8).write(to: mv2Fixture.appendingPathComponent("compat.js"))
         let extensionB = try await host.importPackage(at: mv2Fixture, profileID: profileB)
         let importedFolder = host.storageURL.appendingPathComponent(extensionB.uuidString)
         try check(host.items(profileID: profileB).first?.compatibilityNote != nil && reviewed.last?.compatibilityNote != nil, "MV2 compatibility preparation was not disclosed")
@@ -195,7 +214,25 @@ import WebKit
             throw error
         }
         try check(await result(webB)?["encoding"] as? String == "naïve ☕", "MV2 background did not execute its original non-ASCII JavaScript correctly")
+        let compat = await result(webB)?["compat"] as? [String: Any] ?? [:]
+        // webNavigation is not requested, so the layer must not conjure that namespace either.
+        try check(compat["notifications"] as? String == "function" && compat["idle"] as? String == "function" && compat["navigationTarget"] as? String == "undefined" && compat["downloads"] as? String == "undefined" && compat["management"] as? String == "undefined",
+                  "Compatibility layer did not provide exactly the requested namespaces: \(compat)")
+        try check(["active", "idle", "locked"].contains(compat["idleState"] as? String ?? "") && compat["browser"] as? String == "Bam" && compat["updateCheck"] as? String == "no_update" && compat["self"] == nil && compat["error"] != nil,
+                  "Compatibility layer answered unexpectedly: \(compat)")
+        try check(Set(reviewed.last?.bridged ?? []) == ["notifications", "idle"] && reviewed.last?.unsupported == ["nativeMessaging"] && host.items(profileID: profileB).first?.compatibility.map(Set.init) == ["notifications", "idle"],
+                  "Permission review did not disclose the compatibility layer: \(reviewed.last?.bridged ?? []) \(reviewed.last?.unsupported ?? [])")
+        try check(await result(webA)?["compat"] as? String == "absent" && (host.items(profileID: profileA).first?.compatibility ?? []).isEmpty, "MV3 fixture without bridged permissions received the compatibility layer")
         try await wait("MV2 runtime.connect handshake did not return profile B storage") { await javascript(webB, "document.documentElement.dataset.bamExtensionPort") as? String == "profile-B" }
+        // WebKit never answers callback-style sendMessage from content scripts on its own; the prepared
+        // messaging adapter must, for both the (message, callback) and (extensionId, message, callback) forms.
+        try await wait("Callback-style sendMessage from a content script was not answered") {
+            let withID = await javascript(webA, "document.documentElement.dataset.bamExtensionCallbackID") as? String
+            let plain = await javascript(webA, "document.documentElement.dataset.bamExtensionCallback") as? String
+            return withID == "callback-id" && plain == "callback"
+        }
+        try await wait("Callback-style sendMessage from an MV2 content script was not answered") { await javascript(webB, "document.documentElement.dataset.bamExtensionCallbackID") as? String == "callback-id" }
+        try check(host.items(profileID: profileA).first?.compatibilityNote?.contains("messaging adapter") == true, "The content-script adaptation is not disclosed for the MV3 fixture")
         try check(await result(webA)?["token"] as? String == "profile-A", "Profile B overwrote profile A extension storage")
         try check(await result(webB)?["urls"] as? [String] == [urlB.absoluteString], "Extension B enumerated another profile")
         guard let popup = contextA.action(for: nil)?.popupWebView else { throw Failure(description: "Native WebKit action did not provide a real popup web view") }
