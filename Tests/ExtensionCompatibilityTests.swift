@@ -329,6 +329,30 @@ import JavaScriptCore
         noCookies.evaluateScript(ExtensionCompatibility.workerScript(manifest: [:], browserVersion: "test"))
         try check(noCookies.evaluateScript("browser.cookies === undefined && __bamCompatibility.cookies === undefined")!.toBool(), "A cookies adapter appeared without a cookies namespace")
 
+        // runtime.onUpdateAvailable: Proton Pass registers a listener unconditionally at worker start.
+        let lifecycle = JSContext()!
+        var lifecycleErrors: [String] = []
+        lifecycle.exceptionHandler = { _, error in lifecycleErrors.append(error?.toString() ?? "JavaScript error") }
+        lifecycle.evaluateScript("""
+            var location = {origin: 'webkit-extension://fixture', href: 'webkit-extension://fixture/background.js'}, console = {error: function() {}}, performance = {now: function() { return 0; }};
+            function Runtime() {} Runtime.prototype.getURL = function (path) { return 'webkit-extension://fixture' + path; }; Runtime.prototype.getManifest = function () { return {version: '1.42.0'}; };
+            var browser = {runtime: new Runtime()}, chrome = {runtime: new Runtime()};
+            """)
+        lifecycle.evaluateScript(ExtensionCompatibility.workerScript(manifest: [:], browserVersion: "test"))
+        lifecycle.evaluateScript("var onUpdate = function () {}; chrome.runtime.onUpdateAvailable.addListener(onUpdate);")
+        try check(lifecycleErrors.isEmpty && lifecycle.evaluateScript("""
+            chrome.runtime.onUpdateAvailable === browser.runtime.onUpdateAvailable && chrome.runtime.onUpdateAvailable.hasListener(onUpdate)
+            && typeof chrome.runtime.onUpdateAvailable.removeListener === 'function'
+            """)!.toBool(), "runtime.onUpdateAvailable was missing or not a shared event: \(lifecycleErrors)")
+        let nativeLifecycle = JSContext()!
+        nativeLifecycle.evaluateScript("""
+            var location = {origin: 'webkit-extension://fixture', href: 'x'}, console = {error: function() {}}, performance = {now: function() { return 0; }};
+            var engineEvent = {addListener: function () {}};
+            var browser = {runtime: {getURL: function (p) { return 'webkit-extension://fixture' + p; }, getManifest: function () { return {}; }, onUpdateAvailable: engineEvent}};
+            """)
+        nativeLifecycle.evaluateScript(ExtensionCompatibility.workerScript(manifest: [:], browserVersion: "test"))
+        try check(nativeLifecycle.evaluateScript("browser.runtime.onUpdateAvailable === engineEvent")!.toBool(), "An engine-provided onUpdateAvailable was replaced")
+
         // scripting.ExecutionWorld: the enum WebKit lacks, on the native namespace and its shared
         // prototype (so a distinct chrome.scripting wrapper sees it); never replacing a native enum.
         func executionWorld(_ setup: String) -> JSContext {

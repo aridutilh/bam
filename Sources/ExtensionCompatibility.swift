@@ -31,7 +31,7 @@ enum ExtensionCompatibility {
     /// Members the layer always offers when the host namespace exists but the member does not.
     static let runtimeExtras: [String] = ["runtime.getBrowserInfo", "runtime.onSuspend", "runtime.requestUpdateCheck", "runtime.getContexts",
                                           "webNavigation.onCreatedNavigationTarget", "storage.managed", "commands", "action.getUserSettings",
-                                          "scripting.ExecutionWorld"]
+                                          "scripting.ExecutionWorld", "runtime.onUpdateAvailable"]
 
     /// Computes what the layer will define for a parsed extension, from its manifest.
     static func plan(manifest: [String: Any]) -> Plan {
@@ -542,6 +542,10 @@ enum ExtensionCompatibility {
       if (managedStorage) extend("storage", "managed", () => managedStorage);
       if (provided.has("runtime.getBrowserInfo")) extend("runtime", "getBrowserInfo", () => call(async () => ({ name: "Bam", vendor: "Bam", version, buildID: "" })));
       if (provided.has("runtime.onSuspend")) for (const name of ["onSuspend", "onSuspendCanceled", "onRestartRequired"]) extend("runtime", name, extensionEvent("runtime", name));
+      // runtime.onUpdateAvailable never fires in Bam: there is no pending-update state. Updates are
+      // user-initiated in Bam's extension manager, reviewed, and replace the extension directly.
+      // Proton Pass registers a listener unconditionally at worker start.
+      if (provided.has("runtime.onUpdateAvailable")) extend("runtime", "onUpdateAvailable", extensionEvent("runtime", "onUpdateAvailable"));
       if (provided.has("runtime.requestUpdateCheck")) extend("runtime", "requestUpdateCheck", () => call(async () => { const value = ["no_update", { version: String(manifest().version || "") }]; value.__bamSpread = true; return value; }));
       // Only the offscreen document Bam hosts is reported; other contexts are not enumerated.
       if (provided.has("runtime.getContexts")) extend("runtime", "getContexts", () => call(async (filter) => {
