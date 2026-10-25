@@ -10,9 +10,9 @@ import WebKit
 /// Runtime prompts while withheld are declined and recorded. Native only (root wires the call into the extension
 /// suite); no account, no vendor code, an ephemeral controller and an owned temporary package per variant.
 ///
-/// Two variants, all-host first (WebKit has a separate all-host injection/coalescing path):
-///   - all-host: host_permissions `*://*/*`, content scripts on `<all_urls>` (the shape Dark Reader requests),
-///     visiting only the loopback page;
+/// Variants, broad forms first (WebKit has a separate all-host injection/coalescing path), visiting only loopback:
+///   - all-host: host_permissions `*://*/*`, content scripts on `<all_urls>` (the shape Dark Reader requests);
+///   - canonical only: `*://*/*` for both; `<all_urls>` only: content scripts, no host_permissions;
 ///   - single-host control: host_permissions and content scripts on `http://127.0.0.1/*`.
 /// Both variants always run. Withheld findings don't stop a variant (its restoration control still runs); every
 /// finding from every variant is reported together, and the suite fails if there is any.
@@ -25,14 +25,20 @@ enum ExtensionSiteAccessSmokeTest {
         let name: String
         let hostPermissions: [String]
         let matches: [String]
+        /// Both broad forms, as Dark Reader declares them (grants `*://*/*` and `<all_urls>`).
         static let allHost = Variant(name: "all-host", hostPermissions: ["*://*/*"], matches: ["<all_urls>"])
+        /// Only the canonical form (grants `*://*/*`).
+        static let canonicalOnly = Variant(name: "all-host-canonical-only", hostPermissions: ["*://*/*"], matches: ["*://*/*"])
+        /// Only `<all_urls>` (content scripts, no host_permissions): WebKit coalesces its injection under the canonical
+        /// key, which no granted key matches; expected to stay a finding until a different public path exists.
+        static let allURLsOnly = Variant(name: "all-host-all-urls-only", hostPermissions: [], matches: ["<all_urls>"])
         static let singleHost = Variant(name: "single-host", hostPermissions: ["http://127.0.0.1/*"], matches: ["http://127.0.0.1/*"])
     }
 
     /// `pageURL` is any page on the loopback fixture origin; this suite uses its own `/site-access-lifecycle.html`.
     static func run(pageURL: URL) async throws -> Int {
         var checks = 0, failures: [String] = []
-        for variant in [Variant.allHost, .singleHost] {
+        for variant in [Variant.allHost, .canonicalOnly, .allURLsOnly, .singleHost] {
             do {
                 let (passed, findings) = try await run(pageURL: pageURL, variant: variant)
                 checks += passed
