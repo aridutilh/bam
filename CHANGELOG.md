@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased draft — folders, Arc import, sidebar look
+
+- Add folders to each Space's kept section: create (including around a tab), rename, nest up to 12 levels, collapse, reorder, move between folders and Spaces, and ungroup in place. A collapsed folder still shows the selected tab; Splits move as one row. Folder metadata is additive to session format 5 and damaged records repair without losing tabs.
+- Add File ▸ Import from Arc… (also in Settings ▸ General). Bam reads Arc's `StorableSidebar.json` read-only, previews Spaces, folders, kept and Today tabs, per-profile Favorites, Splits and every limitation, then imports in one step. Imported pages stay asleep until opened; the window lands on a blank tab. Repeat imports add only new Arc items and keep local edits and removals. If saving fails, the import is undone and the outcome reported truthfully. Layout only: no passwords, cookies, history or extensions.
+- Bring the sidebar closer to Arc and Yab: a lifted translucent address field with the extension control inside it, an extension row only when extensions are installed, three-column Favorites tiles, a quiet Space heading, emoji Space icons, outline-free selected rows, a softer page frame, readable indentation for deep folders and folder rows that slide open (not under Reduce Motion).
+- Component tests only so far; native checks in Bam Preview are pending (see `VALIDATION.md`). Version number to be assigned at integration.
+
 ## 0.21.3 unreleased draft — build 44
 
 - Preserve early and late external URL-open requests in duplicate launches through an acknowledged, retryable handoff to the owning profile. Deduplicate transport retries without suppressing intentional repeated opens.
