@@ -156,6 +156,9 @@ import WebKit
         records.map { ["id": $0.uniqueIdentifier, "types": $0.containedDataTypes.map(\.rawValue).sorted(), "bytes": $0.totalSizeInBytes] }
     }
     private static func ok(_ result: [String: Any], equals expected: String) -> Bool { result["ok"] as? Bool == true && result["value"] as? String == expected }
+    /// The namespace holds exactly the records this run's write created (no more, no fewer).
+    private static func identifiers(_ records: [WKWebExtension.DataRecord]) -> Set<String> { Set(records.map(\.uniqueIdentifier)) }
+    static func expectedRecords(_ manifest: Manifest) -> (a: Set<String>, b: Set<String>) { ([manifest.probeID, manifest.legacyID], [manifest.probeID]) }
 
     // MARK: Modes
 
@@ -186,8 +189,9 @@ import WebKit
         session.unloadAll()
         let after = (try await records(a, deadline: deadline, name: "A"), try await records(b, deadline: deadline, name: "B"))
         output["recordsAfterWrite"] = ["A": describe(after.0), "B": describe(after.1)]
+        let expected = expectedRecords(manifest)
         let complete = ok(writes["A"]!, equals: manifest.expectedA) && ok(writes["L"]!, equals: manifest.expectedL) && ok(writes["B"]!, equals: manifest.expectedB)
-            && !after.0.isEmpty && !after.1.isEmpty
+            && identifiers(after.0) == expected.a && identifiers(after.1) == expected.b
         if complete { var done = manifest; done.written = true; try save(done, in: directory) }
         return complete
     }
@@ -199,7 +203,14 @@ import WebKit
         defer { session.unloadAll(); session.controllers.removeAll() }
         let a = controller("A", manifest.controllerA, session: session, released: released), b = controller("B", manifest.controllerB, session: session, released: released)
         let storeA = session.controllers[0].2, storeB = session.controllers[1].2
-        output["recordsAtStart"] = ["A": describe(try await records(a, deadline: deadline, name: "A")), "B": describe(try await records(b, deadline: deadline, name: "B"))]
+        // Ownership: only a namespace holding exactly this run's records may be loaded into. A Bam profile's namespace
+        // (with other extensions, or empty) is refused before any context is created.
+        let start = (try await records(a, deadline: deadline, name: "A"), try await records(b, deadline: deadline, name: "B"))
+        output["recordsAtStart"] = ["A": describe(start.0), "B": describe(start.1)]
+        let expected = expectedRecords(manifest)
+        guard identifiers(start.0) == expected.a, identifiers(start.1) == expected.b else {
+            throw Refusal(description: "The namespaces do not hold exactly this run's records; nothing was loaded. Use cleanup if the run stopped early.")
+        }
         var reads: [String: Any] = [:], pageReport: [String: Any]?
         do {
             let contextA = try await load(a, id: manifest.probeID, host: manifest.hostA, package: package, name: "A", session: session, released: released, deadline: deadline)
@@ -227,9 +238,11 @@ import WebKit
         let cleaned = try await cleanup(manifest, controllers: [("A", a), ("B", b)], deadline: deadline, output: &output)
         // Valid transport for every read is required; a value that did not survive is a legitimate measurement.
         let transportOK = ["A", "L", "B", "A new host"].allSatisfy { ((reads[$0] as? [String: Any])?["ok"] as? Bool) == true }
+        // Terminal: a reply/message or an explicit error (a semantic negative). Missing, malformed or timed out is not.
         let messaging = ["callbackSelf", "portById"].allSatisfy { key in
-            guard let entry = pageReport?[key] as? [String: Any] else { return false }
-            return entry["timeout"] == nil && entry["error"] == nil
+            guard let entry = pageReport?[key] as? [String: Any], !entry.isEmpty, entry["timeout"] == nil else { return false }
+            if entry["error"] is String { return true }
+            return key == "callbackSelf" ? entry.keys.contains("reply") : entry["id"] != nil
         }
         output["messagingTerminal"] = messaging
         return transportOK && messaging && output["readFailure"] == nil && cleaned
