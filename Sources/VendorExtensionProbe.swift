@@ -22,6 +22,10 @@ import WebKit
     /// Set when the run task has fully returned, so every cleanup in the
     /// installation path (including the installer's staging-folder removal) ran.
     private var runEnded = false
+    /// The installer's staging parent for this run only (downloaded archive and
+    /// unpacked package). Created and removed by the probe; nothing else is touched.
+    private let scratch = FileManager.default.temporaryDirectory
+        .appendingPathComponent("bam-vendor-probe-\(UUID().uuidString)", isDirectory: true)
     private var preparationStarted = ProcessInfo.processInfo.systemUptime
     private var observationStarted: TimeInterval?
     /// True only when the full requested observation period ran.
@@ -184,6 +188,8 @@ import WebKit
         configuration.websiteDataStore = browser.profileStores.store(for: profile)
         host.configure(configuration, profileID: profile)
         let installer = host.installer
+        try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: false)
+        installer.stagingRoot = scratch
         let listing = try await installer.chromeWebStore.candidate(for: expected)
         guard listing.source == .chromeWebStore, listing.upstreamID == expected else {
             throw BrowserExtensions.failure("The Chrome Web Store did not resolve \(expected) to that listing")
@@ -409,12 +415,6 @@ import WebKit
         guard !finished else { return }
         finished = true; watchdog?.invalidate(); watchdog = nil
         task?.cancel(); task = nil
-        // "completed" means the full requested observation ran, not merely that
-        // the extension initialized; the phase fields say how far it got.
-        let success = requested && observationCompleted
-        let reason = Self.sanitize(raw)
-        observations["completed"] = success
-        observations["reason"] = reason
         observations["phases"] = ["installed_and_initialized": initialized, "observation_started": observationStarted != nil,
                                   "observation_completed": observationCompleted]
         if let observationStarted {
@@ -441,16 +441,38 @@ import WebKit
             }
         }
         controller?.prepareToClose(persistSession: false)
+        let fm = FileManager.default
         // The private host deletes its temporary package storage on shutdown;
         // confirm that, and remove only that folder if teardown did not.
-        if let storage = temporaryStorage, storage.path.hasPrefix(FileManager.default.temporaryDirectory.path) {
-            let leftover = FileManager.default.fileExists(atPath: storage.path)
-            if leftover { try? FileManager.default.removeItem(at: storage) }
+        var hostStorageClean = true
+        if let storage = temporaryStorage, storage.path.hasPrefix(fm.temporaryDirectory.path) {
+            let leftover = fm.fileExists(atPath: storage.path)
+            if leftover { try? fm.removeItem(at: storage) }
             observations["temporary_storage_removed_by_host"] = !leftover
-            observations["temporary_storage_remaining"] = FileManager.default.fileExists(atPath: storage.path)
+            hostStorageClean = !fm.fileExists(atPath: storage.path)
+            observations["temporary_storage_remaining"] = !hostStorageClean
         }
+        // The installer stages downloads and unpacked packages only inside this
+        // run's scratch folder. Whatever it left there after returning (or after
+        // a cancelled run unwound) is reported, then only this folder is removed.
+        let stagedLeft = (try? fm.contentsOfDirectory(atPath: scratch.path)) ?? []
+        observations["installer_staging_entries_left"] = stagedLeft.count
+        observations["installer_staging_removed_by_installer"] = stagedLeft.isEmpty
+        if fm.fileExists(atPath: scratch.path) { try? fm.removeItem(at: scratch) }
+        let scratchClean = !fm.fileExists(atPath: scratch.path)
+        observations["installer_staging_remaining"] = !scratchClean
         window?.orderOut(nil); window?.close()
         controller = nil; window = nil
+        // "completed" means the full requested observation ran (not merely that
+        // the extension initialized) and no vendor files were left behind.
+        var reasonText = raw
+        if requested && observationCompleted && !(hostStorageClean && scratchClean) {
+            reasonText += "; temporary vendor files could not be removed"
+        }
+        let success = requested && observationCompleted && hostStorageClean && scratchClean
+        let reason = Self.sanitize(reasonText)
+        observations["completed"] = success
+        observations["reason"] = reason
         // Single output boundary: every string printed passes through `sanitize`.
         let printable = Self.scrub(observations)
         if JSONSerialization.isValidJSONObject(printable),
