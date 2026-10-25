@@ -48,17 +48,25 @@ import WebKit
             return true
         }
         value.createTab = { [weak self] url, profile, active in self?.openProfileTab(url, profileID: profile, active: active) }
+        // Only windows an extension opened may be closed by one; user-opened Little Bam windows are not.
+        final class OpenedWindows { var ids = Set<ObjectIdentifier>() }
+        let opened = OpenedWindows()
         value.createWindow = { [weak self] url, profile, focused in
             guard let self else { return nil }
             let before = Set(self.littleWindows.keys)
-            self.openLittleOrbit(url: url, profileID: profile)
+            // Little Bam refuses non-web addresses on its own; an extension's own page
+            // goes in after the window exists, through the readiness-gated open path.
+            let isExtensionPage = url?.scheme == "webkit-extension"
+            self.openLittleOrbit(url: isExtensionPage ? nil : url, profileID: profile)
             guard let id = self.littleWindows.keys.first(where: { !before.contains($0) }), let little = self.littleWindows[id], let window = little.window else { return nil }
+            if isExtensionPage, let url, !little.open(url: url) { little.close(); return nil }
+            opened.ids.insert(ObjectIdentifier(window))
             if !focused { self.view.window?.makeKeyAndOrderFront(nil) }
             return window
         }
         value.closeWindow = { [weak self] window in
-            guard let self, let little = self.littleWindows.values.first(where: { $0.window === window }) else { return false }
-            little.close(); return true
+            guard let self, opened.ids.contains(ObjectIdentifier(window)), let little = self.littleWindows.values.first(where: { $0.window === window }) else { return false }
+            opened.ids.remove(ObjectIdentifier(window)); little.close(); return true
         }
         value.startDownload = { [weak self] web, url, _ in
             guard let self else { return false }

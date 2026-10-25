@@ -33,9 +33,9 @@ enum ExtensionCompatibility {
     /// Computes what the layer will define for a parsed extension, from its manifest.
     static func plan(manifest: [String: Any]) -> Plan {
         var requested: [String] = []
-        for key in ["permissions", "optional_permissions"] {
-            for case let value as String in manifest[key] as? [Any] ?? [] { requested.append(value) }
-        }
+        // Optional permissions stay undefined until granted, as in Firefox; WebKit
+        // cannot grant a permission it does not know, so they are never provided.
+        for case let value as String in manifest["permissions"] as? [Any] ?? [] { requested.append(value) }
         var plan = Plan()
         for permission in bridgedPermissions where requested.contains(permission) { plan.provided.append(permission) }
         plan.provided += runtimeExtras
@@ -140,7 +140,7 @@ enum ExtensionCompatibility {
           const payload = { id, type: String(options.type || "basic"), title: String(options.title || ""), message: String(options.message || ""),
                             contextMessage: options.contextMessage ? String(options.contextMessage) : "",
                             buttons: Array.isArray(options.buttons) ? options.buttons.slice(0, 2).map((b) => String((b && b.title) || "")) : [] };
-          ids.set(id, payload);
+          ids.set(id, { ...options });
           try { await bridge("notifications.create", payload); } catch (error) { /* in-memory only */ }
           return id;
         };
@@ -346,7 +346,10 @@ enum ExtensionCompatibility {
     private var scripts: [String: WKUserScript] = [:]
     /// The extension document that registered last for each loaded context, by
     /// unique identifier: popups come and go, the background page persists.
-    private var documents: [String: [WKWebView]] = [:]
+    /// A frame that ran the layer. Replies and events are evaluated in that
+    /// frame, never in the main frame on its behalf, and dead views are dropped.
+    private struct Document { weak var web: WKWebView?; let frame: WKFrameInfo; var isLive: Bool { web?.url != nil } }
+    private var documents: [String: [Document]] = [:]
     private var notificationOwners: [String: String] = [:]
     /// Diagnostics per context: documents that reported in, and any failure of the layer itself.
     private var helloURLs: [String: [String]] = [:]
@@ -354,8 +357,9 @@ enum ExtensionCompatibility {
     /// Diagnostic only: evaluates a script in every extension document that reported in.
     func evaluate(_ script: String, for context: WKWebExtensionContext) async -> [String] {
         var results: [String] = []
-        for web in documents[context.uniqueIdentifier] ?? [] {
-            do { results.append(Self.json(try await web.evaluateJavaScript(script) ?? NSNull())) }
+        for document in documents[context.uniqueIdentifier] ?? [] {
+            guard let web = document.web, document.isLive else { continue }
+            do { results.append(Self.json(try await web.evaluateJavaScript(script, in: document.frame, contentWorld: .page) ?? NSNull())) }
             catch { results.append("error: \(error.localizedDescription)") }
         }
         return results
@@ -421,9 +425,10 @@ enum ExtensionCompatibility {
         let key = context.uniqueIdentifier
         switch kind {
         case "hello":
-            var list = (documents[key] ?? []).filter { $0.url != nil }
-            list.removeAll { $0 === web }
-            list.append(web)
+            let frame = message.frameInfo
+            var list = (documents[key] ?? []).filter(\.isLive)
+            list.removeAll { $0.web === web && $0.frame.isMainFrame == frame.isMainFrame && $0.frame.request.url == frame.request.url }
+            list.append(Document(web: web, frame: frame))
             documents[key] = list
             if let url = body["url"] as? String, (helloURLs[key]?.count ?? 0) < 20 {
                 helloURLs[key, default: []].append("\(url) ready=\(body["ready"] as? String ?? "?") webNavigation=\(body["webNavigation"] as? String ?? "?") namespaces=\(body["namespaces"] as? String ?? "?")")
@@ -434,11 +439,12 @@ enum ExtensionCompatibility {
         case "request":
             guard let id = body["id"] as? Int, let method = body["method"] as? String else { return }
             let params = body["params"] as? [String: Any] ?? [:]
+            let frame = message.frameInfo
             Task { @MainActor [weak self, weak web] in
                 guard let self else { return }
                 let (value, error) = await self.handle(method: method, params: params, context: context, web: web)
                 guard let web else { return }
-                self.reply(web, id: id, value: value, error: error)
+                self.reply(web, frame: frame, id: id, value: value, error: error)
             }
         default: break
         }
@@ -465,6 +471,7 @@ enum ExtensionCompatibility {
             guard let id = params["id"] as? String else { return (false, nil) }
             let identifier = Self.notificationIdentifier(context: context, id: id)
             notificationOwners.removeValue(forKey: identifier)
+            ExtensionNotificationCenter.shared.forget(identifier)
             if Self.canUseNotificationCenter {
                 UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [identifier])
                 UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: [identifier])
@@ -472,7 +479,7 @@ enum ExtensionCompatibility {
             return (true, nil)
         case "downloads.download":
             guard let web, let id = params["id"] as? Int, let raw = params["url"] as? String, let url = URL(string: raw),
-                  ["http", "https", "blob", "data"].contains(url.scheme?.lowercased() ?? "") || BrowserExtensions.isExtensionURL(url, ownedBy: context) else { return (nil, "Only HTTP(S), blob, data or this extension's own URLs can be downloaded.") }
+                  ["http", "https"].contains(url.scheme?.lowercased() ?? "") else { return (nil, "Only HTTP(S) URLs can be downloaded through Bam.") }
             let download = Download(id: id, url: url, filename: params["filename"] as? String ?? "", saveAs: params["saveAs"] as? Bool ?? false)
             guard startDownload?(web, download) == true else { return (nil, "Bam could not start this download.") }
             return (true, nil)
@@ -481,15 +488,16 @@ enum ExtensionCompatibility {
         }
     }
 
-    private func reply(_ web: WKWebView, id: Int, value: Any?, error: String?) {
+    private func reply(_ web: WKWebView, frame: WKFrameInfo, id: Int, value: Any?, error: String?) {
         let encodedValue = Self.json(value ?? NSNull()), encodedError = Self.json(error ?? NSNull())
-        web.evaluateJavaScript("globalThis.__bamCompatibility && globalThis.__bamCompatibility.resolve(\(id), \(encodedValue), \(encodedError));", completionHandler: nil)
+        web.evaluateJavaScript("globalThis.__bamCompatibility && globalThis.__bamCompatibility.resolve(\(id), \(encodedValue), \(encodedError));", in: frame, in: .page) { _ in }
     }
 
     /// Delivers an event to every live document of one extension.
     func dispatch(_ event: String, _ arguments: [Any], to uniqueIdentifier: String) {
         let script = "globalThis.__bamCompatibility && globalThis.__bamCompatibility.dispatch(\(Self.json(event)), \(Self.json(arguments)));"
-        for web in documents[uniqueIdentifier] ?? [] where web.url != nil { web.evaluateJavaScript(script, completionHandler: nil) }
+        documents[uniqueIdentifier]?.removeAll { !$0.isLive }
+        for document in documents[uniqueIdentifier] ?? [] { document.web?.evaluateJavaScript(script, in: document.frame, in: .page) { _ in } }
     }
 
     static func json(_ value: Any) -> String {
@@ -524,6 +532,7 @@ enum ExtensionCompatibility {
                 }
             }
             self.notificationOwners.removeValue(forKey: identifier)
+            ExtensionNotificationCenter.shared.forget(identifier)
         }
     }
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification, withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
@@ -546,6 +555,16 @@ enum ExtensionCompatibility {
         UNUserNotificationCenter.current().setNotificationCategories([category])
     }
     func unregister(_ bridge: ExtensionCompatibilityBridge) { bridges.removeValue(forKey: ObjectIdentifier(bridge)) }
+    /// Drops the per-notification button category once the notification is gone.
+    func forget(_ identifier: String) {
+        guard ExtensionCompatibilityBridge.canUseNotificationCenter else { return }
+        Task { @MainActor in
+            let center = UNUserNotificationCenter.current()
+            let existing = await center.notificationCategories()
+            let pruned = existing.filter { $0.identifier != "bam-extension-\(identifier)" }
+            if pruned.count != existing.count { center.setNotificationCategories(pruned) }
+        }
+    }
     var isAvailable: Bool { ExtensionCompatibilityBridge.canUseNotificationCenter && authorization != false }
     func post(identifier: String, title: String, body: String, buttons: [String]) async -> String? {
         guard ExtensionCompatibilityBridge.canUseNotificationCenter else { return "Notifications need the installed Bam app." }
