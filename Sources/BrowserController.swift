@@ -590,8 +590,11 @@ import QuartzCore
         }
         for (id, peek) in peeks { peek.setVisible(id == tab.id) }
         if let group = session.split(for: tab.id) { showSplit(group) }
-        else if tab.isArcEasel, browsers[tab.id] == nil {
-            // An Arc Easel reference has no web page: a native explanation, no renderer, no network.
+        else if tab.isArcEasel {
+            // An Arc Easel reference has no web page: a native explanation, no
+            // renderer, no network. A page left from navigating away (then
+            // resetting back to the reference) is retired, never shown.
+            if browsers[tab.id] != nil { teardownPage(tab.id) }
             installActiveHost(EaselReferenceView(title: tab.displayTitle))
         } else {
             let browser = webView(for: tab)
@@ -777,25 +780,29 @@ import QuartzCore
             split.detach(); split.view.removeFromSuperview()
             retiringViews.removeValue(forKey: ObjectIdentifier(split.view))
         }
-        for closingID in closingIDs {
-            invalidateFaviconDocument(closingID)
-            peeks[closingID]?.dismiss()
-            observations.removeValue(forKey: closingID)
-            let web = browsers.removeValue(forKey: closingID)
-            if let web { tabActivityProbe.invalidate(web) }
-            tabLastUsed.removeValue(forKey: closingID); sleepRestores.removeValue(forKey: closingID); nonGetDocuments.remove(closingID); pendingNonGetDocuments.removeValue(forKey: closingID)
-            web?.navigationDelegate = nil; web?.uiDelegate = nil; web?.stopLoading()
-            // PiP restoration can synchronously re-enter showActive. The closed
-            // view must no longer be discoverable by metadata or return callbacks.
-            if let web, pictureInPicture.references(web) { pictureInPicture.restore() }
-            if let web {
-                web.pauseAllMediaPlayback(completionHandler: nil)
-                retiringViews.removeValue(forKey: ObjectIdentifier(web)); web.removeFromSuperview()
-            }
-            navigationTokens.removeValue(forKey: closingID); browserExtensionOrigins.removeValue(forKey: closingID)
-            pendingHome.remove(closingID); tabErrors.removeValue(forKey: closingID); pendingLoads.remove(closingID); requestedAddresses.removeValue(forKey: closingID)
-        }
+        for closingID in closingIDs { teardownPage(closingID) }
         showActive(); save()
+    }
+    /// Retires a tab's page completely: its web view, callbacks, load state,
+    /// Peek and floating video. Used when a tab closes, and when a tab that had
+    /// a page becomes an Arc Easel reference again (which has no page).
+    func teardownPage(_ id: UUID) {
+        invalidateFaviconDocument(id)
+        peeks[id]?.dismiss()
+        observations.removeValue(forKey: id)
+        let web = browsers.removeValue(forKey: id)
+        if let web { tabActivityProbe.invalidate(web) }
+        tabLastUsed.removeValue(forKey: id); sleepRestores.removeValue(forKey: id); nonGetDocuments.remove(id); pendingNonGetDocuments.removeValue(forKey: id)
+        web?.navigationDelegate = nil; web?.uiDelegate = nil; web?.stopLoading()
+        // PiP restoration can synchronously re-enter showActive. The retired
+        // view must no longer be discoverable by metadata or return callbacks.
+        if let web, pictureInPicture.references(web) { pictureInPicture.restore() }
+        if let web {
+            web.pauseAllMediaPlayback(completionHandler: nil)
+            retiringViews.removeValue(forKey: ObjectIdentifier(web)); web.removeFromSuperview()
+        }
+        navigationTokens.removeValue(forKey: id); browserExtensionOrigins.removeValue(forKey: id)
+        pendingHome.remove(id); tabErrors.removeValue(forKey: id); pendingLoads.remove(id); requestedAddresses.removeValue(forKey: id)
     }
     func pinTab(_ id: UUID) {
         cancelPaging()
@@ -1151,9 +1158,14 @@ import QuartzCore
         returnActiveVideo()
         let id = focusedTabID
         guard let i = session.tabs.firstIndex(where: { $0.id == id }) else { return }
+        // Leaving an Easel reference (a native view) for a web address must
+        // install the new page as the visible host, not just load it hidden.
+        let leavingNativeView = session.tabs[i].isArcEasel
         session.tabs[i].address = address; session.tabs[i].title = address == "orbit://newtab" ? "New tab" : (address == "orbit://video" ? "Picture in Picture demo" : URL(string: address)?.host ?? address)
         let browser = webView(for: session.tabs[i]); load(address, in: browser, id: id)
-        dismissAddress(); refresh(); save()
+        dismissAddress()
+        if leavingNativeView { showActive() } else { refresh() }
+        save()
     }
     func scheduleSave() {
         saveWork?.cancel(); let work = DispatchWorkItem { [weak self] in self?.save() }; saveWork = work

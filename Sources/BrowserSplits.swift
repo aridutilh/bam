@@ -115,8 +115,15 @@ import WebKit
     @objc func splitWithNewPage(_ sender: Any?) {
         let primary = session.activeID
         if session.split(for: primary) != nil || session.active?.isFavorite == true { return }
-        let id = session.add()
-        session.makeSplit(primary: primary, secondary: id); showActive(); save()
+        // All or nothing: a refused Split (e.g. an Arc Easel reference, which
+        // has no page) must not leave a new blank tab created and selected.
+        var draft = session
+        let id = draft.add()
+        guard draft.makeSplit(primary: primary, secondary: id) else {
+            if session.active?.isArcEasel == true { pageFeedback.show("Easels can’t be in a Split", symbol: "rectangle.split.2x1", in: webHost) }
+            return
+        }
+        session = draft; showActive(); save()
         splitCoordinators[primary]?.focusAddress(.right)
     }
     @objc func unsplitCurrent(_ sender: Any?) { unsplit(session.activeID) }
