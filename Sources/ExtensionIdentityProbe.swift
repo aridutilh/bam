@@ -140,9 +140,11 @@ import WebKit
         let workerReading = Rules.read(workerValue)
         observations["reading"] = ["page": Rules.summary(pageReading), "worker": Rules.summary(workerReading),
                                    "content_scripts": "pending"]
-        let measured = pageReading.ownGetterObserved != nil && pageReading.facadeInstalled != nil && workerValue != nil
-        finish(complete: measured, reason: measured ? "page and worker measured; content scripts pending"
-                                                    : "page or worker evidence missing (see measurement)")
+        // Complete only with measured page and worker scopes (restorations confirmed) and every message answered or failed definitely.
+        let missing = Rules.missing(result)
+        observations["missing"] = missing
+        finish(complete: missing.isEmpty, reason: missing.isEmpty ? "page and worker measured; content scripts pending"
+                                                                  : "evidence missing or unconfirmed: \(missing.joined(separator: ", "))")
     }
 
     private func finish(complete: Bool, reason: String) {
@@ -182,7 +184,11 @@ import WebKit
             while !outcome.done, ProcessInfo.processInfo.systemUptime < deadline { try? await Task.sleep(nanoseconds: 50_000_000) }
             if !outcome.done { removal.cancel(); report["fixture_removal_timed_out"] = true }
             if let error = outcome.error { report["fixture_removal_error"] = error }
-            report["fixture_removed"] = outcome.done && outcome.error == nil && host.context(for: id) == nil
+            // Confirmed removal is part of a clean run; a timeout or error makes the measurement incomplete.
+            let removed = outcome.done && outcome.error == nil && host.context(for: id) == nil
+            report["fixture_removed"] = removed; clean = clean && removed
+        } else if extensionID != nil {
+            report["fixture_removed"] = "no host to remove it from"; clean = false
         }
         let storage = host?.storageURL
         host?.shutdown(); host = nil

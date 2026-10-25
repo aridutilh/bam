@@ -37,6 +37,11 @@ import JavaScriptCore
             // Like a native attribute: own properties can be defined and described, but reads of `id` ignore them.
             target = Object.assign(Object.create(null), base);
             runtime = new Proxy(target, {get(t, key) { return key === "id" ? id : Reflect.get(t, key); }});
+          } else if (mode === "locked") {
+            // A locked native `id`: non-configurable, read-only data. defineProperty throws, and a Proxy that
+            // answers a different `id` violates the invariant, so reading the facade throws a TypeError.
+            target = runtime = Object.assign({}, base);
+            Object.defineProperty(runtime, "id", {value: id, configurable: false, enumerable: true, writable: false});
           } else {
             target = runtime = Object.assign({}, base);
             Object.defineProperty(runtime, "id", {value: id, configurable: true, enumerable: true, writable: false});
@@ -78,6 +83,8 @@ import JavaScriptCore
             // Plain: the original own data property is back exactly. Native-precedence: no own `id` is left behind.
             let descriptor = context.evaluateScript(mode == "plain"
                 ? "(() => { const d = Object.getOwnPropertyDescriptor(chrome.runtime, 'id'); return !!d && 'value' in d && d.writable === false && d.configurable === true; })()"
+                : mode == "locked"
+                ? "(() => { const d = Object.getOwnPropertyDescriptor(chrome.runtime, 'id'); return !!d && d.configurable === false && d.writable === false; })()"
                 : "!Object.prototype.hasOwnProperty.call(chrome.runtime, 'id')")
             require(descriptor?.toBool() == true, "The runtime's own `id` is restored exactly in \(mode)")
             return (try? JSONSerialization.jsonObject(with: Data(text.utf8))) as? [String: Any] ?? [:]
@@ -111,6 +118,34 @@ import JavaScriptCore
         let summary = Rules.summary(lockedReading)
         require(summary["facade_observed"] as? Bool == false && summary["own_getter_observed"] as? Bool == false, "Summary reports unobserved outcomes as false")
         require(Rules.summary(Rules.read(nil))["facade_observed"] as? String == "not measured", "Missing evidence is 'not measured', never a pass")
+
+        // Review: a locked native `id` makes the facade's reads throw after the global was replaced. The
+        // throw is captured as a result and the global is still restored (run() checks both).
+        let lockedID = run(mode: "locked", configurableGlobal: true)
+        let lockedOwn = lockedID["ownGetter"] as? [String: Any], lockedFacade = lockedID["facade"] as? [String: Any]
+        let lockedReads = lockedFacade?["immediate"] as? [String: Any]
+        require(lockedOwn?["defined"] as? Bool == false && lockedOwn?["error"] != nil, "A locked id refuses the own getter, recorded")
+        require(lockedFacade?["installed"] as? Bool == true && (lockedReads?["facadeDirect"] as? [String: Any])?["error"] != nil
+                && (lockedReads?["globalChrome"] as? [String: Any])?["error"] != nil,
+                "Facade reads that throw are captured as errors, not thrown past the restore")
+        let lockedIDReading = Rules.read(lockedID)
+        require(lockedIDReading.facadeObserved == false && lockedIDReading.restored == true, "Locked id: facade not observed, global restored")
+        require(Rules.isMeasured(lockedID), "A definite negative outcome with confirmed restore is still a measurement")
+
+        // Review: completion needs measured page and worker scopes, confirmed restores and definite message outcomes.
+        let messages: [String: Any] = ["implicit": ["outcome": "resolved"], "nativeID": ["outcome": "resolved"], "alias": ["outcome": "rejected", "error": "x"]]
+        let complete: [String: Any] = ["page": plain, "worker": ["outcome": "resolved", "value": native], "messaging": messages]
+        require(Rules.missing(complete).isEmpty, "Measured page + worker + all messages is complete: \(Rules.missing(complete))")
+        var workerErrorResult = complete; workerErrorResult["worker"] = ["outcome": "resolved", "value": ["error": "TypeError: boom"]]
+        require(Rules.missing(workerErrorResult) == ["worker"], "A worker {error} reply is not a measurement")
+        var workerTimeout = complete; workerTimeout["worker"] = ["outcome": "timed out"]
+        require(Rules.missing(workerTimeout) == ["worker"], "A timed-out worker is not a measurement")
+        var unrestored = plain; var unrestoredFacade = plain["facade"] as! [String: Any]; unrestoredFacade["restored"] = false; unrestored["facade"] = unrestoredFacade
+        var pageUnrestored = complete; pageUnrestored["page"] = unrestored
+        require(Rules.missing(pageUnrestored) == ["page"], "An unconfirmed restore makes the page scope incomplete")
+        var noAlias = complete; noAlias["messaging"] = ["implicit": ["outcome": "resolved"], "nativeID": ["outcome": "resolved"]]
+        require(Rules.missing(noAlias) == ["messaging.alias"], "A missing message outcome is reported")
+        require(!Rules.isMeasured(nil) && !Rules.isMeasured(["error": "x"]), "Nothing or an error object is never measured")
 
         // The worker and page scripts parse; the worker answers sender and measure messages.
         let worker = JSContext()!

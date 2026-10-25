@@ -96,16 +96,21 @@ enum ExtensionIdentityProbeRules {
       own.originalOwnDescriptor = describe(originalOwnID);
       try { Object.defineProperty(rt, "id", {get() { return alias; }, configurable: true, enumerable: true}); own.defined = true; }
       catch (e) { own.defined = false; own.error = text(e); }
-      own.descriptorAfter = describe(Object.getOwnPropertyDescriptor(rt, "id"));
-      own.immediate = reads();
-      await sleep(60);
-      own.delayed = reads();
-      own.nativeCalls = await nativeCalls(nativeChrome);
-      if (own.defined) {
-        try {
-          if (originalOwnID) { Object.defineProperty(rt, "id", originalOwnID); own.restoredOwnDescriptor = true; }
-          else { own.deleted = delete rt.id; }
-        } catch (e) { own.restoreError = text(e); }
+      try {
+        own.descriptorAfter = describe(Object.getOwnPropertyDescriptor(rt, "id"));
+        own.immediate = reads();
+        await sleep(60);
+        own.delayed = reads();
+        own.nativeCalls = await nativeCalls(nativeChrome);
+      } catch (e) { own.measureError = text(e); }
+      finally {
+        // Restore whatever happened above.
+        if (own.defined) {
+          try {
+            if (originalOwnID) { Object.defineProperty(rt, "id", originalOwnID); own.restoredOwnDescriptor = true; }
+            else { own.deleted = delete rt.id; }
+          } catch (e) { own.restoreError = text(e); }
+        }
       }
       own.afterRestore = reads();
       const after = Object.getOwnPropertyDescriptor(rt, "id");
@@ -121,20 +126,28 @@ enum ExtensionIdentityProbeRules {
       const facade = new Proxy(nativeChrome, {get(target, key) { return key === "runtime" ? runtimeFacade : bind(target, Reflect.get(target, key)); }});
       const original = Object.getOwnPropertyDescriptor(g, "chrome");
       facadeResult.globalDescriptorBefore = describe(original);
+      // A read can throw here (for example a Proxy invariant when the native `id` is a locked data property):
+      // every read is captured as a result, and the original global is restored in `finally` whatever happens.
+      const capture = (fn) => { const r = safe(fn); return "error" in r ? {error: r.error} : r.value; };
       try {
-        Object.defineProperty(g, "chrome", {value: facade, configurable: true, writable: true, enumerable: original ? !!original.enumerable : false});
-        facadeResult.installed = true;
-      } catch (e) { facadeResult.installed = false; facadeResult.error = text(e); }
-      facadeResult.immediate = {globalChrome: safe(() => g.chrome.runtime.id).value,
-                                bareChrome: safe(() => chrome.runtime.id).value,
-                                browser: safe(() => g.browser && g.browser.runtime ? g.browser.runtime.id : null).value,
-                                facadeDirect: facade.runtime.id};
-      await sleep(60);
-      facadeResult.delayed = {globalChrome: safe(() => g.chrome.runtime.id).value, bareChrome: safe(() => chrome.runtime.id).value};
-      facadeResult.nativeCalls = await nativeCalls(facade);
-      try {
-        if (original) Object.defineProperty(g, "chrome", original); else delete g.chrome;
-      } catch (e) { facadeResult.restoreError = text(e); }
+        try {
+          Object.defineProperty(g, "chrome", {value: facade, configurable: true, writable: true, enumerable: original ? !!original.enumerable : false});
+          facadeResult.installed = true;
+        } catch (e) { facadeResult.installed = false; facadeResult.error = text(e); }
+        facadeResult.immediate = {globalChrome: capture(() => g.chrome.runtime.id),
+                                  bareChrome: capture(() => chrome.runtime.id),
+                                  browser: capture(() => g.browser && g.browser.runtime ? g.browser.runtime.id : null),
+                                  facadeDirect: capture(() => facade.runtime.id)};
+        await sleep(60);
+        facadeResult.delayed = {globalChrome: capture(() => g.chrome.runtime.id), bareChrome: capture(() => chrome.runtime.id)};
+        facadeResult.nativeCalls = await nativeCalls(facade);
+      } catch (e) { facadeResult.measureError = text(e); }
+      finally {
+        if (facadeResult.installed) {
+          try { if (original) Object.defineProperty(g, "chrome", original); else delete g.chrome; }
+          catch (e) { facadeResult.restoreError = text(e); }
+        }
+      }
       facadeResult.restored = g.chrome === nativeChrome && safe(() => g.chrome.runtime.id).value === nativeID;
       out.facade = facadeResult;
       out.finalNativeID = safe(() => g.chrome.runtime.id).value;
@@ -245,6 +258,32 @@ enum ExtensionIdentityProbeRules {
             reading.restored = (reading.restored ?? true) && facade["restored"] as? Bool == true
         }
         return reading
+    }
+
+    /// A scope counts as measured only when it read the native ID, ran both experiments to a definite outcome
+    /// and confirmed both restorations. An error object (for example a worker's `{error}` reply) never counts.
+    static func isMeasured(_ scope: [String: Any]?) -> Bool {
+        guard let scope, scope["error"] == nil, let native = scope["native"] as? [String: Any], native["id"] is String,
+              let own = scope["ownGetter"] as? [String: Any], own["defined"] is Bool, own["restored"] as? Bool == true,
+              let facade = scope["facade"] as? [String: Any], facade["installed"] is Bool, facade["restored"] as? Bool == true,
+              scope["finalNativeID"] as? String == native["id"] as? String else { return false }
+        // A defined getter must have been read; an installed facade must have been read.
+        if own["defined"] as? Bool == true, own["immediate"] == nil || own["delayed"] == nil { return false }
+        if facade["installed"] as? Bool == true, facade["immediate"] == nil || facade["delayed"] == nil { return false }
+        return true
+    }
+    /// What's missing for a complete measurement (empty when complete): measured page and worker scopes, and
+    /// a definite outcome for each self-targeted message.
+    static func missing(_ result: [String: Any]) -> [String] {
+        var missing: [String] = []
+        if !isMeasured(result["page"] as? [String: Any]) { missing.append("page") }
+        let worker = result["worker"] as? [String: Any]
+        if worker?["outcome"] as? String != "resolved" || !isMeasured(worker?["value"] as? [String: Any]) { missing.append("worker") }
+        let messaging = result["messaging"] as? [String: Any]
+        for key in ["implicit", "nativeID", "alias"] where (messaging?[key] as? [String: Any])?["outcome"] as? String == nil {
+            missing.append("messaging.\(key)")
+        }
+        return missing
     }
 
     static func summary(_ reading: ScopeReading) -> [String: Any] {
