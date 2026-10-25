@@ -1003,16 +1003,35 @@ enum ArkPalette {
 @MainActor struct ArkRowLayout {
     let icon: NSRect, title: NSRect, close: NSRect, chevron: NSRect
     let indent: CGFloat
+    /// Where readable title text must end: before the close button when it
+    /// shows (hover/selected), else the title frame's end. The title frame
+    /// itself never changes with the close button, so glyphs never move on
+    /// hover; only the trailing fade moves to this point.
+    let visibleTitleEnd: CGFloat
     init(width: CGFloat, height: CGFloat, depth: Int, listMaxDepth: Int, isFolder: Bool, showsClose: Bool) {
         let step = ArkMetrics.indentStep(maxDepth: max(listMaxDepth, depth), width: width)
         indent = CGFloat(max(0, depth)) * step
         icon = NSRect(x: 10 + indent, y: (height - 16) / 2, width: 16, height: 16)
         close = NSRect(x: width - 30, y: (height - 24) / 2, width: 24, height: 24)
         chevron = NSRect(x: width - 24, y: (height - 12) / 2, width: 12, height: 12)
-        // The title runs to the trailing control when one shows, else to the edge.
-        let titleEnd = isFolder ? chevron.minX - 4 : showsClose ? close.minX - 4 : width - ArkMetrics.trailingGap
+        // Folders stop before their chevron; tabs run to the row edge.
+        let titleEnd = isFolder ? chevron.minX - 4 : width - ArkMetrics.trailingGap
         let titleX = ArkMetrics.leadingInset + indent
         title = NSRect(x: titleX, y: (height - 20) / 2, width: max(0, titleEnd - titleX), height: 20)
+        visibleTitleEnd = !isFolder && showsClose ? max(titleX, close.minX - 4) : title.maxX
+    }
+}
+
+/// A long title fades out over its last few points (Yab-like) instead of an
+/// ellipsis; text that fits is left untouched.
+enum ArkTitleFade {
+    static let width: CGFloat = 18
+    /// Gradient stops (0…1 across the title frame), or nil when the text fits
+    /// before `visibleWidth`.
+    static func stops(textWidth: CGFloat, frameWidth: CGFloat, visibleWidth: CGFloat) -> (start: CGFloat, end: CGFloat)? {
+        guard frameWidth > 0, textWidth > visibleWidth else { return nil }
+        let end = min(frameWidth, max(0, visibleWidth))
+        return (max(0, end - width) / frameWidth, end / frameWidth)
     }
 }
 
@@ -1497,6 +1516,8 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted {
     init(item: SidebarTabItem) {
         self.item = item
         titleLabel = arkLabel(item.title.isEmpty ? "New Tab" : item.title, size: ArkType.rowSize, weight: item.isActive ? .medium : .regular)
+        // Long titles clip under a soft trailing fade (updateTitleFade), not an ellipsis.
+        titleLabel.lineBreakMode = .byClipping; titleLabel.wantsLayer = true
         subtitleLabel = arkLabel(item.subtitle, size: 9, weight: .regular)
         super.init(frame: .zero)
         wantsLayer = true
@@ -1536,8 +1557,11 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted {
             // Assistive tech hears exactly what the row shows, including the blank-title fallback.
             titleLabel.stringValue = item.title.isEmpty ? (item.isFolder ? "Folder" : "New Tab") : item.title
             setAccessibilityLabel(titleLabel.stringValue)
+            needsLayout = true   // the fade depends on the text's width
         }
-        if first || old.isActive != item.isActive || old.isFolder != item.isFolder { titleLabel.font = ArkType.rowFont(active: item.isActive, folder: item.isFolder) }
+        if first || old.isActive != item.isActive || old.isFolder != item.isFolder {
+            titleLabel.font = ArkType.rowFont(active: item.isActive, folder: item.isFolder); needsLayout = true
+        }
         if first || old.depth != item.depth || old.isFolder != item.isFolder { needsLayout = true }
         if first || old.isUnloaded != item.isUnloaded || old.isSleeping != item.isSleeping {
             titleLabel.textColor = ArkRowInk.title(sleeping: item.isSleeping)
@@ -1636,6 +1660,7 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted {
                                   isFolder: item.isFolder, showsClose: !closeButton.isHidden)
         iconView.frame = frames.icon
         titleLabel.frame = frames.title
+        updateTitleFade(visibleWidth: frames.visibleTitleEnd - frames.title.minX)
         subtitleLabel.frame = NSRect(x: frames.title.minX + 1, y: 23, width: frames.title.width, height: 12)
         subtitleLabel.isHidden = true
         closeButton.frame = frames.close
@@ -1651,6 +1676,26 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted {
         if chevronView.isHidden != !item.isFolder { chevronView.isHidden = !item.isFolder; needsLayout = true }
         updateChevronEmphasis(focused: window?.firstResponder === self)
     }
+    /// Trailing fade: a horizontal gradient mask on the title's layer. Only the
+    /// mask moves (to clear the close button on hover); the text never shifts.
+    /// The full title stays in the tooltip and the row's accessibility label.
+    private func updateTitleFade(visibleWidth: CGFloat) {
+        let bounds = titleLabel.bounds
+        let textWidth = ceil(titleLabel.attributedStringValue.size().width) + 2
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        defer { CATransaction.commit() }
+        guard let stops = ArkTitleFade.stops(textWidth: textWidth, frameWidth: bounds.width, visibleWidth: visibleWidth),
+              let layer = titleLabel.layer else { titleLabel.layer?.mask = nil; titleFadeStops = nil; return }
+        let mask = (layer.mask as? CAGradientLayer) ?? CAGradientLayer()
+        mask.frame = bounds
+        mask.startPoint = CGPoint(x: 0, y: 0.5); mask.endPoint = CGPoint(x: 1, y: 0.5)
+        mask.colors = [NSColor.black.cgColor, NSColor.black.cgColor, NSColor.clear.cgColor, NSColor.clear.cgColor]
+        mask.locations = [0, NSNumber(value: Double(stops.start)), NSNumber(value: Double(stops.end)), 1]
+        if layer.mask !== mask { layer.mask = mask }
+        titleFadeStops = stops
+    }
+    /// The current fade (title-frame fractions), for tests; nil when the title fits.
+    private(set) var titleFadeStops: (start: CGFloat, end: CGFloat)?
     /// Folders recede at rest: the chevron is quieter until the row is hovered
     /// or focused, so open/closed state stays visible without a gray column.
     private func updateChevronEmphasis(focused: Bool) {
