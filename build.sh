@@ -30,6 +30,7 @@ COMMON=(-swift-version 5 -sdk "$SDK" -target "$ARCH-apple-macosx14.0" -module-ca
 "$SWIFTC" "${COMMON[@]}" -O -parse-as-library -framework AppKit -framework WebKit -framework QuartzCore -framework UserNotifications -framework Security "$PROJECT_DIR"/Sources/*.swift -o "$APP/Contents/MacOS/BamBrowser"
 cp -X "$PROJECT_DIR/Info.plist" "$APP/Contents/Info.plist"
 /usr/bin/ditto --norsrc --noextattr "$PROJECT_DIR/Resources/" "$APP/Contents/Resources/"
+cp -X "$PROJECT_DIR/LICENSE" "$APP/Contents/Resources/LICENSE"
 # Exclude the previous generated icon from upgraded working copies.
 rm -f "$APP/Contents/Resources/ArkIcon.icns"
 # Finder/iCloud may attach metadata to newly created .app folders in Documents.

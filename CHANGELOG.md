@@ -1,15 +1,15 @@
 # Changelog
 
-## Unreleased
+## 0.21.2 — build 43
 
 - Hide the window's close, minimize and zoom buttons together with the sidebar, as Arc does: they fade out over the last 80 points of the collapse, so a collapsed sidebar leaves the page alone in the window, and they return as the sidebar slides back in.
 - Retire the “A little space” start page. An empty tab is now a plain dark surface titled “New tab” (the address bar still reads “Search or enter URL”), and the History ▸ Home command (⇧⌘H) that navigated to it is gone. Existing tabs on that page keep working and simply show the blank surface.
 
-## 0.21.2 draft — build 43
-
 - Preserve the native namespace receiver for detached `action.setIcon` / `browserAction.setIcon` calls inside an extension's own documents. Dashlane extracts this method; WebKit silently ignored that call and left the loading icon in place. Bam now lets the extension supply its orange/teal state without reading or guessing vault state.
 - Verify the real vendor icon is orange in a signed-out probe and teal in the authenticated persistent preview; the optimized preview also fills both dummy values correctly.
 - Keep prepared worker adapter bytes unchanged. Add focused API-shape and rendered toolbar-state checks; 26 component checks and 310 supported-path native checks pass. Missing iframe request events are reported separately and excluded from passed counts.
+
+The earlier draft sections below are also included in 0.21.2; they were not separate published releases.
 
 ## 0.21.1 draft — build 42
 

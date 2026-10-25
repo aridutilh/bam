@@ -1,3 +1,5 @@
+**Release scope — 0.21.2 build 43:** the extension-library drafts below are included in this prerelease. Their stated compatibility limits remain; release-package validation is recorded in [VALIDATION.md](VALIDATION.md).
+
 **0.21.2 build 43 — local draft:** document-native action icons accept detached Chrome-style `setIcon` calls while preserving native arguments, callbacks, errors and permission checks. All four call forms and actual sidebar colors pass native checks; real Dashlane observations show signed-out orange and authenticated teal. The optimized preview also fills both dummy fields exactly. Workers retain their existing prepared adapter bytes. The separate iframe request-event gap remains explicit.
 
 # Arc for macOS, Yab, and Bam: feature inventory and implementation checklist
