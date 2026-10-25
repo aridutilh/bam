@@ -1038,19 +1038,37 @@ import Darwin
             }
             let injection = "return await browser.scripting.executeScript({target: {tabId: tab.id}, func: () => document.location.host})" +
                 ".then((r) => 'ran:' + (r && r[0] && r[0].result), (e) => 'refused:' + String(e && e.message));"
-            // Withheld requested host: tab reads, injection and a CORS fetch neither prompt nor grant (the prompt would approve).
+            // Withheld requested host: tab reads (query, get, populated windows), injection and a CORS fetch neither prompt
+            // nor grant nor deny (the prompt would approve); the record and Site Access are unchanged.
+            func recordState() -> String {
+                guard let record = host.records.first(where: { $0.id == extensionID }) else { return "no-record" }
+                return "\(record.patterns.keys.sorted()) \(record.deniedPatterns.keys.sorted()) \(record.siteAccess?.base64EncodedString() ?? "-")"
+            }
+            func undecided(_ url: URL) -> Bool { ![.grantedExplicitly, .deniedExplicitly].contains(liveContext.permissionStatus(for: url)) }
+            let recordBefore = recordState()
             reviewsShown = 0
             host.permissionPrompt = { _ in reviewsShown += 1; return true }
             let withheldUse = try await consentProbe("""
                 const read = (await browser.tabs.query({})).length;
+                const got = !!(await browser.tabs.get(tab.id));
+                const windows = (await browser.windows.getAll({populate: true})).length;
                 const injected = await (async () => { \(injection) })();
                 const fetched = await fetch(target, {credentials: 'include'}).then((r) => 'read:' + r.status, (e) => 'refused');
-                return {found: !!tab, read, injected, fetched};
+                return {found: !!tab, read, got, windows, injected, fetched};
                 """, ["target": consentTabURL.absoluteString])
-            try check(withheldUse["found"] as? Bool == true && reviewsShown == 0 && (withheldUse["injected"] as? String)?.hasPrefix("refused:") == true &&
-                withheldUse["fetched"] as? String == "refused" && !granted(ip) && deniedKeys(ip).isEmpty &&
+            try check(withheldUse["found"] as? Bool == true && withheldUse["got"] as? Bool == true && reviewsShown == 0 &&
+                (withheldUse["injected"] as? String)?.hasPrefix("refused:") == true && withheldUse["fetched"] as? String == "refused" &&
+                !granted(ip) && deniedKeys(ip).isEmpty && undecided(consentTabURL) && recordState() == recordBefore &&
                 host.siteAccess(id: extensionID)?.state.mode == .withheld && host.siteAccess(id: extensionID)?.revision == consentBase.revision,
                 "Using a withheld requested site prompted, granted, denied or changed Site Access: shown=\(reviewsShown), \(withheldUse)")
+            // activeTab on the withheld site: a user gesture in the tab lets injection run with no review and no lasting grant.
+            guard let consentAdapter = promptRuntime.tabs[consentTab] else { throw ExtensionSmokeTest.Failure(description: "No adapter for the consent tab") }
+            liveContext.userGesturePerformed(in: consentAdapter)
+            let gestured = try await consentProbe("return {injected: await (async () => { \(injection) })()};")
+            liveContext.clearUserGesture(in: consentAdapter)
+            try check((gestured["injected"] as? String)?.hasPrefix("ran:127.0.0.1") == true && reviewsShown == 0 && recordState() == recordBefore &&
+                host.siteAccess(id: extensionID)?.state.mode == .withheld,
+                "activeTab on a withheld site prompted, failed or left a lasting grant: shown=\(reviewsShown), \(gestured)")
             // An explicit request reaches the pattern review once; declining denies, approving grants and injection then works.
             var reviewed: [BrowserExtensionPermissionReview] = []
             host.permissionPrompt = { review in reviewed.append(review); return false }
@@ -1060,6 +1078,20 @@ import Darwin
                 "A declined permissions.request did not show one pattern review or record its denial: \(reviewed.map(\.websites)) \(declinedRequest)")
             for key in liveContext.deniedPermissionMatchPatterns.keys where key.matches(optionalURL) { liveContext.deniedPermissionMatchPatterns.removeValue(forKey: key) }
             host.persistPermissions(liveContext)
+            // A stale explicit answer: Site Access changes while the review is open (the panel adds the site); the
+            // dialog's Allow then grants nothing beyond the panel's change and denies nothing.
+            reviewed = []
+            host.permissionPrompt = { review in
+                reviewed.append(review)
+                if let current = host.siteAccess(id: extensionID) { _ = try? perform(current, .addSite(input: "127.0.0.1", includeSubdomains: false)) }
+                return true
+            }
+            let staleRequest = try await consentProbe("return {granted: await browser.permissions.request({origins: ['http://127.0.0.1/*']})};")
+            try check(reviewed.count == 1 && staleRequest["granted"] as? Bool == false && granted(ip) && deniedKeys(ip).isEmpty &&
+                host.siteAccess(id: extensionID)?.state.mode == .specific(["http://127.0.0.1/*"]),
+                "A stale explicit answer granted or denied beyond the panel's change: \(reviewed.map(\.websites)) \(staleRequest)")
+            _ = try perform(host.siteAccess(id: extensionID)!, .choose(.withheld))
+            try check(!granted(ip), "The consent checks could not withhold the requested site again")
             reviewed = []
             host.permissionPrompt = { review in reviewed.append(review); return true }
             let approvedRequest = try await consentProbe("const granted = await browser.permissions.request({origins: ['http://127.0.0.1/*']}); const injected = await (async () => { \(injection) })(); return {granted, injected};")
