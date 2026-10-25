@@ -98,7 +98,9 @@ import WebKit
         try check(browser.browsers[first.id] === original && retainedAfterCancel,
                   "Cancel replaced or reloaded the live page")
 
-        browser.manageSpaces(nil)
+        // Reopen through the footer Downloads menu's Manage Spaces… item: it must reach the same real action.
+        try check(NSApp.sendAction(manageItem.action!, to: manageItem.target, from: manageItem),
+                  "Downloads ▸ Manage Spaces… did not perform its action")
         try await wait("Space management sheet reopens") { browser.spaceManager?.window === fixtureWindow.attachedSheet }
         guard let editor = browser.spaceManager else { throw Failure.assertion("Second Space editor missing") }
         fields(editor, name: "", symbol: "terminal", color: 3)
