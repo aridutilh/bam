@@ -46,6 +46,14 @@ struct BrowserExtensionRecord: Codable, Identifiable {
     var nativeHost: ExtensionNativeMessaging.Host? = nil
     /// Static declarativeNetRequest disclosure for `version`; replaced (never appended) when re-audited.
     var staticRuleAudit: ExtensionStaticRuleAudit? = nil
+    /// The value WebKit exposes as `runtime.id` and uses to address the extension. Chosen once at install: the
+    /// CRX3-verified Chrome Web Store ID for a store install whose publisher key derives that listing ID; nil for
+    /// everything else (folders, direct packages, unverified CRXs, Safari bundles, installs from before this field),
+    /// which keep the installation UUID. Never changed afterwards: WebKit keys extension storage by it.
+    var runtimeIdentifier: String? = nil
+    /// The context's unique identifier (`runtime.id`). The context's base URL always keeps the installation UUID host,
+    /// so extension resource URLs cannot be used by websites to recognize installed extensions.
+    var contextIdentifier: String { runtimeIdentifier ?? id.uuidString.lowercased() }
     /// Everything Bam discloses about this install: the current static-rule audit first (it can change what the
     /// extension does), then preparation notes.
     var disclosedNote: String? {
@@ -313,9 +321,24 @@ struct BrowserExtensionPermissionReview {
     }
 
     /// Copies only the explicitly selected package, then reviews capabilities before loading.
+    /// The verified Chrome Web Store ID for `runtime.id`, or nil. Only a store install whose CRX3 publisher signature
+    /// verified and whose derived ID is exactly the listing's ID qualifies; never a user- or package-chosen value.
+    nonisolated static func verifiedRuntimeIdentifier(for catalog: ExtensionCatalogRecord?) -> String? {
+        guard let catalog, catalog.source == .chromeWebStore, let verified = catalog.verifiedChromeExtensionID, verified == catalog.upstreamID,
+              verified.count == 32, verified.unicodeScalars.allSatisfy({ ("a"..."p").contains(Character($0)) }) else { return nil }
+        return verified
+    }
+    /// The record an extension context belongs to: its base URL host is always the installation UUID.
+    nonisolated static func recordID(of context: WKWebExtensionContext) -> UUID? { context.baseURL.host.flatMap { UUID(uuidString: $0) } }
+
     @discardableResult func importPackage(at source: URL, profileID: UUID, catalog: ExtensionCatalogRecord? = nil) async throws -> UUID {
         try Task.checkCancellation()
         guard runtimes[profileID] != nil else { throw Self.failure("Open this profile before installing an extension.") }
+        let runtimeIdentifier = Self.verifiedRuntimeIdentifier(for: catalog)
+        // One context per identifier in a profile's controller: a second install of the same store extension is refused.
+        if let runtimeIdentifier, records.contains(where: { $0.profileID == profileID && $0.contextIdentifier == runtimeIdentifier }) {
+            throw Self.failure("This extension is already installed in this profile.")
+        }
         let values = try source.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
         guard values.isSymbolicLink != true, values.isDirectory == true else {
             throw Self.failure("Choose an unpacked extension folder containing manifest.json. Use Add from Store or Link for archives, CRX files and store listings.")
@@ -334,7 +357,12 @@ struct BrowserExtensionPermissionReview {
             try Task.checkCancellation()
             guard ext.errors.isEmpty else { throw Self.failure(ext.errors.map(\.localizedDescription).joined(separator: "\n")) }
             guard !stopped else { throw Self.failure("The browser is closing.") }
-            records.append(BrowserExtensionRecord(id: id, profileID: profileID, name: ext.displayName ?? "Unnamed extension", version: ext.version ?? "", packageName: name, compatibilityNote: compatibilityNote, catalog: catalog))
+            guard runtimeIdentifier == nil || !records.contains(where: { $0.profileID == profileID && $0.contextIdentifier == runtimeIdentifier }) else {
+                throw Self.failure("This extension is already installed in this profile.")
+            }
+            var record = BrowserExtensionRecord(id: id, profileID: profileID, name: ext.displayName ?? "Unnamed extension", version: ext.version ?? "", packageName: name, compatibilityNote: compatibilityNote, catalog: catalog)
+            record.runtimeIdentifier = runtimeIdentifier
+            records.append(record)
             try persist()
             do { try await load(id, review: true, parsed: ext) }
             catch is CancellationError { throw CancellationError() }
@@ -599,7 +627,7 @@ struct BrowserExtensionPermissionReview {
         try await setEnabled(false, id: id)
         if let runtime = runtimes[record.profileID] {
             let data = await runtime.controller.dataRecords(ofTypes: WKWebExtensionController.allExtensionDataTypes)
-            let matching = data.filter { $0.uniqueIdentifier == id.uuidString.lowercased() }
+            let matching = data.filter { $0.uniqueIdentifier == record.contextIdentifier }
             await runtime.controller.removeData(ofTypes: WKWebExtensionController.allExtensionDataTypes, from: matching)
         }
         records.removeAll { $0.id == id }; errors.removeValue(forKey: id)
@@ -726,7 +754,7 @@ struct BrowserExtensionPermissionReview {
         }
         let current = records[index]
         let context = WKWebExtensionContext(for: ext)
-        context.uniqueIdentifier = id.uuidString.lowercased()
+        context.uniqueIdentifier = current.contextIdentifier
         context.baseURL = URL(string: "webkit-extension://\(id.uuidString.lowercased())/")!
         context.unsupportedAPIs = Self.unsupportedAPIs
         context.hasAccessToPrivateData = isPrivate
@@ -757,8 +785,16 @@ struct BrowserExtensionPermissionReview {
     }
     private func packageURL(_ record: BrowserExtensionRecord) -> URL { storageURL.appendingPathComponent(record.id.uuidString, isDirectory: true).appendingPathComponent(record.packageName) }
     func approve(_ review: BrowserExtensionPermissionReview) -> Bool { permissionPrompt?(review) ?? ExtensionManagement.reviewPermissions(review) }
+    /// The record of a live context, only when that exact context object is the record's loaded context in the record's
+    /// own profile runtime. The base-URL host maps a context to its record; this identity check is what authorizes.
+    func ownedRecordIndex(for context: WKWebExtensionContext) -> Int? {
+        guard let id = Self.recordID(of: context), let index = records.firstIndex(where: { $0.id == id }),
+              runtimes[records[index].profileID]?.contexts[id] === context else { return nil }
+        return index
+    }
     func persistPermissions(_ context: WKWebExtensionContext) {
-        guard let id = UUID(uuidString: context.uniqueIdentifier), let i = records.firstIndex(where: { $0.id == id }) else { return }
+        guard let i = ownedRecordIndex(for: context) else { return }
+        let id = records[i].id
         let before = records[i]
         records[i].permissions = Dictionary(uniqueKeysWithValues: context.grantedPermissions.filter { Self.supportedPermissions.contains($0.key.rawValue) }.map { ($0.key.rawValue, $0.value) })
         records[i].patterns = Dictionary(uniqueKeysWithValues: context.grantedPermissionMatchPatterns.map { ($0.key.string, $0.value) })
@@ -933,8 +969,7 @@ struct BrowserExtensionPermissionReview {
             return owner.historySnapshot?(self.profileID).map { Array($0.prefix(ExtensionHistory.maximumVisits)) }
         }
         compatibility.permissionGranted = { [weak self] context, permission in
-            guard let self, self.owns(context), let id = UUID(uuidString: context.uniqueIdentifier),
-                  let record = self.owner?.records.first(where: { $0.id == id && $0.profileID == self.profileID && $0.enabled }) else { return false }
+            guard let self, let record = self.ownedRecord(for: context), record.enabled else { return false }
             return (record.compatibilityGrants?[permission] ?? .distantPast) > Date()
         }
         let names: [Notification.Name] = [WKWebExtensionContext.errorsDidUpdateNotification,
@@ -948,7 +983,7 @@ struct BrowserExtensionPermissionReview {
                     guard let self, let context = notification.object as? WKWebExtensionContext,
                           context.webExtensionController === self.controller else { return }
                     if name == WKWebExtensionContext.errorsDidUpdateNotification {
-                        if let error = context.errors.first { self.owner?.setError(error, for: UUID(uuidString: context.uniqueIdentifier)) }
+                        if let error = context.errors.first { self.owner?.setError(error, for: BrowserExtensions.recordID(of: context)) }
                     } else {
                         self.owner?.persistPermissions(context)
                     }
@@ -1273,10 +1308,15 @@ struct BrowserExtensionPermissionReview {
         }
         completionHandler(compatibility.connectNativePort(port, context: context))
     }
+    /// This profile's record for a context, only when that exact context is the record's loaded context here.
+    func ownedRecord(for context: WKWebExtensionContext) -> BrowserExtensionRecord? {
+        guard owns(context), let id = BrowserExtensions.recordID(of: context), contexts[id] === context else { return nil }
+        return owner?.records.first { $0.id == id && $0.profileID == profileID }
+    }
     private func allowsCompatibilityTransport(_ context: WKWebExtensionContext) -> Bool {
         guard owns(context), context.hasPermission(.init(rawValue: "nativeMessaging")),
               ExtensionServiceWorkerPreparation.isPrepared(manifest: context.webExtension.manifest),
-              let id = UUID(uuidString: context.uniqueIdentifier), let record = owner?.records.first(where: { $0.id == id }) else { return false }
+              let record = ownedRecord(for: context) else { return false }
         return record.safariBundle == nil
     }
     func webExtensionController(_ controller: WKWebExtensionController, openOptionsPageFor context: WKWebExtensionContext, completionHandler: @escaping (Error?) -> Void) {

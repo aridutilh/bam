@@ -772,7 +772,10 @@ enum ExtensionCompatibility {
     /// frame, never in the main frame on its behalf, and dead views are dropped.
     private struct Document { weak var web: WKWebView?; let frame: WKFrameInfo; var isLive: Bool { web?.url != nil } }
     private var documents: [String: [Document]] = [:]
-    private var notificationOwners: [String: String] = [:]
+    /// Who posted each notification: the registration key (runtime.id) and the posting installation (base URL host).
+    /// A replacement install of the same store extension reuses runtime.id but never the installation host.
+    private struct NotificationOwner { let key: String; let install: String }
+    private var notificationOwners: [String: NotificationOwner] = [:]
     /// Diagnostics per context: documents that reported in, and any failure of the layer itself.
     private var helloURLs: [String: [String]] = [:]
     private var scriptErrors: [String: [String]] = [:]
@@ -865,7 +868,22 @@ enum ExtensionCompatibility {
         scripts[context.uniqueIdentifier] = script
         contentController.addUserScript(script)
     }
+    /// The registration a notification response may reach: only while the identifier is still owned and the live
+    /// registration under that key is the very installation that posted it.
+    func routedOwner(for identifier: String) -> String? {
+        guard let owner = notificationOwners[identifier], let context = registrations[owner.key]?.context,
+              ownsRegisteredContext(context), context.baseURL.host == owner.install else { return nil }
+        return owner.key
+    }
     func remove(_ context: WKWebExtensionContext) {
+        // Withdraw this installation's notifications: their responses must never reach a later install.
+        let install = context.baseURL.host ?? ""
+        let owned = notificationOwners.filter { $0.value.install == install }.map(\.key)
+        for identifier in owned { notificationOwners.removeValue(forKey: identifier); ExtensionNotificationCenter.shared.forget(identifier) }
+        if !owned.isEmpty, Self.canUseNotificationCenter {
+            UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: owned)
+            UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: owned)
+        }
         offscreen.discard(owner: context.uniqueIdentifier)
         documents.removeValue(forKey: context.uniqueIdentifier)
         registrations.removeValue(forKey: context.uniqueIdentifier)
@@ -1091,7 +1109,7 @@ enum ExtensionCompatibility {
             let title = params["title"] as? String ?? "", message = params["message"] as? String ?? ""
             let buttons = params["buttons"] as? [String] ?? []
             let identifier = Self.notificationIdentifier(context: context, id: id)
-            notificationOwners[identifier] = context.uniqueIdentifier
+            notificationOwners[identifier] = NotificationOwner(key: context.uniqueIdentifier, install: context.baseURL.host ?? "")
             if let failure = await post(identifier, title.isEmpty ? (context.webExtension.displayName ?? "Extension") : title, message, buttons, { [weak self, weak context] in
                 guard let self, let context else { return false }
                 return self.permits("notifications", for: context)
@@ -1206,7 +1224,9 @@ enum ExtensionCompatibility {
               let text = String(data: data, encoding: .utf8) else { return "null" }
         return String(text.dropFirst().dropLast())
     }
-    static func notificationIdentifier(context: WKWebExtensionContext, id: String) -> String { "bam-extension:\(context.uniqueIdentifier):\(id)" }
+    /// Per installation (base URL host), not per `runtime.id`: two profiles can install the same store extension, and
+    /// the shared notification center must not let one profile's notification reach the other.
+    static func notificationIdentifier(context: WKWebExtensionContext, id: String) -> String { "bam-extension:\(context.baseURL.host ?? context.uniqueIdentifier):\(id)" }
     static func parseNotificationIdentifier(_ identifier: String) -> (context: String, id: String)? {
         let parts = identifier.split(separator: ":", maxSplits: 2, omittingEmptySubsequences: false)
         guard parts.count == 3, parts[0] == "bam-extension" else { return nil }
@@ -1223,13 +1243,14 @@ enum ExtensionCompatibility {
         let identifier = response.notification.request.identifier, action = response.actionIdentifier
         Task { @MainActor [weak self] in
             defer { completionHandler() }
-            guard let self, let parsed = Self.parseNotificationIdentifier(identifier), self.notificationOwners[identifier] == parsed.context else { return }
+            // Only the bridge that posted it owns it; events go to the registration that posted it.
+            guard let self, let parsed = Self.parseNotificationIdentifier(identifier), let owner = self.routedOwner(for: identifier) else { return }
             switch action {
-            case UNNotificationDefaultActionIdentifier: self.dispatch("notifications.onClicked", [parsed.id], to: parsed.context)
-            case UNNotificationDismissActionIdentifier: self.dispatch("notifications.onClosed", [parsed.id, true], to: parsed.context)
+            case UNNotificationDefaultActionIdentifier: self.dispatch("notifications.onClicked", [parsed.id], to: owner)
+            case UNNotificationDismissActionIdentifier: self.dispatch("notifications.onClosed", [parsed.id, true], to: owner)
             default:
                 if action.hasPrefix("bam-button-"), let index = Int(action.dropFirst("bam-button-".count)) {
-                    self.dispatch("notifications.onButtonClicked", [parsed.id, index], to: parsed.context)
+                    self.dispatch("notifications.onButtonClicked", [parsed.id, index], to: owner)
                 }
             }
             self.notificationOwners.removeValue(forKey: identifier)

@@ -248,7 +248,8 @@ import UniformTypeIdentifiers
         let now = Date()
         let ungranted = (record.compatibility ?? []).filter { (record.compatibilityGrants?[$0] ?? .distantPast) <= now }
         let access = ungranted.isEmpty ? nil : "Not granted: \(ExtensionCompatibility.reviewLabel(ungranted)). Disable and enable the extension to review this access."
-        let parts = [access, record.staticRuleAudit?.note, record.compatibilityNote].compactMap { $0 }
+        let identity = record.runtimeIdentifier.map { "Chrome Web Store ID \($0), from a verified publisher signature. The extension sees it as its runtime ID; its pages keep a private per-install address." }
+        let parts = [access, identity, record.staticRuleAudit?.note, record.compatibilityNote].compactMap { $0 }
         return parts.isEmpty ? nil : (parts + ["Reload open pages after changing access."]).joined(separator: "\n\n")
     }
     static func statusText(headline: String?, details: String?, guidance: String) -> String {

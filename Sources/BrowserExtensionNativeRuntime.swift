@@ -4,7 +4,7 @@ import WebKit
 @available(macOS 15.4, *)
 @MainActor extension BrowserExtensionRuntime {
     func approvedNativeHost(_ context: WKWebExtensionContext) -> ExtensionNativeMessaging.Host? {
-        guard owns(context), context.isLoaded, let id = UUID(uuidString: context.uniqueIdentifier), contexts[id] === context,
+        guard owns(context), context.isLoaded, let id = BrowserExtensions.recordID(of: context), contexts[id] === context,
               context.hasPermission(.init(rawValue: "nativeMessaging")),
               context.webExtension.requestedPermissions.contains(.init(rawValue: "nativeMessaging")),
               let record = owner?.records.first(where: { $0.id == id && $0.profileID == profileID }),
