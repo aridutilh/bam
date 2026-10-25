@@ -198,6 +198,34 @@ import AppKit
         sidebar.updateExtensions([]); sidebar.layoutSubtreeIfNeeded()
         require(descendants(sidebar).allSatisfy { $0.identifier?.rawValue.hasPrefix("extension-action-") != true }, "Removing or switching profiles clears old actions")
         require(descendants(sidebar).first { $0.identifier?.rawValue == "extension-library" }?.isHidden == false, "Empty profiles offer Add extensions directly")
+
+        // Folder rows: deep nesting keeps titles readable at the narrowest width,
+        // and pressing a folder toggles it instead of selecting a page.
+        sidebar.setFrameSize(NSSize(width: 164, height: 720))
+        let folderIDs = (0..<12).map { _ in UUID() }, leaf = UUID()
+        var toggled: [UUID] = []
+        sidebar.onToggleFolder = { toggled.append($0) }
+        let nested = folderIDs.enumerated().map { depth, id in
+            SidebarTabItem(id: id, title: "Folder level \(depth) with a long name", subtitle: "", symbol: "folder", isPinned: true,
+                           isActive: false, depth: depth, isFolder: true, isExpanded: true)
+        } + [SidebarTabItem(id: leaf, title: "Deep leaf page title", subtitle: "https://deep.invalid", symbol: "globe",
+                            isPinned: true, isActive: true, depth: 12, parentFolderID: folderIDs.last)]
+        update(0, nested)
+        let deepTable = table(in: 0)
+        let deepRow = row(deepTable, 12)
+        let deepTitle = descendants(deepRow).compactMap { $0 as? NSTextField }.first { $0.stringValue == "Deep leaf page title" }!
+        require(deepTitle.frame.width >= 60 && deepTitle.frame.minX > 36 && deepTitle.frame.maxX <= deepRow.bounds.width,
+                "Depth-12 title stays readable and still indented at 164pt: \(deepTitle.frame)")
+        let narrowIndent = deepTitle.frame.minX
+        sidebar.setFrameSize(NSSize(width: 228, height: 720)); update(0, nested)
+        let wideTitle = descendants(row(table(in: 0), 12)).compactMap { $0 as? NSTextField }.first { $0.stringValue == "Deep leaf page title" }!
+        require(wideTitle.frame.width >= 64 && wideTitle.frame.minX > narrowIndent, "Wider sidebars restore deeper indentation: \(wideTitle.frame)")
+        let folderRow = row(deepTable, 0)
+        selected.removeAll()
+        _ = folderRow.accessibilityPerformPress()
+        require(toggled == [folderIDs[0]] && selected.isEmpty, "Pressing a folder toggles it and selects nothing")
+        require(folderRow.isAccessibilityDisclosed() && folderRow.accessibilityValue() as? String == "Expanded", "Folder exposes expanded state")
+        require(deepTable.delegate?.tableView?(deepTable, shouldSelectRow: 0) == false, "Folder rows are not table selections")
         print("PASS: \(checks) sidebar virtualization, identity, scrolling, paging and extension action checks")
         window.contentView = nil
     }
