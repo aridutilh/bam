@@ -2,6 +2,40 @@ import Foundation
 import WebKit
 
 /// Exercises the actual adapters without creating windows, renderers or extension processes.
+/// Resolves one store ID to a CRX-named URL whose body is whatever the test supplies.
+final class StoreZIPClient: ExtensionHTTPClient, @unchecked Sendable {
+    let id: String, body: Data
+    var downloads = 0
+    init(id: String, body: Data) { self.id = id; self.body = body }
+    func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) { throw URLError(.unsupportedURL) }
+    func response(for request: URLRequest, followingRedirects: Bool) async throws -> (Data, HTTPURLResponse) {
+        let location = "https://clients2.googleusercontent.com/crx/blobs/AVDNL_fixture/\(id.uppercased())_1_0_0.crx"
+        return (Data(), HTTPURLResponse(url: request.url!, statusCode: 302, httpVersion: "HTTP/1.1", headerFields: ["Location": location])!)
+    }
+    func download(for request: URLRequest, to destination: URL, byteLimit: Int) async throws -> HTTPURLResponse {
+        downloads += 1
+        try body.write(to: destination)
+        return HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: nil)!
+    }
+}
+
+/// A stored (uncompressed) ZIP of the given files.
+func storedZIP(_ files: [(String, Data)]) -> Data {
+    func le16(_ value: Int) -> [UInt8] { [UInt8(value & 0xFF), UInt8(value >> 8 & 0xFF)] }
+    func le32(_ value: UInt32) -> [UInt8] { (0..<4).map { UInt8(value >> ($0 * 8) & 0xFF) } }
+    var body = Data(), central = Data()
+    for (name, data) in files {
+        let nameBytes = Array(name.utf8), crc = ExtensionCRC32.checksum(data), offset = UInt32(body.count)
+        body.append(contentsOf: le32(0x0403_4B50) + le16(20) + le16(0) + le16(0) + le16(0) + le16(0) + le32(crc) + le32(UInt32(data.count)) + le32(UInt32(data.count)) + le16(nameBytes.count) + le16(0))
+        body.append(contentsOf: nameBytes); body.append(data)
+        central.append(contentsOf: le32(0x0201_4B50) + le16(0x031E) + le16(20) + le16(0) + le16(0) + le16(0) + le16(0) + le32(crc) + le32(UInt32(data.count)) + le32(UInt32(data.count)) + le16(nameBytes.count) + le16(0) + le16(0) + le16(0) + le16(0) + le32(0) + le32(offset))
+        central.append(contentsOf: nameBytes)
+    }
+    var archive = body; archive.append(central)
+    archive.append(contentsOf: le32(0x0605_4B50) + le16(0) + le16(0) + le16(files.count) + le16(files.count) + le32(UInt32(central.count)) + le32(UInt32(body.count)) + le16(0))
+    return archive
+}
+
 @main @MainActor enum BrowserExtensionEnumerationTests {
     struct Failure: Error { let message: String }
     static func main() async throws {
@@ -226,6 +260,23 @@ import WebKit
         try check(runtime.tabs.isEmpty && runtime.windows.isEmpty && runtime.orderedIDs.isEmpty, "Closing all live tabs must clear adapters and window topology")
         host.shutdown()
         checks += try await nativeAuthority()
+        // A Chrome Web Store install whose download is a plain ZIP is refused by the fetch gate:
+        // the installer never reaches review/import, and no record or context exists afterwards.
+        let storeID = "abcdefghijklmnopabcdefghijklmnop"
+        let storeClient = StoreZIPClient(id: storeID, body: storedZIP([("manifest.json", Data(#"{"manifest_version":3,"name":"Unsigned store fixture","version":"1.0.0","description":"Original unsigned fixture"}"#.utf8))]))
+        let storeHost = BrowserExtensions(storageURL: nil, isPrivate: true)
+        defer { storeHost.shutdown() }
+        var reviewReached = false
+        storeHost.permissionPrompt = { _ in reviewReached = true; return true }
+        // An open (disposable) profile, so a regression would reach review and import, not stop earlier.
+        let storeConfiguration = WKWebViewConfiguration(); storeConfiguration.websiteDataStore = .nonPersistent()
+        storeHost.configure(storeConfiguration, profileID: profile)
+        let installer = ExtensionInstaller(host: storeHost, client: storeClient, bamVersion: "test")
+        var installError = ""
+        do { _ = try await installer.install(ExtensionBuildCandidate(source: .chromeWebStore, upstreamID: storeID, name: "Unsigned store fixture", publisher: "", version: "1.0.0"), profileID: profile) }
+        catch { installError = error.localizedDescription }
+        try check(installError.contains("plain ZIP") && storeClient.downloads == 1 && !reviewReached && storeHost.records.isEmpty && storeHost.items(profileID: profile).isEmpty,
+                  "An unsigned Chrome Web Store ZIP reached review or import: error=\(installError) downloads=\(storeClient.downloads) review=\(reviewReached) records=\(storeHost.records.count)")
         print("PASS: Extension enumeration — \(checks)")
     }
 
