@@ -77,15 +77,15 @@ import WebKit
 
         // MARK: Grants: optional grants never disappear under a withholding mode.
         let optionalGrant = "https://optional.example/*"
-        require(Access.grantedPatterns(.init(mode: .withheld, optionalGrants: [optionalGrant]), declarations: docs) == [optionalGrant],
+        require(Access.grantedPatterns(.withheld(optionalGrants: [optionalGrant]), declarations: docs) == [optionalGrant],
                 "Withheld grants no requested site, and keeps what the user allowed the extension to ask for")
-        require(Access.grantedPatterns(.init(mode: .specific(["https://api.docs.example/*"]), optionalGrants: [optionalGrant]), declarations: docs)
+        require(Access.grantedPatterns(.specific(["https://api.docs.example/*"], optionalGrants: [optionalGrant]), declarations: docs)
                 == ["https://api.docs.example/*", optionalGrant], "Specific: exactly the listed sites plus optional grants")
-        require(Access.grantedPatterns(.init(mode: .allRequested), declarations: docs) == Set(docs.requested), "All requested: exactly the requests")
-        require(Access.grantedPatterns(.init(mode: .specific(["https://elsewhere.example/*"]), optionalGrants: ["https://gone.example/*"]), declarations: docs).isEmpty,
+        require(Access.grantedPatterns(.allRequested(approving: docs), declarations: docs) == Set(docs.requested), "All requested: exactly the approved requests")
+        require(Access.grantedPatterns(.specific(["https://elsewhere.example/*"], optionalGrants: ["https://gone.example/*"]), declarations: docs).isEmpty,
                 "Nothing undeclared is ever granted, whatever was stored")
         let before: Set<String> = ["https://*.docs.example/*", "*://mail.example/*", optionalGrant]
-        let after = Access.grantedPatterns(.init(mode: .specific(["https://api.docs.example/*"]), optionalGrants: [optionalGrant]), declarations: docs)
+        let after = Access.grantedPatterns(.specific(["https://api.docs.example/*"], optionalGrants: [optionalGrant]), declarations: docs)
         let change = Access.diff(current: before, target: after)
         require(change.grant == ["https://api.docs.example/*"] && change.revoke == ["https://*.docs.example/*", "*://mail.example/*"]
                 && !change.revoke.contains(optionalGrant), "Narrowing revokes only the dropped requested sites, never the optional grant")
@@ -95,15 +95,25 @@ import WebKit
 
         // MARK: Legacy records never widen.
         let legacyAll = Access.migrate(granted: docs.requested + [optionalGrant], declarations: docs)
-        require(legacyAll == .init(mode: .allRequested, optionalGrants: [optionalGrant]), "Install approval + an optional prompt: all requested, optional kept")
-        require(Access.migrate(granted: ["*://mail.example/*"], declarations: docs) == .init(mode: .specific(["*://mail.example/*"])),
-                "A partial grant becomes exactly those sites")
-        require(Access.migrate(granted: [], declarations: docs) == .init(mode: .withheld), "A revoked record stays without access")
+        require(legacyAll == .allRequested(approving: docs, optionalGrants: [optionalGrant]), "Install approval + an optional prompt: all requested, optional kept")
+        require(Access.migrate(granted: ["*://mail.example/*"], declarations: docs) == .specific(["*://mail.example/*"]), "A partial grant becomes exactly those sites")
+        require(Access.migrate(granted: [], declarations: docs) == .withheld(), "A revoked record stays without access")
         require(Access.migrate(granted: ["https://api.docs.example/*", "https://gone.example/*"], declarations: docs)
-                == .init(mode: .specific(["https://api.docs.example/*"])), "A narrower retained grant stays a site; undeclared grants are dropped")
-        require(Access.migrate(granted: [optionalGrant], declarations: docs) == .init(mode: .withheld, optionalGrants: [optionalGrant]),
-                "Only an optional grant: requested sites withheld, the optional grant still granted")
-        require(Access.migrate(granted: [], declarations: .init(requested: [])) == .init(mode: .allRequested), "Nothing requested: nothing to choose")
+                == .specific(["https://api.docs.example/*"]), "A narrower retained grant stays a site; undeclared grants are dropped")
+        require(Access.migrate(granted: [optionalGrant], declarations: docs) == .withheld(optionalGrants: [optionalGrant]),
+                "Only an optional grant (no request covers it): requested sites withheld, the optional grant still granted")
+        require(Access.migrate(granted: [], declarations: .init(requested: [])).mode == .allRequested, "Nothing requested: nothing to choose")
+        // Review blocker 2: a broad optional declaration overlapping a narrower legacy requested grant. Without
+        // prompt provenance the grant is a requested site, so withholding really withholds it.
+        let overlapping = Access.Declarations(requested: ["https://*.docs.example/*"], optional: ["*://*/*"])
+        let legacyNarrow = Access.migrate(granted: ["https://api.docs.example/*"], declarations: overlapping)
+        require(legacyNarrow == .specific(["https://api.docs.example/*"]) && legacyNarrow.optionalGrants.isEmpty,
+                "A requested-covered legacy grant is a site, not an optional grant, even under a broad optional declaration: \(legacyNarrow)")
+        let withheldAfterMigration = Access.State.withheld(optionalGrants: legacyNarrow.optionalGrants)
+        require(Access.grantedPatterns(withheldAfterMigration, declarations: overlapping).isEmpty,
+                "After migration, withholding requested sites leaves that legacy grant revoked (it doesn't survive as 'optional')")
+        let legacyOptionalOnly = Access.migrate(granted: ["https://shop.example/*"], declarations: overlapping)
+        require(legacyOptionalOnly == .withheld(optionalGrants: ["https://shop.example/*"]), "A grant only the optional declaration covers stays optional")
         for granted in [[], docs.requested, [optionalGrant], ["*://mail.example/*", optionalGrant], ["https://api.docs.example/*"], ["https://gone.example/*"]] {
             let result = Access.grantedPatterns(Access.migrate(granted: granted, declarations: docs), declarations: docs)
             require(result.isSubset(of: Set(granted)), "Migration never grants more than the record had: \(granted) → \(result)")
@@ -111,33 +121,59 @@ import WebKit
 
         // MARK: Updates never widen.
         let narrowed = Access.Declarations(requested: ["https://api.docs.example/*"], optional: [])
-        let state = Access.State(mode: .specific(["*://mail.example/*", "https://api.docs.example/*"]), optionalGrants: [optionalGrant])
-        require(Access.updated(state, to: narrowed) == .init(mode: .specific(["https://api.docs.example/*"])),
+        let state = Access.State.specific(["*://mail.example/*", "https://api.docs.example/*"], optionalGrants: [optionalGrant])
+        require(Access.updated(state, to: narrowed) == .specific(["https://api.docs.example/*"]),
                 "Listed sites the new version no longer requests are dropped, as are optional grants it no longer declares")
-        require(Access.updated(.init(mode: .specific(["*://mail.example/*"])), to: narrowed) == .init(mode: .withheld), "No listed site left: withheld")
+        require(Access.updated(.specific(["*://mail.example/*"]), to: narrowed) == .withheld(), "No listed site left: withheld")
         let widened = Access.Declarations(requested: docs.requested + ["https://new.example/*"], optional: docs.optional)
-        require(Access.updated(.init(mode: .specific(["*://mail.example/*"])), to: widened) == .init(mode: .specific(["*://mail.example/*"])),
-                "A wider new version adds nothing to a site list")
-        require(Access.updated(.init(mode: .allRequested), to: widened).mode == .allRequested
-                && Access.newlyRequested(from: docs, to: widened) == ["https://new.example/*"], "All requested stays; the addition is listed for review")
-        require(Access.newlyRequested(from: Access.Declarations(requested: ["<all_urls>"]), to: widened).isEmpty, "Nothing is new under <all_urls>")
+        require(Access.updated(.specific(["*://mail.example/*"]), to: widened) == .specific(["*://mail.example/*"]), "A wider new version adds nothing to a site list")
         let promoted = Access.Declarations(requested: docs.requested + [optionalGrant], optional: [])
-        require(Access.updated(.init(mode: .withheld, optionalGrants: [optionalGrant]), to: promoted).optionalGrants == [optionalGrant],
+        require(Access.updated(.withheld(optionalGrants: [optionalGrant]), to: promoted).optionalGrants == [optionalGrant],
                 "An optional grant the new version now requests is kept (still allowed, not silently revoked)")
 
-        // MARK: Persistence: explicit shape; unknown or malformed modes read back as withheld.
-        for value in [Access.State(mode: .withheld), .init(mode: .allRequested, optionalGrants: [optionalGrant]),
-                      .init(mode: .specific(["https://api.docs.example/*"]))] {
+        // MARK: Review blocker 1: All requested + a version that requests more. Additions are pending, never granted.
+        let approvedAll = Access.State.allRequested(approving: docs, optionalGrants: [optionalGrant])
+        let previous = Access.grantedPatterns(approvedAll, declarations: docs)
+        let afterUpdate = Access.updated(approvedAll, to: widened)
+        let updatedGrants = Access.grantedPatterns(afterUpdate, declarations: widened)
+        require(!updatedGrants.contains("https://new.example/*") && updatedGrants == previous,
+                "An update's new request is not granted: the prior scope holds exactly (\(updatedGrants))")
+        require(Access.pendingRequests(afterUpdate, declarations: widened) == ["https://new.example/*"], "The addition is pending for review")
+        require(Access.grantedPatterns(approvedAll, declarations: widened) == previous && Access.pendingRequests(approvedAll, declarations: widened) == ["https://new.example/*"],
+                "Intrinsic: even without calling updated, recomputing with the new manifest grants nothing new")
+        let accepted = Access.accepting(["https://new.example/*"], in: afterUpdate, declarations: widened)
+        require(Access.grantedPatterns(accepted, declarations: widened) == previous.union(["https://new.example/*"])
+                && Access.pendingRequests(accepted, declarations: widened).isEmpty, "Accepting grants exactly the reviewed addition")
+        require(Access.accepting([], in: afterUpdate, declarations: widened) == afterUpdate, "Rejecting (accepting nothing) keeps the state unchanged")
+        require(Access.accepting(["https://elsewhere.example/*", "https://*.docs.example/*"], in: afterUpdate, declarations: widened) == afterUpdate,
+                "Only pending requests can be accepted (not undeclared or already approved ones)")
+        require(Access.accepting(["https://new.example/*"], in: .specific(["*://mail.example/*"]), declarations: widened) == .specific(["*://mail.example/*"])
+                && Access.pendingRequests(.withheld(), declarations: widened).isEmpty, "Other modes have nothing pending and accept nothing")
+        let narrowerRequest = Access.Declarations(requested: ["https://api.docs.example/*", "*://mail.example/*"], optional: docs.optional)
+        require(Access.grantedPatterns(Access.updated(approvedAll, to: narrowerRequest), declarations: narrowerRequest) == ["https://api.docs.example/*", "*://mail.example/*", optionalGrant]
+                && Access.pendingRequests(Access.updated(approvedAll, to: narrowerRequest), declarations: narrowerRequest).isEmpty,
+                "A request inside what was approved needs no review")
+        let broader = Access.Declarations(requested: ["<all_urls>"], optional: [])
+        require(Access.grantedPatterns(Access.updated(approvedAll, to: broader), declarations: broader) == [optionalGrant]
+                && Access.pendingRequests(Access.updated(approvedAll, to: broader), declarations: broader) == ["<all_urls>"],
+                "A broader replacement request (all sites) is pending, not granted; only the still-declared optional grant remains")
+
+        // MARK: Persistence: explicit shape; unknown or malformed modes read back as withheld; approvals kept.
+        for value in [Access.State.withheld(), .allRequested(approving: docs, optionalGrants: [optionalGrant]), .specific(["https://api.docs.example/*"]),
+                      Access.accepting(["https://new.example/*"], in: afterUpdate, declarations: widened)] {
             let data = try JSONEncoder().encode(value)
             let loaded = try JSONDecoder().decode(Access.State.self, from: data)
             require(loaded == value, "\(value) survives a save and load")
         }
-        let shape = String(data: try JSONEncoder().encode(Access.State(mode: .specific(["https://a.example/*"]))), encoding: .utf8) ?? ""
-        require(shape.contains("\"mode\":\"specific\"") && shape.contains("\"sites\""), "Stored as {mode, sites, optionalGrants}: \(shape)")
+        let shape = String(data: try JSONEncoder().encode(Access.State.specific(["https://a.example/*"])), encoding: .utf8) ?? ""
+        require(shape.contains("\"mode\":\"specific\"") && shape.contains("\"sites\""), "Stored as {mode, sites, optionalGrants, approved}: \(shape)")
         for json in [#"{"mode":"everything"}"#, #"{"mode":"specific","sites":[]}"#, #"{}"#] {
             let loaded = try JSONDecoder().decode(Access.State.self, from: Data(json.utf8))
             require(loaded.mode == .withheld, "\(json) reads back as withheld, never wider")
         }
+        let bareAll = try JSONDecoder().decode(Access.State.self, from: Data(#"{"mode":"allRequested"}"#.utf8))
+        require(Access.grantedPatterns(bareAll, declarations: docs).isEmpty && Access.pendingRequests(bareAll, declarations: docs) == docs.requested.sorted(),
+                "All requested without stored approvals grants nothing until reviewed")
 
         print("PASS: \(checks) extension site access checks")
     }
