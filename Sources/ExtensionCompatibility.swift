@@ -418,6 +418,11 @@ enum ExtensionCompatibility {
     /// Diagnostics per context: documents that reported in, and any failure of the layer itself.
     private var helloURLs: [String: [String]] = [:]
     private var scriptErrors: [String: [String]] = [:]
+    private static func appendDiagnostic(_ value: String, for key: String, to entries: inout [String: [String]], limit: Int) {
+        guard (entries[key]?.count ?? 0) < limit else { return }
+        // Scalar counting also bounds pathological combining-character strings.
+        entries[key, default: []].append(String(String.UnicodeScalarView(value.unicodeScalars.prefix(1_200))))
+    }
     /// Diagnostic only: evaluates a script in every extension document that reported in.
     func evaluate(_ script: String, for context: WKWebExtensionContext) async -> [String] {
         var results: [String] = []
@@ -463,6 +468,8 @@ enum ExtensionCompatibility {
     func remove(_ context: WKWebExtensionContext) {
         documents.removeValue(forKey: context.uniqueIdentifier)
         registrations.removeValue(forKey: context.uniqueIdentifier)
+        helloURLs.removeValue(forKey: context.uniqueIdentifier)
+        scriptErrors.removeValue(forKey: context.uniqueIdentifier)
         let ports = eventConnections.removeValue(forKey: context.uniqueIdentifier)?.values.map(\.port) ?? []
         for port in ports { port.disconnect() }
         idleIntervals.removeValue(forKey: context.uniqueIdentifier); idleStates.removeValue(forKey: context.uniqueIdentifier)
@@ -479,6 +486,7 @@ enum ExtensionCompatibility {
         contentController?.removeScriptMessageHandler(forName: handlerName, contentWorld: .page)
         contentController?.removeAllUserScripts()
         scripts.removeAll(); documents.removeAll()
+        helloURLs.removeAll(); scriptErrors.removeAll()
     }
 
     private func ownsRegisteredContext(_ context: WKWebExtensionContext) -> Bool {
@@ -507,15 +515,12 @@ enum ExtensionCompatibility {
               let kind = body["kind"] as? String else { return (nil, Self.bridgeError("Invalid or inactive compatibility request.")) }
         switch kind {
         case "hello":
-            if let url = body["url"] as? String, let parsed = URL(string: url), BrowserExtensions.isExtensionURL(parsed, ownedBy: context),
-               (helloURLs[context.uniqueIdentifier]?.count ?? 0) < 20 {
-                helloURLs[context.uniqueIdentifier, default: []].append("\(url) ready=worker")
+            if let url = body["url"] as? String, let parsed = URL(string: url), BrowserExtensions.isExtensionURL(parsed, ownedBy: context) {
+                Self.appendDiagnostic("\(url) ready=worker", for: context.uniqueIdentifier, to: &helloURLs, limit: 20)
             }
             return (true, nil)
         case "scriptError":
-            if (scriptErrors[context.uniqueIdentifier]?.count ?? 0) < 10 {
-                scriptErrors[context.uniqueIdentifier, default: []].append(String((body["message"] as? String ?? "Worker compatibility error").prefix(1_200)))
-            }
+            Self.appendDiagnostic(body["message"] as? String ?? "Worker compatibility error", for: context.uniqueIdentifier, to: &scriptErrors, limit: 10)
             return (true, nil)
         case "idle.interval":
             guard permits("idle", for: context) else { return (nil, Self.bridgeError("The extension has not declared idle access.")) }
@@ -606,12 +611,12 @@ enum ExtensionCompatibility {
             list.append(Document(web: web, frame: frame))
             documents[key] = list
             if permits("idle", for: context) { setIdleInterval(idleIntervals[key] ?? 60, for: context) }
-            if let url = body["url"] as? String, (helloURLs[key]?.count ?? 0) < 20 {
-                helloURLs[key, default: []].append("\(url) ready=\(body["ready"] as? String ?? "?") webNavigation=\(body["webNavigation"] as? String ?? "?") namespaces=\(body["namespaces"] as? String ?? "?")")
+            if let url = body["url"] as? String {
+                Self.appendDiagnostic("\(url) ready=\(body["ready"] as? String ?? "?") webNavigation=\(body["webNavigation"] as? String ?? "?") namespaces=\(body["namespaces"] as? String ?? "?")", for: key, to: &helloURLs, limit: 20)
             }
         case "scriptError":
             let text = "\(body["message"] as? String ?? "?") @ \(body["url"] as? String ?? "?") \((body["stack"] as? String ?? "").prefix(600))"
-            if (scriptErrors[key]?.count ?? 0) < 10 { scriptErrors[key, default: []].append(text) }
+            Self.appendDiagnostic(text, for: key, to: &scriptErrors, limit: 10)
         case "request":
             guard let id = body["id"] as? Int, let method = body["method"] as? String else { return }
             let params = body["params"] as? [String: Any] ?? [:]

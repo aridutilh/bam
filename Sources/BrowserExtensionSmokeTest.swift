@@ -1,9 +1,28 @@
 import AppKit
 import WebKit
+import Darwin
 
 /// Covers the real browser adapter, in addition to the isolated extension host.
 @available(macOS 15.4, *)
 @MainActor enum BrowserExtensionSmokeTest {
+    private final class WeakReference<Value: AnyObject> {
+        weak var value: Value?
+        init(_ value: Value) { self.value = value }
+    }
+    /// Observations, not a leak threshold: WebKit/process caches can outlive views.
+    private static func recordLifecycle(_ phase: String, retiredPopovers: Int, retiredWebViews: Int, retiredContexts: Int = 0) {
+        var usage = rusage_info_v0()
+        let result = withUnsafeMutablePointer(to: &usage) {
+            proc_pid_rusage(getpid(), RUSAGE_INFO_V0, UnsafeMutableRawPointer($0).assumingMemoryBound(to: rusage_info_t?.self))
+        }
+        var report: [String: Any] = ["phase": phase, "pid": getpid(), "uptime": ProcessInfo.processInfo.systemUptime,
+            "retiredPopoversStillAlive": retiredPopovers, "retiredWebViewsStillAlive": retiredWebViews,
+            "retiredContextsStillAlive": retiredContexts]
+        if result == 0 { report["appResidentBytes"] = usage.ri_resident_size; report["appPhysicalFootprintBytes"] = usage.ri_phys_footprint }
+        if let data = try? JSONSerialization.data(withJSONObject: report, options: .sortedKeys) {
+            print("BAM_EXTENSION_LIFECYCLE " + String(decoding: data, as: UTF8.self)); fflush(stdout)
+        }
+    }
     static func run(fixtureURL: URL, pageURL: URL) async throws -> Int {
         var checks = 0
         func check(_ condition: Bool, _ message: String) throws {
@@ -73,6 +92,7 @@ import WebKit
             throw ExtensionSmokeTest.Failure(description: "Missing toolbar action fixture")
         }
         try check(button.accessibilityLabel() == actionContext.webExtension.displayName, "Extension button lost its vendor name")
+        recordLifecycle("baseline", retiredPopovers: 0, retiredWebViews: 0)
         button.performClick(nil)
         try await wait("Clicking the sidebar action did not show WebKit's actual popup") { tabAction.popupPopover?.isShown == true }
         try check(tabAction.popupPopover?.behavior == .transient, "Extension popup cannot dismiss on outside click")
@@ -83,14 +103,20 @@ import WebKit
             guard popover.isShown, let root = popover.contentViewController?.view, let popupWindow = root.window else { return nil }
             return descendants(root).compactMap { $0 as? WKWebView }.first { $0.window === popupWindow }
         }
-        guard let firstPopover = tabAction.popupPopover else { throw ExtensionSmokeTest.Failure(description: "Initial action has no presented popover") }
-        try await wait("Initial presented popup did not contain live extension HTML") {
-            guard let web = presentedWeb(firstPopover) else { return false }
-            return (try? await web.evaluateJavaScript("document.title")) as? String == "Bam fixture ready"
+        do {
+            guard let firstPopover = tabAction.popupPopover else { throw ExtensionSmokeTest.Failure(description: "Initial action has no presented popover") }
+            try await wait("Initial presented popup did not contain live extension HTML") {
+                guard let web = presentedWeb(firstPopover) else { return false }
+                return (try? await web.evaluateJavaScript("document.title")) as? String == "Bam fixture ready"
+            }
         }
-        for cycle in 1...2 {
+        var retiredPopovers: [WeakReference<NSPopover>] = []
+        var retiredWebViews: [WeakReference<WKWebView>] = []
+        for cycle in 1...20 {
             guard let shown = tabAction.popupPopover, let popupWindow = shown.contentViewController?.view.window else { throw ExtensionSmokeTest.Failure(description: "Popup lost its window before dismissal") }
-            if cycle == 1 {
+            retiredPopovers.append(WeakReference(shown))
+            if let popupWeb = presentedWeb(shown) { retiredWebViews.append(WeakReference(popupWeb)) }
+            if cycle.isMultiple(of: 2) == false {
                 guard let escape = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
                     windowNumber: popupWindow.windowNumber, context: nil, characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}", isARepeat: false, keyCode: 53) else {
                     throw ExtensionSmokeTest.Failure(description: "Could not create popup Escape event")
@@ -109,7 +135,19 @@ import WebKit
             let answer = try await liveWeb.callAsyncJavaScript("return (await browser.runtime.sendMessage({kind:'ping',via:'reopened'})).pong;", arguments: [:], contentWorld: .page)
             try check(answer as? String == "reopened", "Reopened popup cannot communicate with its background")
         }
+        recordLifecycle("after-20-popup-cycles", retiredPopovers: retiredPopovers.filter { $0.value != nil }.count,
+            retiredWebViews: retiredWebViews.filter { $0.value != nil }.count)
+        if let shown = tabAction.popupPopover {
+            retiredPopovers.append(WeakReference(shown))
+            if let popupWeb = presentedWeb(shown) { retiredWebViews.append(WeakReference(popupWeb)) }
+        }
         tabAction.closePopup()
+        try await wait("Closed popup objects remained retained after 20 presentation cycles") {
+            retiredPopovers.allSatisfy { $0.value == nil } && retiredWebViews.allSatisfy { $0.value == nil }
+        }
+        try await Task.sleep(nanoseconds: 500_000_000)
+        recordLifecycle("popup-recovery", retiredPopovers: retiredPopovers.filter { $0.value != nil }.count,
+            retiredWebViews: retiredWebViews.filter { $0.value != nil }.count)
         controller.setSidebar(false)
         try await wait("Sidebar did not finish collapsing around the extension shelf") { controller.sidebar.isHidden }
         let collapsedMenu = NSMenu(); controller.updateExtensionsMenu(collapsedMenu)
@@ -283,6 +321,63 @@ import WebKit
         try check(actionButton() == nil, "Disabling the extension left a stale sidebar action")
         controller.navigatePane(tab.id, address: extensionURL.absoluteString)
         try check(controller.tabErrors[tab.id]?.contains("unavailable") == true, "Disabled extension page had no recoverable error")
+        // Exercise fresh diagnostic state across real unload/reload boundaries.
+        // Keep each cycle's strong references inside this helper so the weak
+        // observations below measure the host, not the test's own local values.
+        func diagnosticCycle(_ cycle: Int) async throws -> WeakReference<WKWebExtensionContext> {
+            try await host.setEnabled(true, id: extensionID)
+            guard let context = host.context(for: extensionID), let action = context.action(for: nil), let popup = action.popupWebView else {
+                throw ExtensionSmokeTest.Failure(description: "Diagnostic reload has no popup")
+            }
+            let bridge = liveRuntime.compatibility
+            try check((bridge.diagnostics(for: context)["script_errors"] as? [String] ?? []).isEmpty,
+                "Reload inherited errors from the preceding context")
+            try await wait("Diagnostic reload popup did not initialize") {
+                (try? await popup.evaluateJavaScript("document.title")) as? String == "Bam fixture ready"
+            }
+            _ = try await popup.callAsyncJavaScript("""
+                const handler=globalThis.webkit.messageHandlers[handlerName];
+                for(let i=0;i<25;i++) handler.postMessage({kind:'hello',url:location.href+'?diagnostic='+cycle+'-'+i,ready:'x'.repeat(3000)});
+                for(let i=0;i<12;i++) handler.postMessage({kind:'scriptError',message:'cycle-'+cycle+'-'+i+'x'.repeat(3000),url:location.href,stack:'s'.repeat(3000)});
+                return true;
+                """, arguments: ["handlerName": bridge.handlerName, "cycle": cycle], contentWorld: .page)
+            try await wait("Diagnostic fixture did not fill the bounded error log") {
+                (bridge.diagnostics(for: context)["script_errors"] as? [String])?.count == 10
+            }
+            let diagnostics = bridge.diagnostics(for: context)
+            let hello = diagnostics["documents"] as? [String] ?? [], errors = diagnostics["script_errors"] as? [String] ?? []
+            try check(hello.count == 20 && errors.count == 10 && (hello + errors).allSatisfy { $0.unicodeScalars.count <= 1_200 },
+                "Compatibility diagnostics exceeded their entry or text bounds")
+            action.closePopup()
+            // The final cycle also verifies shutdown while diagnostics are populated.
+            if cycle == 3 { bridge.shutdown() }
+            try await host.setEnabled(false, id: extensionID)
+            let cleared = bridge.diagnostics(for: context)
+            try check(cleared["installed"] as? Bool == false && (cleared["documents"] as? [String])?.isEmpty == true &&
+                (cleared["script_errors"] as? [String])?.isEmpty == true, "Unloading or shutting down retained compatibility diagnostics")
+            let (_, staleError) = await bridge.receiveNativeMessage(["kind": "scriptError", "message": "after-unload"], context: context)
+            try check(staleError != nil && (bridge.diagnostics(for: context)["script_errors"] as? [String])?.isEmpty == true,
+                "An unloaded context repopulated compatibility diagnostics")
+            return WeakReference(context)
+        }
+        var retiredContexts: [WeakReference<WKWebExtensionContext>] = []
+        for cycle in 1...3 { retiredContexts.append(try await diagnosticCycle(cycle)) }
+        // An isolated bridge must release after removing its script handler even
+        // while the content controller stays alive. Native WebKit context/cache
+        // reclamation is observed separately rather than called a memory leak.
+        let contentController = WKUserContentController()
+        var isolatedBridge: ExtensionCompatibilityBridge? = ExtensionCompatibilityBridge(controller: liveRuntime.controller,
+            dataStore: config.websiteDataStore, contentController: contentController, browserVersion: "lifecycle-test")
+        let retiredBridge = WeakReference(isolatedBridge!)
+        isolatedBridge?.shutdown(); isolatedBridge = nil
+        try await wait("Shutdown retained the compatibility script handler") { retiredBridge.value == nil }
+        let recoveryDeadline = ProcessInfo.processInfo.systemUptime + 2
+        while retiredContexts.contains(where: { $0.value != nil }) && ProcessInfo.processInfo.systemUptime < recoveryDeadline {
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        withExtendedLifetime(contentController) {}
+        recordLifecycle("after-3-disable-reenable-cycles", retiredPopovers: retiredPopovers.filter { $0.value != nil }.count,
+            retiredWebViews: retiredWebViews.filter { $0.value != nil }.count, retiredContexts: retiredContexts.filter { $0.value != nil }.count)
         return checks
     }
 }
