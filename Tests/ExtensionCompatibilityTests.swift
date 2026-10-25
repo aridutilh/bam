@@ -79,6 +79,38 @@ import JavaScriptCore
             """)
         nativeSymbols.evaluateScript(worker)
         try check(nativeSymbols.evaluateScript("Symbol.dispose === nativeDispose && typeof Symbol.asyncDispose === 'symbol'")!.toBool(), "Worker adapter replaced an engine-provided Symbol.dispose")
+        // Two realms of one agent (a parent extension page and its same-origin frame): a resource
+        // made in one is disposed in the other, synchronously and asynchronously.
+        let agent = JSVirtualMachine()!
+        let realms = (0..<2).map { _ in JSContext(virtualMachine: agent)! }
+        var realmErrors: [String] = []
+        for realm in realms {
+            realm.exceptionHandler = { _, error in realmErrors.append(error?.toString() ?? "JavaScript error") }
+            realm.evaluateScript("""
+                var location = {origin: 'webkit-extension://fixture', href: 'webkit-extension://fixture/frame.html'}, console = {error: function() {}}, performance = {now: function() { return 0; }};
+                var browser = {runtime: {getURL: function(path) { return 'webkit-extension://fixture' + path; }, getManifest: function() { return {}; }}};
+                """)
+            realm.evaluateScript(worker)
+        }
+        realms[1].evaluateScript("""
+            var released = [];
+            var makeResource = function () { return {[Symbol.dispose]: function () { released.push('sync'); }, [Symbol.asyncDispose]: function () { released.push('async'); return Promise.resolve(); }}; };
+            """)
+        realms[0].setObject(realms[1].objectForKeyedSubscript("makeResource"), forKeyedSubscript: "foreignMake" as NSString)
+        realms[0].setObject(realms[1].objectForKeyedSubscript("released"), forKeyedSubscript: "foreignReleased" as NSString)
+        realms[0].evaluateScript("""
+            var crossRealm = 'pending';
+            (async function () {
+              var resource = foreignMake();
+              var dispose = resource[Symbol.dispose], disposeAsync = resource[Symbol.asyncDispose];
+              if (typeof dispose !== 'function' || typeof disposeAsync !== 'function') throw new TypeError('Object not disposable.');
+              dispose.call(resource); await disposeAsync.call(resource);
+              crossRealm = foreignReleased.join();
+            })().catch(function (error) { crossRealm = String(error); });
+            """)
+        try check(realmErrors.isEmpty && realms[0].evaluateScript("crossRealm")!.toString() == "sync,async" &&
+                  realms[0].evaluateScript("Symbol.dispose")!.isEqual(to: realms[1].evaluateScript("Symbol.dispose")),
+                  "Disposal symbols differed between same-agent realms: \(realms[0].evaluateScript("crossRealm")!) \(realmErrors)")
 
         // Model WebKit's native receiver check without replacing any API semantics.
         let binding = JSContext()!

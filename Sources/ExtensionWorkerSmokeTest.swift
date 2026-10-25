@@ -1,4 +1,5 @@
 import AppKit
+import Network
 import WebKit
 
 /// Runs original classic and module fixtures as real WebKit service workers.
@@ -71,7 +72,24 @@ import WebKit
               catch (error) { return String(error); }
             };
             api.runtime.onMessage.addListener(async message => {
-              if (!message || !['probe','denials','revoked','offscreen','offscreen-close'].includes(message.kind)) return undefined;
+              if (!message || !['probe','denials','revoked','offscreen','offscreen-close','offscreen-stall','offscreen-after-close'].includes(message.kind)) return undefined;
+              if (message.kind === 'offscreen-stall') {
+                // The page's script runs, then its load stalls on a loopback request that never answers.
+                globalThis.pendingOffscreen = api.offscreen.createDocument({url: 'offscreen.html?stall=' + message.port, reasons: ['DOM_PARSER'], justification: 'Bam fixture'})
+                  .then(() => 'resolved', error => error.message);
+                let echo = null;
+                for (let attempt = 0; attempt < 100 && !echo; attempt++) {
+                  try { echo = await api.runtime.sendMessage({kind: 'offscreen-echo', value: 'stalled'}); } catch (error) {}
+                  if (!echo) await new Promise(resolve => setTimeout(resolve, 50));
+                }
+                return {echo, has: await api.offscreen.hasDocument()};
+              }
+              if (message.kind === 'offscreen-after-close') {
+                if (message.close) await api.offscreen.closeDocument();
+                let echo;
+                try { echo = await api.runtime.sendMessage({kind: 'offscreen-echo', value: 'after'}); } catch (error) { echo = 'error: ' + error.message; }
+                return {echo: echo === undefined ? 'none' : echo, outcome: await globalThis.pendingOffscreen, has: await api.offscreen.hasDocument()};
+              }
               if (message.kind === 'offscreen') {
                 const parameters = {url: 'offscreen.html', reasons: ['DOM_PARSER'], justification: 'Bam fixture'};
                 await api.offscreen.createDocument(parameters);
@@ -114,6 +132,8 @@ import WebKit
             try Data(content.utf8).write(to: package.appendingPathComponent("content.js"))
             // The offscreen page answers only its own kind, parsing with a DOM API a worker lacks.
             try Data("""
+            const stall = new URL(location.href).searchParams.get('stall');
+            if (stall) { const image = new Image(); image.src = 'http://127.0.0.1:' + stall + '/stall.png'; document.documentElement.append(image); }
             (globalThis.browser || globalThis.chrome).runtime.onMessage.addListener(message => {
               if (message?.kind !== 'offscreen-echo') return undefined;
               const parsed = new DOMParser().parseFromString('<p>' + message.value + '</p>', 'text/html').body.textContent;
@@ -209,9 +229,42 @@ import WebKit
             let opened = await request(popupA, kind: "offscreen")?["has"] as? Bool, closed = await request(popupA, kind: "offscreen-close")?["has"] as? Bool
             try check(opened == true && closed == false, "Offscreen create/close cycle \(cycle) failed")
         }
-        _ = await request(popupA, kind: "offscreen"); _ = await request(popupB, kind: "offscreen")
-        try check(runtimeA.compatibility.offscreen.has(contextA.uniqueIdentifier) && runtimeB.compatibility.offscreen.has(contextB.uniqueIdentifier),
+        // A load that never finishes: close and revoke must end it at once, not at the timeout.
+        let stallParameters = NWParameters.tcp
+        stallParameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: .any)
+        let stallListener = try NWListener(using: stallParameters)
+        var stalledConnections: [NWConnection] = []
+        stallListener.newConnectionHandler = { connection in stalledConnections.append(connection); connection.start(queue: .main) }
+        stallListener.start(queue: .main)
+        defer { stallListener.cancel(); for connection in stalledConnections { connection.cancel() } }
+        try await wait("Stalling loopback listener did not start") { stallListener.port != nil }
+        let stallPort = Int(stallListener.port!.rawValue)
+        func stalledOffscreen(_ popup: WKWebView) async -> [String: Any]? {
+            try? await popup.callAsyncJavaScript("return await (globalThis.browser || globalThis.chrome).runtime.sendMessage({kind: 'offscreen-stall', port});",
+                arguments: ["port": stallPort], in: nil, contentWorld: .page) as? [String: Any]
+        }
+        func afterClose(_ popup: WKWebView, close: Bool) async -> [String: Any]? {
+            try? await popup.callAsyncJavaScript("return await (globalThis.browser || globalThis.chrome).runtime.sendMessage({kind: 'offscreen-after-close', close});",
+                arguments: ["close": close], in: nil, contentWorld: .page) as? [String: Any]
+        }
+        let stalledReport = await stalledOffscreen(popupA)
+        try check((stalledReport?["echo"] as? [String: Any])?["echo"] as? String == "stalled" && stalledReport?["has"] as? Bool == true &&
+                  runtimeA.compatibility.offscreen.entry(for: contextA.uniqueIdentifier)?.isLoaded == false,
+                  "The stalled offscreen page did not run while its load was pending: \(stalledReport ?? [:])")
+        weak var stalledWeb = runtimeA.compatibility.offscreen.currentDocument(for: contextA.uniqueIdentifier)
+        let closedStall = await afterClose(popupA, close: true)
+        try check(closedStall?["outcome"] as? String == "The offscreen document was closed before it finished loading." && closedStall?["has"] as? Bool == false &&
+                  (closedStall?["echo"] as? [String: Any])?["echo"] == nil, "Closing a loading document left it answering or its create pending: \(closedStall ?? [:])")
+        try await wait("A closed loading offscreen web view was retained") { stalledWeb == nil }
+        let recreated = await request(popupA, kind: "offscreen")
+        try check(recreated?["has"] as? Bool == true && (recreated?["echo"] as? [String: Any])?["echo"] as? String == "ping" &&
+                  (recreated?["echo"] as? [String: Any])?["path"] as? String == "/offscreen.html", "Recreating after a cancelled load failed: \(recreated ?? [:])")
+        _ = await request(popupA, kind: "offscreen-close")
+        // A is still loading when its grants are revoked; B is loaded when B is disabled.
+        _ = await stalledOffscreen(popupA); _ = await request(popupB, kind: "offscreen")
+        try check(runtimeA.compatibility.offscreen.entry(for: contextA.uniqueIdentifier)?.isLoaded == false && runtimeB.compatibility.offscreen.has(contextB.uniqueIdentifier),
                   "Offscreen documents were not reopened for the lifecycle checks")
+        weak var revokedWeb = runtimeA.compatibility.offscreen.currentDocument(for: contextA.uniqueIdentifier)
         let denied = await request(popupA, kind: "denials")
         try check(denied?["external"] is String && denied?["undeclared"] is String && denied?["unknown"] is String,
                   "Worker native messaging allowed an external app, undeclared capability or unknown method: \(denied ?? [:])")
@@ -234,6 +287,7 @@ import WebKit
         try host.revokePermissions(id: idA)
         try check(!runtimeA.compatibility.offscreen.has(contextA.uniqueIdentifier) && runtimeB.compatibility.offscreen.has(contextB.uniqueIdentifier),
                   "Revoking one extension did not close only its offscreen document")
+        try await wait("A revoked loading offscreen web view was retained") { revokedWeb == nil }
         let revokedID = "revoked-" + UUID().uuidString
         runtimeA.compatibility.dispatch("notifications.onClicked", [revokedID], to: contextA.uniqueIdentifier)
         let revokedNative = await runtimeA.compatibility.receiveNativeMessage(["kind": "request", "method": "idle.queryState"], context: contextA)

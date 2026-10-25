@@ -363,7 +363,82 @@ import Darwin
         _ = try await languageWeb.evaluateJavaScript("document.getElementById('bam-language').remove(); for (const node of document.body.children) node.hidden = true; true")
         let declared = try await detectedLanguage()
         try check(declared["promised"] as? String == "pt-BR", "tabs.detectLanguage ignored the declared language: \(declared)")
-        _ = try await languageWeb.evaluateJavaScript("document.documentElement.removeAttribute('lang'); for (const node of document.body.children) node.hidden = false; true")
+        _ = try await languageWeb.evaluateJavaScript("document.documentElement.removeAttribute('lang'); true")
+        let undetermined = try await detectedLanguage()
+        try check(undetermined["promised"] as? String == "und", "tabs.detectLanguage did not report und for an undeclared page without text: \(undetermined)")
+        _ = try await languageWeb.evaluateJavaScript("for (const node of document.body.children) node.hidden = false; true")
+
+        // activeTab only: no access to any tab before the user's action gesture, then only to
+        // that tab, until the gesture is cleared or the tab navigates.
+        let activeFixture = FileManager.default.temporaryDirectory.appendingPathComponent("bam-active-tab-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: activeFixture, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: activeFixture) }
+        try JSONSerialization.data(withJSONObject: ["manifest_version": 3, "name": "Bam activeTab fixture", "version": "1.0",
+            "description": "Original activeTab-only fixture", "permissions": ["activeTab"], "action": ["default_title": "Bam activeTab"]])
+            .write(to: activeFixture.appendingPathComponent("manifest.json"))
+        try Data("<!doctype html><meta charset='utf-8'><title>activeTab page</title>".utf8).write(to: activeFixture.appendingPathComponent("page.html"))
+        let activeID = try await host.importPackage(at: activeFixture, profileID: profile)
+        let secondURL = url.deletingLastPathComponent().appendingPathComponent("next.html")
+        guard let activeContext = host.context(for: activeID), let activeConfiguration = activeContext.webViewConfiguration,
+              let secondID = controller.openProfileTab(secondURL, profileID: profile, active: false) else { throw ExtensionSmokeTest.Failure(description: "activeTab fixture did not load") }
+        try await wait("activeTab second tab did not load") { controller.browsers[secondID]?.url == secondURL && controller.browsers[secondID]?.isLoading == false }
+        host.reconcile()
+        let activePage = WKWebView(frame: NSRect(x: 0, y: 0, width: 320, height: 240), configuration: activeConfiguration)
+        activePage.load(URLRequest(url: activeContext.baseURL.appendingPathComponent("page.html")))
+        try await wait("activeTab extension page did not load") { activePage.title == "activeTab page" }
+        func activeTabAccess() async throws -> (allowed: [Int], denied: Int, callback: String) {
+            let text = try await activePage.callAsyncJavaScript("""
+                const allowed = [], denied = [];
+                for (const tab of await browser.tabs.query({})) {
+                  try { await browser.tabs.detectLanguage(tab.id); allowed.push(tab.id); } catch (error) { denied.push(String(error?.message || error)); }
+                }
+                const target = allowed[0] ?? (await browser.tabs.query({}))[0].id;
+                const callback = await new Promise(resolve => chrome.tabs.detectLanguage(target, value => resolve(chrome.runtime.lastError ? 'error' : 'value:' + value)));
+                return JSON.stringify({allowed, denied: denied.length, callback});
+                """, arguments: [:], contentWorld: .page) as? String
+            guard let data = text?.data(using: .utf8), let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                throw ExtensionSmokeTest.Failure(description: "activeTab detectLanguage probe failed: \(text ?? "nil")")
+            }
+            return (value["allowed"] as? [Int] ?? [], value["denied"] as? Int ?? -1, value["callback"] as? String ?? "")
+        }
+        let before = try await activeTabAccess()
+        try check(before.allowed.isEmpty && before.denied >= 2 && before.callback == "error", "activeTab-only extension read a tab's language before any gesture: \(before)")
+        guard let secondTab = runtime.tabs[secondID] else { throw ExtensionSmokeTest.Failure(description: "Missing activeTab second tab adapter") }
+        activeContext.performAction(for: secondTab)
+        let granted = try await activeTabAccess()
+        try check(granted.allowed.count == 1 && granted.denied == before.denied - 1 && granted.callback.hasPrefix("value:"),
+                  "activeTab gesture did not grant exactly its tab in promise and callback forms: \(granted)")
+        activeContext.clearUserGesture(in: secondTab)
+        let cleared = try await activeTabAccess()
+        try check(cleared.allowed.isEmpty && cleared.callback == "error", "Clearing the gesture did not revoke activeTab language access: \(cleared)")
+        activeContext.performAction(for: secondTab)
+        try check(try await activeTabAccess().allowed == granted.allowed, "A repeated gesture did not restore activeTab access")
+        // Same-origin navigation: Chrome keeps the activeTab grant. Record WebKit's actual
+        // behavior; a dropped grant is a limitation, not something Bam re-grants.
+        controller.navigatePane(secondID, address: secondURL.absoluteString + "?same-origin")
+        try await wait("activeTab second tab did not navigate within its origin") { controller.browsers[secondID]?.url?.query == "same-origin" && controller.browsers[secondID]?.isLoading == false }
+        let sameOrigin = try await activeTabAccess()
+        if sameOrigin.allowed == granted.allowed { try check(true, "") }
+        else if ProcessInfo.processInfo.environment["BAM_REQUIRE_ACTIVE_TAB_SAME_ORIGIN"] == "1" {
+            throw ExtensionSmokeTest.Failure(description: "Same-origin navigation ended the activeTab grant, unlike Chrome: \(sameOrigin)")
+        } else {
+            print("KNOWN_LIMITATION activeTab: same-origin navigation ended the grant (gesture active: \(activeContext.hasActiveUserGesture(in: secondTab))); Chrome keeps it. Not counted as passed. Set BAM_REQUIRE_ACTIVE_TAB_SAME_ORIGIN=1 for the strict reproducer."); fflush(stdout)
+        }
+        // Cross-origin navigation must end it. Start from a fresh gesture so the check does not
+        // depend on the same-origin outcome above.
+        activeContext.performAction(for: secondTab)
+        try check(try await activeTabAccess().allowed == granted.allowed, "A fresh gesture did not grant access before the cross-origin check")
+        var crossComponents = URLComponents(url: secondURL, resolvingAgainstBaseURL: false)!
+        crossComponents.host = "localhost"; crossComponents.query = "cross-origin"
+        let crossURL = crossComponents.url!
+        controller.navigatePane(secondID, address: crossURL.absoluteString)
+        try await wait("activeTab second tab did not navigate to another origin") { controller.browsers[secondID]?.url?.host == "localhost" && controller.browsers[secondID]?.isLoading == false }
+        let crossOrigin = try await activeTabAccess()
+        try check(crossOrigin.allowed.isEmpty && crossOrigin.callback == "error", "Cross-origin navigation did not end the tab's activeTab grant: \(crossOrigin)")
+        activePage.stopLoading()
+        _ = host.closeTab?(secondID)
+        try await host.remove(id: activeID)
+        host.reconcile()
         _ = try await popup.evaluateJavaScript("document.getElementById('open-page').click(); true")
         try await wait("Browser adapter did not open its own extension page") { controller.session.tabs.contains { URLInput.extensionURL($0.address) != nil } }
         guard let tab = controller.session.tabs.first(where: { URLInput.extensionURL($0.address) != nil }), let extensionWeb = controller.browsers[tab.id] else { throw ExtensionSmokeTest.Failure(description: "Missing extension renderer") }

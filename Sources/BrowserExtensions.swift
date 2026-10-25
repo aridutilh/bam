@@ -1169,18 +1169,33 @@ struct BrowserExtensionPermissionReview {
         web.goForward(); completionHandler(nil)
     }
     /// tabs.detectLanguage: the page's recognizable text, else its declared language, else `und`.
-    /// The sample is read in an isolated world and only from pages this extension may access.
+    /// Bam samples the page itself, so it requires access to this tab (a host grant or the
+    /// tab's `activeTab` grant); Chrome answers from browser state without that requirement.
+    /// The sample is read in an isolated world, never returned, and discarded unless the same
+    /// document of the same tab is still accessible when it arrives.
     func detectWebpageLocale(for context: WKWebExtensionContext, completionHandler: @escaping (Locale?, Error?) -> Void) {
-        guard let web = webView(for: context), let url = url(for: context), context.hasAccess(to: url) else { completionHandler(nil, BrowserExtensions.failure("This page's language is not available to this extension.")); return }
-        web.callAsyncJavaScript(ExtensionLanguageDetection.sampleScript, arguments: [:], in: nil, in: Self.languageWorld) { result in
-            guard case .success(let value) = result, let sample = value as? [String: Any] else { completionHandler(nil, BrowserExtensions.failure("The page language could not be detected.")); return }
+        let denied = BrowserExtensions.failure("This page's language is not available to this extension.")
+        guard let web = webView(for: context), let url = url(for: context), context.hasAccess(to: url, in: self) else { completionHandler(nil, denied); return }
+        web.callAsyncJavaScript(ExtensionLanguageDetection.sampleScript, arguments: [:], in: nil, in: Self.languageWorld) { [weak self, weak web, weak context] result in
+            guard let self, let web, let context, context.isLoaded, self.webView(for: context) === web, let current = self.url(for: context),
+                  Self.sameDocument(current, url), context.hasAccess(to: current, in: self) else { completionHandler(nil, denied); return }
+            guard case .success(let value) = result, let sample = value as? [String: Any],
+                  let sampled = (sample["url"] as? String).flatMap(URL.init(string:)), Self.sameDocument(sampled, url) else {
+                completionHandler(nil, BrowserExtensions.failure("The page language could not be detected.")); return
+            }
             completionHandler(Locale(identifier: ExtensionLanguageDetection.language(declared: sample["declared"] as? String, text: sample["text"] as? String)), nil)
         }
+    }
+    /// Same document: equal apart from a fragment, which a same-page jump changes.
+    private static func sameDocument(_ a: URL, _ b: URL) -> Bool {
+        var left = URLComponents(url: a, resolvingAgainstBaseURL: false), right = URLComponents(url: b, resolvingAgainstBaseURL: false)
+        left?.fragment = nil; right?.fragment = nil
+        return left != nil && left?.url == right?.url
     }
     private static let languageWorld = WKContentWorld.world(name: "BamLanguageDetection")
     /// tabs.captureVisibleTab: a snapshot of the live page, which the extension already has host access to.
     func takeSnapshot(using configuration: WKSnapshotConfiguration, for context: WKWebExtensionContext, completionHandler: @escaping (NSImage?, Error?) -> Void) {
-        guard let web = webView(for: context), let url = url(for: context), context.hasAccess(to: url) else { completionHandler(nil, BrowserExtensions.failure("This page cannot be captured.")); return }
+        guard let web = webView(for: context), let url = url(for: context), context.hasAccess(to: url, in: self) else { completionHandler(nil, BrowserExtensions.failure("This page cannot be captured.")); return }
         web.takeSnapshot(with: configuration) { image, error in completionHandler(image, error) }
     }
     func shouldGrantPermissionsOnUserGesture(for context: WKWebExtensionContext) -> Bool { url(for: context) != nil }

@@ -1,9 +1,10 @@
 import Foundation
 import NaturalLanguage
 
-/// `tabs.detectLanguage`, decided like Chrome: the page's own text when it is long and
-/// clear enough to recognize, else the language the document declares, else `und`.
-/// The user's interface language is never reported as the page's language.
+/// `tabs.detectLanguage`: the page's own text when it is long and clear enough to
+/// recognize (as Chrome's detector prefers), else the language the document declares in
+/// `<html lang>` or a `<meta http-equiv="content-language">` (not the HTTP response
+/// header), else `und`. The user's interface language is never reported as the page's.
 enum ExtensionLanguageDetection {
     static let undetermined = "und"
     static let sampleLength = 4000
@@ -12,7 +13,7 @@ enum ExtensionLanguageDetection {
     /// Run in an isolated content world, so the page cannot redefine what Bam reads.
     static let sampleScript = """
     const meta = document.querySelector('meta[http-equiv="content-language" i]');
-    return {declared: document.documentElement.lang || (meta && meta.content) || '',
+    return {url: location.href, declared: document.documentElement.lang || (meta && meta.content) || '',
             text: ((document.body && document.body.innerText) || '').slice(0, \(sampleLength))};
     """
 
