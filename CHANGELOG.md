@@ -5,7 +5,7 @@
 - Assign the verified Chrome Web Store ID to new store installs through the public native runtime API. Keep legacy installs, folder imports, unverified packages and Safari bundles on their existing installation IDs. Resource origins remain per-installation UUIDs.
 - Resolve host authorization through exact loaded contexts and their profiles, and refuse duplicate verified runtime IDs within a profile.
 - Scope notifications to their posting installation so old responses cannot reach a later reinstall with the same publisher ID.
-- Disclose the verified ID in Manage Extensions. Full build and all eleven native suites passed. Session Buddy now exposes its Open controls; complete restoration remains under test.
+- Disclose the verified ID in Manage Extensions. Full build and all eleven native suites passed. Session Buddy now exposes its Open controls and passes ordinary same-window save/restore; pinned and multiwindow restoration remain incomplete.
 
 ## 0.22.1 build 46 — Arc import, folders and sidebar corrections
 
