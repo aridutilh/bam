@@ -9,6 +9,11 @@ import WebKit
 @MainActor final class ExtensionSiteAccessPanel: NSWindowController, NSTableViewDataSource, NSTableViewDelegate, NSWindowDelegate {
     /// What the engine says is true now, for one extension in one profile.
     struct Snapshot: Equatable {
+        /// Which extension in which profile this describes, and the engine's revision of its site access (advanced
+        /// on every change). Requests carry these so a stale proposal can be refused.
+        var extensionID: UUID
+        var profileID: UUID
+        var revision: Int
         var extensionName: String
         var profileName: String
         var state: ExtensionSiteAccess.State
@@ -29,6 +34,18 @@ import WebKit
         /// Exactly the pending requests the user just reviewed and allowed.
         case acceptPending([String])
     }
+    /// An action bound to the snapshot it was proposed from. The engine should refuse it (`.failed`) when the
+    /// extension, profile or revision no longer matches.
+    struct Request: Equatable {
+        let extensionID: UUID
+        let profileID: UUID
+        let revision: Int
+        /// The declarations the panel displayed when the user acted. `.choose(.allRequested)` approves exactly
+        /// `displayed.requested` (`.allRequested(approving: displayed)`), so hosts a newer manifest adds stay
+        /// pending; the engine also refuses the request if the current declarations or revision differ.
+        let displayed: ExtensionSiteAccess.Declarations
+        let action: Action
+    }
     enum Failure: Error, Equatable {
         /// The model's refusal for a typed site; shown inline, the typed text is kept.
         case refused(ExtensionSiteAccess.Refusal)
@@ -38,7 +55,7 @@ import WebKit
 
     /// Injected by the engine owner. Call `completion` exactly once, on the main actor, with the authoritative
     /// snapshot after applying, or the failure. Controls stay disabled until then.
-    var perform: ((Action, @escaping @MainActor (Result<Snapshot, Failure>) -> Void) -> Void)?
+    var perform: ((Request, @escaping @MainActor (Result<Snapshot, Failure>) -> Void) -> Void)?
     /// The explicit review for pending requests; true allows exactly `sites`. Defaults to a native alert sheet-free
     /// modal; tests substitute a decision.
     var confirmPending: (([String], Snapshot) -> Bool)?
@@ -51,6 +68,8 @@ import WebKit
     private(set) var draftingSites = false
     private(set) var busy = false
     private var listedSites: [String] = []
+    /// Advanced by every send, reset, show and close. An answer only lands for the request still current.
+    private var generation = 0
 
     let modeMenu = NSPopUpButton(frame: .zero, pullsDown: false)
     let modeHelp = NSTextField(wrappingLabelWithString: "")
@@ -70,6 +89,8 @@ import WebKit
     let reloadNotice = NSTextField(wrappingLabelWithString: "Reload open pages for this change to take effect.")
     let doneButton = NSButton(title: "Done", target: nil, action: nil)
     private let heading = NSTextField(labelWithString: "Site Access")
+    /// The bounded, scrolling details region (everything except Done).
+    let detailScroll = NSScrollView()
     private let subheading = NSTextField(labelWithString: "")
 
     /// Popup tags.
@@ -98,16 +119,18 @@ import WebKit
     }
     /// Replaces the snapshot without presenting (engine-side changes while open, and tests).
     func reset(to snapshot: Snapshot) {
+        generation &+= 1   // any answer still on its way belongs to what was shown before
         self.snapshot = snapshot; draftingSites = false; busy = false
         siteField.stringValue = ""; subdomainsBox.state = .off; feedbackLabel.stringValue = ""; reloadNotice.isHidden = true
         render(previous: nil)
     }
     @objc func done() {
+        generation &+= 1; busy = false
         guard let window else { return }
         if let parent = window.sheetParent { parent.endSheet(window) } else { window.orderOut(nil) }
         onClose?()
     }
-    func windowWillClose(_ notification: Notification) { onClose?() }
+    func windowWillClose(_ notification: Notification) { generation &+= 1; busy = false; onClose?() }
 
     // MARK: Layout (Manage Extensions' language: semibold heading, 12 pt secondary detail, native controls)
 
@@ -116,7 +139,7 @@ import WebKit
         window.contentView = root
         heading.font = .systemFont(ofSize: 20, weight: .semibold)
         subheading.font = .systemFont(ofSize: 12); subheading.textColor = .secondaryLabelColor
-        let prompt = NSTextField(labelWithString: "Can read and change site data:")
+        let prompt = NSTextField(labelWithString: "Access to the sites it requests:")
         prompt.font = .systemFont(ofSize: 13)
         modeMenu.target = self; modeMenu.action = #selector(modeChanged)
         let modeRow = NSStackView(views: [prompt, modeMenu]); modeRow.spacing = 8
@@ -156,17 +179,37 @@ import WebKit
 
         doneButton.target = self; doneButton.action = #selector(done)
         doneButton.keyEquivalent = "\u{1b}"   // Escape closes; changes already applied by the engine
-        let bottom = NSStackView(views: [NSView(), doneButton]); bottom.distribution = .fill
-
+        // Long manifests (many requested, pending or optional sites) never push controls out of the window: the
+        // details scroll inside a bounded region, and Done stays in a fixed footer.
         let stack = NSStackView(views: [heading, subheading, modeRow, modeHelp, requestedLabel, editor, feedbackLabel,
-                                        pendingRow, optionalLabel, reloadNotice, bottom])
+                                        pendingRow, optionalLabel, reloadNotice])
         stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 10
-        stack.edgeInsets = NSEdgeInsets(top: 20, left: 22, bottom: 18, right: 22)
+        stack.edgeInsets = NSEdgeInsets(top: 20, left: 22, bottom: 12, right: 22)
         stack.setCustomSpacing(2, after: heading)
         stack.translatesAutoresizingMaskIntoConstraints = false
-        root.addSubview(stack)
-        NSLayoutConstraint.activate([stack.leadingAnchor.constraint(equalTo: root.leadingAnchor), stack.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-                                     stack.topAnchor.constraint(equalTo: root.topAnchor), bottom.widthAnchor.constraint(equalToConstant: 436)])
+        let document = PanelDocumentView(); document.translatesAutoresizingMaskIntoConstraints = false
+        document.addSubview(stack)
+        detailScroll.drawsBackground = false; detailScroll.hasVerticalScroller = true; detailScroll.autohidesScrollers = true
+        detailScroll.borderType = .noBorder; detailScroll.translatesAutoresizingMaskIntoConstraints = false
+        detailScroll.documentView = document
+        detailScroll.setAccessibilityLabel("Site access details")
+        let footer = NSStackView(views: [NSView(), doneButton]); footer.distribution = .fill
+        footer.translatesAutoresizingMaskIntoConstraints = false
+        let separator = NSBox(); separator.boxType = .separator; separator.translatesAutoresizingMaskIntoConstraints = false
+        [detailScroll, separator, footer].forEach(root.addSubview)
+        NSLayoutConstraint.activate([
+            detailScroll.topAnchor.constraint(equalTo: root.topAnchor), detailScroll.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            detailScroll.trailingAnchor.constraint(equalTo: root.trailingAnchor), detailScroll.bottomAnchor.constraint(equalTo: separator.topAnchor),
+            separator.leadingAnchor.constraint(equalTo: root.leadingAnchor), separator.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            separator.bottomAnchor.constraint(equalTo: footer.topAnchor, constant: -12),
+            footer.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 22), footer.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -22),
+            footer.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -16),
+            document.leadingAnchor.constraint(equalTo: detailScroll.contentView.leadingAnchor),
+            document.trailingAnchor.constraint(equalTo: detailScroll.contentView.trailingAnchor),
+            document.topAnchor.constraint(equalTo: detailScroll.contentView.topAnchor),
+            stack.leadingAnchor.constraint(equalTo: document.leadingAnchor), stack.trailingAnchor.constraint(equalTo: document.trailingAnchor),
+            stack.topAnchor.constraint(equalTo: document.topAnchor), stack.bottomAnchor.constraint(equalTo: document.bottomAnchor)
+        ])
         window.initialFirstResponder = modeMenu
         Self.dress?(window, root)
     }
@@ -176,21 +219,27 @@ import WebKit
     /// The mode's wording. "On click" only when one-time access exists; never promised otherwise.
     static func title(for choice: Int, oneTimeAccess: Bool, requestsAllSites: Bool) -> String {
         switch choice {
-        case Choice.withheld.rawValue: return oneTimeAccess ? "On click" : "On no sites"
+        case Choice.withheld.rawValue: return oneTimeAccess ? "On click" : "No requested sites"
         case Choice.specific.rawValue: return "On specific sites"
         default: return requestsAllSites ? "On all sites" : "On all requested sites"
         }
     }
-    static func help(for mode: ExtensionSiteAccess.Mode, drafting: Bool, oneTimeAccess: Bool) -> String {
-        if drafting { return "Add a site below to allow only specific sites. Until then, access stays as it is." }
-        switch mode {
-        case .withheld:
-            return oneTimeAccess
-                ? "No site is allowed in advance. Click the extension’s button on a page to let it run on that tab."
-                : "No requested site is allowed. This extension doesn’t support one-time access on click, so it runs only on sites you add."
-        case .specific(let sites): return "Allowed only on \(sites.count == 1 ? "1 site" : "\(sites.count) sites") you chose."
-        case .allRequested: return "Allowed on every site it requested that you approved."
+    /// Scoped to requested access, and honest about separately allowed (optional) sites in every mode.
+    static func help(for mode: ExtensionSiteAccess.Mode, drafting: Bool, oneTimeAccess: Bool, optionalCount: Int = 0) -> String {
+        let requested: String
+        if drafting { requested = "Add a site below to allow only specific requested sites. Until then, access stays as it is." }
+        else {
+            switch mode {
+            case .withheld:
+                requested = oneTimeAccess
+                    ? "None of the sites it requests is allowed in advance. Click the extension’s button on a page to let it run on that tab."
+                    : "None of the sites it requests is allowed. This extension doesn’t support one-time access on click; choose “On specific sites” to allow some."
+            case .specific(let sites): requested = "Of the sites it requests, it’s allowed only on \(sites.count == 1 ? "the 1 site" : "the \(sites.count) sites") you chose."
+            case .allRequested: requested = "Allowed on every site it requests that you approved."
+            }
         }
+        guard optionalCount > 0 else { return requested }
+        return requested + " Separately, it still has access to \(optionalCount == 1 ? "1 site" : "\(optionalCount) sites") it asked for and you allowed (listed below)."
     }
     static func describe(_ refusal: ExtensionSiteAccess.Refusal) -> String {
         switch refusal {
@@ -218,8 +267,11 @@ import WebKit
         modeMenu.selectItem(withTag: choice.rawValue)
         modeMenu.setAccessibilityLabel("Site access for \(snapshot.extensionName)")
         let requestsNothing = decl.requested.isEmpty
-        modeHelp.stringValue = requestsNothing ? "This extension doesn’t request access to websites."
-            : Self.help(for: state.mode, drafting: draftingSites, oneTimeAccess: snapshot.oneTimeAccess)
+        let optionalCount = state.optionalGrants.filter { ExtensionSiteAccess.isCovered($0, by: decl.optional + decl.requested) }.count
+        modeHelp.stringValue = requestsNothing
+            ? "This extension doesn’t require access to any website." + (optionalCount > 0
+                ? " Separately, it has access to \(optionalCount == 1 ? "1 site" : "\(optionalCount) sites") it asked for and you allowed (listed below)." : "")
+            : Self.help(for: state.mode, drafting: draftingSites, oneTimeAccess: snapshot.oneTimeAccess, optionalCount: optionalCount)
         requestedLabel.stringValue = requestsNothing ? "" : "Requested: " + decl.requested.sorted().joined(separator: ", ")
         requestedLabel.isHidden = requestsNothing
         let sites: [String] = { if case .specific(let sites) = state.mode, !draftingSites { return sites }; return [] }()
@@ -233,7 +285,7 @@ import WebKit
         let optional = state.optionalGrants.filter { ExtensionSiteAccess.isCovered($0, by: decl.optional + decl.requested) }
         optionalLabel.isHidden = optional.isEmpty
         optionalLabel.stringValue = optional.isEmpty ? ""
-            : "Also allowed because the extension asked and you agreed (not changed by this setting): " + optional.joined(separator: ", ")
+            : "Allowed separately because the extension asked and you agreed (this setting doesn’t change them): " + optional.joined(separator: ", ")
         if let message = snapshot.message { feedbackLabel.stringValue = message }
         feedbackLabel.isHidden = feedbackLabel.stringValue.isEmpty
         // Reload notice only when the engine's answer changed what is actually granted.
@@ -254,12 +306,18 @@ import WebKit
 
     // MARK: Actions → engine
 
-    private func send(_ action: Action, keepingInput: Bool = false) {
+    private func send(_ action: Action) {
         guard let perform, !busy else { return }
+        generation &+= 1
+        let token = generation, before = snapshot
         busy = true; feedbackLabel.stringValue = ""; render(previous: nil)
-        let before = snapshot
-        perform(action) { [weak self] result in
-            guard let self else { return }
+        let request = Request(extensionID: before.extensionID, profileID: before.profileID, revision: before.revision,
+                              displayed: before.declarations, action: action)
+        perform(request) { [weak self] result in
+            // Only the answer to the request still current applies: not one for a snapshot replaced by reset/show,
+            // closed, or superseded; and never a snapshot for another extension or profile.
+            guard let self, token == self.generation else { return }
+            if case .success(let next) = result, next.extensionID != before.extensionID || next.profileID != before.profileID { return }
             self.busy = false
             switch result {
             case .success(let next):
@@ -309,10 +367,24 @@ import WebKit
         send(.removeSite(listedSites[row]))
     }
     @objc private func reviewPending() {
-        let pending = ExtensionSiteAccess.pendingRequests(snapshot.state, declarations: snapshot.declarations)
+        guard !busy else { return }
+        let reviewed = snapshot, token = generation
+        let pending = ExtensionSiteAccess.pendingRequests(reviewed.state, declarations: reviewed.declarations)
         guard !pending.isEmpty else { return }
-        let allowed = (confirmPending ?? Self.confirmWithAlert)(pending, snapshot)
-        if allowed { send(.acceptPending(pending)) }
+        let allowed = (confirmPending ?? Self.confirmWithAlert)(pending, reviewed)
+        // The review is modal: the panel may have been reset, reopened for another extension, closed, or the
+        // engine may have changed this one meanwhile. Approve only what was reviewed, for exactly that snapshot.
+        let unchanged = token == generation && !busy && snapshot.extensionID == reviewed.extensionID && snapshot.profileID == reviewed.profileID
+            && snapshot.revision == reviewed.revision && ExtensionSiteAccess.pendingRequests(snapshot.state, declarations: snapshot.declarations) == pending
+        guard allowed else { return }
+        guard unchanged else {
+            if snapshot.extensionID == reviewed.extensionID && snapshot.profileID == reviewed.profileID {
+                feedbackLabel.stringValue = "Site access changed while you were reviewing. Review the new sites again."
+                render(previous: nil)
+            }
+            return
+        }
+        send(.acceptPending(pending))
     }
     static func confirmWithAlert(_ sites: [String], _ snapshot: Snapshot) -> Bool {
         let alert = NSAlert()
@@ -343,3 +415,6 @@ import WebKit
         }
     }
 }
+
+/// Flipped so the details start at the top of their scroll region.
+private final class PanelDocumentView: NSView { override var isFlipped: Bool { true } }

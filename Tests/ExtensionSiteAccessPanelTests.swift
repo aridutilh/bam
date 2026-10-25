@@ -24,16 +24,25 @@ import WebKit
         @MainActor final class FakeEngine {
             var snapshot: Panel.Snapshot
             var actions: [Panel.Action] = []
+            var requests: [Panel.Request] = []
             var deferred: ((Result<Panel.Snapshot, Panel.Failure>) -> Void)?
             var holdNext = false
             init(_ snapshot: Panel.Snapshot) { self.snapshot = snapshot }
-            func perform(_ action: Panel.Action, _ completion: @escaping @MainActor (Result<Panel.Snapshot, Panel.Failure>) -> Void) {
+            func perform(_ request: Panel.Request, _ completion: @escaping @MainActor (Result<Panel.Snapshot, Panel.Failure>) -> Void) {
+                requests.append(request)
+                let action = request.action
                 actions.append(action)
+                // A real engine refuses a proposal made from an old revision, for another extension/profile, or from
+                // declarations other than the current ones (a manifest changed between render and click).
+                guard request.extensionID == snapshot.extensionID, request.profileID == snapshot.profileID, request.revision == snapshot.revision,
+                      request.displayed == snapshot.declarations else {
+                    completion(.failure(.failed("Site access changed; showing the current setting."))); return
+                }
                 var state = snapshot.state
                 let decl = snapshot.declarations
                 switch action {
                 case .choose(.withheld): state = .withheld(optionalGrants: state.optionalGrants)
-                case .choose(.allRequested): state = .allRequested(approving: decl, optionalGrants: state.optionalGrants)
+                case .choose(.allRequested): state = .allRequested(approving: request.displayed, optionalGrants: state.optionalGrants)
                 case .choose(.specific): completion(.failure(.failed("Specific sites start with a site"))); return
                 case .addSite(let input, let subdomains):
                     let from: Access.Mode = { if case .specific = state.mode { return state.mode }; return .withheld }()
@@ -47,15 +56,17 @@ import WebKit
                     else { state = .withheld(optionalGrants: state.optionalGrants) }
                 case .acceptPending(let sites): state = Access.accepting(sites, in: state, declarations: decl)
                 }
+                if state != snapshot.state { snapshot.revision += 1 }
                 snapshot.state = state
                 let answer = snapshot
                 if holdNext { holdNext = false; deferred = { completion($0) } } else { completion(.success(answer)) }
             }
         }
         @MainActor func make(_ state: Access.State, declarations: Access.Declarations = docs, oneTime: Bool = false) -> (Panel, FakeEngine) {
-            let snapshot = Panel.Snapshot(extensionName: "Docs Helper", profileName: "Work", state: state, declarations: declarations, oneTimeAccess: oneTime)
+            let snapshot = Panel.Snapshot(extensionID: UUID(), profileID: UUID(), revision: 1, extensionName: "Docs Helper", profileName: "Work",
+                                          state: state, declarations: declarations, oneTimeAccess: oneTime)
             let engine = FakeEngine(snapshot), panel = Panel(snapshot: snapshot)
-            panel.perform = { action, completion in engine.perform(action, completion) }
+            panel.perform = { request, completion in engine.perform(request, completion) }
             return (panel, engine)
         }
         @MainActor func titles(_ panel: Panel) -> [String] { panel.modeMenu.itemArray.map(\.title) }
@@ -64,18 +75,23 @@ import WebKit
 
         // MARK: Honest wording: "On click" only with one-time access.
         let (withheldPanel, withheldEngine) = make(.withheld(optionalGrants: [optionalGrant]))
-        require(titles(withheldPanel) == ["On no sites", "On specific sites", "On all requested sites"] && withheldPanel.modeMenu.selectedTag() == 0,
-                "Without activeTab, withheld is 'On no sites', never 'On click': \(titles(withheldPanel))")
-        require(withheldPanel.modeHelp.stringValue.contains("doesn’t support one-time access"), "The help says why: \(withheldPanel.modeHelp.stringValue)")
+        require(titles(withheldPanel) == ["No requested sites", "On specific sites", "On all requested sites"] && withheldPanel.modeMenu.selectedTag() == 0,
+                "Without activeTab, withheld is 'No requested sites', never 'On click': \(titles(withheldPanel))")
+        let withheldHelp = withheldPanel.modeHelp.stringValue
+        require(withheldHelp.contains("doesn’t support one-time access") && withheldHelp.contains("None of the sites it requests"),
+                "The help says why, about requested sites: \(withheldHelp)")
+        // Review (3): with an optional grant kept, nothing claims the extension has no site access at all.
+        require(withheldHelp.contains("Separately, it still has access to 1 site it asked for") && !withheldHelp.contains("No site is allowed")
+                && !titles(withheldPanel).contains("On no sites"), "Withheld wording is scoped to requested sites and states the kept optional access")
         let (clickPanel, _) = make(.withheld(), oneTime: true)
-        require(titles(clickPanel).first == "On click" && clickPanel.modeHelp.stringValue.contains("Click the extension’s button"),
-                "With activeTab the same mode is 'On click'")
+        require(titles(clickPanel).first == "On click" && clickPanel.modeHelp.stringValue.contains("Click the extension’s button")
+                && !clickPanel.modeHelp.stringValue.contains("Separately"), "With activeTab the same mode is 'On click'; no optional sentence without optional grants")
         let (allSitesPanel, _) = make(.allRequested(approving: .init(requested: ["<all_urls>"])), declarations: .init(requested: ["<all_urls>"]))
         require(titles(allSitesPanel).last == "On all sites" && allSitesPanel.modeMenu.selectedTag() == 2, "All-hosts requests are worded 'On all sites'")
 
         // MARK: Optional grants are shown separately, never as revoked.
         require(visible(withheldPanel.optionalLabel) && withheldPanel.optionalLabel.stringValue.contains(optionalGrant)
-                && withheldPanel.optionalLabel.stringValue.contains("not changed by this setting")
+                && withheldPanel.optionalLabel.stringValue.contains("this setting doesn’t change them")
                 && !withheldPanel.optionalLabel.stringValue.lowercased().contains("revoked"), "Optional grant listed as still allowed under On no sites")
         require(withheldPanel.requestedLabel.stringValue.contains("mail.example") && withheldPanel.requestedLabel.stringValue.contains("docs.example"),
                 "The requested sites are listed")
@@ -167,8 +183,15 @@ import WebKit
 
         // MARK: Nothing requested; engine messages; accessibility and close.
         let (nothing, _) = make(.allRequested(approving: .init(requested: [])), declarations: .init(requested: []))
-        require(!nothing.modeMenu.isEnabled && nothing.modeHelp.stringValue.contains("doesn’t request access to websites") && !visible(nothing.siteField),
-                "An extension requesting no sites has nothing to choose")
+        require(!nothing.modeMenu.isEnabled && nothing.modeHelp.stringValue == "This extension doesn’t require access to any website." && !visible(nothing.siteField),
+                "An extension requiring no sites has nothing to choose")
+        let (optionalOnly, _) = make(.allRequested(approving: .init(requested: []), optionalGrants: [optionalGrant]),
+                                     declarations: .init(requested: [], optional: [optionalGrant]))
+        require(optionalOnly.modeHelp.stringValue.contains("doesn’t require access") && optionalOnly.modeHelp.stringValue.contains("Separately, it has access to 1 site")
+                && visible(optionalOnly.optionalLabel), "No required sites but an optional grant: worded about required access, optional access stated")
+        let (specificOptional, _) = make(.specific(["https://api.docs.example/*"], optionalGrants: [optionalGrant]))
+        require(specificOptional.modeHelp.stringValue.contains("Of the sites it requests, it’s allowed only on the 1 site you chose")
+                && specificOptional.modeHelp.stringValue.contains("Separately, it still has access to 1 site"), "Specific sites with an optional grant say both")
         var withMessage = withheldEngine.snapshot; withMessage.message = "Access was changed in another window."
         withheldPanel.reset(to: withMessage)
         require(withheldPanel.feedbackLabel.stringValue == "Access was changed in another window." && visible(withheldPanel.feedbackLabel), "Engine messages show")
@@ -186,6 +209,117 @@ import WebKit
         for label in [Panel.describe(.empty), Panel.describe(.invalid), Panel.describe(.unsupportedScheme("ftp")), Panel.describe(.allSites), Panel.describe(.notRequested)] {
             require(!label.isEmpty && !label.contains("Refusal"), "Every refusal has plain wording: \(label)")
         }
+
+        // MARK: Review (1): a stale answer never lands on a replaced snapshot or a newer request.
+        let (stalePanel, staleEngine) = make(.withheld())
+        staleEngine.holdNext = true
+        pick(stalePanel, tag: 2)                                     // request A, held
+        let answerA = staleEngine.deferred
+        var other = staleEngine.snapshot                             // reopened for another extension: B
+        other.extensionID = UUID(); other.extensionName = "Other"; other.state = .withheld()
+        let engineB = FakeEngine(other)
+        stalePanel.perform = { request, completion in engineB.perform(request, completion) }
+        stalePanel.reset(to: other)
+        engineB.holdNext = true
+        pick(stalePanel, tag: 2)                                     // request B, held
+        require(stalePanel.busy && engineB.requests.last?.extensionID == other.extensionID, "B's request carries B's identity")
+        answerA?(.success(staleEngine.snapshot))                     // A answers late
+        require(stalePanel.busy && stalePanel.snapshot.extensionName == "Other" && stalePanel.snapshot.state.mode == .withheld
+                && !visible(stalePanel.reloadNotice), "A's late success neither overwrites B nor clears B's busy state")
+        engineB.deferred?(.success(engineB.snapshot))
+        require(!stalePanel.busy && stalePanel.snapshot.state.mode == .allRequested && stalePanel.snapshot.extensionName == "Other", "B's own answer lands")
+        let (failPanel, failEngine) = make(.withheld())
+        failEngine.holdNext = true
+        pick(failPanel, tag: 2)
+        failPanel.reset(to: failEngine.snapshot)
+        failEngine.deferred?(.failure(.failed("late failure")))
+        require(failPanel.feedbackLabel.stringValue.isEmpty && !failPanel.busy, "A late failure after reopening shows nothing")
+        let (closePanel, closeEngine) = make(.withheld())
+        closeEngine.holdNext = true
+        pick(closePanel, tag: 2)
+        closePanel.done()
+        closeEngine.deferred?(.success(closeEngine.snapshot))
+        require(closePanel.snapshot.state.mode == .withheld && !closePanel.busy, "An answer after closing is dropped")
+        let (foreignPanel, foreignEngine) = make(.withheld())
+        foreignEngine.holdNext = true
+        pick(foreignPanel, tag: 2)
+        var foreign = foreignEngine.snapshot; foreign.extensionID = UUID()
+        foreignEngine.deferred?(.success(foreign))
+        require(foreignPanel.snapshot.extensionID != foreign.extensionID && foreignPanel.snapshot.state.mode == .withheld,
+                "A snapshot for another extension is never rendered as this one's answer")
+        require(staleEngine.requests.first.map { $0.revision == 1 && $0.action == .choose(.allRequested) } == true, "Requests carry the revision they came from")
+
+        // MARK: Review (2): the pending review is bound to what was reviewed and rechecked after the modal.
+        let (reentrant, reentrantEngine) = make(.allRequested(approving: docs), declarations: widened)
+        var otherPending = reentrantEngine.snapshot
+        otherPending.extensionID = UUID(); otherPending.extensionName = "Other"
+        otherPending.declarations = Access.Declarations(requested: docs.requested + ["https://other-new.example/*"], optional: docs.optional)
+        reentrant.confirmPending = { _, _ in reentrant.reset(to: otherPending); return true }   // rebound while the dialog is up
+        reentrant.pendingButton.performClick(nil)
+        require(reentrantEngine.actions.isEmpty && reentrant.snapshot.extensionName == "Other", "Approving A's review never approves B's pending sites")
+        let (revised, revisedEngine) = make(.allRequested(approving: docs), declarations: widened)
+        var newer = revisedEngine.snapshot; newer.revision += 1
+        revised.confirmPending = { _, _ in revised.reset(to: newer); return true }               // same extension, changed meanwhile
+        revised.pendingButton.performClick(nil)
+        require(revisedEngine.actions.isEmpty && revised.feedbackLabel.stringValue.contains("changed while you were reviewing"),
+                "A revision change during the review cancels the approval and asks to review again")
+        var morePending = revisedEngine.snapshot
+        morePending.declarations = Access.Declarations(requested: widened.requested + ["https://more.example/*"], optional: docs.optional)
+        let (grown, grownEngine) = make(.allRequested(approving: docs), declarations: widened)
+        grown.confirmPending = { _, _ in var next = morePending; next.extensionID = grown.snapshot.extensionID; next.profileID = grown.snapshot.profileID
+            next.revision = grown.snapshot.revision; grown.reset(to: next); return true }
+        grown.pendingButton.performClick(nil)
+        require(grownEngine.actions.isEmpty, "If the pending list itself changed during the review, nothing is approved")
+        let (stalePending, stalePendingEngine) = make(.allRequested(approving: docs), declarations: widened)
+        stalePendingEngine.snapshot.revision += 1                    // engine moved on without the panel knowing
+        stalePending.confirmPending = { _, _ in true }
+        stalePending.pendingButton.performClick(nil)
+        require(stalePendingEngine.actions == [.acceptPending(["https://new.example/*"])] && stalePendingEngine.snapshot.state == stalePending.snapshot.state
+                && stalePending.feedbackLabel.stringValue.contains("changed"), "A stale revision reaches the engine, which refuses it; the panel says so")
+
+        // MARK: Third review: All requested approves exactly what was displayed.
+        let (scoped, scopedEngine) = make(.withheld())
+        scopedEngine.snapshot.declarations = widened                 // manifest changed after the panel rendered
+        pick(scoped, tag: 2)
+        require(scopedEngine.requests.last?.displayed == docs && scopedEngine.snapshot.state.mode == .withheld && scoped.snapshot.state.mode == .withheld,
+                "A click on All requested carries the displayed declarations; with a newer manifest the engine refuses and nothing is approved")
+        let (bound, boundEngine) = make(.withheld())
+        pick(bound, tag: 2)
+        require(boundEngine.snapshot.state.approvedRequests == docs.requested.sorted()
+                && Access.pendingRequests(boundEngine.snapshot.state, declarations: widened) == ["https://new.example/*"],
+                "Approving All requested approves exactly the displayed requests; a later addition is pending, not approved")
+
+        // MARK: Third review: long lists never push controls out of reach.
+        let many = (0..<60).map { "https://site-\($0).long-requested-domain-name.example/*" }
+        let longDecl = Access.Declarations(requested: many + ["https://added-later.example/*"], optional: (0..<30).map { "https://optional-\($0).example/*" })
+        let longState = Access.State(mode: .allRequested, optionalGrants: longDecl.optional, approvedRequests: many)
+        let (longPanel, _) = make(longState, declarations: longDecl)
+        var longSnapshot = longPanel.snapshot; longSnapshot.message = String(repeating: "A long engine message that wraps. ", count: 20)
+        longPanel.reset(to: longSnapshot)
+        @MainActor func settle(_ panel: Panel) { panel.window?.contentView?.layoutSubtreeIfNeeded(); panel.detailScroll.documentView?.layoutSubtreeIfNeeded() }
+        settle(longPanel)
+        let content = longPanel.window!.contentView!
+        require(content.bounds.height <= 470.5, "The window keeps its bounded size: \(content.bounds)")
+        let doneFrame = longPanel.doneButton.convert(longPanel.doneButton.bounds, to: content)
+        require(content.bounds.contains(doneFrame) && doneFrame.height > 10, "Done stays inside the window: \(doneFrame) in \(content.bounds)")
+        let scrollFrame = longPanel.detailScroll.convert(longPanel.detailScroll.bounds, to: content)
+        require(content.bounds.contains(scrollFrame) && !scrollFrame.intersects(doneFrame), "The details region is bounded and above the footer")
+        let documentHeight = longPanel.detailScroll.documentView!.frame.height, visibleHeight = longPanel.detailScroll.contentView.bounds.height
+        require(documentHeight > visibleHeight + 200, "Long details overflow into the scroll region (\(documentHeight) vs \(visibleHeight))")
+        @MainActor func reachable(_ control: NSView, in panel: Panel) -> Bool {
+            control.scrollToVisible(control.bounds)
+            let clip = panel.detailScroll.contentView
+            let inClip = control.convert(control.bounds, to: clip)
+            return clip.bounds.contains(inClip) && panel.window!.contentView!.bounds.contains(control.convert(control.bounds, to: panel.window!.contentView!))
+        }
+        require(visible(longPanel.pendingButton) && reachable(longPanel.pendingButton, in: longPanel), "The pending review button can be scrolled into view")
+        require(reachable(longPanel.modeMenu, in: longPanel), "The mode menu can be scrolled back into view")
+        pick(longPanel, tag: 1)
+        settle(longPanel)
+        require(visible(longPanel.addButton) && reachable(longPanel.addButton, in: longPanel) && reachable(longPanel.siteField, in: longPanel),
+                "The site editor's field and Add button are reachable with long lists")
+        let doneAfter = longPanel.doneButton.convert(longPanel.doneButton.bounds, to: content)
+        require(doneAfter == doneFrame, "Done doesn't move while the details scroll")
 
         print("PASS: \(checks) extension site access panel checks")
     }
