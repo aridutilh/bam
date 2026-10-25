@@ -130,17 +130,18 @@ import WebKit
         var result: [BrowserExtensionSurface] = session.tabs.filter { session.profileID(for: $0) == profileID }.map { tab in
             BrowserExtensionSurface(id: tab.id, title: tab.displayTitle, url: URL(string: tab.address), webView: browsers[tab.id], window: viewIfLoaded?.window,
                 isActive: session.currentProfileID == profileID && focusedTabID == tab.id && peeks[session.activeID]?.isPresented != true,
-                isSelected: session.currentProfileID == profileID && visibleMemberIDs.contains(tab.id), isPinned: tab.isSaved)
+                isSelected: session.currentProfileID == profileID && visibleMemberIDs.contains(tab.id), isPinned: tab.isSaved,
+                isLoading: browsers[tab.id]?.isLoading == true)
         }
         for (owner, peek) in peeks {
             guard let web = peek.webView, self.profileID(of: web) == profileID, let id = peekExtensionIDs[owner] else { continue }
             result.append(BrowserExtensionSurface(id: id, title: web.title ?? "Peek", url: web.url, webView: web, window: viewIfLoaded?.window,
-                isActive: session.activeID == owner && peek.isPresented, isSelected: session.activeID == owner && peek.isPresented))
+                isActive: session.activeID == owner && peek.isPresented, isSelected: session.activeID == owner && peek.isPresented, isLoading: web.isLoading))
         }
         for (id, little) in littleWindows {
             guard let web = little.webView, self.profileID(of: web) == profileID else { continue }
             result.append(BrowserExtensionSurface(id: id, title: web.title ?? "Little Bam", url: web.url, webView: web, window: little.window,
-                isActive: true, isSelected: true))
+                isActive: true, isSelected: true, isLoading: web.isLoading))
         }
         return result
     }
@@ -156,16 +157,17 @@ import WebKit
             let tab = session.tabs[index]
             return BrowserExtensionSurface(id: tab.id, title: tab.displayTitle, url: URL(string: tab.address), webView: browsers[tab.id], window: viewIfLoaded?.window,
                 isActive: session.currentProfileID == profileID && focusedTabID == tab.id && peeks[session.activeID]?.isPresented != true,
-                isSelected: session.currentProfileID == profileID && visibleMemberIDs.contains(tab.id), isPinned: tab.isSaved)
+                isSelected: session.currentProfileID == profileID && visibleMemberIDs.contains(tab.id), isPinned: tab.isSaved,
+                isLoading: browsers[tab.id]?.isLoading == true)
         }
         for (owner, peek) in peeks where peekExtensionIDs[owner] == id {
             guard let web = peek.webView, self.profileID(of: web) == profileID else { continue }
             return BrowserExtensionSurface(id: id, title: web.title ?? "Peek", url: web.url, webView: web, window: viewIfLoaded?.window,
-                isActive: session.activeID == owner && peek.isPresented, isSelected: session.activeID == owner && peek.isPresented)
+                isActive: session.activeID == owner && peek.isPresented, isSelected: session.activeID == owner && peek.isPresented, isLoading: web.isLoading)
         }
         if let little = littleWindows[id], let web = little.webView, self.profileID(of: web) == profileID {
             return BrowserExtensionSurface(id: id, title: web.title ?? "Little Bam", url: web.url, webView: web, window: little.window,
-                isActive: true, isSelected: true)
+                isActive: true, isSelected: true, isLoading: web.isLoading)
         }
         return nil
     }

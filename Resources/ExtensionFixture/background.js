@@ -1,3 +1,10 @@
+// Every tab status change the host reports, so a test can require `status: "complete"`.
+const bamTabUpdates = [];
+browser.tabs.onUpdated.addListener((id, info, tab) => {
+  bamTabUpdates.push({id, info, status: tab.status || "", url: tab.url || ""});
+  browser.storage.local.set({bamTabUpdates});
+});
+
 const menusReady = (async () => {
   await browser.contextMenus.removeAll();
   await new Promise((resolve, reject) => {
@@ -14,6 +21,7 @@ browser.contextMenus.onClicked.addListener((info, tab) => {
 });
 
 browser.runtime.onMessage.addListener((message) => {
+  if (message?.kind === "updates") return browser.storage.local.get("bamTabUpdates").then(value => ({updates: value.bamTabUpdates || []}));
   if (!message || !["fixture", "popup"].includes(message.kind)) return;
   return (async () => {
     await menusReady;

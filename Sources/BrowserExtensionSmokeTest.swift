@@ -61,6 +61,13 @@ import WebKit
         host.reconcile()
         guard let context = host.context(for: extensionID), let popup = context.action(for: nil)?.popupWebView else { throw ExtensionSmokeTest.Failure(description: "Missing browser-adapter action popup") }
         try await wait("Browser-adapter popup did not initialize") { (try? await popup.evaluateJavaScript("document.title")) as? String == "Bam fixture ready" }
+        // A finished load must reach the extension as `tabs.onUpdated` with `status: "complete"`
+        // even though the URL did not change after commit (Dashlane's sign-in check waits for it).
+        try await wait("Browser adapter never reported the page load as complete to tabs.onUpdated") {
+            let updates = try? await popup.callAsyncJavaScript("return JSON.stringify((await browser.runtime.sendMessage({kind: \"updates\"})).updates || []);", arguments: [:], contentWorld: .page)
+            guard let text = updates as? String else { return false }
+            return text.contains("\"status\":\"complete\"") && text.contains("extension-test.html")
+        }
         _ = try await popup.evaluateJavaScript("document.getElementById('open-page').click(); true")
         try await wait("Browser adapter did not open its own extension page") { controller.session.tabs.contains { URLInput.extensionURL($0.address) != nil } }
         guard let tab = controller.session.tabs.first(where: { URLInput.extensionURL($0.address) != nil }), let extensionWeb = controller.browsers[tab.id] else { throw ExtensionSmokeTest.Failure(description: "Missing extension renderer") }
