@@ -122,7 +122,9 @@ import WebKit
         // left the extension origin and been released (stopLoading alone keeps a document; a reassigned page used to be
         // released only after its successor existed). Separates "a held old client keeps the process and its CORS
         // allowlist" from "a context with no old clients". Nothing is deleted and no identity changes.
-        var closeFailures: [String] = []
+        // Two different facts, reported separately: whether a held page navigated off the extension origin, and
+        // whether every page the probe created was deallocated. A failed navigation is not an allocated page.
+        var navigationFailures: [String] = []
         for (name, web) in [("optional", optionalPage), ("requested", requestedPage)] {
             guard let web else { continue }
             web.stopLoading()
@@ -132,7 +134,7 @@ import WebKit
                 try await Task.sleep(nanoseconds: 40_000_000)
             }
             if !(web.url?.absoluteString == "about:blank" && !web.isLoading) {
-                closeFailures.append("\(name) did not leave the extension origin within 5 s (url=\(web.url?.absoluteString ?? "nil"), loading=\(web.isLoading))")
+                navigationFailures.append("\(name): still url=\(web.url?.absoluteString ?? "nil") loading=\(web.isLoading) after 5 s")
             }
         }
         optionalPage = nil; requestedPage = nil
@@ -140,12 +142,13 @@ import WebKit
         while ProcessInfo.processInfo.systemUptime < releaseDeadline, tracked.contains(where: { $0.web != nil }) {
             try await Task.sleep(nanoseconds: 40_000_000)
         }
-        let alive = tracked.filter { $0.web != nil }.map(\.label)
-        if !alive.isEmpty { closeFailures.append("pages still allocated after release: \(alive)") }
-        print("FETCH_ACCESS_CLOSE pages=\(tracked.count) released=\(tracked.count - alive.count) failures=\(closeFailures)"); fflush(stdout)
+        let stillAllocated = tracked.filter { $0.web != nil }.map(\.label)
+        print("FETCH_ACCESS_CLOSE pages=\(tracked.count) deallocated=\(tracked.count - stillAllocated.count) stillAllocated=\(stillAllocated) " +
+              "navigationFailures=\(navigationFailures)"); fflush(stdout)
         try await host.setEnabled(false, id: requestedID); try await host.setEnabled(true, id: requestedID)
         let closedPagesPage = try await page(requestedID, "requested-after-close")
-        _ = try await measure("requested-withheld-closed-pages-new-context(closeFailures=\(closeFailures.count))", requestedID, closedPagesPage)
+        _ = try await measure("requested-withheld-closed-pages-new-context(stillAllocated=\(stillAllocated.count),navigationFailures=\(navigationFailures.count))",
+                              requestedID, closedPagesPage)
         closedPagesPage.stopLoading()
 
         try await host.remove(id: optionalID)
