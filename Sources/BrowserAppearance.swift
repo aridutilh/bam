@@ -50,6 +50,15 @@ extension NSColor {
     static func chrome(light: NSColor, dark: NSColor) -> NSColor {
         NSColor(name: nil) { $0.isDarkChrome ? dark : light }
     }
+    convenience init(spaceTheme color: SpaceTheme.RGBA) {
+        self.init(srgbRed: color.red, green: color.green, blue: color.blue, alpha: color.alpha)
+    }
+    /// The window gradient for a Space with an imported theme, or nil when the
+    /// Space uses its flat color (no theme, or Prism/Clear).
+    static func themedCanvas(_ theme: SpaceTheme?, colorIndex: Int, dark: Bool) -> [NSColor]? {
+        guard let theme, (0..<BrowserSpace.flatColorCount).contains(colorIndex) else { return nil }
+        return theme.canvasStops(dark: dark).map(NSColor.init(spaceTheme:))
+    }
 }
 
 /// Resolves a dynamic color for a CALayer, which only stores a fixed CGColor.

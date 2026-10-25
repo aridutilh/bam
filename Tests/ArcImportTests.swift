@@ -42,7 +42,8 @@ import Foundation
             guard let key else { return ["default": true] }
             return ["custom": ["_0": ["directoryBasename": key, "machineID": "machine-\(key)"]]]
         }
-        @discardableResult func space(_ title: String, profile: String?, emoji: Any? = nil, theme: (Double, Double, Double)? = nil, legacy: Bool = false) -> (pinned: String, unpinned: String) {
+        @discardableResult func space(_ title: String, profile: String?, emoji: Any? = nil, theme: (Double, Double, Double)? = nil, legacy: Bool = false,
+                                      windowTheme: [String: Any]? = nil) -> (pinned: String, unpinned: String) {
             let id = newID()
             let pinned = container(["spaceItems": ["_0": id]]), unpinned = container(["spaceItems": ["_0": id]])
             var icon: [String: Any] = [:]
@@ -51,6 +52,7 @@ import Foundation
             if let (r, g, b) = theme {
                 custom["windowTheme"] = ["primaryColorPalette": ["midTone": ["red": r, "green": g, "blue": b, "alpha": 1, "colorSpace": "extendedSRGB"]]]
             }
+            if let windowTheme { custom["windowTheme"] = windowTheme }
             var object: [String: Any] = ["id": id, "title": title, "profile": Self.profile(profile), "customInfo": custom,
                                          "containerIDs": ["pinned", pinned, "unpinned", unpinned]]
             object["newContainerIDs"] = legacy ? [Any]() : [["pinned": [:]], pinned, ["unpinned": [:]], unpinned] as [Any]
@@ -133,8 +135,16 @@ import Foundation
             // Counts only: never prints titles, URLs or profile identifiers.
             let (session, report) = ArcImport.apply(try ArcImport.load(from: URL(fileURLWithPath: arguments[2])), to: .fresh())
             for (index, space) in report.spaces.enumerated() {
-                print("space \(index): kept \(space.keptTabs), folders \(space.folders), today \(space.todayTabs), favorites \(space.favorites), splits \(space.splits), easel refs \(space.easels), emoji \(space.emoji != nil)")
+                print("space \(index): kept \(space.keptTabs), folders \(space.folders), today \(space.todayTabs), favorites \(space.favorites), splits \(space.splits), easel refs \(space.easels), emoji \(space.emoji != nil), theme \(space.theme)")
             }
+            // Theme shape and contrast only, never color values.
+            for theme in session.spaces.compactMap(\.theme) {
+                let contrast = [false, true].map { dark in
+                    theme.canvasStops(dark: dark).map { $0.contrast(with: (dark ? theme.dark : theme.light).title) }.min() ?? 0
+                }
+                print("theme: gradient stops \(theme.gradient.count), min text contrast light \(String(format: "%.1f", contrast[0])) dark \(String(format: "%.1f", contrast[1]))")
+            }
+            print("themes imported \(report.importedThemes), unreadable \(report.approximatedThemes)")
             print("tabs \(report.importedTabs), folders \(report.importedFolders), profiles new \(report.newProfiles.count), easel refs \(report.easelReferences), easels unplaced \(report.easels), live \(report.liveFolders), overflow \(report.favoriteOverflow), unattached \(report.unattachedProfiles)/\(report.unattachedFavorites), invalid \(report.invalidAddresses), missing \(report.missingItems), unknown \(report.unknownItems), depth \(report.depthLimited), refused \(report.refusal != nil)")
             print("max depth \(session.folders.map { session.folderDepth($0.id) }.max() ?? -1), dormant kept \(session.tabs.filter { $0.saved?.kind == .kept && !$0.isUnloaded }.count == 3)")
             let layout = URL(fileURLWithPath: arguments[2])
@@ -465,6 +475,135 @@ import Foundation
                "Over-deep folders fold into their nearest allowed parent without losing tabs")
         expect(bigTabs.allSatisfy(\.isUnloaded), "Hundreds of imported tabs stay dormant")
 
+        try themeChecks(fixtures)
         print("PASS: \(count) Arc import checks")
+    }
+
+    /// An original synthetic Arc window theme with the real schema's shape.
+    static func arcTheme(gradient: [(Double, Double, Double)] = [(0.62, 0.78, 0.96), (0.95, 0.70, 0.80)],
+                         colorSpace: String = "extendedSRGB", blended: Bool = true) -> [String: Any] {
+        func c(_ r: Double, _ g: Double, _ b: Double, _ a: Double = 1) -> [String: Any] {
+            ["red": r, "green": g, "blue": b, "alpha": a, "colorSpace": colorSpace]
+        }
+        func roles(dark: Bool) -> [String: Any] {
+            let bg = dark ? c(0.10, 0.10, 0.13) : c(0.95, 0.94, 0.97), ink = dark ? c(0.95, 0.95, 0.97) : c(0.08, 0.08, 0.10)
+            return ["background": bg, "backgroundExtra": dark ? c(0.14, 0.13, 0.17) : c(0.99, 0.98, 1.0), "title": ink,
+                    "subtitle": dark ? c(0.70, 0.70, 0.74) : c(0.35, 0.35, 0.40), "focus": c(0.40, 0.55, 0.90, 0.8),
+                    "hover": c(0.5, 0.5, 0.5, 0.48), "foregroundPrimary": ink, "foregroundSecondary": c(0.6, 0.6, 0.6),
+                    "foregroundTertiary": c(0.7, 0.7, 0.7), "cutoutColor": bg, "maxContrastColor": ink, "minContrastColor": bg]
+        }
+        let style: [String: Any] = blended
+            ? ["color": ["_0": ["blendedGradient": ["_0": [
+                "baseColors": gradient.map { c($0.0, $0.1, $0.2) }, "overlayColors": [Any](), "translucencyStyle": "light",
+                "modifiers": ["intensityFactor": 0.0, "noiseFactor": 0.0, "overlay": "grain"], "wheel": ["complimentary": [:]]]]]]]
+            : ["image": ["_0": ["name": "synthetic"]]]
+        return [
+            "primaryColorPalette": ["midTone": c(0.40, 0.55, 0.90), "shaded": c(0.30, 0.40, 0.70),
+                                    "shadedDark": c(0.12, 0.16, 0.30), "tintedLight": c(0.80, 0.86, 0.98)],
+            "semanticColorPalette": ["appearanceBased": ["light": roles(dark: false), "dark": roles(dark: true)]],
+            "background": ["single": ["_0": ["style": style, "isVibrant": true, "contentOverBackgroundAppearance": "light"]]]
+        ]
+    }
+
+    static func themeChecks(_ fixtures: URL) throws {
+        // Full theme: typed, per appearance, with its two gradient colors.
+        let themed = Fixture(); let themedSpace = themed.space("Themed", profile: nil, windowTheme: arcTheme())
+        themed.tab("Inside", "https://inside.example/", in: themedSpace.pinned)
+        themed.space("Plain", profile: nil)
+        let source = try ArcImport.parse(themed.json())
+        let (session, report) = ArcImport.apply(source, to: BrowserSession.fresh())
+        let space = session.spaces.first { $0.name == "Themed" }!, plain = session.spaces.first { $0.name == "Plain" }!
+        guard let theme = space.theme else { expect(false, "A complete Arc theme is imported"); return }
+        expect(theme.gradient.count == 2 && theme.light != theme.dark && theme.accentLight != nil && theme.accentDark != nil,
+               "Theme keeps both gradient colors, separate light/dark roles and accent variants")
+        expect(space.colorIndex == 2 && plain.theme == nil, "A themed Space keeps the nearest flat color as fallback; an unthemed one has none")
+        expect(report.importedThemes == 1 && report.approximatedThemes == 0
+               && report.notices.contains { $0.contains("1 Space keeps its Arc theme colors and gradient") && $0.contains("grain and vibrancy aren’t reproduced") },
+               "The preview says the theme comes over and what doesn't")
+
+        // Drawing: readable text over every gradient color in both appearances,
+        // a real two-color gradient, a dark window in dark, accent visible.
+        for dark in [false, true] {
+            let roles = dark ? theme.dark : theme.light, stops = theme.canvasStops(dark: dark)
+            expect(stops.count == 2 && stops[0] != stops[1], "Two distinct gradient colors (dark: \(dark))")
+            expect(stops.allSatisfy { $0.contrast(with: roles.title) >= SpaceTheme.minimumTextContrast }, "Title text stays readable over the gradient (dark: \(dark))")
+            expect(stops.allSatisfy { $0.contrast(with: theme.accent(dark: dark)) >= SpaceTheme.minimumIconContrast - 0.001 }, "The Space accent stands out (dark: \(dark))")
+        }
+        expect(theme.canvasStops(dark: true).allSatisfy { $0.luminance < 0.2 } && theme.canvasStops(dark: false).allSatisfy { $0.luminance > 0.5 },
+               "Dark mode gets a dark window, light mode a light one")
+        let gray = try ArcImport.parse({ let f = Fixture(); f.space("Gray", profile: nil, windowTheme: arcTheme(gradient: [(0.5, 0.5, 0.5), (0.45, 0.45, 0.45)])); return f.json() }())
+        let grayTheme = gray.spaces[0].theme!
+        for dark in [false, true] {
+            expect(grayTheme.canvasStops(dark: dark).allSatisfy { $0.contrast(with: (dark ? grayTheme.dark : grayTheme.light).title) >= SpaceTheme.minimumTextContrast },
+                   "A mid-gray gradient is eased until text reads (dark: \(dark))")
+        }
+
+        // Fallbacks: unknown color space, unknown background variant, partial theme.
+        let p3 = try ArcImport.parse({ let f = Fixture(); f.space("P3", profile: nil, windowTheme: arcTheme(colorSpace: "displayP3")); return f.json() }())
+        let (p3Session, p3Report) = ArcImport.apply(p3, to: BrowserSession.fresh())
+        expect(p3.spaces[0].theme == nil && p3Session.spaces.first { $0.name == "P3" }?.theme == nil && p3Report.approximatedThemes == 1
+               && p3Report.notices.contains { $0.contains("couldn’t be read") }, "An unknown color space falls back to the flat color, with a notice")
+        let image = try ArcImport.parse({ let f = Fixture(); f.space("Image", profile: nil, windowTheme: arcTheme(blended: false)); return f.json() }())
+        let imageTheme = image.spaces[0].theme
+        expect(imageTheme?.gradient.isEmpty == true && imageTheme.map { $0.canvasStops(dark: false)[0] == $0.light.background.mixed(toward: $0.light.background, by: 1) } == true,
+               "An unknown background variant keeps the theme's colors over its own backgrounds")
+        var partial = arcTheme(); partial["semanticColorPalette"] = ["appearanceBased": ["light": (arcTheme()["semanticColorPalette"] as! [String: Any])]]
+        expect(ArcImport.spaceTheme(partial) == nil && ArcImport.spaceTheme(["primaryColorPalette": ["midTone": ["red": 2.0, "green": 0, "blue": 0]]]) == nil,
+               "Missing appearances or out-of-range colors aren't imported")
+
+        // Persistence: restart, sanitize, Space edits.
+        let file = fixtures.appendingPathComponent("themes.json")
+        try SessionFile.save(session, to: file)
+        var restored = SessionFile.load(file)
+        expect(restored.spaceDefinition(space.id)?.theme == theme, "The theme survives restart exactly")
+        restored.sanitize()
+        expect(restored.spaceDefinition(space.id)?.theme == theme, "Sanitizing keeps a valid theme")
+        expect(restored.updateSpace(id: space.id, name: "Renamed", symbol: "book", colorIndex: space.colorIndex)
+               && restored.spaceDefinition(space.id)?.theme == theme, "Renaming or a new icon keeps the theme")
+        var recolored = restored
+        expect(recolored.updateSpace(id: space.id, name: "Renamed", symbol: "book", colorIndex: 4) && recolored.spaceDefinition(space.id)?.theme == nil,
+               "Choosing another Space color replaces the imported theme")
+        var prism = restored
+        expect(prism.updateSpace(id: space.id, name: "Renamed", symbol: "book", colorIndex: BrowserSpace.prismColorIndex)
+               && prism.spaceDefinition(space.id)?.theme == nil && !prism.setSpaceTheme(id: space.id, theme: theme),
+               "Prism and Clear never carry an imported theme")
+        expect(BrowserSpace(id: 9, name: "X", symbol: "globe", colorIndex: BrowserSpace.clearColorIndex, theme: theme).theme == nil, "The model refuses a theme on Clear")
+
+        // A damaged stored theme falls back to the flat color without losing the Space.
+        var json = try JSONSerialization.jsonObject(with: Data(contentsOf: file)) as! [String: Any]
+        var spaces = json["spaces"] as! [[String: Any]]
+        let themedIndex = spaces.firstIndex { ($0["id"] as? Int) == space.id }!
+        var stored = spaces[themedIndex]["theme"] as! [String: Any]
+        var accent = stored["accent"] as! [String: Any]; accent["red"] = 1.7; stored["accent"] = accent
+        spaces[themedIndex]["theme"] = stored; json["spaces"] = spaces
+        let damagedFile = fixtures.appendingPathComponent("themes-damaged.json")
+        try JSONSerialization.data(withJSONObject: json).write(to: damagedFile)
+        let damaged = SessionFile.load(damagedFile)
+        expect(damaged.spaceDefinition(space.id)?.theme == nil && damaged.spaceDefinition(space.id)?.colorIndex == space.colorIndex
+               && damaged.tabs.count == session.tabs.count, "A damaged stored theme falls back to the flat color; nothing else is lost")
+
+        // Repeat import: nothing new; a Space imported before themes existed
+        // gets its theme once, unless its color was changed locally.
+        let (again, againReport) = ArcImport.apply(source, to: session)
+        expect(againReport.isEmpty && againReport.importedThemes == 0 && again.spaces == session.spaces, "Importing again changes nothing")
+        var older = session
+        _ = older.setSpaceTheme(id: space.id, theme: nil); older.importLinks?.removeValue(forKey: "arc-theme:\(source.spaces[0].id)")
+        let (upgraded, upgradeReport) = ArcImport.apply(source, to: older)
+        expect(report.spaces.first { $0.title == "Themed" }?.theme == true && report.spaces.first { $0.title == "Plain" }?.theme == false,
+               "The preview marks which Space gets a theme")
+        expect(upgraded.spaceDefinition(space.id)?.theme == theme && upgradeReport.importedThemes == 1 && !upgradeReport.isEmpty
+               && upgradeReport.spaces.first { $0.title == space.name }?.theme == true,
+               "An earlier-imported Space still wearing Bam's chosen color gets its theme")
+        var recoloredOlder = older
+        _ = recoloredOlder.updateSpace(id: space.id, name: space.name, symbol: space.symbol, colorIndex: 4)
+        expect(ArcImport.apply(source, to: recoloredOlder).session.spaceDefinition(space.id)?.theme == nil, "A locally chosen color is never overridden")
+        var removedLocally = upgraded
+        _ = removedLocally.updateSpace(id: space.id, name: space.name, symbol: space.symbol, colorIndex: 4)
+        _ = removedLocally.updateSpace(id: space.id, name: space.name, symbol: space.symbol, colorIndex: space.colorIndex)
+        expect(ArcImport.apply(source, to: removedLocally).session.spaceDefinition(space.id)?.theme == nil,
+               "A theme the user replaced isn't brought back by a later import")
+        // Undo after a failed save removes a theme the import added to an existing Space.
+        let undone = ArcImport.undo(upgraded, over: older, in: upgraded)
+        expect(undone.spaceDefinition(space.id)?.theme == nil && undone.importLinks == older.importLinks, "Undo removes the added theme")
     }
 }
