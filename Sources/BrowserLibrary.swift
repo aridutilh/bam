@@ -34,6 +34,17 @@ struct ClosedRecord: Codable, Identifiable, Equatable {
         case cleared
     }
     var onHistoryChange: ((HistoryChange) -> Void)?
+    /// One accepted visit exactly as recorded. A coalesced revisit reuses the entry's id but gets a new
+    /// revision, so a token from an earlier visit of that entry no longer matches.
+    struct VisitToken: Equatable {
+        let id: UUID
+        let address: String
+        let revision: UInt64
+    }
+    /// In memory only (never stored): the revision of each entry's latest accepted visit this session.
+    /// Entries loaded at startup have none, so no token can match them.
+    private var visitRevisions: [UUID: UInt64] = [:]
+    private var lastVisitRevision: UInt64 = 0
     var profileName: String?
     let storageURL: URL?
     private var loadFailure: String?
@@ -91,11 +102,11 @@ struct ClosedRecord: Codable, Identifiable, Equatable {
     }
     private func reloadWindows() { historyWindow?.reload(); archiveWindow?.reload() }
 
-    func recordVisit(title: String, address: String) {
-        guard let url = Self.webURL(address) else { return }
+    @discardableResult func recordVisit(title: String, address: String) -> VisitToken? {
+        guard let url = Self.webURL(address) else { return nil }
         let address = url.absoluteString
         let title = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard canMutate() else { return }
+        guard canMutate() else { return nil }
         var trimmed: [String] = []
         if history.first?.address == address {
             // Only consecutive visits coalesce; earlier visits stay visible.
@@ -105,6 +116,7 @@ struct ClosedRecord: Codable, Identifiable, Equatable {
             history.insert(BrowserHistoryEntry(title: title.isEmpty ? (url.host ?? address) : title, address: address), at: 0)
             if history.count > Self.historyLimit {
                 trimmed = history[Self.historyLimit...].map(\.address)
+                for entry in history[Self.historyLimit...] { visitRevisions.removeValue(forKey: entry.id) }
                 history.removeLast(history.count - Self.historyLimit)
             }
         }
@@ -113,8 +125,27 @@ struct ClosedRecord: Codable, Identifiable, Equatable {
         writer?.enqueue(snapshot)
         reloadWindows()
         // Accepted into in-memory history (as search sees it); the write's outcome is not implied.
+        lastVisitRevision += 1
+        visitRevisions[history[0].id] = lastVisitRevision
+        let token = VisitToken(id: history[0].id, address: address, revision: lastVisitRevision)
         onHistoryChange?(.visited(history[0]))
         if !trimmed.isEmpty { onHistoryChange?(.trimmed(addresses: trimmed)) }
+        return token
+    }
+
+    /// The recorded document's title arrived after its visit. Changes only that entry's title: same id,
+    /// visitedAt and position; no event, no new visit. The save is the same ordered write a visit uses.
+    /// False, with nothing changed or written, when the token is stale (a later coalesced revisit, a trim,
+    /// a clear), the address differs, the title is empty or unchanged, or the library can't be changed.
+    @discardableResult func updateVisitTitle(_ title: String, for token: VisitToken) -> Bool {
+        let title = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty, visitRevisions[token.id] == token.revision,
+              let index = history.firstIndex(where: { $0.id == token.id }), history[index].address == token.address,
+              history[index].title != title, canMutate() else { return false }
+        history[index].title = title
+        writer?.enqueue(snapshot)
+        reloadWindows()
+        return true
     }
 
     func recordClosed(tabs: [BrowserTab], split: Bool) {
@@ -141,6 +172,7 @@ struct ClosedRecord: Codable, Identifiable, Equatable {
     // Low-level mutations; the native window's Clear buttons confirm first.
     @discardableResult func clearHistory() -> Bool {
         guard commit({ history.removeAll() }) else { return false }
+        visitRevisions.removeAll()
         onHistoryChange?(.cleared)
         return true
     }
@@ -227,7 +259,7 @@ struct ClosedRecord: Codable, Identifiable, Equatable {
 
     private func acceptLoaded(history entries: [BrowserHistoryEntry], closedRecords records: [ClosedRecord]) {
         var historyIDs = Set<UUID>()
-        history = []
+        history = []; visitRevisions.removeAll()
         for entry in entries {
             guard entry.visitedAt.timeIntervalSince1970.isFinite, Self.webURL(entry.address) != nil,
                   historyIDs.insert(entry.id).inserted else { continue }

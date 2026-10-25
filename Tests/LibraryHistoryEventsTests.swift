@@ -59,6 +59,14 @@ import AppKit
         require(Events.snapshot(of: nil, available: true) == nil, "No library in memory: nil, even though history exists on disk")
         require(Events.snapshot(of: writer, available: false) == nil, "Unavailable (private, closing, switching, unknown profile): nil")
         require(Events.snapshot(of: writer, available: true)?.map(\.url) == ["https://disk.example/"], "A loaded library is read from memory")
+        // A late document title: search (the memory snapshot) sees it; no event is fabricated.
+        let titled = BrowserLibrary(storageURL: nil)
+        var titledSent: [ExtensionHistory.Change] = []
+        titled.onHistoryChange = { change in if let event = Events.change(change, history: titled.history) { titledSent.append(event) } }
+        let token = titled.recordVisit(title: "", address: "http://127.0.0.1:9/bookmarks/beta.html")!
+        require(titledSent.count == 1 && Events.snapshot(titled.history).map(\.title) == ["127.0.0.1"], "Visited once, with the host stand-in")
+        require(titled.updateVisitTitle("Bam bookmark beta", for: token) && titledSent.count == 1
+                && Events.snapshot(titled.history).map(\.title) == ["Bam bookmark beta"], "The snapshot shows the corrected title; no new event")
         print("PASS: \(checks) library history event checks")
     }
 }
