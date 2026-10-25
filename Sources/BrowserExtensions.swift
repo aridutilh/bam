@@ -42,9 +42,10 @@ struct BrowserExtensionRecord: Codable, Identifiable {
     var nativeHost: ExtensionNativeMessaging.Host? = nil
     /// Static declarativeNetRequest disclosure for `version`; replaced (never appended) when re-audited.
     var staticRuleAudit: ExtensionStaticRuleAudit? = nil
-    /// Everything Bam discloses about this install: preparation notes, then the current static-rule audit.
+    /// Everything Bam discloses about this install: the current static-rule audit first (it can change what the
+    /// extension does), then preparation notes.
     var disclosedNote: String? {
-        let notes = [compatibilityNote, staticRuleAudit?.note].compactMap { $0 }
+        let notes = [staticRuleAudit?.note, compatibilityNote].compactMap { $0 }
         return notes.isEmpty ? nil : notes.joined(separator: " ")
     }
 }

@@ -1,0 +1,60 @@
+import AppKit
+import Foundation
+
+/// The extension manager shows a selected extension's full disclosure (static-rule warning first) in a scrollable,
+/// accessible view, and marks affected rows. Records come from a temporary registry; nothing is loaded or shown.
+@main @MainActor enum ExtensionManagementDisclosureTests {
+    struct Failure: Error { let message: String }
+    static func main() {
+        guard #available(macOS 15.4, *) else { print("SKIP: Extension management requires macOS 15.4"); return }
+        do { print("PASS: Extension management disclosure — \(try run()) checks") }
+        catch { fputs("FAIL: Extension management disclosure: \((error as? Failure)?.message ?? "\(error)")\n", stderr); exit(1) }
+    }
+    @available(macOS 15.4, *)
+    static func run() throws -> Int {
+        var checks = 0
+        func check(_ condition: Bool, _ message: String) throws { guard condition else { throw Failure(message: message) }; checks += 1 }
+        _ = NSApplication.shared
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("bam-management-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let profile = UUID(), audited = UUID(), legacy = UUID()
+        let audit = ExtensionStaticRuleAudit(format: ExtensionStaticRuleAudit.currentFormat, extensionVersion: "3.0",
+            rulesets: (1...12).map { .init(id: "ruleset\($0)", enabledByDefault: $0 % 2 == 0, methodRules: $0, excludesAllTypesRules: 0) }, unreadable: ["broken"])
+        let preparation = Array(repeating: "Prepared Bam's compatibility adapter for this package without changing extension scripts.", count: 6).joined(separator: " ")
+        let records = [
+            BrowserExtensionRecord(id: audited, profileID: profile, name: "Audited", version: "3.0", packageName: "package", compatibilityNote: preparation, staticRuleAudit: audit),
+            BrowserExtensionRecord(id: legacy, profileID: profile, name: "Earlier install", version: "1.0", packageName: "package")]
+        var registry = try JSONSerialization.jsonObject(with: JSONEncoder().encode(records)) as! [[String: Any]]
+        registry[1].removeValue(forKey: "staticRuleAudit")   // as written by a Bam without the audit
+        try JSONSerialization.data(withJSONObject: registry).write(to: root.appendingPathComponent("registry.json"))
+
+        let host = BrowserExtensions(storageURL: root)
+        defer { host.shutdown() }
+        try check(host.records.count == 2 && host.records.first { $0.id == legacy }?.staticRuleAudit == nil, "Registry records did not restore, or an older record gained an audit")
+        let manager = ExtensionManagement(host: host)
+        manager.load(profileID: profile)
+        guard let row = manager.items(for: audited) else { throw Failure(message: "The audited extension is not listed") }
+        manager.table.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        manager.refresh()
+        let shown = manager.status.string, note = audit.note ?? "missing"
+        try check(shown.hasPrefix(note) && shown.contains(preparation) && shown.range(of: note)!.lowerBound < shown.range(of: preparation)!.lowerBound,
+                  "The details were incomplete or the static-rule warning was not first: \(shown.prefix(200))")
+        manager.status.layoutManager?.ensureLayout(for: manager.status.textContainer!)
+        let used = manager.status.layoutManager?.usedRect(for: manager.status.textContainer!).height ?? 0
+        try check(manager.statusScroll.documentView === manager.status && manager.statusScroll.hasVerticalScroller &&
+                  used > manager.statusScroll.contentSize.height && manager.status.frame.height >= used,
+                  "Long details were not scrollable in full: text \(used) pt, visible \(manager.statusScroll.contentSize.height) pt, view \(manager.status.frame.height) pt")
+        try check(!manager.status.isEditable && manager.status.isSelectable && manager.status.acceptsFirstResponder &&
+                  manager.status.accessibilityLabel() == "Selected extension status and compatibility details",
+                  "The details view is not read-only, selectable, focusable and labelled")
+        func rowText(_ id: UUID) -> String {
+            guard let index = manager.items(for: id), let cell = manager.tableView(manager.table, viewFor: nil, row: index),
+                  let label = cell.subviews.first as? NSTextField else { return "" }
+            return label.accessibilityLabel() ?? ""
+        }
+        try check(rowText(audited).contains("Network rules: see details") && !rowText(legacy).contains("Network rules"),
+                  "The row marker was missing for the audited install or shown for the earlier one: \(rowText(audited)) | \(rowText(legacy))")
+        return checks
+    }
+}

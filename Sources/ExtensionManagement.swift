@@ -7,9 +7,12 @@ import UniformTypeIdentifiers
     private weak var host: BrowserExtensions?
     private var profileID = UUID()
     private var items: [BrowserExtensionRecord] = []
-    private let table = NSTableView()
+    let table = NSTableView()
     private let heading = NSTextField(labelWithString: "Extensions")
-    private let status = NSTextField(wrappingLabelWithString: "")
+    /// Status and the selected extension's full disclosure: read-only, selectable, scrollable and focusable, so no
+    /// note is clipped however long it is (it replaced a fixed-height label).
+    let status = NSTextView(frame: NSRect(x: 0, y: 0, width: 560, height: 44))
+    let statusScroll = NSScrollView(frame: NSRect(x: 22, y: 94, width: 576, height: 44))
     private let toggle = NSButton(title: "Enable", target: nil, action: nil)
     private let removeButton = NSButton(title: "Remove", target: nil, action: nil)
     private let revoke = NSButton(title: "Revoke Permissions", target: nil, action: nil)
@@ -36,7 +39,14 @@ import UniformTypeIdentifiers
         table.headerView = nil; table.rowHeight = 62; table.delegate = self; table.dataSource = self
         table.setAccessibilityLabel("Extensions in this profile")
         scroll.documentView = table; root.addSubview(scroll)
-        status.font = .systemFont(ofSize: 11); status.textColor = .secondaryLabelColor; status.frame = NSRect(x: 22, y: 94, width: 576, height: 44); root.addSubview(status)
+        status.isEditable = false; status.isSelectable = true; status.drawsBackground = false
+        status.font = .systemFont(ofSize: 11); status.textColor = .secondaryLabelColor
+        status.textContainerInset = NSSize(width: 0, height: 2); status.textContainer?.widthTracksTextView = true
+        status.isVerticallyResizable = true; status.autoresizingMask = [.width]
+        status.setAccessibilityLabel("Selected extension status and compatibility details")
+        statusScroll.documentView = status; statusScroll.hasVerticalScroller = true; statusScroll.autohidesScrollers = true
+        statusScroll.drawsBackground = false; statusScroll.borderType = .noBorder
+        root.addSubview(statusScroll)
         libraryButton.frame = NSRect(x: 18, y: 56, width: 214, height: 32); libraryButton.target = self; libraryButton.action = #selector(openLibrary)
         importButton.frame = NSRect(x: 236, y: 56, width: 160, height: 32); importButton.target = self; importButton.action = #selector(importPackage)
         updateButton.frame = NSRect(x: 400, y: 56, width: 198, height: 32); updateButton.target = self; updateButton.action = #selector(checkForUpdate)
@@ -55,8 +65,10 @@ import UniformTypeIdentifiers
     /// Restyles a freshly made row label the way `dress` styles static ones.
     @MainActor static var restyleCell: ((NSTextField) -> Void)?
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+    /// Lists a profile's extensions without presenting the window.
+    func load(profileID: UUID) { self.profileID = profileID; refresh() }
     func show(profileID: UUID, relativeTo parent: NSWindow?) {
-        self.profileID = profileID; refresh()
+        load(profileID: profileID)
         if let parent { window?.setFrameOrigin(NSPoint(x: parent.frame.midX - 310, y: parent.frame.midY - 235)) } else { window?.center() }
         showWindow(nil); window?.makeKeyAndOrderFront(nil)
     }
@@ -69,6 +81,8 @@ import UniformTypeIdentifiers
         if let selected, let row = items.firstIndex(where: { $0.id == selected }) { table.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false) }
         updateControls()
     }
+    /// Row of an extension in the current list (tests and selection restore).
+    func items(for id: UUID) -> Int? { items.firstIndex { $0.id == id } }
     private var selection: BrowserExtensionRecord? { items.indices.contains(table.selectedRow) ? items[table.selectedRow] : nil }
     private func updateControls() {
         let selected = selection
@@ -94,10 +108,11 @@ import UniformTypeIdentifiers
         updateButton.toolTip = safari ? "Review the current signed extension in its installed app, without contacting the store. Keeps its Bam identity and settings. Update the containing app in the App Store first when needed."
             : updatable ? "Ask \(selected?.catalog?.sourceLabel ?? "the store") for a newer version of this build. Updates keep the extension’s identity and storage and never switch stores." : "Only store-installed extensions can check for updates."
         let guidance = "Reload already open pages after enabling, disabling, or revoking access. Code injected into a page cannot be removed until that page reloads. Extension storage stays local to this profile."
-        status.stringValue = pendingStatus ?? selected.flatMap { host?.errors[$0.id] } ?? (selected == nil ? host?.lastError : nil)
-            ?? selected?.disclosedNote.map { $0 + " Reload open pages after changing access." } ?? guidance
+        status.string = pendingStatus ?? selected.flatMap { host?.errors[$0.id] } ?? (selected == nil ? host?.lastError : nil)
+            ?? selected.flatMap(Self.details) ?? guidance
+        status.scrollToBeginningOfDocument(nil)
         pendingStatus = nil
-        status.toolTip = guidance
+        statusScroll.toolTip = guidance
     }
     func numberOfRows(in tableView: NSTableView) -> Int { items.count }
     func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? { Self.rowView?() }
@@ -110,7 +125,9 @@ import UniformTypeIdentifiers
         if let available = record.catalog?.availableVersion { origin += " · Update available: \(available)" }
         let state = record.safariBundle != nil && record.enabled && host?.context(for: record.id) == nil ? "Not running" : record.enabled ? "Enabled" : "Disabled"
         let desktop = record.nativeHost == nil ? "" : " · Desktop access approved"
-        let label = NSTextField(wrappingLabelWithString: "\(record.name)  \(record.version)\n\(state)\(host?.errors[record.id] != nil ? " · Needs attention" : "")\(desktop)\(bridged)\(origin)")
+        // Visible without selecting the row: installs from an earlier Bam get the static-rule audit without a new review.
+        let rules = record.staticRuleAudit?.note == nil ? "" : " · Network rules: see details"
+        let label = NSTextField(wrappingLabelWithString: "\(record.name)  \(record.version)\n\(state)\(host?.errors[record.id] != nil ? " · Needs attention" : "")\(desktop)\(rules)\(bridged)\(origin)")
         label.font = .systemFont(ofSize: 12); label.setAccessibilityLabel(label.stringValue)
         let cell = NSView(); label.translatesAutoresizingMaskIntoConstraints = false; cell.addSubview(label)
         NSLayoutConstraint.activate([label.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 12),
@@ -126,7 +143,7 @@ import UniformTypeIdentifiers
     @objc private func checkForUpdate() {
         guard let host, let selected = selection, !busy else { return }
         busy = true; updateControls()
-        status.stringValue = selected.safariBundle != nil ? "Verifying the installed app for \(selected.name)…" : "Checking \(selected.catalog?.sourceLabel ?? "the store") for a newer \(selected.name)…"
+        status.string = selected.safariBundle != nil ? "Verifying the installed app for \(selected.name)…" : "Checking \(selected.catalog?.sourceLabel ?? "the store") for a newer \(selected.name)…"
         Task { @MainActor [weak self] in
             defer { self?.busy = false; self?.refresh() }
             do {
@@ -212,6 +229,12 @@ import UniformTypeIdentifiers
             defer { self?.busy = false; self?.refresh() }
             do { try await host.remove(id: selected.id) } catch { host.setError(error, for: selected.id) }
         }
+    }
+    /// The selected extension's disclosure: the static-rule warning first (it can affect what the extension does),
+    /// then preparation notes, then reload guidance. Nil when there is nothing extension-specific to say.
+    static func details(_ record: BrowserExtensionRecord) -> String? {
+        let parts = [record.staticRuleAudit?.note, record.compatibilityNote].compactMap { $0 }
+        return parts.isEmpty ? nil : (parts + ["Reload open pages after changing access."]).joined(separator: "\n\n")
     }
     static func reviewPermissions(_ review: BrowserExtensionPermissionReview) -> Bool {
         let alert = NSAlert()
