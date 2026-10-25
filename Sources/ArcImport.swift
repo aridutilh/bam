@@ -99,7 +99,15 @@ enum ArcImport {
         for object in rawItems {
             guard let id = object["id"] as? String, !id.isEmpty else { throw Failure.malformed("an item has no identifier") }
             guard nodes[id] == nil else { throw Failure.malformed("an item identifier appears twice") }
-            let children = (object["childrenIds"] as? [Any])?.compactMap { $0 as? String } ?? []
+            // A damaged child list would silently hide contents; refuse instead.
+            var children: [String] = []
+            if let raw = object["childrenIds"], !(raw is NSNull) {
+                guard let list = raw as? [Any] else { throw Failure.malformed("an item’s child list is damaged") }
+                children = try list.map { value in
+                    guard let id = value as? String else { throw Failure.malformed("an item’s child list is damaged") }
+                    return id
+                }
+            }
             let title = (object["title"] as? String).flatMap { $0.isEmpty ? nil : $0 }
             nodes[id] = Node(id: id, kind: kind(of: object["data"]), title: title, children: children)
         }
@@ -111,7 +119,7 @@ enum ArcImport {
             let custom = object["customInfo"] as? [String: Any]
             let icon = custom?["iconType"] as? [String: Any]
             var emoji = (icon?["emoji_v2"] as? String).flatMap(BrowserSpace.validEmoji)
-            if emoji == nil, let code = icon?["emoji"] as? Int, let scalar = Unicode.Scalar(UInt32(max(0, code))) {
+            if emoji == nil, let code = icon?["emoji"] as? Int, let value = UInt32(exactly: code), let scalar = Unicode.Scalar(value) {
                 emoji = BrowserSpace.validEmoji(String(Character(scalar)))
             }
             spaces.append(Space(id: id, title: (object["title"] as? String) ?? "", emoji: emoji,
@@ -129,8 +137,17 @@ enum ArcImport {
                 favoriteRoots.append((profile(pairs[index]), root))
             }
         }
+        // Bound nesting before any traversal so hostile depth can't exhaust the stack.
+        let roots = spaces.flatMap { [$0.pinnedRoot, $0.unpinnedRoot].compactMap { $0 } } + favoriteRoots.map(\.1)
+        var stack = roots.map { ($0, 0) }, seen = Set<String>()
+        while let (id, depth) = stack.popLast() {
+            guard seen.insert(id).inserted, let node = nodes[id] else { continue }
+            guard depth <= maximumNesting else { throw Failure.malformed("items are nested more than \(maximumNesting) levels deep") }
+            stack += node.children.map { ($0, depth + 1) }
+        }
         return Source(spaces: spaces, nodes: nodes, favoriteRoots: favoriteRoots)
     }
+    static let maximumNesting = 256
 
     /// `items`/`spaces` alternate an ID string with the object it names.
     private static func objectPairs(_ value: Any?, label: String) throws -> [[String: Any]] {
@@ -245,6 +262,10 @@ enum ArcImport {
         var approximatedThemes = 0
         var customIcons = 0
         var firstSpaceID: Int?
+        /// Previously imported Spaces the user removed and Arc has nothing new for.
+        var removedSpaces = 0
+        /// Favorites of profiles whose Spaces were left out of this import.
+        var excludedFavorites = 0
         /// Set when the import was refused as a whole; nothing changes.
         var refusal: String?
 
@@ -256,6 +277,8 @@ enum ArcImport {
             var lines: [String] = []
             func plural(_ n: Int, _ word: String) -> String { "\(n) \(word)\(n == 1 ? "" : "s")" }
             if alreadyImported > 0 { lines.append("\(plural(alreadyImported, "item")) already imported earlier will be skipped.") }
+            if removedSpaces > 0 { lines.append("\(plural(removedSpaces, "Space")) you removed after an earlier import will stay removed.") }
+            if excludedFavorites > 0 { lines.append("\(plural(excludedFavorites, "Favorite")) of Spaces left out of this import won’t be imported.") }
             if easels > 0 { lines.append("\(plural(easels, "Easel")) can’t be imported; Bam has no Easels.") }
             if liveFolders > 0 { lines.append("\(plural(liveFolders, "live folder")) will be imported as ordinary folders; live updates aren’t supported.") }
             if flattenedTodayFolders > 0 { lines.append("\(plural(flattenedTodayFolders, "folder")) in Today will be flattened; Bam keeps folders in the kept section.") }
@@ -317,7 +340,9 @@ enum ArcImport {
         }
         func makeTab(_ node: Node, url: String, savedTitle: String?, space: Int, kind: SavedTabKind?, folder: UUID?, profile: UUID? = nil) -> BrowserTab {
             let host = URL(string: url)?.host ?? url
-            let title = clipped(savedTitle, limit: 300) ?? clipped(node.title, limit: 300) ?? host
+            // Kept tabs keep Arc's rename as their saved name; a renamed Today
+            // tab has no saved name, so the rename becomes its title.
+            let title = (kind == nil ? clipped(node.title, limit: 300) : nil) ?? clipped(savedTitle, limit: 300) ?? clipped(node.title, limit: 300) ?? host
             let saved = kind.map { SavedTabState(kind: $0, address: url, customTitle: clipped(node.title, limit: 80),
                                                   isUnloaded: true, profileID: $0 == .favorite ? profile : nil) }
             return BrowserTab(title: title, address: url, space: space, saved: saved, folderID: kind == .kept ? folder : nil)
@@ -418,7 +443,7 @@ enum ArcImport {
                     let tab = makeTab(node, url: url, savedTitle: savedTitle, space: space, kind: nil, folder: nil)
                     session.tabs.append(tab); links[key] = "tab:\(tab.id.uuidString)"; spaceReport.todayTabs += 1
                 case .folder:
-                    report.flattenedTodayFolders += 1
+                    if links["arc:\(node.id)"] == nil { report.flattenedTodayFolders += 1; links["arc:\(node.id)"] = "flattened" }
                     importToday(node.children, space: space, spaceReport: &spaceReport)
                 case .split:
                     var created: [UUID] = []
@@ -441,8 +466,23 @@ enum ArcImport {
                 }
             }
         }
+        /// Whether a subtree holds anything not imported before (tabs or folders).
+        func hasNewItems(_ ids: [String]) -> Bool {
+            var stack = ids, seen = Set<String>()
+            while let id = stack.popLast() {
+                guard seen.insert(id).inserted, let node = source.nodes[id] else { continue }
+                switch node.kind {
+                case .tab(let raw, _): if links["arc:\(id)"] == nil, address(raw) != nil { return true }
+                case .folder: if links["arc:\(id)"] == nil { return true }; stack += node.children
+                case .split, .container: stack += node.children
+                case .easel, .unknown: continue
+                }
+            }
+            return false
+        }
         func importFavorites(root: String, profile: UUID, homeSpace: Int, spaceReport: inout SpaceReport) {
-            guard let node = source.nodes[root], visited.insert(root).inserted else { return }
+            guard let node = source.nodes[root] else { report.missingItems += 1; return }
+            guard visited.insert(root).inserted else { return }
             var overflowFolder: UUID?
             for childID in node.children {
                 guard visited.insert(childID).inserted, let child = source.nodes[childID] else { report.missingItems += 1; continue }
@@ -462,7 +502,7 @@ enum ArcImport {
                     let overflowKey = "arc-favorites-overflow:\(root)"
                     if overflowFolder == nil, let raw = linked(overflowKey, prefix: "folder:"), let id = UUID(uuidString: raw),
                        session.folder(id)?.space == homeSpace { overflowFolder = id }
-                    if overflowFolder == nil {
+                    if overflowFolder == nil, session.folders.count < BrowserSession.maximumFolders {
                         let folder = BrowserFolder(name: "More Favorites", space: homeSpace, isCollapsed: false)
                         session.folders.append(folder); orders[.folder(folder.id)] = []
                         var rootList = order(.root(homeSpace)); rootList.insert(folder.id, at: 0); orders[.root(homeSpace)] = rootList
@@ -471,7 +511,7 @@ enum ArcImport {
                     }
                     let tab = makeTab(child, url: url, savedTitle: savedTitle, space: homeSpace, kind: .kept, folder: overflowFolder)
                     session.tabs.append(tab); links[key] = "tab:\(tab.id.uuidString)"
-                    place(tab.id, in: .folder(overflowFolder!), isNewContainer: true); spaceReport.keptTabs += 1
+                    place(tab.id, in: overflowFolder.map { .folder($0) } ?? .root(homeSpace), isNewContainer: true); spaceReport.keptTabs += 1
                 }
             }
         }
@@ -482,11 +522,20 @@ enum ArcImport {
         var reportIndexBySpace: [Int: Int] = [:]
         for (offset, arcSpace) in selected.enumerated() {
             let title = BrowserSpace.validName(String(arcSpace.title.prefix(60))) ?? "Arc Space \(offset + 1)"
-            guard let profile = bamProfile(for: arcSpace.profile, name: title) else { report.skippedSpaces += 1; continue }
             var spaceID: Int?
             var isNew = false
             if let raw = linked("arc-space:\(arcSpace.id)", prefix: "space:"), let id = Int(raw), session.spaceDefinition(id) != nil { spaceID = id }
+            if arcSpace.pinnedRoot.map({ source.nodes[$0] == nil }) == true { report.missingItems += 1 }
+            if options.includeToday, arcSpace.unpinnedRoot.map({ source.nodes[$0] == nil }) == true { report.missingItems += 1 }
+            // A Space removed after an earlier import stays removed unless Arc
+            // has something new for it; never recreate it empty.
+            if spaceID == nil, links["arc-space:\(arcSpace.id)"] != nil {
+                let roots = [arcSpace.pinnedRoot] + (options.includeToday ? [arcSpace.unpinnedRoot] : [])
+                let children = roots.compactMap { $0.flatMap { source.nodes[$0]?.children } }.flatMap { $0 }
+                if !hasNewItems(children) { report.removedSpaces += 1; continue }
+            }
             if spaceID == nil {
+                guard let profile = bamProfile(for: arcSpace.profile, name: title) else { report.skippedSpaces += 1; continue }
                 let color = arcSpace.colorIndex ?? [0, 2, 3, 4, 1, 5][offset % 6]
                 guard let created = session.createSpace(name: title, symbol: "sparkles", colorIndex: color, profileID: profile) else {
                     report.skippedSpaces += 1; continue
@@ -514,15 +563,25 @@ enum ArcImport {
         }
 
         // Favorites: matched by Arc profile identity, never by position.
+        let sourceProfiles = Set(source.spaces.map(\.profile))
         if options.includeFavorites {
             for (profile, root) in source.favoriteRoots {
-                if let home = homeSpaces[profile], let bam = profileMap[profile] ?? (profile.isDefault ? BrowserProfile.defaultID : nil),
+                // Favorites join the login profile their Arc Space now uses in Bam.
+                if let home = homeSpaces[profile], let bam = session.spaceDefinition(home)?.profileID,
                    let index = reportIndexBySpace[home] {
                     var spaceReport = report.spaces[index]
                     importFavorites(root: root, profile: bam, homeSpace: home, spaceReport: &spaceReport)
                     report.spaces[index] = spaceReport
                     continue
                 }
+                // A profile used by any source Space is not an orphan, even when
+                // that Space was left out, removed or skipped: its Favorites
+                // follow the Space selection and never go to a recovery Space.
+                if sourceProfiles.contains(profile) {
+                    report.excludedFavorites += source.nodes[root]?.children.filter { links["arc:\($0)"] == nil }.count ?? 0
+                    continue
+                }
+                guard source.nodes[root] != nil else { report.missingItems += 1; continue }
                 let count = source.nodes[root]?.children.filter { id in
                     if case .tab = source.nodes[id]?.kind { return links["arc:\(id)"] == nil } else { return false }
                 }.count ?? 0

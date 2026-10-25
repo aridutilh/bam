@@ -241,6 +241,45 @@ import Foundation
         let (fromCopy, _) = ArcImport.apply(try ArcImport.load(from: copy), to: restored)
         expect(fromCopy.tabs.count == restored.tabs.count, "A copied or renamed source adds nothing")
 
+        // A removed imported Space stays removed when Arc has nothing new for it…
+        var removed = restored
+        let homeSpace = removed.spaces.first { $0.name == "Home" }!.id
+        _ = removed.deleteSpace(id: homeSpace, movingTabsTo: work.id)
+        removed.tabs.removeAll { $0.space == work.id && $0.title == "Recipes" }
+        let spacesBefore = removed.spaces.count
+        let (afterRemoval, removalReport) = ArcImport.apply(source, to: removed)
+        expect(afterRemoval.spaces.count == spacesBefore && removalReport.removedSpaces == 1 && removalReport.importedTabs == 0,
+               "A deleted imported Space is not recreated empty")
+        // …but returns for genuinely new Arc items.
+        let grown = standardFixture()
+        let homePinned = (try ArcImport.parse(grown.fixture.json())).spaces[1].pinnedRoot!
+        grown.fixture.tab("New Home Item", "https://new.example.com/", in: homePinned)
+        let (regrown, regrownReport) = ArcImport.apply(try ArcImport.parse(grown.fixture.json()), to: removed)
+        expect(regrown.spaces.count == spacesBefore + 1 && regrownReport.importedTabs == 1, "New items in a removed Space bring it back with only the new items")
+
+        // Space selection is independent of Favorites orphan detection.
+        var onlyWork = ArcImport.Options(); onlyWork.spaceIDs = [source.spaces[0].id]; onlyWork.includeUnattachedProfiles = true
+        let (workOnly, workOnlyReport) = ArcImport.apply(source, to: BrowserSession.fresh(), options: onlyWork)
+        expect(!workOnly.spaces.contains { $0.name == "Home" } && !workOnly.tabs.contains { $0.title == "Home Mail" },
+               "Favorites of a left-out Space are not imported into a recovery Space")
+        expect(workOnlyReport.excludedFavorites == 1 && workOnly.spaces.filter { $0.name.hasPrefix("Arc Favorites") }.count == 1,
+               "Only true orphan profiles get recovery Spaces")
+
+        // Damaged references are reported, not silently omitted; huge emoji codes don't trap.
+        var damaged = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+        var dSidebar = damaged["sidebar"] as! [String: Any]; var dContainers = dSidebar["containers"] as! [Any]
+        var dMain = dContainers[1] as! [String: Any]; var dSpaces = dMain["spaces"] as! [Any]
+        var firstSpace = dSpaces[1] as! [String: Any]
+        firstSpace["newContainerIDs"] = [["pinned": [:]], "missing-root", ["unpinned": [:]], "missing-today"] as [Any]
+        firstSpace["customInfo"] = ["iconType": ["emoji": Int.max]]
+        dSpaces[1] = firstSpace; dMain["spaces"] = dSpaces
+        dMain["topAppsContainerIDs"] = (dMain["topAppsContainerIDs"] as! [Any]) + [["default": true], "missing-favorites"]
+        dContainers[1] = dMain; dSidebar["containers"] = dContainers; damaged["sidebar"] = dSidebar
+        let damagedSource = try ArcImport.parse(try JSONSerialization.data(withJSONObject: damaged))
+        expect(damagedSource.spaces[0].emoji == nil, "Out-of-range numeric emoji is ignored safely")
+        let (_, damagedReport) = ArcImport.apply(damagedSource, to: BrowserSession.fresh())
+        expect(damagedReport.missingItems >= 3, "Missing pinned, Today and Favorites roots are reported")
+
         // Optional recovery of unattached profiles into their own Space and profile.
         var options = ArcImport.Options(); options.includeUnattachedProfiles = true
         let (recovered, recoveredReport) = ArcImport.apply(source, to: BrowserSession.fresh(), options: options)
@@ -270,6 +309,20 @@ import Foundation
         items = (main["items"] as! [Any]); items[0] = "mismatched-id"; main["items"] = items + [""]
         if case .malformed = failure(try JSONSerialization.data(withJSONObject: ["version": 1, "sidebar": ["containers": [["global": [:]], main]]])) {}
         else { expect(false, "Mismatched item identifier rejected") }
+
+        // Damaged child lists and hostile nesting refuse the whole import.
+        let badChildren = Fixture(); let badSpace = badChildren.space("Bad", profile: nil)
+        var badRoot = badChildren.nodes[badSpace.pinned]!; badRoot["childrenIds"] = [1, 2]; badChildren.nodes[badSpace.pinned] = badRoot
+        if case .malformed = failure(badChildren.json()) {} else { expect(false, "Non-string child IDs refused") }
+        let hostile = Fixture(); let hostileSpace = hostile.space("Deep", profile: nil)
+        var level = hostileSpace.pinned
+        for _ in 0...(ArcImport.maximumNesting + 1) { level = hostile.node(["list": [:]], parent: level) }
+        if case .malformed = failure(hostile.json()) {} else { expect(false, "Excessive nesting refused before traversal") }
+        // A renamed Today tab keeps its Arc name.
+        let renamed = Fixture(); let renamedSpace = renamed.space("Renamed", profile: nil)
+        renamed.tab("Page Title", "https://renamed.example.com/", in: renamedSpace.unpinned, custom: "My Name")
+        let (renamedSession, _) = ArcImport.apply(try ArcImport.parse(renamed.json()), to: BrowserSession.fresh())
+        expect(renamedSession.tabs.contains { $0.title == "My Name" && !$0.isSaved }, "Renamed Today tab keeps its name")
 
         // Cycles and missing children are survived and reported.
         let cyclic = Fixture()
