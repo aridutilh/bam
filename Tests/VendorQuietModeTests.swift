@@ -34,6 +34,8 @@ import Foundation
         check(!quiet.faviconDocumentDiscovery && !quiet.automaticTabSleeping, "quiet: the browser's own automatic evaluations are off")
         check(!quiet.hostEvaluations && normal.hostEvaluations, "quiet permits no host evaluation at all")
         check(quiet.responderSnapshots && Q.maximumResponderSnapshots <= 150, "quiet: bounded native responder snapshots")
+        check(!quiet.readPopupGetters && normal.readPopupGetters,
+              "quiet never reads the popup factory getters (popupPopover/popupWebView create and load the popup); default still does")
 
         // Results: default unchanged; quiet never completed, a clean interval is distinct (exit 3), anything else failed.
         check(Q.result(quiet: false, success: true, quietIntervalClean: true) == Q.Result(status: .completed, completed: true, exitCode: 0), "default success")

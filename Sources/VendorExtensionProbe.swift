@@ -397,8 +397,10 @@ import WebKit
                     button.performClick(nil)
                 }
             }
-            if invokedAction?.popupPopover?.isShown == true { observations["action_popup_presented"] = true }
-            if let popup = invokedAction?.popupWebView { notePopup(popup) }
+            if plan.readPopupGetters {
+                if invokedAction?.popupPopover?.isShown == true { observations["action_popup_presented"] = true }
+                if let popup = invokedAction?.popupWebView { notePopup(popup) }
+            }
             if plan.openFallbackPage && !fallbackOpened && elapsed >= 5 {
                 fallbackOpened = true
                 let options = manifest["options_ui"] as? [String: Any]
@@ -428,13 +430,22 @@ import WebKit
                 observations["controller_configuration_persistent"] = controllerConfigurationPersistent
                 observations["manifest_errors"] = context.webExtension.errors.prefix(20).map(errorDescription)
                 observations["context_error_count"] = context.errors.count
-                if let action = invokedAction ?? context.action(for: nil) {
-                    observations["action_has_popup"] = action.presentsPopup
-                    observations["action_popup_is_shown"] = action.popupPopover?.isShown == true
-                    if let popup = action.popupWebView {
-                        notePopup(popup)
-                        if plan.samplePages { samplePage(popup, key: "action_popup", context: context) }
+                if plan.readPopupGetters {
+                    if let action = invokedAction ?? context.action(for: nil) {
+                        observations["action_has_popup"] = action.presentsPopup
+                        observations["action_popup_is_shown"] = action.popupPopover?.isShown == true
+                        if let popup = action.popupWebView {
+                            notePopup(popup)
+                            if plan.samplePages { samplePage(popup, key: "action_popup", context: context) }
+                        }
                     }
+                } else {
+                    // Quiet: no WebKit action getter at all (action(for:) is get-or-create; popupPopover/popupWebView create
+                    // and load the popup). Popup presence comes from the manifest only.
+                    let declared = ((manifest["action"] as? [String: Any])?["default_popup"] as? String).map { !$0.isEmpty } ?? false
+                    observations["action_has_popup"] = declared
+                    observations["action_has_popup_source"] = "manifest default_popup (quiet; WebKit action not read)"
+                    observations["action_popup_is_shown"] = "not read (quiet: the popup getters create and load the popup)"
                 }
                 for (tabID, web) in browser.browsers where plan.samplePages && web.url.map({ BrowserExtensions.isExtensionURL($0, ownedBy: context) }) == true {
                     samplePage(web, key: "tab_\(tabID.uuidString)", context: context)
@@ -706,7 +717,10 @@ import WebKit
                     if let offscreen = runtime?.compatibility.offscreen?.currentDocument(for: context.uniqueIdentifier) {
                         ownedViews.append(WeakView(offscreen))
                     }
-                    if let popup = context.action(for: nil)?.popupWebView { notePopup(popup) }
+                    // Quiet: not read at all (the getter would create and load a popup during teardown). Quiet makes no
+                    // claim that no popup exists (a person may open one); any popup is not inspected and, like the
+                    // background page, is covered only by the tracked WKWebExtensionController's release.
+                    if plan.readPopupGetters, let popup = context.action(for: nil)?.popupWebView { notePopup(popup) }
                     observations["context_errors"] = context.errors.prefix(20).map(errorDescription)
                     observations["context_error_count"] = context.errors.count
                 }

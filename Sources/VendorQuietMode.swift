@@ -37,15 +37,20 @@ enum VendorQuietMode {
         /// When false, the probe turns automatic tab sleeping (and its page activity inspection) off before any load.
         var automaticTabSleeping: Bool
         var responderSnapshots: Bool
+        /// `WKWebExtension.Action.popupPopover` / `popupWebView` are factory getters: reading either creates the popup
+        /// web view and loads it (WebKit WebExtensionActionCocoa). Quiet never reads them; `presentsPopup` is metadata only.
+        var readPopupGetters: Bool
         /// Any host-initiated page or extension-document evaluation the plan permits.
         var hostEvaluations: Bool { sampleSite || samplePages || backgroundProbe || documentModeMeasurement || faviconDocumentDiscovery || automaticTabSleeping }
     }
     static func plan(quiet: Bool) -> Plan {
         quiet
             ? Plan(invokeAction: false, openFallbackPage: false, sampleSite: false, samplePages: false, backgroundProbe: false,
-                   documentModeMeasurement: false, faviconDocumentDiscovery: false, automaticTabSleeping: false, responderSnapshots: true)
+                   documentModeMeasurement: false, faviconDocumentDiscovery: false, automaticTabSleeping: false, responderSnapshots: true,
+                   readPopupGetters: false)
             : Plan(invokeAction: true, openFallbackPage: true, sampleSite: true, samplePages: true, backgroundProbe: true,
-                   documentModeMeasurement: true, faviconDocumentDiscovery: true, automaticTabSleeping: true, responderSnapshots: false)
+                   documentModeMeasurement: true, faviconDocumentDiscovery: true, automaticTabSleeping: true, responderSnapshots: false,
+                   readPopupGetters: true)
     }
 
     enum Status: String { case completed, quietUnmeasured = "quiet-unmeasured", failed }
