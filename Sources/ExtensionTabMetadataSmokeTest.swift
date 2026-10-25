@@ -225,12 +225,24 @@ import WebKit
             try check(reference != nil && String(describing: reference!) == String(describing: facade ?? []),
                       "filter \(filter) differs from WebKit's own: \(String(describing: facade)) vs \(String(describing: reference))")
         }
+        // WebKit may refuse synchronously (a throw from the call) or asynchronously (a rejected promise); record which,
+        // separately for the facade and the captured native method, and require the same form and message.
         let invalid = try await js(noHost.page, """
-            const wrapped = await browser.tabs.query({url: 'not a pattern'}).then((t) => 'resolved:' + t.length, (e) => String(e && e.message));
-            const native = await nat('tabs', 'query', {url: 'not a pattern'}).then((t) => 'resolved:' + t.length, (e) => String(e && e.message));
+            const outcome = async (call) => {
+              let result;
+              try { result = call(); } catch (error) { return {form: 'throw', message: String(error && error.message || error)}; }
+              try { const value = await result; return {form: 'resolve', message: Array.isArray(value) ? 'tabs:' + value.length : typeof value}; }
+              catch (error) { return {form: 'reject', message: String(error && error.message || error)}; }
+            };
+            const wrapped = await outcome(() => browser.tabs.query({url: 'not a pattern'}));
+            const native = await outcome(() => nat('tabs', 'query', {url: 'not a pattern'}));
             return {wrapped, native};
             """)
-        try check(invalid["wrapped"] as? String == invalid["native"] as? String, "an invalid url filter did not keep WebKit's own outcome: \(invalid)")
+        let wrappedOutcome = invalid["wrapped"] as? [String: Any], nativeOutcome = invalid["native"] as? [String: Any]
+        try check(nativeOutcome?["form"] as? String != nil && nativeOutcome?["form"] as? String != "resolve" && !((nativeOutcome?["message"] as? String) ?? "").isEmpty,
+                  "WebKit did not refuse an invalid url filter, so the facade comparison has no reference: \(invalid)")
+        try check(wrappedOutcome?["form"] as? String == nativeOutcome?["form"] as? String && wrappedOutcome?["message"] as? String == nativeOutcome?["message"] as? String,
+                  "an invalid url filter did not keep WebKit's own failure form and message: \(invalid)")
 
         // 5. Topology changes between the token and the answer (engine hook) never put a value on the wrong tab.
         var phases: [String: Int] = [:]
