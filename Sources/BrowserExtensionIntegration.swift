@@ -91,7 +91,17 @@ import WebKit
         return value
     }
     func configureExtensions(_ configuration: WKWebViewConfiguration, profileID: UUID) {
-        if #available(macOS 15.4, *) { browserExtensions.configure(configuration, profileID: profileID) }
+        if #available(macOS 15.4, *) {
+            preloadHistoryForExtensions(profileID: profileID)
+            browserExtensions.configure(configuration, profileID: profileID)
+        }
+    }
+    /// The profile's library is loaded as part of preparing its extension runtime, before any of that
+    /// profile's extensions can run. So history.search reads memory only and never triggers disk I/O.
+    /// Not in private windows (no library file, and history is unavailable there).
+    func preloadHistoryForExtensions(profileID: UUID) {
+        guard !privateMode else { return }
+        _ = library(for: profileID)
     }
     func whenExtensionsReady(profileID: UUID, perform: @escaping @MainActor () -> Void) {
         if #available(macOS 15.4, *) { browserExtensions.whenReady(profileID: profileID, perform: perform) }
@@ -240,6 +250,7 @@ import WebKit
         guard #available(macOS 15.4, *) else { manageExtensions(sender); return }
         let profile = commandProfileID
         let configuration = WKWebViewConfiguration(); configuration.websiteDataStore = profileStores.store(for: profile)
+        preloadHistoryForExtensions(profileID: profile)
         browserExtensions.configure(configuration, profileID: profile)
         browserExtensions.showLibrary(profileID: profile, relativeTo: NSApp.keyWindow ?? view.window)
     }
@@ -250,6 +261,7 @@ import WebKit
         }
         let profile = commandProfileID
         let configuration = WKWebViewConfiguration(); configuration.websiteDataStore = profileStores.store(for: profile)
+        preloadHistoryForExtensions(profileID: profile)
         browserExtensions.configure(configuration, profileID: profile)
         browserExtensions.showManager(profileID: profile, relativeTo: NSApp.keyWindow ?? view.window)
     }
@@ -285,15 +297,14 @@ import WebKit
         }
     }
 
-    /// history.search's data: the registered profile's in-memory library, newest first. nil (an error for the
-    /// extension, never an empty history) in private windows, while closing or switching profiles, or for an
-    /// unknown profile. The library is created through library(for:) when it isn't in memory yet, which reads
-    /// Bam's own library file for that profile exactly as the History window does; no page or other file is read.
+    /// history.search's data: the registered profile's in-memory library, newest first. Memory only: no
+    /// file or page is ever read on request (the library is preloaded when the profile's extension runtime is
+    /// prepared). nil (an error for the extension, never an empty history) when that library isn't in memory,
+    /// in private windows, while closing or switching profiles, or for an unknown profile.
     @available(macOS 15.4, *)
     func extensionHistorySnapshot(profileID: UUID) -> [ExtensionHistory.Visit]? {
-        guard !privateMode, !isShuttingDown, !isApplyingProfileChange,
-              session.profiles.contains(where: { $0.id == profileID }) else { return nil }
-        return LibraryHistoryEvents.snapshot(library(for: profileID).history)
+        let available = !privateMode && !isShuttingDown && !isApplyingProfileChange && session.profiles.contains(where: { $0.id == profileID })
+        return LibraryHistoryEvents.snapshot(of: profileLibraries[profileID], available: available)
     }
 
     /// Sends this profile library's genuine changes to the extension engine. Assigning replaces any earlier

@@ -51,6 +51,14 @@ import AppKit
                 "An accepted visit whose write failed is both an event and in the snapshot (same in-memory history)")
         failingSent.removeAll()
         require(!failing.clearHistory() && failingSent.isEmpty && Events.snapshot(failing.history).count == 1, "A failed clear sends nothing and keeps history")
+        // Review of 64404ab: the snapshot reads memory only. An absent library is nil (no load on request).
+        let saved = dir.appendingPathComponent("history-snapshot-\(UUID().uuidString)/library.json")
+        let writer = BrowserLibrary(storageURL: saved)
+        writer.recordVisit(title: "On disk", address: "https://disk.example/")
+        require(writer.flush(), "Fixture history saved to disk")
+        require(Events.snapshot(of: nil, available: true) == nil, "No library in memory: nil, even though history exists on disk")
+        require(Events.snapshot(of: writer, available: false) == nil, "Unavailable (private, closing, switching, unknown profile): nil")
+        require(Events.snapshot(of: writer, available: true)?.map(\.url) == ["https://disk.example/"], "A loaded library is read from memory")
         print("PASS: \(checks) library history event checks")
     }
 }

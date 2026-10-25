@@ -8,6 +8,12 @@ enum LibraryHistoryEvents {
     }
     /// Newest first, as the library keeps it (at most 5,000).
     static func snapshot(_ history: [BrowserHistoryEntry]) -> [ExtensionHistory.Visit] { history.map(visit) }
+    /// The engine's snapshot for a profile: only an already-loaded library is read (memory only); an absent one
+    /// is nil, an error for the extension, never a trigger to load it from disk.
+    @MainActor static func snapshot(of library: BrowserLibrary?, available: Bool) -> [ExtensionHistory.Visit]? {
+        guard available, let library else { return nil }
+        return snapshot(library.history)
+    }
 
     /// The engine event for one library change; nil when there's nothing to tell (a trim that removed no URL
     /// entirely, because a retained visit still has it). `history` is the library's history after the change.
