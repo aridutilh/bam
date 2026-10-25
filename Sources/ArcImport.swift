@@ -289,6 +289,9 @@ enum ArcImport {
         var easels = 0
         /// Whether this import gives the Space its Arc theme.
         var theme = false
+        /// The Arc Space this row comes from; nil for a Space made to hold
+        /// Favorites from an Arc profile no Space uses.
+        var sourceSpaceID: String? = nil
     }
     struct Report: Equatable {
         var spaces: [SpaceReport] = []
@@ -713,7 +716,7 @@ enum ArcImport {
             if report.firstSpaceID == nil { report.firstSpaceID = space }
             if homeSpaces[arcSpace.profile] == nil { homeSpaces[arcSpace.profile] = space }
             var spaceReport = SpaceReport(title: session.spaceDefinition(space)?.name ?? title, emoji: session.spaceDefinition(space)?.emoji, isNew: isNew)
-            spaceReport.theme = themedNow
+            spaceReport.theme = themedNow; spaceReport.sourceSpaceID = arcSpace.id
             if let root = arcSpace.pinnedRoot, let node = source.nodes[root] {
                 visited.insert(root)
                 importPinned(node.children, space: space, folder: nil, depth: 0, isNewContainer: isNew, spaceReport: &spaceReport)

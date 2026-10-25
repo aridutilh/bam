@@ -33,6 +33,8 @@ import AppKit
             window.setContentSize(size)
             window.contentView!.layoutSubtreeIfNeeded()
             let content = window.contentView!.bounds
+            require(abs(content.width - size.width) < 0.5 && abs(content.height - size.height) < 0.5,
+                    "The sheet actually reaches \(label) (long labels wrap, never hold it wider): \(content.size)")
             for button in [sheet.importButton, sheet.cancelButton, sheet.chooseButton] {
                 let f = frame(button)
                 require(content.contains(f) && f.width >= button.intrinsicContentSize.width - 1, "\(button.title) fully visible at \(label): \(f)")
@@ -63,6 +65,91 @@ import AppKit
         // Unreadable source: clear error, nothing to import.
         sheet.load(URL(fileURLWithPath: "/nonexistent/StorableSidebar.json"))
         require(sheet.source == nil && !sheet.importButton.isEnabled && !sheet.status.isHidden, "Unreadable file reports an error and disables Import")
+
+        // Per-Space selection, with the real importer behind the preview.
+        let picker = ArcImportController()
+        let pickerWindow = picker.window!
+        picker.preview = { source, options in ArcImport.apply(source, to: BrowserSession.fresh(), options: options).report }
+        picker.load(fixture)
+        guard let source = picker.source else { fatalError("Fixture must load for selection checks") }
+        let ids = source.spaces.map(\.id)
+        let full = ArcImport.apply(source, to: BrowserSession.fresh(), options: ArcImport.Options()).report
+        require(ids.count == 3 && picker.spaceBoxes.count == 3 && ids.allSatisfy { picker.spaceBoxes[$0]?.state == .on },
+                "Every Arc Space gets a checkbox, all selected by default")
+        require(picker.options.spaceIDs == nil && picker.report == full, "All selected previews exactly the full import")
+        let work = picker.spaceBoxes[ids[0]]!
+        require(work.title.hasSuffix("Work") && (work.accessibilityLabel() ?? "").hasPrefix("\(work.title): ") && (work.accessibilityLabel() ?? "").contains("kept"),
+                "A Space row reads as one accessible checkbox: its name, then what it adds")
+        // Keyboard: toggling keeps focus on the same checkbox (rows aren't rebuilt).
+        pickerWindow.makeFirstResponder(work)
+        work.performClick(nil)
+        require(pickerWindow.firstResponder === work && picker.spaceBoxes[ids[0]] === work && work.state == .off, "Toggling keeps keyboard focus on that checkbox")
+        require(picker.options.spaceIDs == Set(ids.dropFirst()) && picker.report?.spaces.contains { $0.sourceSpaceID == ids[0] } == false
+                && (work.accessibilityLabel() ?? "").hasSuffix("Not imported") && picker.importButton.isEnabled,
+                "Leaving a Space out recomputes the preview without it; the rest still import")
+        require((picker.report?.importedTabs ?? 0) < full.importedTabs && picker.report?.excludedFavorites == 0,
+                "Its tabs are no longer counted; its profile's Favorites follow the other selected Space on that profile")
+        // Today/Favorites options keep their meaning with a partial selection.
+        picker.todayBox.performClick(nil)
+        require(picker.options.includeToday == false && picker.options.spaceIDs == Set(ids.dropFirst())
+                && picker.report == ArcImport.apply(source, to: .fresh(), options: picker.options).report,
+                "Options combine with the selection")
+        picker.todayBox.performClick(nil)
+        // No Space selected: explicit feedback, Import disabled — unless other-profile Favorites add something.
+        for id in ids.dropFirst() { picker.spaceBoxes[id]!.performClick(nil) }
+        require(picker.selectedSpaceCount == 0 && picker.report?.isEmpty == true && !picker.importButton.isEnabled,
+                "With nothing selected and nothing else to add, Import is disabled")
+        let unattached = picker.report?.unattachedProfiles ?? 0
+        require(unattached > 0 && !picker.recoverBox.isHidden, "The fixture's unused Arc profile keeps its recovery option visible")
+        require((picker.report?.excludedFavorites ?? 0) > 0, "Favorites of profiles whose Spaces are all left out are reported, not orphaned")
+        let headline = (picker.body.arrangedSubviews.first as? NSStackView)?.arrangedSubviews.compactMap { ($0 as? NSTextField)?.stringValue } ?? []
+        require(headline.first == "No Spaces selected" && headline.dropFirst().first?.contains("other Arc profiles") == true,
+                "Empty selection says so plainly and points to the other-profile option")
+        picker.recoverBox.performClick(nil)
+        require(picker.selectedSpaceCount == 0 && picker.report?.isEmpty == false && picker.importButton.isEnabled
+                && picker.report?.spaces.allSatisfy { $0.sourceSpaceID == nil } == true,
+                "Zero Spaces plus other-profile Favorites is a valid import (enabled from the actual plan)")
+        picker.recoverBox.performClick(nil)
+        // Reloading the same file keeps deliberate exclusions; a different file never inherits stale ones.
+        picker.spaceBoxes[ids[1]]!.performClick(nil)
+        picker.load(fixture)
+        require(picker.excludedSpaceIDs == [ids[0], ids[2]] && picker.spaceBoxes[ids[1]]?.state == .on && picker.spaceBoxes[ids[0]]?.state == .off,
+                "Reloading the same layout keeps the user's choices")
+        let workDir = URL(fileURLWithPath: CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : NSTemporaryDirectory())
+        try? FileManager.default.createDirectory(at: workDir, withIntermediateDirectories: true)
+        let otherFile = workDir.appendingPathComponent("other-layout.json")
+        var text = try! String(contentsOf: fixture, encoding: .utf8)
+        for (index, id) in ids.enumerated() { text = text.replacingOccurrences(of: id, with: "00000000-0000-4000-8000-0000000009\(String(format: "%02d", index))") }
+        for (old, long) in [("\"Work\"", "\"A Space with a very long imported name that must wrap or truncate nicely\""),
+                            ("\"Home\"", "\"Another long Space name from a different Arc layout file\"")] {
+            text = text.replacingOccurrences(of: "\"title\" : \(old)", with: "\"title\" : \(long)")
+        }
+        try! text.write(to: otherFile, atomically: true, encoding: .utf8)
+        picker.load(otherFile)
+        require(picker.source != nil && picker.excludedSpaceIDs.isEmpty && picker.options.spaceIDs == nil
+                && picker.spaceBoxes.count == 3 && picker.spaceBoxes.values.allSatisfy { $0.state == .on },
+                "A different layout starts with every Space selected; stale IDs never suppress it")
+        // Long Space names stay inside the scrolling body at every size, footer pinned.
+        for size in [ArcImportController.minimumSize, NSSize(width: 580, height: 560)] {
+            pickerWindow.setContentSize(size); pickerWindow.contentView!.layoutSubtreeIfNeeded()
+            let body = picker.body.convert(picker.body.bounds, to: nil)
+            let content = pickerWindow.contentView!.bounds
+            require(abs(content.width - size.width) < 0.5 && body.maxX <= content.maxX, "The sheet reaches \(size) and the body fits it: \(body) in \(content)")
+            for box in picker.spaceBoxes.values {
+                let f = box.superview!.convert(box.alignmentRect(forFrame: box.frame), to: nil)
+                require(f.minX >= body.minX - 0.5 && f.maxX <= body.maxX + 0.5, "Space rows stay within the body at \(size): \(f) in \(body)")
+            }
+            require(pickerWindow.contentView!.bounds.contains(picker.importButton.convert(picker.importButton.bounds, to: nil)),
+                    "Import stays visible with Space rows at \(size)")
+        }
+        // Commit carries the selection.
+        var committed: ArcImport.Options?
+        picker.onCommit = { _, options, done in committed = options; done(nil) }
+        let longBox = picker.spaceBoxes.values.first { $0.title.contains("very long") }!
+        longBox.performClick(nil)
+        picker.importButton.performClick(nil)
+        let longID = String(longBox.identifier!.rawValue.dropFirst("arc-space-".count))
+        require(committed?.spaceIDs?.contains(longID) == false && committed?.spaceIDs?.count == 2, "Import commits exactly the selected Spaces")
         print("PASS: \(checks) Arc import sheet layout and state checks")
     }
 }
