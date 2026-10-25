@@ -217,6 +217,93 @@ import AppKit
         futureLibrary.onHistoryChange = { futureEvents.append($0) }
         futureLibrary.recordVisit(title: "Refused", address: "https://future.example/")
         check(!futureLibrary.clearHistory() && futureEvents.isEmpty, "When the library can't be changed, nothing is sent")
+        check(futureLibrary.recordVisit(title: "Refused", address: "https://future.example/") == nil, "A refused visit has no token")
+
+        // Late document titles (history-title-approval.md): only the recorded visit's title changes.
+        final class Writes: @unchecked Sendable {
+            private let lock = NSLock(); private var value = 0
+            var count: Int { lock.lock(); defer { lock.unlock() }; return value }
+            func add() { lock.lock(); value += 1; lock.unlock() }
+        }
+        let writes = Writes()
+        let titledFile = root.appendingPathComponent("titles/library.json")
+        let titled = BrowserLibrary(storageURL: titledFile, write: { snapshot, url in writes.add(); try LibraryWriter.writeFile(snapshot, to: url) })
+        var titleEvents: [BrowserLibrary.HistoryChange] = []
+        titled.onHistoryChange = { titleEvents.append($0) }
+        check(titled.recordVisit(title: "", address: "orbit://newtab") == nil, "A rejected visit has no token")
+        let beta = titled.recordVisit(title: "", address: "http://127.0.0.1:9/bookmarks/beta.html")!
+        check(titled.history[0].title == "127.0.0.1", "Empty title at didFinish: the host stands in (the observed defect)")
+        let betaBefore = titled.history[0]
+        let other = titled.recordVisit(title: "Other", address: "https://other.example/")!
+        check(titled.flush(), "Fixture visits saved")
+        titleEvents.removeAll()
+        let writesBefore = writes.count
+        check(titled.updateVisitTitle("Bam bookmark beta", for: beta), "The late title corrects the recorded visit")
+        let betaAfter = titled.history[1]
+        check(betaAfter.id == betaBefore.id && betaAfter.visitedAt == betaBefore.visitedAt && betaAfter.address == betaBefore.address
+              && betaAfter.title == "Bam bookmark beta" && titled.history.count == 2 && titled.history[0].id == other.id
+              && titled.history[0].title == "Other", "Only that entry's title changes: same id, time, order and count; the newer entry is untouched")
+        check(titleEvents.isEmpty, "A title correction sends no event (no new visit)")
+        check(titled.flush() && writes.count == writesBefore + 1, "The correction is one ordered write")
+        let reread = BrowserLibrary(storageURL: titledFile)
+        check(reread.history.map(\.title) == ["Other", "Bam bookmark beta"] && abs(reread.history[1].visitedAt.timeIntervalSince(betaBefore.visitedAt)) < 0.002,
+              "The corrected title is saved with the original visit time (stored to the millisecond)")
+        check(reread.recordVisit(title: "x", address: "https://reread.example/") != nil && !reread.updateVisitTitle("Stolen", for: beta),
+              "A token from another library instance (or a startup-loaded entry) never matches")
+        // Rejected corrections change and write nothing.
+        let quiet = writes.count
+        check(!titled.updateVisitTitle("Bam bookmark beta", for: beta), "An unchanged title is refused")
+        check(!titled.updateVisitTitle("   ", for: beta) && !titled.updateVisitTitle("", for: beta), "An empty title is refused")
+        let wrongAddress = BrowserLibrary.VisitToken(id: beta.id, address: "http://127.0.0.1:9/bookmarks/alpha.html", revision: beta.revision)
+        check(!titled.updateVisitTitle("Wrong", for: wrongAddress), "Another address is refused even with the right id and revision")
+        check(titled.flush() && writes.count == quiet && titled.history[1].title == "Bam bookmark beta", "Refused corrections write nothing")
+        // A coalesced revisit reuses the id: the earlier visit's late title must not overwrite the newer visit.
+        let revisitFirst = titled.recordVisit(title: "", address: "https://same.example/page")!
+        let revisitSecond = titled.recordVisit(title: "Newer visit", address: "https://same.example/page")!
+        check(revisitFirst.id == revisitSecond.id && revisitFirst.revision != revisitSecond.revision, "A coalesced revisit keeps the id with a new revision")
+        check(!titled.updateVisitTitle("Older document", for: revisitFirst) && titled.history[0].title == "Newer visit",
+              "The earlier visit's late title is stale after the coalesced revisit")
+        check(titled.updateVisitTitle("Newer document", for: revisitSecond) && titled.history[0].title == "Newer document", "The newest visit's title applies")
+        // Trimmed and cleared visits.
+        let trimTitles = BrowserLibrary(storageURL: nil)
+        let oldestToken = trimTitles.recordVisit(title: "", address: "https://oldest.example/")!
+        for n in 0..<5_000 { trimTitles.recordVisit(title: "F\(n)", address: "https://fill.example/\(n)") }
+        check(!trimTitles.updateVisitTitle("Late", for: oldestToken) && !trimTitles.history.contains { $0.title == "Late" }, "A trimmed visit can't be retitled")
+        let survivor = trimTitles.recordVisit(title: "", address: "https://survivor.example/")!
+        check(trimTitles.clearHistory() && !trimTitles.updateVisitTitle("Late", for: survivor) && trimTitles.history.isEmpty, "A cleared visit can't be retitled")
+        let failingTitles = BrowserLibrary(storageURL: root.appendingPathComponent("failing-titles/library.json"), write: { _, _ in throw WriteRefused() })
+        let kept = failingTitles.recordVisit(title: "", address: "https://kept.example/")!
+        check(!failingTitles.clearHistory() && failingTitles.updateVisitTitle("Still here", for: kept) && failingTitles.history[0].title == "Still here",
+              "A failed clear keeps the visit retitlable; a failing write keeps the in-memory title")
+
+        // The per-view follow-up: current document and profile only; only accepted changes use the budget.
+        let profile = UUID(), elsewhere = UUID()
+        let follow = BrowserLibrary(storageURL: nil)
+        let page = URL(string: "http://127.0.0.1:9/passwords/plain.html")!
+        var followUp = HistoryTitleFollowUp(profileID: profile, visit: follow.recordVisit(title: "", address: page.absoluteString)!)
+        check(followUp.candidate(url: page, title: "Bam plain login comparison", profileID: profile) == "Bam plain login comparison", "Same document and profile: offered")
+        check(followUp.candidate(url: URL(string: page.absoluteString + "#x"), title: "T", profileID: profile) == nil
+              && followUp.candidate(url: URL(string: "http://127.0.0.1:9/bookmarks/beta.html"), title: "T", profileID: profile) == nil,
+              "A fragment change or another document is skipped (an old title delivered after a new navigation can't land)")
+        check(followUp.candidate(url: page, title: "T", profileID: elsewhere) == nil && followUp.candidate(url: page, title: "T", profileID: nil) == nil,
+              "Another or unknown profile is skipped")
+        check(!followUp.apply(url: page, title: "", profileID: profile, library: follow) && !followUp.apply(url: page, title: nil, profileID: profile, library: follow)
+              && !followUp.apply(url: page, title: "T", profileID: profile, library: nil) && followUp.updates == 0, "Empty, missing or no library: budget untouched")
+        check(followUp.apply(url: page, title: "Bam plain login comparison", profileID: profile, library: follow) && followUp.updates == 1
+              && follow.history[0].title == "Bam plain login comparison", "An accepted change counts once")
+        for _ in 0..<10 { _ = followUp.apply(url: page, title: "Bam plain login comparison", profileID: profile, library: follow) }
+        check(followUp.updates == 1, "Repeated unchanged observations don't use the budget")
+        for n in 2...5 { check(followUp.apply(url: page, title: "Title \(n)", profileID: profile, library: follow), "Change \(n) accepted") }
+        check(followUp.isSpent && !followUp.apply(url: page, title: "Title 6", profileID: profile, library: follow) && follow.history[0].title == "Title 5",
+              "After five accepted changes nothing more is written")
+        // Two tabs, same URL: the coalesced revisit invalidates the first tab's follow-up.
+        let shared = URL(string: "https://shared.example/")!
+        var firstTab = HistoryTitleFollowUp(profileID: profile, visit: follow.recordVisit(title: "", address: shared.absoluteString)!)
+        var secondTab = HistoryTitleFollowUp(profileID: profile, visit: follow.recordVisit(title: "Second", address: shared.absoluteString)!)
+        check(!firstTab.apply(url: shared, title: "First tab's old title", profileID: profile, library: follow) && firstTab.updates == 0
+              && follow.history[0].title == "Second", "The earlier tab's late title doesn't overwrite the newer visit, and costs nothing")
+        check(secondTab.apply(url: shared, title: "Second document", profileID: profile, library: follow) && follow.history[0].title == "Second document",
+              "The newer tab's title applies")
         print("PASS: \(checks) library metadata checks")
     }
 }
