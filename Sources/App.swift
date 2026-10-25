@@ -20,6 +20,7 @@ import WebKit
     var onboarding: OnboardingController?
     var settings: SettingsController?
     var extensionsMenu: NSMenu?
+    var appearanceMenu: NSMenu?
     private let quitCoordinator = QuitCoordinator()
     private var mainWindowWasClosed = false
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -70,6 +71,8 @@ import WebKit
         let sessionFileExists = FileManager.default.fileExists(atPath: support.appendingPathComponent("session.json").path)
         if !preview { BrowserController.restoreDefaultSearchEngine() }
         ShortcutStore.shared.configure(persists: !preview)
+        // Before any window exists, so every window opens in the chosen appearance.
+        BrowserAppearance.restore(persists: !preview)
         if #available(macOS 15.4, *) {
             ExtensionManagement.dress = { BamSheetStyle.dress(window: $0, root: $1) }
             ExtensionManagement.rowView = { BamTableRowView() }
@@ -82,13 +85,13 @@ import WebKit
         window.title = launch.windowTitle; window.titleVisibility = .hidden; window.titlebarAppearsTransparent = true
         window.isReleasedWhenClosed = false; window.delegate = self
         window.isMovableByWindowBackground = false; window.minSize = NSSize(width: 760, height: 540)
-        window.backgroundColor = NSColor(white: 0.10, alpha: 1)
+        window.backgroundColor = BrowserChrome.windowBackground
         window.contentViewController = controller
         let available = NSScreen.main?.visibleFrame.size ?? NSSize(width: 1440, height: 900)
         window.setContentSize(NSSize(width: min(1260, available.width - 60), height: min(800, available.height - 60)))
         window.center()
         if !preview { window.setFrameAutosaveName(launch.windowAutosaveName) }
-        window.appearance = NSAppearance(named: .darkAqua)
+        // The window follows NSApp.appearance (View ▸ Appearance / Settings).
         controller.onSpacesChanged = { [weak self] in
             self?.rebuildSpacesMenu()
             if self?.settings?.window.isVisible == true { self?.settings?.refresh() }
@@ -96,6 +99,9 @@ import WebKit
         buildMenus(); window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
         NotificationCenter.default.addObserver(forName: ShortcutStore.didChange, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.applyShortcuts() }
+        }
+        NotificationCenter.default.addObserver(forName: BrowserAppearance.didChange, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.appearanceDidChange() }
         }
         ShortcutStore.shared.reservedOwner = { [weak self] combo in self?.fixedMenuItem(wearing: combo)?.title }
         externalURLs.connect { [weak self] urls in
@@ -252,6 +258,17 @@ import WebKit
             item.keyEquivalent = combo.key; item.keyEquivalentModifierMask = combo.modifiers
         }
     }
+    @objc func chooseAppearance(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String, let choice = BrowserAppearance(rawValue: raw) else { return }
+        BrowserAppearance.apply(choice)
+    }
+    /// Keeps the View ▸ Appearance checkmark and an open Settings window in step.
+    func appearanceDidChange() {
+        for entry in appearanceMenu?.items ?? [] {
+            entry.state = (entry.representedObject as? String) == BrowserAppearance.current.rawValue ? .on : .off
+        }
+        if settings?.window.isVisible == true { settings?.refresh() }
+    }
     func rebuildSpacesMenu() {
         guard let spacesMenu, let controller else { return }
         spacesMenu.removeAllItems()
@@ -317,6 +334,16 @@ import WebKit
         item(edit, "Find Previous", #selector(BrowserController.findPrevious(_:)), "g", [.command, .shift], controller)
         item(edit, "Copy Current URL", #selector(BrowserController.copyCurrentURL(_:)), "c", [.command, .shift], controller)
         let view = menu("View")
+        let appearanceItem = NSMenuItem(title: "Appearance", action: nil, keyEquivalent: "")
+        let appearanceMenu = NSMenu(title: "Appearance")
+        for choice in BrowserAppearance.allCases {
+            let entry = NSMenuItem(title: choice.title, action: #selector(chooseAppearance(_:)), keyEquivalent: "")
+            entry.target = self; entry.representedObject = choice.rawValue
+            entry.state = choice == BrowserAppearance.current ? .on : .off
+            appearanceMenu.addItem(entry)
+        }
+        appearanceItem.submenu = appearanceMenu; view.addItem(appearanceItem); self.appearanceMenu = appearanceMenu
+        view.addItem(.separator())
         bound(view, "Toggle Sidebar", #selector(BrowserController.toggleSidebar(_:)), .toggleSidebar, controller)
         item(view, "Reset Sidebar Width", #selector(BrowserController.resetSidebar(_:)), "s", [.command, .shift], controller)
         bound(view, "Keep / Unkeep Tab", #selector(BrowserController.togglePin(_:)), .keepTab, controller)

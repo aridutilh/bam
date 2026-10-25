@@ -36,6 +36,7 @@ struct SettingsSnapshot {
     var keepAwakeHost: String? = nil
     var keepsCurrentSiteAwake = false
     var searchEngine: DefaultSearchEngine = .duckDuckGo
+    var appearance: BrowserAppearance = .system
     var spaces: [BrowserSpace] = BrowserSpace.defaults
     var currentSpaceID = 0
     var profileName = "Default"
@@ -56,6 +57,7 @@ struct SettingsActions {
     var manageExtensions: () -> Void = {}
     var showWelcome: () -> Void = {}
     var importFromArc: () -> Void = {}
+    var setAppearance: (BrowserAppearance) -> Void = { _ in }
     var openURL: (URL) -> Void = { _ in }
 }
 
@@ -312,7 +314,24 @@ struct SettingsActions {
         bring.add(BamRow(title: "Bring in your Arc sidebar",
                          detail: "Spaces, folders, kept tabs, Today tabs and Favorites from Arc’s layout file. Pages stay asleep until you open them.",
                          control: arc))
-        return [caption("Import"), bring, caption("Playback"), playback, caption("Memory"), memory, caption("Keyboard"), keys]
+        let look = BamCard(frame: .zero)
+        let choices = NSStackView(); choices.orientation = .horizontal; choices.spacing = 8
+        appearanceChips = choices
+        for (index, choice) in BrowserAppearance.allCases.enumerated() {
+            let chip = BamChip(title: choice.title)
+            chip.accent = accent; chip.isPicked = choice == snapshot.appearance; chip.tag = index
+            chip.setAccessibilityLabel("\(choice.title) appearance")
+            chip.target = self; chip.action = #selector(pickAppearance(_:))
+            choices.addArrangedSubview(chip)
+        }
+        look.add(BamRow(title: "Appearance", detail: "Light or dark browser chrome. System follows macOS; Space colors carry over in both.", control: choices))
+        return [caption("Look"), look, caption("Import"), bring, caption("Playback"), playback, caption("Memory"), memory, caption("Keyboard"), keys]
+    }
+    private weak var appearanceChips: NSStackView?
+    @objc private func pickAppearance(_ sender: BamChip) {
+        guard BrowserAppearance.allCases.indices.contains(sender.tag) else { return }
+        act { actions.setAppearance(BrowserAppearance.allCases[sender.tag]) }
+        for case let chip as BamChip in appearanceChips?.arrangedSubviews ?? [] { chip.isPicked = chip === sender }
     }
     @objc private func importFromArc() {
         window.orderOut(nil)

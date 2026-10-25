@@ -219,6 +219,13 @@ struct SidebarExtensionItem {
     @objc private func chooseSpaceFromMenu(_ sender: NSMenuItem) { onSpaceChange?(sender.tag) }
     @objc private func manageSpacesFromMenu() { onManageSpaces?() }
 
+    /// Custom-drawn controls resolve their colors at draw time; repaint them all.
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        func invalidate(_ view: NSView) { view.needsDisplay = true; view.subviews.forEach(invalidate) }
+        invalidate(self)
+    }
+
     // A vertical tab list is always at its horizontal edge. Ask AppKit to
     // forward that axis through its responder chain, including tracked events.
     override func wantsForwardedScrollEvents(for axis: NSEvent.GestureAxis) -> Bool {
@@ -600,7 +607,18 @@ struct SidebarExtensionItem {
     }
     fileprivate func handleTableArrow(_ delta: Int) -> Bool {
         let current = table.selectedRow
-        guard current >= 0 else { return false }
+        // No selected row (e.g. the active page is a Favorite): enter from the
+        // edge in the arrow's direction. A folder there takes focus; a tab row
+        // keeps the table's own selection behavior.
+        guard current >= 0 else {
+            let start = delta > 0 ? -1 : entries.count
+            var target = start + delta
+            while entries.indices.contains(target) {
+                if case .tab(let index) = entries[target] { return tabs[index].isFolder ? moveKeyboardFocus(from: start, by: delta) : false }
+                target += delta
+            }
+            return false
+        }
         // Only intercept when a folder lies between this row and the next tab.
         var target = current + delta
         while entries.indices.contains(target) {
@@ -654,7 +672,7 @@ struct SidebarExtensionItem {
         identifier = NSUserInterfaceItemIdentifier("sidebar-space-\(space.id)")
         heading.configure(space)
         table.setAccessibilityLabel("Tabs in \(space.name)")
-        let tint = ArkPalette.spaceColor(space.colorIndex)
+        let tint = ArkPalette.spaceTint(space.colorIndex)
         table.enumerateAvailableRowViews { [weak self] _, index in
             guard let self, let cell = self.table.view(atColumn: 0, row: index, makeIfNecessary: false) as? SidebarTabCell else { return }
             cell.row.configureSpace(id: space.id, tint: tint, destinations: destinations)
@@ -667,7 +685,7 @@ struct SidebarExtensionItem {
            focused === row || focused.isDescendant(of: row) { window?.makeFirstResponder(table) }
         row.update(item)
         row.setFavicon(superview == nil || item.isSplit ? nil : faviconProvider?(item.id))
-        if let spaceAppearance { row.configureSpace(id: spaceAppearance.id, tint: ArkPalette.spaceColor(spaceAppearance.colorIndex), destinations: destinations) }
+        if let spaceAppearance { row.configureSpace(id: spaceAppearance.id, tint: ArkPalette.spaceTint(spaceAppearance.colorIndex), destinations: destinations) }
         row.canMoveEarlier = item.hasEarlierSibling; row.canMoveLater = item.hasLaterSibling
         // Read the cell's current identity: AppKit can recycle it for a different tab.
         row.select = { [weak self, weak row] in if let id = row?.item.id { self?.select?(id) } }
@@ -764,15 +782,44 @@ struct SidebarExtensionItem {
     override init(frame: NSRect) { super.init(frame: frame); setAccessibilityElement(false) }
     required init?(coder: NSCoder) { fatalError() }
     override func draw(_ dirtyRect: NSRect) {
-        NSColor.white.withAlphaComponent(0.10).setFill()
+        ArkPalette.separator.setFill()
         NSRect(x: 10, y: bounds.midY, width: max(0,bounds.width-20), height: 1).fill()
     }
 }
 
+/// Sidebar colors resolve per appearance at draw time. Dark keeps Bam's
+/// established values; light follows Arc/Yab's light chrome: near-black ink,
+/// a lifted white selection, translucent white tiles and black-tinted hovers.
 @MainActor
 enum ArkPalette {
-    static let ink = NSColor(white: 0.94, alpha: 1)
-    static let secondary = NSColor(white: 0.73, alpha: 1)
+    private static func white(_ alpha: CGFloat) -> NSColor { NSColor(white: 1, alpha: alpha) }
+    private static func black(_ alpha: CGFloat) -> NSColor { NSColor(white: 0, alpha: alpha) }
+    static let ink = NSColor.chrome(light: NSColor(white: 0.11, alpha: 1), dark: NSColor(white: 0.94, alpha: 1))
+    static let secondary = NSColor.chrome(light: NSColor(white: 0.38, alpha: 1), dark: NSColor(white: 0.73, alpha: 1))
+    /// Hover wash for rows and icon buttons.
+    static let hover = NSColor.chrome(light: black(0.055), dark: white(0.07))
+    static let pressed = NSColor.chrome(light: black(0.10), dark: white(0.20))
+    static let iconHover = NSColor.chrome(light: black(0.06), dark: white(0.10))
+    /// The selected tab: a lifted pill.
+    static let selection = NSColor.chrome(light: white(0.86), dark: white(0.15))
+    static let selectionEdge = NSColor.chrome(light: black(0.06), dark: white(0.10))
+    static let field = NSColor.chrome(light: white(0.58), dark: white(0.09))
+    static let fieldHover = NSColor.chrome(light: white(0.75), dark: white(0.14))
+    static let tile = NSColor.chrome(light: white(0.46), dark: white(0.09))
+    static let tileHover = NSColor.chrome(light: white(0.66), dark: white(0.15))
+    static let tileActive = NSColor.chrome(light: white(0.94), dark: white(0.22))
+    static let tileRing = NSColor.chrome(light: black(0.10), dark: white(0.28))
+    static let separator = NSColor.chrome(light: black(0.08), dark: white(0.10))
+    /// Space icon tint: the pastel in dark mode, a deeper version on light chrome.
+    static func spaceTint(_ index: Int) -> NSColor { spaceTints[min(spaceTints.count - 1, max(0, index))] }
+    /// Built once so identity comparisons stay stable across updates.
+    private static let spaceTints: [NSColor] = spaceColors.map { base in
+        let deep = base.usingColorSpace(.deviceRGB).map {
+            NSColor(deviceHue: $0.hueComponent, saturation: min(1, $0.saturationComponent * 1.5 + 0.12),
+                    brightness: $0.brightnessComponent * 0.62, alpha: 1)
+        } ?? base
+        return .chrome(light: deep, dark: base)
+    }
     static let spaceColors = [
         NSColor(calibratedRed: 0.80, green: 0.72, blue: 0.96, alpha: 1),
         NSColor(calibratedRed: 0.88, green: 0.75, blue: 0.60, alpha: 1),
@@ -831,7 +878,7 @@ enum ArkPalette {
     }
     static func image(for space: BrowserSpace, pointSize: CGFloat) -> NSImage? {
         guard let emoji = space.emoji else {
-            return SidebarSymbol.image(named: space.symbol, color: ArkPalette.spaceColor(space.colorIndex), pointSize: pointSize)
+            return SidebarSymbol.image(named: space.symbol, color: ArkPalette.spaceTint(space.colorIndex), pointSize: pointSize)
         }
         let side = pointSize + 4
         return NSImage(size: NSSize(width: side, height: side), flipped: false) { rect in
@@ -922,7 +969,7 @@ private final class ArkIconButton: ArkHoverButton {
         needsDisplay = true
     }
     override func draw(_ dirtyRect: NSRect) {
-        if (hovered || isHighlighted) && isEnabled { fill(NSColor.white.withAlphaComponent(isHighlighted ? 0.20 : 0.10), radius: 7) }
+        if (hovered || isHighlighted) && isEnabled { fill(isHighlighted ? ArkPalette.pressed : ArkPalette.iconHover, radius: 7) }
         symbol(symbolName, rect: NSRect(x: (bounds.width - glyphSize) / 2, y: (bounds.height - glyphSize) / 2, width: glyphSize, height: glyphSize), color: ArkPalette.ink, size: glyphSize)
     }
 }
@@ -936,7 +983,7 @@ private final class ArkIconButton: ArkHoverButton {
     // A quiet icon at the address field's trailing edge, like Arc's toolbar
     // extension affordance; the full library opens on click.
     override func draw(_ dirtyRect: NSRect) {
-        if hovered || isHighlighted { fill(NSColor.white.withAlphaComponent(isHighlighted ? 0.20 : 0.12), radius: 7) }
+        if hovered || isHighlighted { fill(isHighlighted ? ArkPalette.pressed : ArkPalette.iconHover, radius: 7) }
         symbol("puzzlepiece.extension", rect: NSRect(x: (bounds.width - 14) / 2, y: (bounds.height - 14) / 2, width: 14, height: 14),
                color: hovered ? ArkPalette.ink : ArkPalette.secondary, size: 14)
     }
@@ -956,7 +1003,7 @@ private final class ArkIconButton: ArkHoverButton {
         needsDisplay = true
     }
     override func draw(_ dirtyRect: NSRect) {
-        if (hovered || isHighlighted) && isEnabled { fill(NSColor.white.withAlphaComponent(isHighlighted ? 0.20 : 0.10), radius: 7) }
+        if (hovered || isHighlighted) && isEnabled { fill(isHighlighted ? ArkPalette.pressed : ArkPalette.iconHover, radius: 7) }
         let rect = bounds.insetBy(dx: 6, dy: 6)
         if let icon = item.icon {
             icon.draw(in: SidebarSymbol.fittedRect(imageSize: icon.size, in: rect), from: .zero,
@@ -984,7 +1031,7 @@ private final class ArkIconButton: ArkHoverButton {
     required init?(coder: NSCoder) { fatalError() }
     override func draw(_ dirtyRect: NSRect) {
         // A lifted, translucent field like Arc/Yab rather than a dark well.
-        fill(NSColor.white.withAlphaComponent(hovered || isHighlighted ? 0.14 : 0.09), radius: 10)
+        fill(hovered || isHighlighted ? ArkPalette.fieldHover : ArkPalette.field, radius: 10)
         text(address, rect: NSRect(x: 12, y: (bounds.height - 18) / 2, width: max(0, bounds.width - 12 - trailingInset), height: 18),
              size: 13.5, color: ArkPalette.ink.withAlphaComponent(0.92))
     }
@@ -1027,9 +1074,9 @@ private final class ArkFavoriteButton: ArkHoverButton {
         else { super.keyDown(with: event) }
     }
     override func draw(_ dirtyRect: NSRect) {
-        fill(NSColor.white.withAlphaComponent(item.isActive ? 0.22 : hovered ? 0.15 : 0.09), radius: 10)
+        fill(item.isActive ? ArkPalette.tileActive : hovered ? ArkPalette.tileHover : ArkPalette.tile, radius: 10)
         if item.isActive {
-            NSColor.white.withAlphaComponent(0.28).setStroke()
+            ArkPalette.tileRing.setStroke()
             let ring = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.75, dy: 0.75), xRadius: 10, yRadius: 10)
             ring.lineWidth = 1; ring.stroke()
         }
@@ -1082,7 +1129,7 @@ private final class ArkNewTabButton: ArkHoverButton {
     @objc private func hint() { toolTip = "New tab (\(ShortcutStore.shared.combo(for: .newTab).compact))" }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     override func draw(_ dirtyRect: NSRect) {
-        if hovered { fill(NSColor.white.withAlphaComponent(0.07), radius: ArkMetrics.rowRadius) }
+        if hovered { fill(ArkPalette.hover, radius: ArkMetrics.rowRadius) }
         symbol("plus", rect: NSRect(x: 10, y: (bounds.height - 15) / 2, width: 15, height: 15), color: ArkPalette.secondary, size: 15)
         text("New Tab", rect: NSRect(x: 36, y: (bounds.height - 18) / 2, width: max(0, bounds.width - 48), height: 18),
              size: ArkType.rowSize, color: ArkPalette.secondary)
@@ -1105,13 +1152,13 @@ private final class ArkSpaceButton: ArkHoverButton {
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     func configure(_ space: BrowserSpace) {
-        name = space.name; symbolName = space.symbol; emoji = space.emoji; tint = ArkPalette.spaceColor(space.colorIndex)
+        name = space.name; symbolName = space.symbol; emoji = space.emoji; tint = ArkPalette.spaceTint(space.colorIndex)
         setAccessibilityLabel("Switch to \(name) space")
         toolTip = name
         needsDisplay = true
     }
     override func draw(_ dirtyRect: NSRect) {
-        if selected || hovered { fill(NSColor.white.withAlphaComponent(selected ? 0.14 : 0.07), radius: 7) }
+        if selected || hovered { fill(selected ? ArkPalette.selection : ArkPalette.hover, radius: 7) }
         // Unselected Spaces recede, as Arc's footer dots do.
         let size: CGFloat = emoji == nil ? 16 : 15
         ArkSpaceIcon.draw((emoji, symbolName, tint), in: NSRect(x: (bounds.width - size) / 2, y: (bounds.height - size) / 2, width: size, height: size),
@@ -1134,14 +1181,14 @@ private final class ArkSpaceHeading: ArkHoverButton {
     init() { super.init(frame: .zero); toolTip = "Manage Spaces" }
     required init?(coder: NSCoder) { fatalError() }
     func configure(_ space: BrowserSpace) {
-        name = space.name; symbolName = space.symbol; emoji = space.emoji; tint = ArkPalette.spaceColor(space.colorIndex)
+        name = space.name; symbolName = space.symbol; emoji = space.emoji; tint = ArkPalette.spaceTint(space.colorIndex)
         setAccessibilityLabel("Manage Spaces — \(name)")
         needsDisplay = true
     }
     // Arc and Yab label the Space quietly above its rows: a small icon and a
     // muted semibold name, aligned with the row icons below.
     override func draw(_ dirtyRect: NSRect) {
-        if hovered { fill(NSColor.white.withAlphaComponent(0.06), radius: 7) }
+        if hovered { fill(ArkPalette.hover, radius: 7) }
         let iconSize: CGFloat = emoji == nil ? 15 : 14
         ArkSpaceIcon.draw((emoji, symbolName, tint), in: NSRect(x: 2, y: (bounds.height - iconSize) / 2, width: iconSize, height: iconSize))
         text(name, rect: NSRect(x: 28, y: (bounds.height - 18) / 2, width: max(0, bounds.width - 46), height: 18),
@@ -1177,7 +1224,7 @@ private final class ArkTabRow: ArkFlippedView {
     var canMoveLater = false
     private var currentSpace = 0
     private var destinations: [BrowserSpace] = []
-    private var spaceTint = ArkPalette.spaceColor(0)
+    private var spaceTint = ArkPalette.spaceTint(0)
     private let titleLabel: NSTextField
     private let subtitleLabel: NSTextField
     private let iconView = NSImageView()
@@ -1302,12 +1349,22 @@ private final class ArkTabRow: ArkFlippedView {
         }
         // Arc/Yab selection: one soft lifted pill, no outline; hover is fainter.
         let selected = item.isActive && !item.isFolder
+        let light = !effectiveAppearance.isDarkChrome
         if selected || hovered {
-            NSColor.white.withAlphaComponent(selected ? 0.15 : 0.07).setFill()
-            NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: ArkMetrics.rowRadius, yRadius: ArkMetrics.rowRadius).fill()
+            NSGraphicsContext.saveGraphicsState()
+            if selected && light {
+                // On light chrome the selected tab is a white card with a soft shadow, as in Yab/Arc.
+                let shadow = NSShadow()
+                shadow.shadowColor = NSColor(white: 0, alpha: 0.10); shadow.shadowBlurRadius = 2.5
+                shadow.shadowOffset = NSSize(width: 0, height: -0.5); shadow.set()
+            }
+            (selected ? ArkPalette.selection : ArkPalette.hover).setFill()
+            NSBezierPath(roundedRect: bounds.insetBy(dx: light && selected ? 1.5 : 0.5, dy: light && selected ? 1.5 : 0.5),
+                         xRadius: ArkMetrics.rowRadius, yRadius: ArkMetrics.rowRadius).fill()
+            NSGraphicsContext.restoreGraphicsState()
         }
-        if selected {
-            NSColor.white.withAlphaComponent(0.10).setFill()
+        if selected && !light {
+            ArkPalette.selectionEdge.setFill()
             NSRect(x: ArkMetrics.rowRadius, y: 0.5, width: max(0, bounds.width - 2 * ArkMetrics.rowRadius), height: 0.5).fill()
         }
     }
@@ -1486,7 +1543,7 @@ private final class ArkTabRow: ArkFlippedView {
         }
     }
     override func draw(_ dirtyRect: NSRect) {
-        if hovered { fill(NSColor.white.withAlphaComponent(0.10), radius: 7) }
+        if hovered { fill(ArkPalette.iconHover, radius: 7) }
         let reduced = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         let hover: CGFloat = reduced ? 0 : min(1, max(0, hoverAmount))
         let pulse: CGFloat = reduced ? 0 : min(1, max(-0.2, selectionPulse))

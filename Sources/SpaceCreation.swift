@@ -36,10 +36,10 @@ import WebKit
         let full = progress >= 1
         let circle = bounds.insetBy(dx: 5, dy: 5)
         if full {
-            NSColor.white.setFill()
+            ArkPalette.ink.setFill()
             NSBezierPath(ovalIn: circle).fill()
         } else {
-            NSColor.white.withAlphaComponent(0.28).setStroke()
+            ArkPalette.ink.withAlphaComponent(0.28).setStroke()
             let track = NSBezierPath(ovalIn: circle)
             track.lineWidth = 3.5
             track.stroke()
@@ -49,7 +49,7 @@ import WebKit
                           endAngle: 90 - 360 * max(0, min(1, progress)), clockwise: true)
             arc.lineWidth = 3.5
             arc.lineCapStyle = .round
-            NSColor.white.setStroke()
+            ArkPalette.ink.setStroke()
             arc.stroke()
         }
         let plus = NSBezierPath()
@@ -60,7 +60,7 @@ import WebKit
         plus.line(to: NSPoint(x: bounds.midX, y: bounds.midY + arm))
         plus.lineWidth = 3
         plus.lineCapStyle = .round
-        (full ? NSColor.black.withAlphaComponent(0.8) : .white).setStroke()
+        (full ? NSColor.chrome(light: .white, dark: NSColor.black.withAlphaComponent(0.8)) : ArkPalette.ink).setStroke()
         plus.stroke()
     }
 }
@@ -115,10 +115,14 @@ import WebKit
     override init(frame: NSRect) {
         super.init(frame: frame)
         wantsLayer = true
-        layer?.backgroundColor = NSColor.white.withAlphaComponent(0.09).cgColor
+        layer?.backgroundColor = resolvedCGColor(ArkPalette.field, for: self)
         layer?.cornerRadius = 11
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        layer?.backgroundColor = resolvedCGColor(ArkPalette.field, for: self)
+    }
     override func mouseDown(with event: NSEvent) {
         if let onClick { onClick() } else { super.mouseDown(with: event) }
     }
@@ -164,25 +168,25 @@ import WebKit
         addSubview(stack)
 
         title.font = .systemFont(ofSize: 17, weight: .bold)
-        title.textColor = .white
+        title.textColor = ArkPalette.ink
         title.alignment = .center
         addSubview(title)
         subtitle.font = .systemFont(ofSize: 12)
-        subtitle.textColor = NSColor.white.withAlphaComponent(0.7)
+        subtitle.textColor = ArkPalette.secondary
         subtitle.alignment = .center
         addSubview(subtitle)
 
         addSubview(nameRow)
         nameIcon.image = NSImage(systemSymbolName: "plus.square.dashed", accessibilityDescription: nil)
-        nameIcon.contentTintColor = NSColor.white.withAlphaComponent(0.8)
+        nameIcon.contentTintColor = ArkPalette.secondary
         nameIcon.setAccessibilityElement(false)
         nameRow.addSubview(nameIcon)
         nameField.font = .systemFont(ofSize: 13, weight: .medium)
         nameField.isBordered = false; nameField.drawsBackground = false; nameField.focusRingType = .none
-        nameField.textColor = .white
+        nameField.textColor = ArkPalette.ink
         nameField.placeholderAttributedString = NSAttributedString(
             string: defaultName,
-            attributes: [.foregroundColor: NSColor.white.withAlphaComponent(0.55),
+            attributes: [.foregroundColor: ArkPalette.secondary.withAlphaComponent(0.75),
                          .font: NSFont.systemFont(ofSize: 13, weight: .medium)])
         nameField.setAccessibilityLabel("Space name")
         nameField.escape = { [weak self] in self?.onCancel?() }
@@ -196,11 +200,11 @@ import WebKit
 
         addSubview(profileRow)
         profileIcon.image = NSImage(systemSymbolName: "person.crop.square", accessibilityDescription: nil)
-        profileIcon.contentTintColor = NSColor.white.withAlphaComponent(0.8)
+        profileIcon.contentTintColor = ArkPalette.secondary
         profileIcon.setAccessibilityElement(false)
         profileRow.addSubview(profileIcon)
         profileLabel.font = .systemFont(ofSize: 13, weight: .medium)
-        profileLabel.textColor = .white
+        profileLabel.textColor = ArkPalette.ink
         profileRow.addSubview(profileLabel)
         profileChip.bezelStyle = .badge
         profileChip.font = .systemFont(ofSize: 11, weight: .semibold)
@@ -212,24 +216,23 @@ import WebKit
 
         addSubview(themeRow)
         themeIcon.image = NSImage(systemSymbolName: "paintbrush", accessibilityDescription: nil)
-        themeIcon.contentTintColor = NSColor.white.withAlphaComponent(0.8)
+        themeIcon.contentTintColor = ArkPalette.secondary
         themeIcon.setAccessibilityElement(false)
         themeRow.addSubview(themeIcon)
         themeLabel.font = .systemFont(ofSize: 13, weight: .medium)
-        themeLabel.textColor = .white
+        themeLabel.textColor = ArkPalette.ink
         themeRow.addSubview(themeLabel)
         themeRow.onClick = { [weak self] in self?.toggleTheme() }
         themeRow.setAccessibilityElement(true)
         themeRow.setAccessibilityRole(.button)
         themeRow.setAccessibilityLabel("Choose a theme")
 
-        for (index, palette) in CanvasView.palettes.enumerated() {
+        for index in CanvasView.palettes.indices {
             let swatch = NSButton(title: "", target: self, action: #selector(chooseTheme(_:)))
             swatch.isBordered = false
             swatch.tag = index
             swatch.wantsLayer = true
             swatch.layer?.cornerRadius = 13
-            swatch.layer?.backgroundColor = palette[0].blended(withFraction: 0.5, of: palette[1])?.cgColor
             swatch.setAccessibilityLabel("\(BrowserSpace.colorNames[min(index, BrowserSpace.colorNames.count - 1)]) theme")
             swatch.isHidden = true
             addSubview(swatch)
@@ -250,7 +253,7 @@ import WebKit
         cancelButton.isBordered = false
         cancelButton.attributedTitle = NSAttributedString(
             string: "Cancel",
-            attributes: [.foregroundColor: NSColor.white.withAlphaComponent(0.8), .font: NSFont.systemFont(ofSize: 13, weight: .medium)])
+            attributes: [.foregroundColor: ArkPalette.secondary, .font: NSFont.systemFont(ofSize: 13, weight: .medium)])
         cancelButton.target = self
         cancelButton.action = #selector(cancel)
         addSubview(cancelButton)
@@ -264,7 +267,7 @@ import WebKit
         let name = profiles.first(where: { $0.id == selectedProfileID })?.name ?? "Default"
         profileChip.attributedTitle = NSAttributedString(
             string: name,
-            attributes: [.foregroundColor: NSColor.white, .font: NSFont.systemFont(ofSize: 11, weight: .semibold)])
+            attributes: [.foregroundColor: ArkPalette.ink, .font: NSFont.systemFont(ofSize: 11, weight: .semibold)])
         profileChip.sizeToFit()
         needsLayout = true
     }
@@ -295,11 +298,19 @@ import WebKit
         refreshSwatchSelection()
         onPreviewTheme?(sender.tag)
     }
+    /// Swatches preview the window wash for the current appearance.
     private func refreshSwatchSelection() {
+        let palettes = effectiveAppearance.isDarkChrome ? CanvasView.palettes : CanvasView.lightPalettes
         for (index, swatch) in swatches.enumerated() {
-            swatch.layer?.borderWidth = index == selectedColorIndex ? 2.5 : 0
-            swatch.layer?.borderColor = NSColor.white.cgColor
+            let pair = palettes[min(index, palettes.count - 1)]
+            swatch.layer?.backgroundColor = pair[0].blended(withFraction: 0.5, of: pair[1])?.cgColor
+            swatch.layer?.borderWidth = index == selectedColorIndex ? 2.5 : (effectiveAppearance.isDarkChrome ? 0 : 1)
+            swatch.layer?.borderColor = resolvedCGColor(index == selectedColorIndex ? ArkPalette.ink : ArkPalette.separator, for: self)
         }
+    }
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        refreshSwatchSelection(); refreshProfileChip()
     }
     @objc private func create() {
         onCreate?(nameField.stringValue, selectedColorIndex, selectedProfileID)
