@@ -240,14 +240,32 @@ final class ImportedIconDiskCache: @unchecked Sendable {
     func record(for tab: UUID) -> Record? { loadIndexIfNeeded(); return index[tab] }
 
     /// A damaged or unreadable index starts the cache over; tabs then use normal favicons.
+    /// Loads the index, then — before anything is decoded — applies the count
+    /// and byte limits and removes Bam-owned icon files the index doesn't
+    /// describe (left by a damaged/missing index or a crash between writing
+    /// an image and the index).
     private func loadIndexIfNeeded() {
         guard !loaded else { return }
         loaded = true
-        guard let values = try? indexURL.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey]),
-              values.isRegularFile == true, values.isSymbolicLink != true, (values.fileSize ?? .max) <= 4 * 1024 * 1024,
+        let intact = decodeIndex()
+        let before = index
+        enforceLimits()
+        let removedOrphans = reconcileOwnedFiles()
+        if !intact || index != before || removedOrphans {
+            if FileManager.default.fileExists(atPath: directory.path) { try? writeIndex() }
+        }
+    }
+    /// The largest index Bam reads; anything bigger is treated as damaged.
+    static let maximumIndexBytes = 4 * 1024 * 1024
+    private func decodeIndex() -> Bool {
+        index = [:]; counter = 0
+        guard let values = try? indexURL.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey]) else {
+            return true  // No index yet.
+        }
+        guard values.isRegularFile == true, values.isSymbolicLink != true, (values.fileSize ?? .max) <= Self.maximumIndexBytes,
               let data = try? Data(contentsOf: indexURL),
               let decoded = try? JSONDecoder().decode([String: Record].self, from: data) else {
-            index = [:]; return
+            return false
         }
         // Tolerate a hand-edited or damaged index: drop implausible records,
         // merge different spellings of one UUID (newest wins), and renumber
@@ -255,16 +273,47 @@ final class ImportedIconDiskCache: @unchecked Sendable {
         var merged: [UUID: Record] = [:]
         for (key, record) in decoded {
             guard let tab = UUID(uuidString: key), record.bytes > 0, record.bytes <= limits.maximumFileBytes,
-                  !record.origin.isEmpty, record.origin.count <= 2048 else { continue }
+                  !record.origin.isEmpty, record.origin.count <= 2048,
+                  record.sha256.count == 64, record.sha256.allSatisfy({ $0.isHexDigit }) else { continue }
             if let existing = merged[tab], existing.order >= record.order { continue }
             merged[tab] = record
         }
-        index = [:]; counter = 0
         for (tab, record) in merged.sorted(by: { $0.value.order < $1.value.order }) {
             counter += 1
             var renumbered = record; renumbered.order = counter
             index[tab] = renumbered
         }
+        return merged.count == decoded.count
+    }
+    /// Deletes `<profile UUID>/<tab UUID>.png` entries under Bam's own folder
+    /// that the index doesn't list, and empty profile folders. Names outside
+    /// that pattern are never touched, symlinked folders are never entered,
+    /// and a symlink in a PNG's place is removed as a link only. Bounded scan.
+    @discardableResult private func reconcileOwnedFiles(scanLimit: Int = 20_000) -> Bool {
+        let fm = FileManager.default
+        guard let top = try? fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey],
+                                                    options: [.skipsHiddenFiles]) else { return false }
+        var scanned = 0, changed = false
+        for folder in top {
+            guard let profile = UUID(uuidString: folder.lastPathComponent),
+                  let values = try? folder.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey]),
+                  values.isDirectory == true, values.isSymbolicLink != true,
+                  let files = try? fm.contentsOfDirectory(at: folder, includingPropertiesForKeys: [.isSymbolicLinkKey], options: []) else { continue }
+            var remaining = files.count
+            for file in files {
+                scanned += 1
+                guard scanned <= scanLimit else { return changed }
+                guard file.pathExtension == "png", let tab = UUID(uuidString: file.deletingPathExtension().lastPathComponent) else { continue }
+                if index[tab]?.profile == profile, file.lastPathComponent == "\(tab.uuidString).png" { continue }
+                if (try? fm.removeItem(at: file)) != nil { remaining -= 1; changed = true }
+            }
+            if remaining == 0 { try? fm.removeItem(at: folder) }
+        }
+        // Index entries whose file is gone are dropped too.
+        for (tab, record) in index where !fm.fileExists(atPath: fileURL(profile: record.profile, tab: tab).path) {
+            index.removeValue(forKey: tab); changed = true
+        }
+        return changed
     }
     private func writeIndex() throws {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)

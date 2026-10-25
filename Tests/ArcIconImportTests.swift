@@ -198,13 +198,76 @@ import UniformTypeIdentifiers
         }
         let messyJSON = "{\"\(messyTab.uuidString.lowercased())\":\(entry(Int.max, bytes: good.bytes)),"
             + "\"\(messyTab.uuidString.uppercased())\":\(entry(-5, bytes: good.bytes)),"
-            + "\"\(UUID().uuidString)\":\(entry(3, bytes: -1)),\"not-a-uuid\":\(entry(1, bytes: 10))}"
+            + "\"\(UUID().uuidString)\":\(entry(3, bytes: -1)),\"not-a-uuid\":\(entry(1, bytes: 10)),"
+            + "\"\(UUID().uuidString)\":{\"profile\":\"\(home.uuidString)\",\"origin\":\"https://m.example\",\"bytes\":10,\"sha256\":\"zz\",\"order\":2}}"
         try messyJSON.write(to: messy.appendingPathComponent("index.json"), atomically: true, encoding: .utf8)
         let tolerant = ImportedIconDiskCache(directory: messy)
         require(tolerant.restore(validTabs: [messyTab: home]).count == 1 && tolerant.recordCount == 1,
                 "Duplicate UUID spellings merge, invalid records drop, nothing traps")
         require(tolerant.record(for: messyTab)!.order == 1, "Orders are renumbered, so Int.max can't overflow")
         require(tolerant.save([(UUID(), home, "https://n.example", loaded[other]!)]) == 1 && tolerant.recordCount == 2, "Saving continues after recovery")
+
+        // Reconciliation of Bam's own folder before any decode.
+        func ownedFixture(_ name: String) throws -> (dir: URL, kept: UUID, orphan: UUID, unrelated: [URL], outside: URL) {
+            let dir = base.appendingPathComponent(name, isDirectory: true)
+            let keeper = ImportedIconDiskCache(directory: dir)
+            let kept = UUID(), orphan = UUID()
+            keeper.save([(kept, home, "https://k.example", loaded[ok]!)])
+            // An image written without an index entry (crash between image and index).
+            try ImportedIconDiskCache.pngData(loaded[other]!)!.write(to: keeper.fileURL(profile: home, tab: orphan))
+            // Unrelated names Bam doesn't own, in the root and in a profile folder.
+            let notes = dir.appendingPathComponent("notes.txt"); try Data("keep".utf8).write(to: notes)
+            let stray = dir.appendingPathComponent(home.uuidString).appendingPathComponent("readme.txt"); try Data("keep".utf8).write(to: stray)
+            let foreignDir = dir.appendingPathComponent("not-a-uuid", isDirectory: true)
+            try fm.createDirectory(at: foreignDir, withIntermediateDirectories: true)
+            let foreignPNG = foreignDir.appendingPathComponent("\(UUID().uuidString).png"); try Data("x".utf8).write(to: foreignPNG)
+            // A symlinked "profile" folder pointing outside must not be entered.
+            let outsideDir = base.appendingPathComponent("\(name)-outside", isDirectory: true)
+            try fm.createDirectory(at: outsideDir, withIntermediateDirectories: true)
+            let outside = outsideDir.appendingPathComponent("\(UUID().uuidString).png"); try Data("x".utf8).write(to: outside)
+            try fm.createSymbolicLink(at: dir.appendingPathComponent(UUID().uuidString), withDestinationURL: outsideDir)
+            return (dir, kept, orphan, [notes, stray, foreignPNG], outside)
+        }
+        func untouched(_ f: (dir: URL, kept: UUID, orphan: UUID, unrelated: [URL], outside: URL)) -> Bool {
+            f.unrelated.allSatisfy { fm.fileExists(atPath: $0.path) } && fm.fileExists(atPath: f.outside.path)
+        }
+        // 1. Image written before its index entry: orphan removed, indexed icon kept.
+        let crash = try ownedFixture("Crash")
+        let crashCache = ImportedIconDiskCache(directory: crash.dir)
+        require(crashCache.recordCount == 1 && !fm.fileExists(atPath: crashCache.fileURL(profile: home, tab: crash.orphan).path)
+                && fm.fileExists(atPath: crashCache.fileURL(profile: home, tab: crash.kept).path) && untouched(crash),
+                "An unindexed icon left by a crash is removed; indexed icons and unrelated files stay")
+        // 2. Damaged index: every owned icon becomes an orphan and is removed; unrelated files stay.
+        let damagedIndex = try ownedFixture("BadIndex")
+        try Data("{ broken".utf8).write(to: damagedIndex.dir.appendingPathComponent("index.json"))
+        let badCache = ImportedIconDiskCache(directory: damagedIndex.dir)
+        require(badCache.recordCount == 0 && !fm.fileExists(atPath: badCache.fileURL(profile: home, tab: damagedIndex.kept).path)
+                && untouched(damagedIndex), "A damaged index cleans up Bam's own icons without touching anything else")
+        // 3. Missing index: same.
+        let missingIndex = try ownedFixture("NoIndex")
+        try fm.removeItem(at: missingIndex.dir.appendingPathComponent("index.json"))
+        let noIndexCache = ImportedIconDiskCache(directory: missingIndex.dir)
+        require(noIndexCache.recordCount == 0 && !fm.fileExists(atPath: noIndexCache.fileURL(profile: home, tab: missingIndex.kept).path)
+                && untouched(missingIndex), "A missing index leaves no orphaned icons")
+        // 4. Oversized index is treated as damaged.
+        let oversized = try ownedFixture("Oversized")
+        try Data(count: ImportedIconDiskCache.maximumIndexBytes + 1).write(to: oversized.dir.appendingPathComponent("index.json"))
+        require(ImportedIconDiskCache(directory: oversized.dir).recordCount == 0 && untouched(oversized), "An oversized index is not read")
+        // 5. Count and byte limits apply before any decode.
+        let crowded = base.appendingPathComponent("Crowded", isDirectory: true)
+        let filler = ImportedIconDiskCache(directory: crowded)
+        let five = (0..<5).map { _ in UUID() }
+        filler.save(five.map { ($0, home, "https://f.example", loaded[ok]!) })
+        var two = ImportedIconDiskCache.Limits(); two.maximumEntries = 2
+        let trimmed = ImportedIconDiskCache(directory: crowded, limits: two)
+        require(trimmed.recordCount == 2 && five.prefix(3).allSatisfy { !fm.fileExists(atPath: trimmed.fileURL(profile: home, tab: $0).path) },
+                "An index over the entry limit is trimmed (oldest first) before decoding")
+        require(trimmed.restore(validTabs: Dictionary(uniqueKeysWithValues: five.map { ($0, home) })).count == 2, "Restore decodes only the bounded set")
+        let pngsOnDisk = (try? fm.contentsOfDirectory(atPath: crowded.appendingPathComponent(home.uuidString).path))?.filter { $0.hasSuffix(".png") } ?? []
+        require(pngsOnDisk.count == 2, "Only the bounded icons remain on disk, not just in the index: \(pngsOnDisk.count)")
+        var byteCap = ImportedIconDiskCache.Limits(); byteCap.maximumTotalBytes = filler.record(for: five[4])!.bytes
+        let capped2 = ImportedIconDiskCache(directory: crowded, limits: byteCap)
+        require(capped2.recordCount == 1, "The total byte limit applies before decoding too")
 
         // Successive imports queue instead of cancelling each other.
         actor Gate {
