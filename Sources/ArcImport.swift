@@ -305,6 +305,17 @@ enum ArcImport {
         }
     }
 
+    /// Switches to `space` and selects exactly one new blank tab there, so no
+    /// imported page is chosen. `changeSpace` already creates a blank tab when
+    /// nothing in the Space is selectable; that one is reused, never doubled.
+    static func arrive(at space: Int, in session: inout BrowserSession) {
+        guard session.spaceDefinition(space) != nil else { return }
+        let existing = Set(session.tabs.map(\.id))
+        session.changeSpace(space)
+        if let active = session.active, !existing.contains(active.id), active.isHome, active.space == space { return }
+        session.add()
+    }
+
     /// Removes exactly what an import added (`imported` minus `previous`) from
     /// `current`, keeping anything the user did since. Used when the imported
     /// session can't be saved. A Space the user has since filled is kept.

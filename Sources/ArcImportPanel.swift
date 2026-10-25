@@ -42,10 +42,8 @@ import AppKit
         if let refusal = report.refusal { completion(refusal); return }
         guard !report.isEmpty else { completion(report.emptyReason); return }
         session = updated
-        if let first = report.firstSpaceID, session.spaceDefinition(first) != nil {
-            session.changeSpace(first)
-            session.add()  // A blank page, so nothing imported is instantiated on arrival.
-        }
+        // Exactly one blank landing tab, so nothing imported is instantiated on arrival.
+        if let first = report.firstSpaceID { ArcImport.arrive(at: first, in: &session) }
         let imported = session
         showActive(); refreshPaletteResults(); onSpacesChanged?()
         let tabs = report.importedTabs
