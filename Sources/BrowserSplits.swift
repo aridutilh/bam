@@ -7,12 +7,17 @@ import WebKit
         // for every sidebar row. A thousand metadata-only tabs must stay cheap.
         let tabsByID = Dictionary(snapshot.tabs.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         let favoriteCount = snapshot.favoriteTabs.count
-        var companions: [UUID: BrowserTab] = [:]
-        for split in snapshot.splits ?? [] { companions[split.primaryID] = tabsByID[split.secondaryID] }
+        var companions: [UUID: BrowserTab] = [:], splitMembers = Set<UUID>()
+        for split in snapshot.splits ?? [] {
+            companions[split.primaryID] = tabsByID[split.secondaryID]
+            splitMembers.insert(split.primaryID); splitMembers.insert(split.secondaryID)
+        }
+        let arcFolders = SidebarDisplayPolicy.arcImportedFolderIDs(snapshot.importLinks)
         func item(_ tab: BrowserTab, depth: Int = 0, parent: UUID? = nil, earlier: Bool = false, later: Bool = false) -> SidebarTabItem {
             let companion = companions[tab.id]
             return SidebarTabItem(id: tab.id, title: companion.map { "\(tab.displayTitle) · \($0.displayTitle)" } ?? tab.displayTitle,
-                subtitle: companion.map { "\(tab.address) | \($0.address)" } ?? tab.address,
+                subtitle: companion.map { [tab.address, $0.address].map(SidebarDisplayPolicy.visibleAddress).filter { !$0.isEmpty }.joined(separator: " | ") }
+                    ?? SidebarDisplayPolicy.visibleAddress(tab.address),
                 symbol: companion == nil ? tab.symbol : "rectangle.split.2x1", isPinned: tab.pinned,
                 isActive: tab.id == snapshot.activeID, isFavorite: tab.isFavorite, isUnloaded: tab.isUnloaded, isSleeping: tab.isSleeping,
                 isSplit: companion != nil, canFavorite: companion == nil && (tab.isFavorite || favoriteCount < BrowserSession.maximumFavorites),
@@ -36,12 +41,14 @@ import WebKit
                     isActive: false, canFavorite: false, depth: entry.depth, isFolder: true, isExpanded: !folder.isCollapsed,
                     parentFolderID: entry.parentID, hasEarlierSibling: earlier, hasLaterSibling: later,
                     folderTabCount: snapshot.tabIDs(inFolder: folder.id).count,
-                    canNestFolder: snapshot.canCreateFolder(inside: folder.id)))
+                    canNestFolder: snapshot.canCreateFolder(inside: folder.id), importedFromArc: arcFolders.contains(folder.id)))
             } else if let tab = tabsByID[entry.id] {
                 result.append(item(tab, depth: entry.depth, parent: entry.parentID, earlier: earlier, later: later))
             }
         }
-        result += visible.filter { !$0.isSaved }.map { item($0) }
+        // Blank New Tab placeholders that aren't selected get no row (display only; the tabs stay in the session).
+        result += visible.filter { !$0.isSaved && !SidebarDisplayPolicy.hidesPlaceholder($0, activeID: snapshot.activeID, inSplit: splitMembers.contains($0.id)) }
+            .map { item($0) }
         for index in result.indices { result[index].treeDepth = treeDepth }
         return result
     }

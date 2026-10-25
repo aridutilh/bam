@@ -260,6 +260,102 @@ import AppKit
         require(covered > 32 * 32 / 3 && tinted > covered / 2, "The folder is a filled shape in the Space's tint, not a thin outline (\(tinted)/\(covered))")
         require(glyphPixels(false, scale: 3).pixelsWide == 48, "Vector glyph renders at any scale")
 
+        // MARK: Footer, as in Arc: Downloads left, Spaces centered, + right.
+        let footer = ArkFooterLayout(width: 240, spaceCount: 3, selectedIndex: 1)
+        let groupWidth = 3 * ArkFooterLayout.step - 2
+        require(footer.downloads.minX == 9 && footer.plus.maxX == 240 - 8 && !footer.overflowing && footer.visibleCount == 3,
+                "Downloads at the leading edge, + at the trailing edge, three Spaces all shown")
+        require(abs((footer.spacesX + groupWidth / 2) - 120) <= 1, "The Space group is centered in the footer")
+        for width in stride(from: CGFloat(164), through: 420, by: 13) {
+            for count in 1...12 {
+                let layout = ArkFooterLayout(width: width, spaceCount: count, selectedIndex: count - 1)
+                let end = layout.spacesX + CGFloat(layout.visibleCount + (layout.overflowing ? 1 : 0)) * ArkFooterLayout.step - 2
+                require(layout.spacesX >= layout.downloads.maxX + 4 && end <= layout.plus.minX - 4,
+                        "Spaces never overlap Downloads or + (\(count) at \(width))")
+                require(layout.visibleCount >= 1 && (layout.overflowing == (layout.visibleCount < count)), "Overflow only when Spaces don't fit")
+                require((layout.startIndex..<(layout.startIndex + layout.visibleCount)).contains(count - 1), "The selected Space stays visible")
+            }
+        }
+        let footerSidebar = SidebarView(frame: NSRect(x: 0, y: 0, width: 240, height: 600))
+        let footerWindow = NSWindow(contentRect: footerSidebar.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        footerWindow.contentView = footerSidebar
+        footerSidebar.configureSpaces([BrowserSpace(id: 0, name: "Explore", symbol: "globe", colorIndex: 0),
+                                       BrowserSpace(id: 1, name: "chill", symbol: "sparkles", colorIndex: 1),
+                                       BrowserSpace(id: 2, name: "Solo", symbol: "sun.max", colorIndex: 2)])
+        footerSidebar.update(tabs: [], space: 1, canGoBack: false, canGoForward: false, isLoading: false)
+        footerSidebar.layoutSubtreeIfNeeded()
+        var opened: [String] = []
+        footerSidebar.onShowDownloads = { opened.append("downloads") }
+        footerSidebar.onShowHistory = { opened.append("history") }
+        footerSidebar.onShowRecentlyClosed = { opened.append("recently-closed") }
+        footerSidebar.onManageSpaces = { opened.append("manage-spaces") }
+        footerSidebar.onNewTab = { opened.append("new-tab") }
+        let downloadsButton = descendants(footerSidebar).first { $0.identifier?.rawValue == "sidebar-downloads" } as! NSButton
+        require(downloadsButton.accessibilityLabel() == "Downloads" && downloadsButton.toolTip == "Downloads (⌘J)", "The leading button is Downloads")
+        downloadsButton.performClick(nil)
+        require(opened == ["downloads"], "Clicking it opens Bam's actual Downloads window")
+        let libraryMenu = downloadsButton.menu!
+        require(libraryMenu.items.map(\.title) == ["Downloads", "History", "Recently Closed", "", "Manage Spaces…"], "Its menu: Downloads, History, Recently Closed, Manage Spaces")
+        opened.removeAll()
+        for item in libraryMenu.items where !item.isSeparatorItem { _ = item.target.map { NSApp.sendAction(item.action!, to: $0, from: item) } }
+        require(opened == ["downloads", "history", "recently-closed", "manage-spaces"], "Every menu item opens the real feature")
+        let footerViews = descendants(footerSidebar).filter { $0.window != nil && !$0.isHiddenOrHasHiddenAncestor && $0.frame.minY >= footerSidebar.bounds.height - 40 }
+        require(!footerViews.contains { ($0.accessibilityLabel() ?? "").hasPrefix("Picture in Picture") || $0.accessibilityLabel() == "Manage Spaces" },
+                "No PiP or Spaces stack button in the footer")
+        let spaceButtons = descendants(footerSidebar).filter { ($0.accessibilityLabel() ?? "").hasPrefix("Switch to ") && !$0.isHidden }
+        require(spaceButtons.count == 3, "All three actual Spaces keep their buttons")
+        let spacesMid = (spaceButtons.map(\.frame.minX).min()! + spaceButtons.map(\.frame.maxX).max()!) / 2
+        require(abs(spacesMid - footerSidebar.bounds.midX) <= 1, "Space buttons are centered")
+        let plusButton = descendants(footerSidebar).first { $0.accessibilityLabel() == "New tab" && $0.frame.minY >= footerSidebar.bounds.height - 40 } as! NSButton
+        plusButton.performClick(nil)
+        require(opened.last == "new-tab" && plusButton.frame.maxX == footerSidebar.bounds.width - 8, "+ at the trailing edge opens a new tab")
+        let rightClick = NSEvent.mouseEvent(with: .rightMouseDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: footerWindow.windowNumber,
+                                            context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
+        require(spaceButtons.allSatisfy { $0.menu(for: rightClick)?.items.map(\.title) == ["Manage Spaces…"] },
+                "Space buttons keep Manage Spaces… in their context menu")
+
+        // MARK: Display policy: internal addresses, blank placeholders, imported-folder provenance.
+        require(SidebarDisplayPolicy.visibleAddress("orbit://newtab").isEmpty && SidebarDisplayPolicy.visibleAddress("ORBIT://video").isEmpty
+                && SidebarDisplayPolicy.visibleAddress("https://example.com/") == "https://example.com/", "Internal orbit:// addresses are never shown")
+        let blank = BrowserTab(title: "New tab", address: "orbit://newtab", space: 0)
+        let page = BrowserTab(title: "Docs", address: "https://docs.example/", space: 0)
+        var keptBlank = BrowserTab(title: "New tab", address: "orbit://newtab", space: 0)
+        keptBlank.saved = SavedTabState(kind: .kept, address: "orbit://newtab", isUnloaded: false)
+        require(SidebarDisplayPolicy.hidesPlaceholder(blank, activeID: page.id, inSplit: false), "An unselected unsaved blank New Tab has no row")
+        require(!SidebarDisplayPolicy.hidesPlaceholder(blank, activeID: blank.id, inSplit: false), "The selected blank tab stays listed")
+        require(!SidebarDisplayPolicy.hidesPlaceholder(blank, activeID: page.id, inSplit: true), "A split pane is never hidden")
+        require(!SidebarDisplayPolicy.hidesPlaceholder(keptBlank, activeID: page.id, inSplit: false), "A saved item is never hidden")
+        require(!SidebarDisplayPolicy.hidesPlaceholder(page, activeID: blank.id, inSplit: false), "Real pages are never hidden")
+        let importedFolder = UUID(), otherFolder = UUID()
+        let links = ["arc:abc": "folder:\(importedFolder.uuidString)", "arc:def": "tab:\(UUID().uuidString)", "arc:x": "flattened",
+                     "chrome:1": "folder:\(otherFolder.uuidString)", "arc:bad": "folder:not-a-uuid"]
+        require(SidebarDisplayPolicy.arcImportedFolderIDs(links) == [importedFolder] && SidebarDisplayPolicy.arcImportedFolderIDs(nil).isEmpty,
+                "Only folders the Arc import recorded are marked")
+        // Rows: no internal address in tooltips; the imported note on imported folders only.
+        let policySidebar = SidebarView(frame: NSRect(x: 0, y: 0, width: 240, height: 600))
+        let policyWindow = NSWindow(contentRect: policySidebar.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        policyWindow.contentView = policySidebar
+        let blankRowID = UUID(), arcFolderID = UUID(), plainFolderID = UUID()
+        policySidebar.update(tabs: [
+            SidebarTabItem(id: arcFolderID, title: "Pull Requests", subtitle: "", symbol: "folder", isPinned: true, isActive: false, isFolder: true, isExpanded: false, importedFromArc: true),
+            SidebarTabItem(id: plainFolderID, title: "Mine", subtitle: "", symbol: "folder", isPinned: true, isActive: false, isFolder: true, isExpanded: false),
+            SidebarTabItem(id: blankRowID, title: "New tab", subtitle: "orbit://newtab", symbol: "star", isPinned: false, isActive: true)
+        ], space: 0, canGoBack: false, canGoForward: false, isLoading: false)
+        policySidebar.layoutSubtreeIfNeeded()
+        @MainActor func policyRow(_ id: UUID) -> NSView { descendants(policySidebar).first { $0.identifier?.rawValue == "tab-row-\(id.uuidString)" }! }
+        require(policyRow(blankRowID).toolTip?.contains("orbit") == false, "A blank tab's tooltip never shows orbit://newtab")
+        require(policyRow(arcFolderID).toolTip?.contains(SidebarDisplayPolicy.arcImportedFolderNote) == true
+                && (policyRow(arcFolderID).accessibilityHelp() ?? "").contains("Imported from Arc as saved links"), "Imported folders say so (tooltip and VoiceOver)")
+        require(policyRow(plainFolderID).toolTip?.contains("Imported") == false && (policyRow(plainFolderID).accessibilityHelp() ?? "").contains("Imported") == false,
+                "Other folders don't")
+        let searchField = descendants(policySidebar).first { $0.accessibilityLabel() == "Search or enter a web address" }!
+        policySidebar.setAddress("orbit://newtab", title: "New tab")
+        require(searchField.toolTip?.contains("orbit") == false && searchField.toolTip?.hasPrefix("Search or enter address") == true,
+                "The address field's tooltip never shows an internal address")
+        policySidebar.setAddress("https://docs.example/a", title: "Docs")
+        require(searchField.toolTip == "https://docs.example/a", "A real page's address still shows")
+        withExtendedLifetime(footerWindow) {}; withExtendedLifetime(policyWindow) {}
+
         print("PASS: \(checks) sidebar morning checks")
     }
 }

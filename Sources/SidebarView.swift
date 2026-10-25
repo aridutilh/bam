@@ -48,6 +48,8 @@ struct SidebarTabItem: Equatable {
     var treeDepth: Int = 0
     /// Shown instead of the generic symbol until a favicon arrives.
     var monogram: String? = nil
+    /// A folder the Arc import created (recorded provenance only).
+    var importedFromArc: Bool = false
 }
 
 /// A destination offered by Move to Folder menus.
@@ -88,7 +90,10 @@ struct SidebarExtensionItem {
     var onSpaceChange: ((Int) -> Void)?
     var onManageSpaces: (() -> Void)?
     var onMoveTab: ((UUID, Int) -> Void)?
-    var onPictureInPicture: (() -> Void)?
+    /// The footer's Downloads button and its menu: Bam's existing Downloads, History and Recently Closed windows.
+    var onShowDownloads: (() -> Void)?
+    var onShowHistory: (() -> Void)?
+    var onShowRecentlyClosed: (() -> Void)?
     var onExtensionAction: ((UUID, NSView) -> Void)?
     var onExtensionsMenu: ((NSView) -> Void)?
     var onExtensionLibrary: (() -> Void)?
@@ -121,8 +126,7 @@ struct SidebarExtensionItem {
     private let extensionMenu = ArkIconButton(symbol: "puzzlepiece.extension", label: "Extensions")
     private let extensionLibrary = ArkExtensionLibraryButton()
     private var extensionButtons: [ArkExtensionButton] = []
-    private let pip = ArkIconButton(symbol: "pip", label: "Picture in Picture (⌥⌘P)")
-    private let library = ArkSpacesButton()
+    private let downloads = ArkDownloadsButton()
     private let plus = ArkIconButton(symbol: "plus", label: "New tab")
     private let spaceOverflow = ArkIconButton(symbol: "ellipsis", label: "Choose Space")
     private var spaceDefinitions: [BrowserSpace] = []
@@ -151,7 +155,7 @@ struct SidebarExtensionItem {
         clip.wantsLayer = true; clip.layer?.masksToBounds = true
         favoritesHost.setAccessibilityLabel("Favorites")
         favoritesHost.setAccessibilityRole(.group)
-        [toggle, back, forward, reload, search, extensionMenu, extensionLibrary, favoritesHost, clip, library, plus, pip, spaceOverflow].forEach(addSubview)
+        [toggle, back, forward, reload, search, extensionMenu, extensionLibrary, favoritesHost, clip, downloads, plus, spaceOverflow].forEach(addSubview)
         clip.addSubview(page); connect(page); cachedPages[0] = page
         back.handler = { [weak self] in self?.onBack?() }
         forward.handler = { [weak self] in self?.onForward?() }
@@ -159,8 +163,10 @@ struct SidebarExtensionItem {
         toggle.handler = { [weak self] in self?.onToggleSidebar?() }
         search.handler = { [weak self] in self?.onSearch?() }
         plus.handler = { [weak self] in self?.onNewTab?() }
-        pip.handler = { [weak self] in self?.onPictureInPicture?() }
-        library.handler = { [weak self] in self?.onManageSpaces?() }
+        downloads.handler = { [weak self] in self?.onShowDownloads?() }
+        downloads.showHistory = { [weak self] in self?.onShowHistory?() }
+        downloads.showRecentlyClosed = { [weak self] in self?.onShowRecentlyClosed?() }
+        downloads.manageSpaces = { [weak self] in self?.onManageSpaces?() }
         spaceOverflow.handler = { [weak self] in self?.showSpaceMenu() }
         extensionMenu.identifier = NSUserInterfaceItemIdentifier("extensions-menu")
         extensionLibrary.identifier = NSUserInterfaceItemIdentifier("extension-library")
@@ -337,7 +343,6 @@ struct SidebarExtensionItem {
                 clip.addSubview(page)
                 selectedSpace = space
                 items = []
-                library.playSelection()
             }
         }
         if items != tabs || spaceChanged {
@@ -373,7 +378,12 @@ struct SidebarExtensionItem {
         }
         return created
     }
-    func setAddress(_ address: String, title: String) { search.address = title; search.toolTip = address }
+    func setAddress(_ address: String, title: String) {
+        search.address = title
+        let visible = SidebarDisplayPolicy.visibleAddress(address)
+        // Bam's own pages keep the field's shortcut hint instead of an internal address.
+        if visible.isEmpty { search.restoreHint() } else { search.toolTip = visible }
+    }
     func beginPaging(tabs: [SidebarTabItem], space: Int, direction: CGFloat) {
         guard space != selectedSpace, let definition = definition(for: space) else { return }
         // Preview data may describe a different selected tab. Shared Favorite
@@ -423,7 +433,6 @@ struct SidebarExtensionItem {
         else { previous.removeFromSuperview() }
         setPagingOffset(preservingOffset ? incomingOffset : 0)
         for button in spaces { button.selected = button.index == space }
-        library.playSelection()
         scheduleHoverResync()
         return offset
     }
@@ -493,19 +502,11 @@ struct SidebarExtensionItem {
         clip.frame = NSRect(x: 0, y: pageTop, width: w, height: max(0, bounds.height - pageTop - 45))
         setPagingOffset(offset)
         let y = bounds.height-36
-        library.frame = NSRect(x: 9, y: y, width: 28, height: 28)
-        // Keep footer actions separate at the minimum width. Overflow uses a
-        // native menu, so horizontal input still belongs to Space paging.
-        let selectorStart: CGFloat = 43
-        let selectorEnd = w - (w < 220 ? 40 : 72)
-        let selectorWidth = max(0, selectorEnd - selectorStart)
-        let capacity = max(1, Int(selectorWidth / 28))
-        let overflowing = spaces.count > capacity
-        let visibleCount = min(spaces.count, max(1, capacity - (overflowing ? 1 : 0)))
-        let selectedIndex = spaces.firstIndex { $0.index == selectedSpace } ?? 0
-        let startIndex = max(0, min(selectedIndex - visibleCount / 2, spaces.count - visibleCount))
-        let totalWidth = CGFloat(visibleCount + (overflowing ? 1 : 0)) * 28
-        let x = selectorStart + max(0, (selectorWidth - totalWidth) / 2)
+        let footer = ArkFooterLayout(width: w, spaceCount: spaces.count,
+                                     selectedIndex: spaces.firstIndex { $0.index == selectedSpace } ?? 0)
+        downloads.frame = footer.downloads
+        let overflowing = footer.overflowing, visibleCount = footer.visibleCount, startIndex = footer.startIndex
+        let x = footer.spacesX
         for (index, button) in spaces.enumerated() {
             button.isHidden = index < startIndex || index >= startIndex + visibleCount
             if !button.isHidden {
@@ -514,9 +515,8 @@ struct SidebarExtensionItem {
         }
         spaceOverflow.isHidden = !overflowing
         spaceOverflow.frame = NSRect(x: x + CGFloat(visibleCount) * 28, y: y, width: 26, height: 28)
-        pip.frame = NSRect(x: w-68, y: y, width: 28, height: 28)
-        plus.frame = NSRect(x: w-36, y: y, width: 28, height: 28)
-        pip.isHidden = w < 220
+        plus.frame = NSRect(x: footer.plus.minX, y: y, width: 28, height: 28)
+        downloads.frame.origin.y = y
     }
 }
 
@@ -1065,6 +1065,29 @@ enum ArkPalette {
     }
 }
 
+/// The footer, as in Arc: Downloads at the leading edge, the Space buttons centered in the footer (an overflow
+/// menu after them only when they don't fit), New Tab at the trailing edge. Pure geometry.
+struct ArkFooterLayout {
+    static let step: CGFloat = 28
+    let downloads: NSRect, plus: NSRect
+    let visibleCount: Int, startIndex: Int, overflowing: Bool
+    /// Leading x of the first visible Space button.
+    let spacesX: CGFloat
+    init(width w: CGFloat, spaceCount: Int, selectedIndex: Int) {
+        downloads = NSRect(x: 9, y: 0, width: 28, height: 28)
+        plus = NSRect(x: w - 36, y: 0, width: 28, height: 28)
+        let start: CGFloat = 43, end = w - 40
+        let room = max(0, end - start)
+        let capacity = max(1, Int(room / Self.step))
+        overflowing = spaceCount > capacity
+        visibleCount = min(spaceCount, max(1, capacity - (overflowing ? 1 : 0)))
+        startIndex = max(0, min(selectedIndex - visibleCount / 2, spaceCount - visibleCount))
+        let total = CGFloat(visibleCount + (overflowing ? 1 : 0)) * Self.step - 2
+        // Centered in the whole footer, as Arc does, but never over the edge buttons.
+        spacesX = min(max(start, ((w - total) / 2).rounded()), max(start, end - total))
+    }
+}
+
 /// Frames inside a sidebar row. Pure geometry so it can be tested directly.
 @MainActor struct ArkRowLayout {
     let icon: NSRect, title: NSRect, close: NSRect, chevron: NSRect
@@ -1369,6 +1392,7 @@ private final class ArkIconButton: ArkHoverButton {
         NotificationCenter.default.addObserver(self, selector: #selector(hint), name: ShortcutStore.didChange, object: nil)
     }
     @objc private func hint() { toolTip = "Search or enter address (\(ShortcutStore.shared.combo(for: .openLocation).compact))" }
+    func restoreHint() { hint() }
     required init?(coder: NSCoder) { fatalError() }
     override func draw(_ dirtyRect: NSRect) {
         // A lifted, translucent field like Arc/Yab rather than a dark well.
@@ -1755,12 +1779,18 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted, Ar
         if item.isFolder {
             // Disclosure controls report 1 when open and 0 when closed.
             setAccessibilityValue(NSNumber(value: item.isExpanded ? 1 : 0))
-            setAccessibilityHelp("Folder with \(item.folderTabCount) tab\(item.folderTabCount == 1 ? "" : "s"). Press to \(item.isExpanded ? "collapse" : "expand").")
+            setAccessibilityHelp("Folder with \(item.folderTabCount) tab\(item.folderTabCount == 1 ? "" : "s"). Press to \(item.isExpanded ? "collapse" : "expand")."
+                + (item.importedFromArc ? " " + SidebarDisplayPolicy.arcImportedFolderNote : ""))
         } else if first || old.isActive != item.isActive || old.isUnloaded != item.isUnloaded || old.isSleeping != item.isSleeping || old.isFolder {
             setAccessibilityValue([item.isActive ? "Selected" : nil, item.isUnloaded ? "Unloaded" : item.isSleeping ? "Sleeping" : nil].compactMap { $0 }.joined(separator: ", "))
         }
-        if first || old.title != item.title || old.subtitle != item.subtitle || old.isUnloaded != item.isUnloaded || old.isSleeping != item.isSleeping {
-            toolTip = [item.title, item.subtitle, item.isUnloaded ? "Unloaded — opens saved page" : item.isSleeping ? "Sleeping — reloads when selected" : ""].filter { !$0.isEmpty }.joined(separator: "\n")
+        if first || old.title != item.title || old.subtitle != item.subtitle || old.isUnloaded != item.isUnloaded || old.isSleeping != item.isSleeping
+            || old.importedFromArc != item.importedFromArc || old.isFolder != item.isFolder {
+            // The subtitle is the address; Bam's own pages never show their internal one.
+            toolTip = [item.title, SidebarDisplayPolicy.visibleAddress(item.subtitle),
+                       item.isFolder && item.importedFromArc ? SidebarDisplayPolicy.arcImportedFolderNote : "",
+                       item.isUnloaded ? "Unloaded — opens saved page" : item.isSleeping ? "Sleeping — reloads when selected" : ""]
+                .filter { !$0.isEmpty }.joined(separator: "\n")
         }
         needsDisplay = true
     }
@@ -2092,61 +2122,37 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted, Ar
     @objc private func moveToFolderFromMenu(_ sender: NSMenuItem) { moveToFolder?(sender.representedObject as? UUID) }
 }
 
-/// An original animation of a system symbol, drawn natively without image frames.
-@MainActor private final class ArkSpacesButton: ArkHoverButton {
-    private let hoverAnimator = SpringAnimator()
-    private let selectionAnimator = SpringAnimator()
-    private var hoverAmount: CGFloat = 0
-    private var selectionPulse: CGFloat = 0
-
+/// The footer's leading button, like Arc's Home: opens Bam's Downloads window (the same as View > Downloads, ⌘J).
+/// Its menu (right-click, or VoiceOver's Show Menu) also offers History, Recently Closed and Manage Spaces.
+@MainActor private final class ArkDownloadsButton: ArkHoverButton {
+    var showHistory: (() -> Void)?
+    var showRecentlyClosed: (() -> Void)?
+    var manageSpaces: (() -> Void)?
     init() {
         super.init(frame: .zero)
-        toolTip = "Manage Spaces — add, rename and reorder"
-        setAccessibilityLabel("Manage Spaces")
+        identifier = NSUserInterfaceItemIdentifier("sidebar-downloads")
+        setAccessibilityLabel("Downloads")
+        setAccessibilityHelp("Opens Downloads. Its menu has History, Recently Closed and Manage Spaces.")
+        // View > Downloads keeps a fixed ⌘J (App.swift); the menu bar owns that key.
+        toolTip = "Downloads (⌘J)"
+        let menu = NSMenu(title: "Library")
+        for (title, action) in [("Downloads", #selector(downloadsFromMenu)), ("History", #selector(historyFromMenu)),
+                                ("Recently Closed", #selector(recentlyClosedFromMenu))] {
+            let item = NSMenuItem(title: title, action: action, keyEquivalent: ""); item.target = self; menu.addItem(item)
+        }
+        menu.addItem(.separator())
+        let manage = NSMenuItem(title: "Manage Spaces…", action: #selector(manageSpacesFromMenu), keyEquivalent: "")
+        manage.target = self; menu.addItem(manage)
+        self.menu = menu
     }
     required init?(coder: NSCoder) { fatalError() }
-
-    override func hoverDidChange() {
-        super.hoverDidChange()
-        animateHover(to: hovered ? 1 : 0)
-    }
-    private func animateHover(to value: CGFloat) {
-        hoverAnimator.animate(from: hoverAmount, to: value, response: 0.24, dampingRatio: 0.90) { [weak self] value in
-            self?.hoverAmount = value
-            self?.needsDisplay = true
-        }
-    }
-    func playSelection() {
-        // A bounded impulse gives each space change a brief tilt and scale pulse.
-        // Repeated selections replace the existing animation; no callbacks queue.
-        selectionAnimator.animate(from: selectionPulse, to: 0, response: 0.36,
-                                  dampingRatio: 0.62, initialVelocity: 18) { [weak self] value in
-            self?.selectionPulse = value
-            self?.needsDisplay = true
-        }
-    }
-    override func viewDidMoveToWindow() {
-        super.viewDidMoveToWindow()
-        if window == nil {
-            hoverAnimator.stop(); selectionAnimator.stop()
-            hoverAmount = 0; selectionPulse = 0
-        }
-    }
+    @objc private func downloadsFromMenu() { handler?() }
+    @objc private func historyFromMenu() { showHistory?() }
+    @objc private func recentlyClosedFromMenu() { showRecentlyClosed?() }
+    @objc private func manageSpacesFromMenu() { manageSpaces?() }
     override func draw(_ dirtyRect: NSRect) {
-        if hovered { fill(ArkPalette.iconHover, radius: 7) }
-        let reduced = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-        let hover: CGFloat = reduced ? 0 : min(1, max(0, hoverAmount))
-        let pulse: CGFloat = reduced ? 0 : min(1, max(-0.2, selectionPulse))
-        NSGraphicsContext.saveGraphicsState()
-        let transform = NSAffineTransform()
-        transform.translateX(by: bounds.midX, yBy: bounds.midY - hover)
-        transform.rotate(byDegrees: -8 * hover + 16 * pulse)
-        transform.scale(by: 1 + 0.08 * hover + 0.12 * pulse)
-        transform.translateX(by: -bounds.midX, yBy: -bounds.midY)
-        transform.concat()
-        symbol("square.stack.3d.up", rect: bounds.insetBy(dx: 4, dy: 4),
-               color: ArkPalette.ink, size: 18)
-        NSGraphicsContext.restoreGraphicsState()
+        if (hovered || isHighlighted) && isEnabled { fill(isHighlighted ? ArkPalette.pressed : ArkPalette.iconHover, radius: 7) }
+        symbol("arrow.down.circle", rect: NSRect(x: (bounds.width - 17) / 2, y: (bounds.height - 17) / 2, width: 17, height: 17),
+               color: ArkPalette.ink, size: 16)
     }
-    deinit { hoverAnimator.stop(); selectionAnimator.stop() }
 }
