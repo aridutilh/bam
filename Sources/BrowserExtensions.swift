@@ -738,7 +738,7 @@ struct BrowserExtensionPermissionReview {
         case .acceptPending(let reviewed):
             next = ExtensionSiteAccess.accepting(reviewed, in: state, declarations: declarations)
         }
-        let timed = ExtensionSiteAccessEngine.timed(Self.timed(records[index]), after: change)
+        let timed = ExtensionSiteAccessEngine.timed(Self.timed(records[index]), after: change, from: state, to: next)
         try applySiteAccess(index: index, state: next, timed: timed, declarations: declarations, context: context)
         guard let snapshot = siteAccess(id: id) else { throw BrowserExtensionSiteAccessFailure.failed("Site access could not be read back.") }
         return snapshot
@@ -756,13 +756,18 @@ struct BrowserExtensionPermissionReview {
         return (result, state == nil ? nil : index.map { siteAccessRevision(records[$0], context: context) })
     }
 
-    /// Records a runtime prompt's approvals with provenance. Only when nothing changed during the dialog (`revision`
-    /// still matches: no revoke, mode change, update or reload) and the choice saved; false grants nothing.
+    /// Whether a prompt's answer still applies: nothing changed during the dialog (no revoke, mode change, panel
+    /// change, update or reload). A stale answer neither grants nor denies anything.
+    func promptIsCurrent(_ context: WKWebExtensionContext, revision: BrowserExtensionSiteAccessSnapshot.Revision?) -> Bool {
+        guard !stopped, let revision, let index = ownedRecordIndex(for: context), !updating.contains(records[index].id) else { return false }
+        return siteAccessRevision(records[index], context: context) == revision
+    }
+
+    /// Records a current prompt's approvals with provenance; false (stale, or the choice didn't save) grants nothing.
     func recordSiteApprovals(_ context: WKWebExtensionContext, _ approved: [ExtensionSiteAccessEngine.Provenance], revision: BrowserExtensionSiteAccessSnapshot.Revision?) -> Bool {
+        guard promptIsCurrent(context, revision: revision), let index = ownedRecordIndex(for: context) else { return false }
         guard !approved.isEmpty else { return true }
-        guard !stopped, let revision, let index = ownedRecordIndex(for: context), !updating.contains(records[index].id),
-              siteAccessRevision(records[index], context: context) == revision,
-              let state = try? ExtensionSiteAccessEngine.decode(records[index].siteAccess) ?? .withheld() else { return false }
+        guard let state = try? ExtensionSiteAccessEngine.decode(records[index].siteAccess) ?? .withheld() else { return false }
         let recorded = ExtensionSiteAccessEngine.recording(approved, in: state, timed: Self.timed(records[index]))
         do { try applySiteAccess(index: index, state: recorded.state, timed: recorded.timed, declarations: .init(context.webExtension), context: context); return true }
         catch { setError(error, for: records[index].id); return false }
@@ -1452,7 +1457,7 @@ struct BrowserExtensionPermissionReview {
         let offered = urls.filter { decisions[$0].map { $0 != .refused } ?? false }
         let review = BrowserExtensionPermissionReview(name: context.webExtension.displayName ?? "Extension", profileName: owner.profileName?(profileID) ?? "Current profile", permissions: [], websites: Set(offered.compactMap { ExtensionSiteAccessEngine.site(for: $0) }).sorted(), unsupported: [], isOptional: true)
         let approved = Set(!offered.isEmpty && owner.approve(review) ? offered : [])
-        guard authorizes(tab, for: context) else { completionHandler([], nil); return }
+        guard authorizes(tab, for: context), owner.promptIsCurrent(context, revision: revision) else { completionHandler([], nil); return }
         // Bound to the state the dialog was computed from: a revoke, mode change or update meanwhile grants nothing.
         let granted = owner.recordSiteApprovals(context, approved.compactMap { decisions[$0] }, revision: revision) ? approved : []
         for url in urls where !granted.contains(url) && !(approved.contains(url)) { context.setPermissionStatus(.deniedExplicitly, for: url) }
@@ -1464,7 +1469,7 @@ struct BrowserExtensionPermissionReview {
         let offered = patterns.filter { decisions[$0].map { $0 != .refused } ?? false }
         let review = BrowserExtensionPermissionReview(name: context.webExtension.displayName ?? "Extension", profileName: owner.profileName?(profileID) ?? "Current profile", permissions: [], websites: offered.map(\.string).sorted(), unsupported: [], isOptional: true)
         let approved = !offered.isEmpty && owner.approve(review) ? offered : []
-        guard authorizes(tab, for: context) else { completionHandler([], nil); return }
+        guard authorizes(tab, for: context), owner.promptIsCurrent(context, revision: revision) else { completionHandler([], nil); return }
         // Bound to the state the dialog was computed from: a revoke, mode change or update meanwhile grants nothing.
         let granted = owner.recordSiteApprovals(context, approved.compactMap { decisions[$0] }, revision: revision) ? approved : []
         for pattern in patterns where !granted.contains(pattern) && !approved.contains(pattern) { context.setPermissionStatus(.deniedExplicitly, for: pattern) }

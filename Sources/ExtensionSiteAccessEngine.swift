@@ -116,16 +116,22 @@ enum ExtensionSiteAccessEngine {
         return result
     }
 
-    /// Time-limited grants after a user change: withholding or choosing All requested ends requested time-limited
-    /// grants (the choice now decides those sites), and removing a site ends those it covers. Optional ones stay.
-    static func timed(_ timed: Timed, after change: BrowserExtensionSiteAccessChange) -> Timed {
-        var next = timed
+    /// Time-limited grants after a user change (`previous` is the state before it). Withholding or choosing All
+    /// requested ends requested time-limited grants (the choice now decides those sites); removing a site ends those
+    /// it covers; adding a site that starts a new list (from Withheld or All requested) ends those outside the list.
+    /// Optional ones always stay.
+    static func timed(_ timed: Timed, after change: BrowserExtensionSiteAccessChange, from previous: State, to next: State) -> Timed {
+        var result = timed
         switch change {
-        case .choose(.withheld), .choose(.allRequested): next.requested = [:]
-        case .removeSite(let site): next.requested = timed.requested.filter { $0.key != site && !ExtensionSiteAccess.isCovered($0.key, by: [site]) }
+        case .choose(.withheld), .choose(.allRequested): result.requested = [:]
+        case .removeSite(let site): result.requested = timed.requested.filter { $0.key != site && !ExtensionSiteAccess.isCovered($0.key, by: [site]) }
+        case .addSite:
+            if case .specific = previous.mode { break }
+            guard case .specific(let sites) = next.mode else { break }
+            result.requested = timed.requested.filter { ExtensionSiteAccess.isCovered($0.key, by: sites) }
         default: break
         }
-        return next
+        return result
     }
 
     private static func isDeclared(_ pattern: String, _ declarations: Declarations) -> Bool {
@@ -190,15 +196,27 @@ enum ExtensionSiteAccessEngine {
     static func reconcile(_ state: State, timed: Timed, applied: [String: Date], live liveGrants: [String: Date], declarations: Declarations, now: Date = Date())
         -> (state: State, timed: Timed, target: [String: Date]) {
         let removed = Set(applied.keys).subtracting(liveGrants.keys)
-        let shortened = Dictionary(uniqueKeysWithValues: liveGrants.filter { !isPermanent($0.value) && $0.value > now && isDeclared($0.key, declarations) }.map { ($0.key, $0.value) })
-        let leaving = removed.union(shortened.keys)
+        // Only a finite grant that differs from what Bam applied is a new constraint (Bam's own time-limited grants
+        // come back unchanged and constrain nothing).
+        let shortened = Dictionary(uniqueKeysWithValues: liveGrants.filter {
+            !isPermanent($0.value) && $0.value > now && isDeclared($0.key, declarations) && applied[$0.key] != $0.value }.map { ($0.key, $0.value) })
+        // Permanent authority overlapping a constrained pattern (equal, broader or narrower) can't stay permanent: a
+        // broader one would keep granting it forever. Listed sites and optional grants that overlap leave; a broad
+        // All requested approval is split into the requests it covered that don't overlap (never wider).
+        func constrained(_ pattern: String) -> Bool {
+            shortened.keys.contains { $0 == pattern || ExtensionSiteAccess.isCovered($0, by: [pattern]) || ExtensionSiteAccess.isCovered(pattern, by: [$0]) }
+        }
         var next = state
-        if !leaving.isEmpty {
-            let optional = state.optionalGrants.filter { !leaving.contains($0) }
+        if !removed.isEmpty || !shortened.isEmpty {
+            let optional = state.optionalGrants.filter { !removed.contains($0) && !constrained($0) }
             switch state.mode {
-            case .specific(let sites): next = .specific(sites.filter { !leaving.contains($0) }, optionalGrants: optional)
+            case .specific(let sites): next = .specific(sites.filter { !removed.contains($0) && !constrained($0) }, optionalGrants: optional)
             case .withheld: next = .withheld(optionalGrants: optional)
-            case .allRequested: next = State(mode: .allRequested, optionalGrants: optional, approvedRequests: state.approvedRequests.filter { !shortened.keys.contains($0) })
+            case .allRequested:
+                let covering = state.approvedRequests.filter(constrained)
+                let split = declarations.requested.filter { request in
+                    !constrained(request) && covering.contains { ExtensionSiteAccess.isCovered(request, by: [$0]) } }
+                next = State(mode: .allRequested, optionalGrants: optional, approvedRequests: state.approvedRequests.filter { !constrained($0) } + split)
             }
         }
         var nextTimed = live(timed, declarations: declarations, now: now)

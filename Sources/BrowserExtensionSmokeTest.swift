@@ -759,7 +759,23 @@ import Darwin
             guard let reloaded = host.siteAccess(id: extensionID) else { throw ExtensionSmokeTest.Failure(description: "No snapshot after reload") }
             let ended = try perform(reloaded, .choose(.withheld))
             try check(ended.timed.requested.isEmpty && !granted(ip), "Withholding must end requested time-limited grants")
-            let restored = try perform(ended, .choose(.allRequested))
+            // A runtime prompt whose dialog outlives a panel change neither grants nor denies (the Allow wins).
+            guard let promptContext = host.context(for: extensionID), let promptController = promptContext.webExtensionController,
+                  let promptRuntime = promptController.delegate as? BrowserExtensionRuntime else { throw ExtensionSmokeTest.Failure(description: "No live runtime for the prompt") }
+            let previousPrompt = host.permissionPrompt
+            var promptAnswer: Set<WKWebExtension.MatchPattern>?
+            host.permissionPrompt = { _ in
+                _ = try? host.performSiteAccess(id: extensionID, profileID: profile, revision: ended.revision, displayed: ended.declarations!,
+                                                change: .addSite(input: "127.0.0.1", includeSubdomains: false))
+                return false
+            }
+            promptRuntime.webExtensionController(promptController, promptForPermissionMatchPatterns: [ipPattern], in: nil, for: promptContext) { granted, _ in promptAnswer = granted }
+            host.permissionPrompt = previousPrompt
+            try check(promptAnswer == [] && granted(ip) && host.records.first { $0.id == extensionID }?.deniedPatterns[ipPattern.string] == nil &&
+                promptContext.deniedPermissionMatchPatterns[ipPattern] == nil,
+                "A stale prompt denial overrode a newer Allow")
+            guard let allowed = host.siteAccess(id: extensionID) else { throw ExtensionSmokeTest.Failure(description: "No snapshot after prompt") }
+            let restored = try perform(allowed, .choose(.allRequested))
             try check(restored.state.mode == .allRequested && restored.timed.requested.isEmpty && granted(ip) && granted(newSite) &&
                 !isFinite(host.context(for: extensionID)?.grantedPermissionMatchPatterns[ipPattern]),
                 "A fresh All requested approval must grant every requested site permanently")

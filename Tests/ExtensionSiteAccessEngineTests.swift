@@ -52,14 +52,25 @@ import WebKit
 
         // MARK: Time-limited grants by provenance across user changes.
         let timed = Engine.Timed(requested: ["https://a.docs.example/*": hour, "https://mail.example/inbox/*": hour], optional: ["https://optional.example/*": day])
-        let withheld = Engine.timed(timed, after: .choose(.withheld))
+        let listedMail = Access.State.specific(["https://mail.example/*"])
+        let withheld = Engine.timed(timed, after: .choose(.withheld), from: listedMail, to: .withheld())
         require(withheld.requested.isEmpty && withheld.optional == timed.optional,
                 "Withholding must end requested time-limited grants and keep optional ones: \(withheld)")
         require(Engine.target(.withheld(), timed: withheld, declarations: declarations, now: now).keys.sorted() == ["https://optional.example/*"],
                 "Withheld must grant only the optional time-limited grant")
-        let removed = Engine.timed(timed, after: .removeSite("https://mail.example/*"))
+        let removed = Engine.timed(timed, after: .removeSite("https://mail.example/*"), from: listedMail, to: .withheld())
         require(removed.requested == ["https://a.docs.example/*": hour], "Removing a site must end the requested time-limited grants it covers: \(removed)")
-        require(Engine.timed(timed, after: .addSite(input: "mail.example", includeSubdomains: false)) == timed, "Adding a site must not touch time-limited grants")
+        let docs = Access.State.specific(["https://a.docs.example/*"])
+        require(Engine.timed(timed, after: .addSite(input: "a.docs.example", includeSubdomains: false), from: listedMail,
+                             to: .specific(["https://a.docs.example/*", "https://mail.example/*"])) == timed,
+                "Adding a site to an existing list must not touch time-limited grants")
+        // Adding a site from Withheld or All requested starts a list with only that site: requested time-limited
+        // grants outside it end; optional ones stay.
+        for previous in [Access.State.withheld(), .allRequested(approving: declarations)] {
+            let started = Engine.timed(timed, after: .addSite(input: "a.docs.example", includeSubdomains: false), from: previous, to: docs)
+            require(started.requested == ["https://a.docs.example/*": hour] && started.optional == timed.optional,
+                    "Starting a list must end requested time-limited grants outside it and keep optional ones: \(started)")
+        }
         let narrowed = Engine.live(timed, declarations: .init(requested: ["https://mail.example/*"], optional: ["https://optional.example/*"]), now: now)
         require(narrowed.requested == ["https://mail.example/inbox/*": hour], "An update must drop requested time-limited grants no longer requested: \(narrowed)")
         require(Engine.live(timed, declarations: declarations, now: hour.addingTimeInterval(1)).requested.isEmpty, "Lapsed grants must drop")
@@ -110,6 +121,33 @@ import WebKit
                                             live: ["https://mail.example/*": hour, "https://*.docs.example/*": forever], declarations: declarations, now: now)
         require(Access.pendingRequests(allShortened.state, declarations: declarations) == ["https://mail.example/*"] && allShortened.target["https://mail.example/*"] == hour,
                 "A shortened All requested approval must be time-limited, then pending: \(allShortened.state)")
+        // A broad approval kept across a narrowing update: shortening one covered site splits it, never regrants it.
+        let narrow = Access.Declarations(requested: ["https://a.example/*", "https://b.example/*"])
+        let broad = Access.State(mode: .allRequested, approvedRequests: ["https://*.example/*"])
+        let broadApplied = Engine.target(broad, timed: .init(), declarations: narrow, now: now)
+        require(broadApplied == ["https://a.example/*": forever, "https://b.example/*": forever], "Fixture: the broad approval grants both requests")
+        let split = Engine.reconcile(broad, timed: .init(), applied: broadApplied,
+                                     live: ["https://a.example/*": hour, "https://b.example/*": forever], declarations: narrow, now: now)
+        require(split.state.approvedRequests == ["https://b.example/*"] && split.timed.requested == ["https://a.example/*": hour],
+                "A covering approval must be split around the shortened site: \(split.state) \(split.timed)")
+        require(split.target == ["https://a.example/*": hour, "https://b.example/*": forever], "The shortened site must stay finite: \(split.target)")
+        require(Engine.target(split.state, timed: split.timed, declarations: narrow, now: now) == split.target &&
+                Access.pendingRequests(split.state, declarations: narrow) == ["https://a.example/*"],
+                "Reapplying must not regrant the shortened site permanently; it returns only through review")
+        // A broad listed site covering a shortened one leaves the permanent list too.
+        let listedBroad = Access.State.specific(["https://*.example/*"])
+        let broadDeclarations = Access.Declarations(requested: ["https://*.example/*"])
+        let listedApplied = Engine.target(listedBroad, timed: .init(), declarations: broadDeclarations, now: now)
+        let listedSplit = Engine.reconcile(listedBroad, timed: .init(), applied: listedApplied,
+                                           live: listedApplied.merging(["https://a.example/*": hour]) { $1 }, declarations: broadDeclarations, now: now)
+        require(listedSplit.state.mode == .withheld && listedSplit.target == ["https://a.example/*": hour],
+                "A listed site covering a shortened one must not keep granting it permanently: \(listedSplit.target)")
+        // Bam's own time-limited grant coming back unchanged constrains nothing.
+        let ownTimed = Engine.Timed(requested: ["https://a.example/*": hour])
+        let withBroad = Access.State.specific(["https://*.example/*"])
+        let ownApplied = Engine.target(withBroad, timed: ownTimed, declarations: broadDeclarations, now: now)
+        let unchanged = Engine.reconcile(withBroad, timed: ownTimed, applied: ownApplied, live: ownApplied, declarations: broadDeclarations, now: now)
+        require(unchanged.state == withBroad && unchanged.target == ownApplied, "An unchanged time-limited grant must not narrow the list")
         // Permanent grants Bam didn't apply are not authority.
         let foreign = Engine.reconcile(specific, timed: .init(), applied: applied,
                                        live: applied.merging(["https://a.docs.example/*": forever]) { $1 }, declarations: declarations, now: now)
