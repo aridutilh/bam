@@ -174,14 +174,21 @@ import WebKit
         return answer ?? ["ok": false, "stage": "transport", "error": "no reply"]
     }
     private static func records(_ controller: WKWebExtensionController, deadline: TimeInterval, name: String) async throws -> [WKWebExtension.DataRecord] {
-        guard let found = try await ExtensionVerifiedIDProbe.bounded(10, by: deadline, "\(name) data records", { await controller.dataRecords(ofTypes: WKWebExtensionController.allExtensionDataTypes) }) else {
+        guard let found = try await ExtensionVerifiedIDProbe.bounded(10, by: deadline, "\(name) data records", { await controller.dataRecords(ofTypes: persistentTypes) }) else {
             throw ExtensionVerifiedIDProbe.Failure(description: "\(name): data records unavailable")
         }
         return found
     }
+    /// Only the persistent extension storage types are queried and removed. Session storage is memory-only: it is
+    /// released with the unloaded contexts (confirmed by the weak release checks), and WebKit reports a
+    /// SessionStorageFailed error (code 3) for it on unloaded contexts. Local and synchronized errors still fail cleanup.
+    static let persistentTypes: Set<WKWebExtension.DataType> = [.local, .synchronized]
+    private static func errorDetails(_ errors: [Error]) -> [[String: Any]] {
+        errors.map { error in let ns = error as NSError; return ["domain": ns.domain, "code": ns.code, "message": ns.localizedDescription] }
+    }
     private static func describe(_ records: [WKWebExtension.DataRecord]) -> [[String: Any]] {
         records.map { ["id": $0.uniqueIdentifier, "types": $0.containedDataTypes.map(\.rawValue).sorted(), "bytes": $0.totalSizeInBytes,
-                       "errors": $0.errors.map(\.localizedDescription)] }
+                       "errors": errorDetails($0.errors)] }
     }
     private static func ok(_ result: [String: Any], equals expected: String) -> Bool { result["ok"] as? Bool == true && result["value"] as? String == expected }
     /// The namespace holds exactly the records this run's write created (no more, no fewer).
@@ -298,7 +305,7 @@ import WebKit
         let hosts: [String: [String: UUID]] = ["A": [manifest.probeID: manifest.hostA, manifest.legacyID: manifest.hostL], "B": [manifest.probeID: manifest.hostB]]
         func remove(_ found: [WKWebExtension.DataRecord], from controller: WKWebExtensionController, name: String) async throws {
             _ = try await ExtensionVerifiedIDProbe.bounded(10, by: deadline, "\(name) remove data") {
-                await controller.removeData(ofTypes: WKWebExtensionController.allExtensionDataTypes, from: found); return true
+                await controller.removeData(ofTypes: persistentTypes, from: found); return true
             }
         }
         for (name, controller, store) in session.controllers {
@@ -310,8 +317,8 @@ import WebKit
             guard !found.isEmpty else { entry["nothingToRemove"] = true; entry["clean"] = true; report[name] = entry; continue }
             // 1. Remove; WebKit attaches any removal failure to the record itself.
             try await remove(found, from: controller, name: name)
-            let firstErrors = found.flatMap(\.errors).map(\.localizedDescription)
-            entry["removalErrors"] = firstErrors
+            let firstErrors = found.flatMap(\.errors)
+            entry["removalErrors"] = errorDetails(firstErrors)
             entry["afterRemoval"] = describe(try await records(controller, deadline: deadline, name: "\(name) after removal"))
             // 2. Value proof: each owned context that had data reloads and must hold no keys. Only those identifiers, so a
             //    partial run's namespace gains no new metadata.
@@ -333,8 +340,8 @@ import WebKit
             let second = try await records(controller, deadline: deadline, name: "\(name) second")
             let secondForeign = second.filter { !manifest.ownedIdentifiers.contains($0.uniqueIdentifier) }
             if secondForeign.isEmpty && !second.isEmpty { try await remove(second, from: controller, name: "\(name) second") }
-            let secondErrors = second.flatMap(\.errors).map(\.localizedDescription)
-            entry["secondRemovalErrors"] = secondErrors
+            let secondErrors = second.flatMap(\.errors)
+            entry["secondRemovalErrors"] = errorDetails(secondErrors)
             let final = try await records(controller, deadline: deadline, name: "\(name) final")
             entry["final"] = describe(final)
             let finalOK = final.allSatisfy { manifest.ownedIdentifiers.contains($0.uniqueIdentifier) && $0.totalSizeInBytes == 0 && $0.errors.isEmpty }
@@ -346,6 +353,7 @@ import WebKit
         output["cleanup"] = report
         output["cleanupProvedEmpty"] = clean
         output["metadataRetained"] = "Owned zero-byte data records may remain: WebKit lists every per-extension storage directory as a record and removeData keeps the directory; public API has no directory removal."
+        output["dataTypes"] = "Queried and removed: local and synchronized (persistent). Session storage is memory-only and released with the unloaded contexts."
         output["valuesProvedEmpty"] = clean
             ? "Yes: every owned context that had data reloaded with no storage.local or storage.sync keys, and a second removal left only owned zero-byte, error-free records."
             : "No: see each namespace's cleanup entry (foreign records, removal errors, remaining keys, a failed reload or non-zero records)."
