@@ -31,7 +31,11 @@ import WebKit
         }
         value.navigateTab = { [weak self] id, url in
             guard let self else { return false }
-            if self.session.tabs.contains(where: { $0.id == id }) { self.navigatePane(id, address: url.absoluteString); return true }
+            if let tab = self.session.tabs.first(where: { $0.id == id }) {
+                // An Arc Easel is a native reference, not a web page: extensions cannot navigate it into one.
+                guard !tab.isArcEasel else { return false }
+                self.navigatePane(id, address: url.absoluteString); return true
+            }
             if let little = self.littleWindows[id] { return little.open(url: url) }
             if let owner = self.peekExtensionIDs.first(where: { $0.value == id })?.key,
                let web = self.peeks[owner]?.webView, URLInput.directURL(url.absoluteString) != nil {
@@ -42,7 +46,11 @@ import WebKit
         value.reloadTab = { [weak self] id, fromOrigin in
             guard let self else { return false }
             var web = self.extensionWebView(id)
-            if web == nil, let tab = self.session.tabs.first(where: { $0.id == id }) { web = self.webView(for: tab) }
+            if web == nil, let tab = self.session.tabs.first(where: { $0.id == id }) {
+                // Never allocate a renderer for an Arc Easel's native reference.
+                guard !tab.isArcEasel else { return false }
+                web = self.webView(for: tab)
+            }
             guard let web else { return false }
             if fromOrigin { web.reloadFromOrigin() } else { web.reload() }
             return true
