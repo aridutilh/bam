@@ -15,7 +15,11 @@ fi
 bash "$PROJECT_DIR/scripts/generate-icon.sh"
 bash "$PROJECT_DIR/scripts/generate-icon.sh" BamPreviewIcon
 BUILD_DIR=${BAM_BUILD_DIR:-${ARK_BUILD_DIR:-${ORBIT_BUILD_DIR:-"$PROJECT_DIR/.build"}}}
-DELIVERABLE_APP="$PROJECT_DIR/Bam.app"
+# A caller may keep build output outside File Provider while the source stays in Documents.
+# This remains a build input; interactive tests install it as canonical Bam Preview.
+DELIVERABLE_DIR=${BAM_BUILD_OUTPUT_DIR:-"$PROJECT_DIR"}
+mkdir -p "$DELIVERABLE_DIR"
+DELIVERABLE_APP="$DELIVERABLE_DIR/Bam.app"
 # Sign outside iCloud/File Provider folders, which may add FinderInfo during signing.
 STAGING_DIR=$(mktemp -d /private/tmp/bam-native.XXXXXX)
 trap 'rm -rf "$STAGING_DIR"' EXIT
