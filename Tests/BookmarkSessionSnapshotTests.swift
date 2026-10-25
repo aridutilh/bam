@@ -107,15 +107,74 @@ import Foundation
         // Limits before traversal: over the model's input budget, nothing is collected.
         var huge = session
         huge.tabs += (0...Tree.maximumInputItems).map { kept("Bulk \($0)", "https://bulk.example/\($0)", space: alpha) }
-        require(BookmarkSessionSnapshot.input(from: huge, profileID: profileA) == nil, "More candidates than the budget gives nil without traversal")
+        var hugeWork = BookmarkSessionSnapshot.Work()
+        require(BookmarkSessionSnapshot.input(from: huge, profileID: profileA, work: &hugeWork) == nil && hugeWork.containersExpanded == 0,
+                "More candidates than the budget gives nil before any container is expanded")
         var justUnder = session
-        // Already in A's Spaces: 2 Favorites + 8 kept rows (incl. Easel and orbit, counted conservatively) + 4 folders.
-        let room = Tree.maximumInputItems - (2 + 8 + 4)
+        // The model's Builder counts every input node: 2 Favorites + 2 Space nodes + Alpha's 1 page and Projects folder
+        // + Beta's Split (2 pages) and Lone + Projects' Nested and Spec + Nested's Deep = 14 (Easel/orbit aren't supplied).
+        let room = Tree.maximumInputItems - 14
         justUnder.tabs += (0..<room).map { kept("Bulk \($0)", "https://bulk.example/\($0)", space: beta) }
         require(BookmarkSessionSnapshot.input(from: justUnder, profileID: profileA) != nil, "Within the budget the snapshot is built")
         var oneOver = justUnder; oneOver.tabs.append(kept("One more", "https://bulk.example/over", space: beta))
         require(BookmarkSessionSnapshot.input(from: oneOver, profileID: profileA) == nil, "One candidate over the budget gives nil")
+
+        // Review of f6b2106 (P2): same result as the session's own keptChildren, including stored order.
+        var ordered = session
+        let extra = kept("Late", "https://late.example/", space: alpha, folder: projects.id)
+        ordered.tabs.append(extra)
+        ordered.rootOrder = [alpha: [projects.id, UUID(), navigated.id, projects.id]]   // stale and repeated IDs are ignored
+        ordered.folders[0].childOrder = [extra.id, nested.id]                            // inFolder isn't listed: it follows
+        require(BookmarkSessionSnapshot.input(from: ordered, profileID: profileA) == Self.reference(ordered, profileA),
+                "Indexed snapshot equals the keptChildren-based reference, with stored orders")
+        require(BookmarkSessionSnapshot.input(from: session, profileID: profileA) == Self.reference(session, profileA)
+                && BookmarkSessionSnapshot.input(from: session, profileID: profileB) == Self.reference(session, profileB),
+                "And for both profiles of the base session")
+
+        // Many folders plus many irrelevant tabs: one pass over each collection, one expansion per reached container.
+        var wide = session
+        let wideFolders = (0..<1_000).map { BrowserFolder(name: "F\($0)", space: alpha) }
+        wide.folders += wideFolders
+        wide.tabs += wideFolders.map { kept("In \($0.name)", "https://in.example/\($0.id)", space: alpha, folder: $0.id) }
+        wide.tabs += (0..<20_000).map { BrowserTab(title: "Noise \($0)", address: "https://noise.example/\($0)", space: other) }  // other profile, Today
+        var wideWork = BookmarkSessionSnapshot.Work()
+        let wideInput = BookmarkSessionSnapshot.input(from: wide, profileID: profileA, work: &wideWork)
+        require(wideInput != nil && wideInput == Self.reference(wide, profileA), "Wide session still matches the reference")
+        require(wideWork.tabsScanned == wide.tabs.count && wideWork.foldersScanned == wide.folders.count
+                && wideWork.splitsScanned == (wide.splits ?? []).count,
+                "Each session collection is scanned exactly once, however many folders: \(wideWork)")
+        require(wideWork.containersExpanded == 2 + 2 + 1_000,
+                "One expansion per Space and per reachable folder (2 Spaces + Projects/Nested + 1,000), not per tab: \(wideWork)")
         print("PASS: \(checks) bookmark session snapshot checks")
+    }
+    /// The straightforward algorithm (session.keptChildren per container): the semantics the index must keep.
+    static func reference(_ session: BrowserSession, _ profileID: UUID) -> ExtensionBookmarkTree.Input? {
+        guard session.profiles.contains(where: { $0.id == profileID }) else { return nil }
+        func page(_ tab: BrowserTab) -> ExtensionBookmarkTree.Page? {
+            guard let saved = tab.saved, !tab.isArcEasel, !ArcEaselReference.isReference(saved.address),
+                  ExtensionBookmarkTree.isWeb(saved.address), session.profileID(for: tab) == profileID else { return nil }
+            return .init(id: tab.id, title: tab.displayTitle, address: saved.address)
+        }
+        var builder = ExtensionBookmarkTree.Builder(), pending: [UUID] = []
+        func children(_ container: BrowserSession.KeptContainer) -> [ExtensionBookmarkTree.Child] {
+            session.keptChildren(of: container).compactMap { id in
+                if session.folder(id) != nil { pending.append(id); return .folder(id) }
+                guard let tab = session.tabs.first(where: { $0.id == id }), let primary = page(tab) else { return nil }
+                if let split = session.splits?.first(where: { $0.primaryID == id }),
+                   let other = session.tabs.first(where: { $0.id == split.secondaryID }), let secondary = page(other) {
+                    return .split(primary: primary, secondary: secondary)
+                }
+                return .page(primary)
+            }
+        }
+        for tab in session.favorites(in: profileID) { if let p = page(tab) { builder.addFavorite(p) } }
+        for space in session.spaces where space.profileID == profileID { builder.addSpace(id: space.id, name: space.name, children: children(.root(space.id))) }
+        var seen = Set<UUID>()
+        while let id = pending.popLast() {
+            guard seen.insert(id).inserted, let folder = session.folder(id) else { continue }
+            builder.addFolder(id: id, name: folder.name, children: children(.folder(id)))
+        }
+        return builder.result
     }
     static func pageIDs(_ child: ExtensionBookmarkTree.Child) -> [UUID] {
         switch child {

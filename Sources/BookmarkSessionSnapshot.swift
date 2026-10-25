@@ -9,12 +9,21 @@ import Foundation
 ///   Today tabs, other profiles and Arc Easel references are never supplied.
 /// - A kept Split is its primary then its secondary (each with its own ID), when the secondary is saved;
 ///   otherwise the primary alone.
-/// - Limits come first: if the profile has more candidate items than the model accepts, nothing is traversed.
+/// - Cost: one pass over the session's tabs, one over its folders and one over its splits builds a bounded
+///   index of just this profile's saved rows, folders and Split pairs; expanding a folder is then a lookup,
+///   never a rescan of the session. Container order is exactly `BrowserSession.keptChildren(of:)`'s:
+///   stored order first, then members missing from it in tab-array order, then folder-array order.
+/// - Limits come first: if the profile has more candidate items than the model accepts, nothing is expanded.
 ///   Folders are walked with a worklist (no recursion); a folder reached twice (a cycle or a duplicate) is
 ///   collected once and referenced again, which the model rejects as inconsistent rather than looping.
-/// - Returns nil when the profile is unknown or the budget is exceeded, so the extension gets an error,
-///   never an empty or partial tree.
+/// - Returns nil when the profile is unknown, the controller is closing or applying a profile change, or the
+///   budget is exceeded, so the extension gets an error, never an empty or partial tree.
 enum BookmarkSessionSnapshot {
+    /// Work done by one snapshot, for tests (element visits, not time).
+    struct Work: Equatable {
+        var tabsScanned = 0, foldersScanned = 0, splitsScanned = 0, containersExpanded = 0
+    }
+
     /// The integration hook's entry point: nil while the controller is closing or applying a profile change
     /// (the session may be mid-transition between profiles), otherwise the snapshot below.
     static func input(from session: BrowserSession, profileID: UUID, isShuttingDown: Bool, isApplyingProfileChange: Bool) -> ExtensionBookmarkTree.Input? {
@@ -23,19 +32,57 @@ enum BookmarkSessionSnapshot {
     }
 
     static func input(from session: BrowserSession, profileID: UUID) -> ExtensionBookmarkTree.Input? {
+        var work = Work()
+        return input(from: session, profileID: profileID, work: &work)
+    }
+
+    private struct Container: Hashable { let space: Int; let parent: UUID? }
+
+    static func input(from session: BrowserSession, profileID: UUID, work: inout Work) -> ExtensionBookmarkTree.Input? {
         guard session.profiles.contains(where: { $0.id == profileID }) else { return nil }
         let spaces = session.spaces.filter { $0.profileID == profileID }
         let spaceIDs = Set(spaces.map(\.id))
-        // Bound the traversal before doing it: every Favorite, kept row and folder costs at least one item.
-        let favorites = session.favorites(in: profileID)
-        var candidates = favorites.count
-        for tab in session.tabs where spaceIDs.contains(tab.space) && tab.saved?.kind == .kept { candidates += 1 }
-        for folder in session.folders where spaceIDs.contains(folder.space) { candidates += 1 }
-        guard candidates <= ExtensionBookmarkTree.maximumInputItems else { return nil }
+        let limit = ExtensionBookmarkTree.maximumInputItems
 
-        let tabsByID = Dictionary(session.tabs.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
-        let foldersByID = Dictionary(session.folders.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
-        let secondaryByPrimary = Dictionary((session.splits ?? []).map { ($0.primaryID, $0.secondaryID) }, uniquingKeysWith: { first, _ in first })
+        // One pass over splits: which tabs are secondaries (never kept rows) and each primary's secondary.
+        var secondaryIDs = Set<UUID>(), secondaryByPrimary: [UUID: UUID] = [:]
+        for split in session.splits ?? [] {
+            work.splitsScanned += 1
+            secondaryIDs.insert(split.secondaryID)
+            if secondaryByPrimary[split.primaryID] == nil { secondaryByPrimary[split.primaryID] = split.secondaryID }
+        }
+        // One pass over tabs: this profile's Favorites (in order) and kept rows by container (tab-array order).
+        // Only relevant saved tabs are kept by ID; counting stops collection once over the budget.
+        var candidates = 0
+        var favorites: [BrowserTab] = []
+        var keptRows: [Container: [UUID]] = [:]
+        var relevant: [UUID: BrowserTab] = [:]
+        for tab in session.tabs {
+            work.tabsScanned += 1
+            guard let saved = tab.saved else { continue }
+            if saved.kind == .favorite {
+                guard session.profileID(for: tab) == profileID else { continue }
+                candidates += 1; guard candidates <= limit else { return nil }
+                favorites.append(tab); if relevant[tab.id] == nil { relevant[tab.id] = tab }
+            } else if saved.kind == .kept, spaceIDs.contains(tab.space) {
+                // A Split's secondary isn't a row of its own; it's kept by ID for its primary.
+                if !secondaryIDs.contains(tab.id) {
+                    candidates += 1; guard candidates <= limit else { return nil }
+                    keptRows[Container(space: tab.space, parent: tab.folderID), default: []].append(tab.id)
+                }
+                if relevant[tab.id] == nil { relevant[tab.id] = tab }
+            }
+        }
+        // One pass over folders: this profile's folders by container (folder-array order); the first definition of an ID wins.
+        var childFolders: [Container: [UUID]] = [:]
+        var foldersByID: [UUID: BrowserFolder] = [:]
+        for folder in session.folders {
+            work.foldersScanned += 1
+            guard spaceIDs.contains(folder.space) else { continue }
+            candidates += 1; guard candidates <= limit else { return nil }
+            childFolders[Container(space: folder.space, parent: folder.parentID), default: []].append(folder.id)
+            if foldersByID[folder.id] == nil { foldersByID[folder.id] = folder }
+        }
 
         func page(_ tab: BrowserTab) -> ExtensionBookmarkTree.Page? {
             // Saved web pages of this profile only (the model would drop non-web ones too; they're not supplied).
@@ -43,13 +90,22 @@ enum BookmarkSessionSnapshot {
                   ExtensionBookmarkTree.isWeb(saved.address), session.profileID(for: tab) == profileID else { return nil }
             return ExtensionBookmarkTree.Page(id: tab.id, title: tab.displayTitle, address: saved.address)
         }
+        /// Exactly keptChildren(of:): stored order first (members only, once each), then the rest in member order.
+        func ordered(_ members: [UUID], stored: [UUID]?) -> [UUID] {
+            guard let stored, !stored.isEmpty else { return members }
+            let memberSet = Set(members); var seen = Set<UUID>()
+            let known = stored.filter { memberSet.contains($0) && seen.insert($0).inserted }
+            return known + members.filter { !seen.contains($0) }
+        }
         var builder = ExtensionBookmarkTree.Builder()
         var pending: [UUID] = []
-        func children(_ container: BrowserSession.KeptContainer) -> [ExtensionBookmarkTree.Child] {
-            session.keptChildren(of: container).compactMap { id in
+        func children(_ container: Container, stored: [UUID]?) -> [ExtensionBookmarkTree.Child] {
+            work.containersExpanded += 1
+            let members = (keptRows[container] ?? []) + (childFolders[container] ?? [])
+            return ordered(members, stored: stored).compactMap { id in
                 if foldersByID[id] != nil { pending.append(id); return .folder(id) }
-                guard let tab = tabsByID[id], let primary = page(tab) else { return nil }
-                if let secondaryID = secondaryByPrimary[id], let other = tabsByID[secondaryID], let secondary = page(other) {
+                guard let tab = relevant[id], let primary = page(tab) else { return nil }
+                if let secondaryID = secondaryByPrimary[id], let other = relevant[secondaryID], let secondary = page(other) {
                     return .split(primary: primary, secondary: secondary)
                 }
                 return .page(primary)
@@ -60,14 +116,15 @@ enum BookmarkSessionSnapshot {
             guard builder.addFavorite(favorite) else { return nil }
         }
         for space in spaces {
-            guard builder.addSpace(id: space.id, name: space.name, children: children(.root(space.id))) else { return nil }
+            let kids = children(Container(space: space.id, parent: nil), stored: session.rootOrder?[space.id])
+            guard builder.addSpace(id: space.id, name: space.name, children: kids) else { return nil }
         }
         var seen = Set<UUID>()
         while let id = pending.popLast() {
             // Each folder is collected once; a second reference stays in its parent for the model to reject.
-            guard seen.insert(id).inserted, let folder = foldersByID[id], spaceIDs.contains(folder.space) else { continue }
-            guard seen.count <= ExtensionBookmarkTree.maximumInputItems,
-                  builder.addFolder(id: id, name: folder.name, children: children(.folder(id))) else { return nil }
+            guard seen.insert(id).inserted, let folder = foldersByID[id] else { continue }
+            let kids = children(Container(space: folder.space, parent: id), stored: folder.childOrder)
+            guard builder.addFolder(id: id, name: folder.name, children: kids) else { return nil }
         }
         return builder.result
     }
