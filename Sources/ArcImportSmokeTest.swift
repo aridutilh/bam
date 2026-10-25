@@ -364,6 +364,15 @@ final class ChildOutput: @unchecked Sendable {
             }
             summary["icons"] = browser.importedTabIcons.count
             summary["colors"] = colors
+            // The Easel reference survives the relaunch in its place and is shown natively.
+            if let work = browser.session.spaces.first(where: { $0.name == "Work" }) { summary["work_rows"] = rows(browser.session, work.id) }
+            let easels = browser.session.tabs.filter { $0.isArcEasel && importedTabIDs(browser.session).contains($0.id) }
+            summary["easel_rows"] = easels.map(\.displayTitle)
+            if mode != "private", easels.count == 1 {
+                browser.select(easels[0].id)
+                summary["easel_native"] = browser.browsers[easels[0].id] == nil && !browser.pendingLoads.contains(easels[0].id)
+                    && (browser.webHost.subviews.last as? EaselReferenceView)?.shownName == easels[0].displayTitle
+            }
             summary["imported_pages"] = importedTabIDs(browser.session).intersection(browser.browsers.keys).count
             summary["ok"] = true
         } catch {
@@ -398,7 +407,7 @@ final class ChildOutput: @unchecked Sendable {
         Task { @MainActor in
             do {
                 try await run()
-                finish(true, "\(checks) checks through the real Import from Arc sheet and callbacks: preview/cancel without mutation, options, locked controls while saving, verified success and dismissal, preview-equals-commit counts, one blank landing with and without Today, Spaces/emoji/profiles, nested folders, Splits, per-profile Favorites and overflow, dormancy, verified save and reload, repeat without duplication, unconfirmed and confirmed undo after failed saves, locked sheet during a slow write, incremental re-import; imported icons from original synthetic cache PNGs (per tab on a shared site, profile-scoped, invalid files fall back, none for previews/cancels/undone imports, no page or fetch) with persistence and isolation verified across relaunched processes")
+                finish(true, "\(checks) checks through the real Import from Arc sheet and callbacks: preview/cancel without mutation, options, locked controls while saving, verified success and dismissal, preview-equals-commit counts, one blank landing with and without Today, Spaces/emoji/profiles, nested folders, Splits, per-profile Favorites and overflow, dormancy, verified save and reload, repeat without duplication, unconfirmed and confirmed undo after failed saves, locked sheet during a slow write, incremental re-import; imported icons from original synthetic cache PNGs (per tab on a shared site, profile-scoped, invalid files fall back, none for previews/cancels/undone imports, no page or fetch) with persistence and isolation verified across relaunched processes; the Arc Easel kept as a named reference row in its place, shown natively without page or connection, before and after relaunch")
             } catch { finish(false, String(describing: error)) }
         }
     }
@@ -447,8 +456,10 @@ final class ChildOutput: @unchecked Sendable {
         let newlyImported = importedTabIDs(after).subtracting(linkedBefore)
         let added = after.tabs.filter { tab in !before.tabs.contains { $0.id == tab.id } }
         let landing = added.filter { !newlyImported.contains($0.id) }
-        try check(newlyImported.count == planned.importedTabs && added.count == planned.importedTabs + 1,
-                  "\(label): adds exactly the previewed tabs (\(newlyImported.count)/\(planned.importedTabs)) plus one landing tab")
+        // Easel references are provenance-linked rows but not counted in importedTabs.
+        let rowsPlanned = planned.importedTabs + planned.easelReferences
+        try check(newlyImported.count == rowsPlanned && added.count == rowsPlanned + 1,
+                  "\(label): adds exactly the previewed tabs and Easel references (\(newlyImported.count)/\(rowsPlanned)) plus one landing tab")
         try check(landing.count == 1 && landing[0].id == after.activeID && landing[0].isHome && !landing[0].isSaved
                   && landing[0].space == planned.firstSpaceID,
                   "\(label): lands on exactly one new blank tab in the first imported Space")
@@ -576,7 +587,7 @@ final class ChildOutput: @unchecked Sendable {
         guard let preview = sheet.report else { throw Failure.assertion("Choosing the fixture produces a preview") }
         try check(preview.refusal == nil && !preview.isEmpty && sheet.importButton.isEnabled, "Preview enables Import")
         try check(preview.spaces.map(\.title) == ["Work", "Home", "Side"] && preview.spaces.allSatisfy(\.isNew), "Preview lists three new Spaces")
-        try check(preview.easels == 1 && preview.liveFolders == 1 && preview.invalidAddresses == 1 && preview.oversizedSplits == 1
+        try check(preview.easels == 0 && preview.easelReferences == 1 && preview.spaces.first?.easels == 1 && preview.liveFolders == 1 && preview.invalidAddresses == 1 && preview.oversizedSplits == 1
                   && preview.favoriteOverflow == 2 && preview.unattachedProfiles == 1 && preview.flattenedTodayFolders == 1,
                   "Preview reports every approximation the fixture contains")
         let todayInPreview = preview.spaces.reduce(0) { $0 + $1.todayTabs }
@@ -641,7 +652,9 @@ final class ChildOutput: @unchecked Sendable {
         let session = controller.session
         let importedIDs = importedTabIDs(session)
         let imported = session.tabs.filter { importedIDs.contains($0.id) }
-        try check(imported.count == preview.importedTabs, "Both imports together add exactly the full preview (\(imported.count)/\(preview.importedTabs))")
+        try check(first.planned.easelReferences == 1 && second.planned.easelReferences == 0, "The Easel reference arrives with the kept import, once")
+        try check(imported.count == preview.importedTabs + preview.easelReferences,
+                  "Both imports together add exactly the full preview (\(imported.count)/\(preview.importedTabs + preview.easelReferences))")
         try check(original.tabs.allSatisfy { tab in session.tabs.contains { $0.id == tab.id && $0.address == tab.address && $0.space == tab.space && $0.saved == tab.saved } },
                   "Existing tabs survive unchanged")
         try check(work.emoji == "💼" && home.emoji == "🏠" && side.emoji == "🧪", "Space emoji preserved")
@@ -658,8 +671,8 @@ final class ChildOutput: @unchecked Sendable {
         let workRows = rows(session, work.id)
         let expected = ["[More Favorites]", "  Fav 13", "  Fav 14", "Team Docs", "[Projects]", "  Alpha Board", "  [Alpha]",
                         "    [Level 2]", "      [Level 3]", "        [Level 4]", "          Deep Page", "  Beta Board",
-                        "[Empty]", "Alpha Board copy", "Left Pane", "[Pull Requests]", "  PR 1", "Wide 1", "Wide 3"]
-        try check(workRows == expected, "Work kept hierarchy matches Arc order (\(workRows.count) rows)")
+                        "[Empty]", "Alpha Board copy", "Sketch", "Left Pane", "[Pull Requests]", "  PR 1", "Wide 1", "Wide 3"]
+        try check(workRows == expected, "Work kept hierarchy matches Arc order, the Easel in its place (\(workRows.count) rows)")
         try check(session.folders.map { session.folderDepth($0.id) }.max() == 4, "Five-level folder nesting is represented")
         guard let left = imported.first(where: { $0.title == "Left Pane" }), let right = imported.first(where: { $0.title == "Right Pane" }),
               let wide = imported.first(where: { $0.title == "Wide 1" }) else { throw Failure.assertion("Split panes imported") }
@@ -683,6 +696,22 @@ final class ChildOutput: @unchecked Sendable {
         try check(try layout(reloaded) == layout(session), "Reloaded session keeps imported tabs, folders, Spaces, profiles, Splits and provenance")
         try check(rows(reloaded, work.id) == expected, "Reloaded hierarchy is identical")
         try check(reloaded.tabs.filter { importedIDs.contains($0.id) && $0.isSaved }.allSatisfy(\.isUnloaded), "Reloaded imported tabs are still dormant")
+
+        // The imported Easel: one named, dormant kept reference row in its place, without a web
+        // address. Selecting it shows the native reference, with no page and no connection.
+        let easels = imported.filter(\.isArcEasel)
+        guard easels.count == 1, let sketch = easels.first else { throw Failure.assertion("The fixture Easel imports as exactly one reference row (\(easels.count))") }
+        try check(sketch.displayTitle == "Sketch" && sketch.saved?.kind == .kept && sketch.isUnloaded && sketch.space == work.id
+                  && sketch.folderID == nil && !sketch.address.lowercased().hasPrefix("http"),
+                  "The Easel is a dormant kept row named Sketch at Work's top level, with no web address")
+        try check(reloaded.tabs.contains { $0.id == sketch.id && $0.isArcEasel && $0.displayTitle == "Sketch" }, "The Easel reference row is saved")
+        controller.select(sketch.id)
+        try check(controller.session.activeID == sketch.id && controller.browsers[sketch.id] == nil
+                  && (controller.webHost.subviews.last as? EaselReferenceView)?.shownName == "Sketch",
+                  "Selecting the imported Easel row shows its native reference view, with no page")
+        try await Task.sleep(for: .milliseconds(300))
+        try check(controller.browsers[sketch.id] == nil && !controller.pendingLoads.contains(sketch.id) && tripwire.connections == 0,
+                  "The Easel reference creates no renderer, requests nothing and connects nowhere")
 
         // 4. Repeat import of the same layout adds nothing and cannot commit.
         let committedLayout = try layout(controller.session)
@@ -778,15 +807,21 @@ final class ChildOutput: @unchecked Sendable {
         let importChild = try await launchChild("import", folder: persist, expected: icons.count)
         try check(importChild["icons"] as? Int == icons.count && importChild["disk_records"] as? Int == icons.count && childColorsMatch(importChild, icons)
                   && importChild["imported_pages"] as? Int == 0, "Import child shows and saves exactly the valid icons, creating no page")
+        try check(importChild["work_rows"] as? [String] == expected && importChild["easel_rows"] as? [String] == ["Sketch"]
+                  && importChild["easel_native"] as? Bool == true, "Import child keeps the Easel row in its place and shows it natively")
         let cacheFolder = persist.appendingPathComponent("ImportedIcons", isDirectory: true)
         try check(FileManager.default.fileExists(atPath: cacheFolder.appendingPathComponent("index.json").path), "Icons persist in the session's own cache")
         let reloadChild = try await launchChild("reload", folder: persist, expected: icons.count)
         try check(reloadChild["icons"] as? Int == icons.count && childColorsMatch(reloadChild, icons) && reloadChild["imported_pages"] as? Int == 0,
                   "A relaunched process restores the same icons for the same tabs and profiles, creating no page")
+        try check(reloadChild["work_rows"] as? [String] == expected && reloadChild["easel_rows"] as? [String] == ["Sketch"]
+                  && reloadChild["easel_native"] as? Bool == true,
+                  "After relaunch the Easel row is still in its place and selecting it shows the native reference without a page")
         let digest = Self.treeDigest(cacheFolder)
         let isolated = try await launchChild("private", folder: persist, expected: 0)
         try check(isolated["icons"] as? Int == 0 && (isolated["colors"] as? [String: [Int]])?.isEmpty == true,
                   "A private relaunch on the same session shows no saved icons")
+        try check(isolated["easel_rows"] as? [String] == ["Sketch"], "A private relaunch still loads the Easel row from the session")
         try check(digest != nil && Self.treeDigest(cacheFolder) == digest, "A private relaunch leaves the icon cache unchanged")
         try check(Set(childPIDs).count == 3 && !childPIDs.contains(getpid()), "Three distinct relaunched processes, none of them this one")
         try check(tripwire.connections == 0, "No relaunched process connected to any imported address (\(tripwire.requestLines))")
