@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased draft — folders, Arc import, sidebar look
+## 0.22.0 build 45 — unreleased draft: folders, Arc import, sidebar look
 
 - Add folders to each Space's kept section: create (including around a tab), rename, nest up to 12 levels, collapse, reorder, move between folders and Spaces, and ungroup in place. A collapsed folder still shows the selected tab; Splits move as one row. Folder metadata is additive to session format 5 and damaged records repair without losing tabs.
 - Add File ▸ Import from Arc… (also in Settings ▸ General). Bam reads Arc's `StorableSidebar.json` read-only, previews Spaces, folders, kept and Today tabs, per-profile Favorites, Splits and every limitation, then imports in one step. Imported pages stay asleep until opened; the window lands on a blank tab. Repeat imports add only new Arc items and keep local edits and removals. If saving fails, the import is undone and the outcome reported truthfully. Layout only: no passwords, cookies, history or extensions.
@@ -9,7 +9,7 @@
 - Imported Arc tabs show the icons Arc had cached for them, read from Arc's icon cache next to its layout file after the import is saved, and keep them after relaunch in a small private cache in Bam's support folder (memory only in disposable previews). An icon stays with its tab's imported site and login profile. Imported tabs don't fetch icons from their sites until opened.
 - Drag sidebar rows: reorder kept and Today tabs and folders, drop on a folder to file a row inside it, drag a kept tab into Today to unkeep it, or drop a tab or folder on a footer Space icon to move it there (asking first when that reloads pages in another login profile). Drop lines and folder highlights appear only where the move is allowed; folders now open on mouse-up so they can be dragged.
 - Add an Appearance preference (System, Light, Dark; System by default) in View ▸ Appearance and Settings ▸ General. Bam no longer forces dark: the browser window, Little Bam, Settings, onboarding, Peek, Space creation and the blank tab follow it, with a light look of pale per-Space washes, dark text and a lifted white selected tab. Dark mode looks as before. Picture in Picture stays dark.
-- Component tests only so far; native checks in Bam Preview are pending (see `VALIDATION.md`). Version number to be assigned at integration.
+- Canonical Preview validation includes the full eleven-suite checkpoint, the later 136-check Arc import/icon-relaunch fixture, and manual folder drag, appearance and keyboard navigation checks. Easel references and the newest visual changes still require their integrated native pass; see `VALIDATION.md` for exact tested revisions and limits.
 
 ## Unreleased extension-compatibility draft (branch work, after 0.21.3)
 
