@@ -1,15 +1,19 @@
 # Changelog
 
-## 0.22.1 build 46 — unreleased draft: sidebar corrections
+## 0.22.1 build 46 — Arc import, folders and sidebar corrections
 
 - Balance Favorites across rows and draw their artwork at 16 points on whole device pixels, avoiding enlargement of imported 32-pixel icons on Retina displays.
 - Reconcile sidebar hover with the actual pointer after Space switches, row reuse, scrolling and key-window changes.
 - Separate pointer and keyboard focus for folder rows; use original filled open/closed folder drawings and quieter disclosure controls.
 - Simplify the footer around Downloads, Spaces and New Tab while keeping Space management, History, Recently Closed and Picture in Picture reachable.
 - Hide inactive unsaved blank-tab placeholders from the sidebar without deleting session data; suppress legacy internal URLs in sidebar copy. Imported folders explain that they contain saved links rather than automatic updates.
-- Local Preview draft verified at `8422e1f`: full build, native Interactions 173 and Features 371; Favicons 85 and Arc import 155 passed on the same production behavior at `b11ccba`. Manual footer, grid and folder-focus checks passed; see VALIDATION.md for scope and limitations.
+- Release candidate verified at `8422e1f`: full build, native Interactions 173 and Features 371; Favicons 85 and Arc import 155 passed on the same production behavior at `b11ccba`. Manual footer, grid and folder-focus checks passed; see VALIDATION.md for scope and limitations.
 
-## 0.22.0 build 45 — unreleased draft: folders, Arc import, sidebar look
+## Development history included in 0.22.1
+
+The following 0.22.0 and overnight extension entries record intermediate checkpoints. Their pending notes are historical; current results and remaining limitations are in VALIDATION.md.
+
+### 0.22.0 build 45 — folders, Arc import, sidebar look
 
 - Verified integration checkpoint `66cdd71`: full component build and all eleven native suites passed in canonical Bam Preview, including Features 369, Extensions 393 and Arc import 155. This supersedes earlier pending-runtime notes for changes included in that checkpoint: native cookie-event interception works, Easel references remain renderer-free, and icons/themes survive real relaunches. The isolated normal-profile probe also ran with explicit non-private flags and confirmed removal of its own store after its controllers and pages were released. Manual themed light/dark, rename/recolor, Space-return, recessed Favorite selection, monograms and narrow-title fade checks passed. No release or production-app replacement.
 

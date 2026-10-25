@@ -1,3 +1,9 @@
+## Release 0.22.1 build 46 — October 25
+
+The release candidate passed `bash build.sh` (production sources at `8422e1f`) and the complete `bash scripts/test-runtime.sh` against canonical Bam Preview. All eleven native suites passed, including Interactions **173**, Features **371**, Extensions **435**, Favicons **85**, Arc import **155**, Profiles **98**, Profile activation **45**, Resources **37** and Automatic PiP **85**, plus WebKit and manual PiP. Release-only changes after the built source are documentation and neutral labels in a component fixture; production source and resources are unchanged. Evidence: task-local `integration-build-morning-sidebar-final.log` and `release-runtime-e1325f5.log`.
+
+The build-generated ZIP's executable matches the built app byte-for-byte and its manifest reports 0.22.1/build 46. Runtime tests used only the canonical Preview identity. This is an ad-hoc-signed Apple Silicon prerelease, not notarized. The measured extension limitations below remain; no universal Chrome compatibility claim is made. Sidebar visual acceptance and personal-profile preservation are recorded in the morning section.
+
 ## Morning sidebar verification — October 25, 0.22.1 build 46
 
 Local draft source `8422e1f` contains the reviewed sidebar corrections plus fixture-only updates after `b11ccba`. The complete build passed at `8422e1f`; canonical native Interactions **173** and Features **371** also passed.

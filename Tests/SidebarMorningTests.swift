@@ -280,8 +280,8 @@ import AppKit
         let footerWindow = NSWindow(contentRect: footerSidebar.frame, styleMask: [.borderless], backing: .buffered, defer: false)
         footerWindow.contentView = footerSidebar
         footerSidebar.configureSpaces([BrowserSpace(id: 0, name: "Explore", symbol: "globe", colorIndex: 0),
-                                       BrowserSpace(id: 1, name: "chill", symbol: "sparkles", colorIndex: 1),
-                                       BrowserSpace(id: 2, name: "Solo", symbol: "sun.max", colorIndex: 2)])
+                                       BrowserSpace(id: 1, name: "Reading", symbol: "sparkles", colorIndex: 1),
+                                       BrowserSpace(id: 2, name: "Projects", symbol: "sun.max", colorIndex: 2)])
         footerSidebar.update(tabs: [], space: 1, canGoBack: false, canGoForward: false, isLoading: false)
         footerSidebar.layoutSubtreeIfNeeded()
         var opened: [String] = []
