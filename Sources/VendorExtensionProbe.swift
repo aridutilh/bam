@@ -507,7 +507,9 @@ import WebKit
     }
     /// After the views are released: remove only the run's own website store (bounded, confirmed by the
     /// store list), then the run directory. Never lists-and-deletes anything else.
+    /// `controllerReleased` covers both the BrowserController and the WKWebExtensionController.
     private func cleanUpNormalRun(_ run: NormalRun, controllerReleased: @escaping () -> Bool,
+                                  extensionControllerReleased: @escaping () -> Bool,
                                   livePages: @escaping () -> Int) async -> (clean: Bool, report: [String: Any]) {
         var report: [String: Any] = [:]
         // No persistent store can be (re)opened from here on; pages still holding one keep it until released.
@@ -535,7 +537,8 @@ import WebKit
         } else {
             report["store_removal"] = ["refused": "the isolated store allowlist is not exactly the run's store"]
         }
-        report["controller_released"] = controllerReleased()
+        report["controllers_released"] = controllerReleased()
+        report["extension_controller_released"] = extensionControllerReleased()
         report["owned_pages_still_alive"] = livePages()
         report["released_before_removal"] = released
         report["store_removed"] = storeRemoved
@@ -598,6 +601,9 @@ import WebKit
             ownedViews += browser.peeks.values.compactMap(\.webView).map(WeakView.init)
         }
         var temporaryStorage: URL?
+        // The WebKit extension controller itself (public object), captured before host shutdown: its release
+        // is the evidence for the background page, which is WebKit-internal and not observed directly.
+        weak var extensionController: AnyObject?
         if #available(macOS 15.4, *), let browser = controller {
             let host = browser.browserExtensions
             temporaryStorage = host.storageURL
@@ -606,6 +612,7 @@ import WebKit
                     // Extension-owned pages reachable before host shutdown: the offscreen document (loading or
                     // open) and the action popups (default and per tab). The background page is WebKit-internal
                     // and not reachable; its release is covered only by the controller's.
+                    extensionController = context.webExtensionController
                     let runtime = context.webExtensionController?.delegate as? BrowserExtensionRuntime
                     if let offscreen = runtime?.compatibility.offscreen?.currentDocument(for: context.uniqueIdentifier) {
                         ownedViews.append(WeakView(offscreen))
@@ -620,7 +627,9 @@ import WebKit
         }
         ownedViews += observedPopups
         observations["tracked_owned_pages"] = ownedViews.count
-        observations["untracked_owned_pages"] = "the extension background page is WebKit-internal; only the controller's release covers it"
+        let extensionControllerTracked = extensionController != nil
+        observations["extension_controller_tracked"] = extensionControllerTracked
+        observations["untracked_owned_pages"] = "the extension background page is WebKit-internal and not observed; release of the WKWebExtensionController (tracked when it existed) is the only evidence for it"
         controller?.prepareToClose(persistSession: false)
         let fm = FileManager.default
         // The private host deletes its temporary package storage on shutdown;
@@ -653,7 +662,8 @@ import WebKit
         let base = requested && observationCompleted && hostStorageClean && scratchClean
         guard let run = normalRun else { emit(base, reasonText); return }
         Task { @MainActor in
-            let cleanup = await self.cleanUpNormalRun(run, controllerReleased: { releasedController == nil },
+            let cleanup = await self.cleanUpNormalRun(run, controllerReleased: { releasedController == nil && extensionController == nil },
+                                                      extensionControllerReleased: { extensionController == nil },
                                                       livePages: { ownedViews.filter { $0.view != nil }.count })
             self.observations["normal_cleanup"] = cleanup.report
             var text = reasonText
