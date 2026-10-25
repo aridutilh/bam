@@ -62,6 +62,15 @@ import WebKit
         let aID = try await open(sameURL), bID = try await open(sameURL)
         _ = try await open(plainURL)
         try await retitle(aID, "Same A"); try await retitle(bID, "Same B")
+        // A candidate in another profile: its URL and title must never reach this profile's extensions.
+        let candidateURL = page("/index.html", "other-profile-candidate"), candidateTitle = "Other profile candidate"
+        guard let candidateID = controller.openProfileTab(candidateURL, profileID: elsewhere, active: false) else {
+            throw Failure(description: "Tab metadata: could not open the other-profile candidate")
+        }
+        opened.append(candidateID)
+        try await wait("the other-profile candidate did not load") { controller.browsers[candidateID]?.url == candidateURL && controller.browsers[candidateID]?.isLoading == false }
+        try await retitle(candidateID, candidateTitle)
+        let leaks: Set<String> = [candidateURL.absoluteString, candidateTitle]
 
         // Three original extensions in that profile.
         func install(_ name: String, _ manifest: [String: Any], background: String? = nil) async throws -> (id: UUID, context: WKWebExtensionContext, page: WKWebView) {
@@ -98,6 +107,12 @@ import WebKit
         let noTabs = try await install("no-tabs", ["permissions": ["storage"]])
         var installed = [noHost.id, authorized.id, noTabs.id]
         defer { for page in [noHost.page, authorized.page, noTabs.page] { page.stopLoading() } }
+        // On a failure the hook is already cleared (above); the fixture extensions are removed best effort so a failed
+        // run never leaves them behind. The successful path removes them strictly at the end.
+        defer {
+            let leftover = installed
+            if !leftover.isEmpty { Task { @MainActor in for id in leftover { try? await host.remove(id: id) } } }
+        }
         host.reconcile()
 
         let prelude = """
@@ -115,6 +130,13 @@ import WebKit
         }
         func tabs(_ value: Any?) -> [[String: Any]] { value as? [[String: Any]] ?? [] }
         func urls(_ list: [[String: Any]]) -> [String] { list.map { $0["url"] as? String ?? "" } }
+        /// WebKit's redaction: neither a URL nor a title (absent and empty both count as redacted).
+        func redacted(_ list: [[String: Any]]) -> Bool {
+            list.allSatisfy { ($0["url"] as? String ?? "").isEmpty && ($0["title"] as? String ?? "").isEmpty }
+        }
+        func leaksNothing(_ list: [[String: Any]]) -> Bool {
+            list.allSatisfy { !leaks.contains($0["url"] as? String ?? "") && !leaks.contains($0["title"] as? String ?? "") }
+        }
         let fixtureURLs: Set<String> = [sameURL.absoluteString, plainURL.absoluteString]
         /// What Bam itself would show for this profile's tabs, in the order extensions see them.
         func expected() -> [(url: String, title: String)] {
@@ -127,12 +149,14 @@ import WebKit
         let presence = try await js(noHost.page, "return {query: typeof browser.tabs.query.__bamTabMetadataNative, chrome: typeof chrome.tabs.get.__bamTabMetadataNative};")
         let absent = try await js(noTabs.page, "return {query: typeof browser.tabs.query.__bamTabMetadataNative, tabs: (await browser.tabs.query({})).map(brief)};")
         try check(presence["query"] as? String == "function" && presence["chrome"] as? String == "function", "the facade is missing on browser or chrome: \(presence)")
-        try check(absent["query"] as? String == "undefined" && fixtureURLs.isDisjoint(with: urls(tabs(absent["tabs"]))),
-                  "an extension without tabs got the facade or a fixture URL: \(absent)")
         let first = try await js(noHost.page, wrappedQuery)
         let nativeTabs = tabs(first["native"]), wrappedTabs = tabs(first["wrapped"]), reference = expected()
-        try check(nativeTabs.count == reference.count && fixtureURLs.isDisjoint(with: urls(nativeTabs)),
-                  "WebKit did not redact the no-host extension's tabs (a host grant leaked?): \(nativeTabs)")
+        // Negative controls: no URL *and* no title, only this profile's tabs, and nothing from the other profile.
+        try check(absent["query"] as? String == "undefined" && tabs(absent["tabs"]).count == reference.count && redacted(tabs(absent["tabs"])),
+                  "an extension without tabs got the facade, a URL or a title, or another profile's tab: \(absent)")
+        try check(nativeTabs.count == reference.count && redacted(nativeTabs),
+                  "WebKit did not redact the no-host extension's URLs and titles (a host grant leaked?): \(nativeTabs)")
+        try check(leaksNothing(wrappedTabs) && wrappedTabs.count == reference.count, "the facade disclosed another profile's tab: \(wrappedTabs)")
         try check(wrappedTabs.map { $0["id"] as? Int } == nativeTabs.map { $0["id"] as? Int }
                   && zip(wrappedTabs, reference).allSatisfy { ($0["url"] as? String) == $1.url && ($0["title"] as? String) == $1.title },
                   "the facade did not add exactly Bam's URL and title per tab: \(wrappedTabs) vs \(reference)")
@@ -167,11 +191,13 @@ import WebKit
         try check((reads["promise"] as? [String: Any])?["title"] as? String == "Same B" && (reads["callback"] as? [String: Any])?["title"] as? String == "Same B"
                   && (reads["promise"] as? [String: Any])?["url"] as? String == sameURL.absoluteString,
                   "tabs.get (promise or callback) did not show the tab's own URL and title: \(reads)")
-        try check(fixtureURLs.isSubset(of: Set(urls(tabs(reads["all"])))) && fixtureURLs.isSubset(of: Set(urls(tabs(reads["single"])))),
-                  "populated windows did not show the tabs' URLs: \(reads)")
+        try check(fixtureURLs.isSubset(of: Set(urls(tabs(reads["all"])))) && fixtureURLs.isSubset(of: Set(urls(tabs(reads["single"]))))
+                  && leaksNothing(tabs(reads["all"])) && leaksNothing(tabs(reads["single"])),
+                  "populated windows did not show the tabs' URLs, or showed another profile's tab: \(reads)")
         let workerReply = reads["worker"] as? [String: Any]
         try check(workerReply?["facade"] as? String == "function" && fixtureURLs.isSubset(of: Set(urls(tabs(workerReply?["wrapped"]))))
-                  && fixtureURLs.isDisjoint(with: urls(tabs(workerReply?["native"]))), "the prepared worker did not get the facade, or WebKit showed it URLs: \(String(describing: workerReply))")
+                  && leaksNothing(tabs(workerReply?["wrapped"])) && redacted(tabs(workerReply?["native"])) && !tabs(workerReply?["native"]).isEmpty,
+                  "the prepared worker did not get the facade, WebKit showed it a URL or title, or another profile leaked: \(String(describing: workerReply))")
         try check(reads["wrappedPromise"] as? String == reads["nativePromise"] as? String && reads["nativePromise"] as? String != "resolved"
                   && reads["wrappedCallback"] as? String == reads["nativeCallback"] as? String && reads["nativeCallback"] as? String != "none",
                   "an invalid tab id did not keep WebKit's own rejection and runtime.lastError: \(reads)")
@@ -269,7 +295,7 @@ import WebKit
             globalThis.__wrappedUpdated = (id, info, tab) => __events.wrapped.push({id, keys: Object.keys(info).sort(), url: info.url, title: info.title, tab: brief(tab)});
             browser.tabs.onUpdated.addListener(__wrappedUpdated);
             browser.tabs.onUpdated.addListener.__bamTabMetadataNative.call(browser.tabs.onUpdated,
-              (id, info) => __events.native.push({id, keys: Object.keys(info).sort(), url: info.url}));
+              (id, info) => __events.native.push({id, keys: Object.keys(info).sort(), url: info.url, title: info.title}));
             browser.tabs.onCreated.addListener((tab) => __events.created.push(brief(tab)));
             return {};
             """)
@@ -278,26 +304,68 @@ import WebKit
         let eventsJS = tabs(try await js(noHost.page, wrappedQuery)["wrapped"]).first { $0["url"] as? String == eventsURL.absoluteString }?["id"] as? Int
         guard let eventsJS else { throw Failure(description: "Tab metadata: the events tab was not visible") }
         let eventsProbe = "return {wrapped: __events.wrapped.filter((e) => e.id === id), native: __events.native.filter((e) => e.id === id), created: __events.created.filter((t) => t.id === id)};"
+        // A navigation, so WebKit sends a (redacted) url key; then wait for the facade to deliver everything.
+        let navigatedURL = page("/next.html", "events-navigated")
+        controller.navigatePane(eventsID, address: navigatedURL.absoluteString)
+        try await wait("the events tab did not navigate") { controller.browsers[eventsID]?.url == navigatedURL && controller.browsers[eventsID]?.isLoading == false }
         try await wait("supplemented onUpdated events did not catch up") {
             guard let value = try? await js(noHost.page, eventsProbe, ["id": eventsJS]) else { return false }
             let wrapped = tabs(value["wrapped"]), native = tabs(value["native"])
-            return !native.isEmpty && wrapped.count == native.count && wrapped.last.map { ($0["tab"] as? [String: Any])?["title"] as? String == "Events title" } == true
+            return native.contains { ($0["keys"] as? [String])?.contains("url") == true } && wrapped.count == native.count
+                && wrapped.last.map { ($0["tab"] as? [String: Any])?["url"] as? String == navigatedURL.absoluteString } == true
         }
         let events = try await js(noHost.page, eventsProbe, ["id": eventsJS])
         let wrappedEvents = tabs(events["wrapped"]), nativeEvents = tabs(events["native"])
         try check(zip(wrappedEvents, nativeEvents).allSatisfy { String(describing: $0["keys"] ?? "") == String(describing: $1["keys"] ?? "") },
                   "onUpdated changeInfo keys differ from WebKit's (an invented or dropped key): \(wrappedEvents) vs \(nativeEvents)")
+        // WebKit sends a redacted key as an absent value or an empty string: both count as blank. Whenever the facade
+        // supplemented an event (its tab carries a URL), every key WebKit sent blank carries that tab's value; a key WebKit
+        // didn't send is never added (checked above), so no title change is invented on first observation. An event
+        // the facade couldn't supplement in time (topology churn while loading) stays exactly WebKit's.
+        func blank(_ event: [String: Any], _ key: String) -> Bool {
+            (event["keys"] as? [String])?.contains(key) == true && ((event[key] as? String) ?? "").isEmpty
+        }
+        let deliveredTab = { (event: [String: Any]) in (event["tab"] as? [String: Any]) ?? [:] }
+        try check(nativeEvents.contains { blank($0, "url") }, "WebKit sent no redacted url key, so the fill rule was not exercised: \(nativeEvents)")
         try check(zip(wrappedEvents, nativeEvents).allSatisfy { wrapped, native in
-                      (native["keys"] as? [String])?.contains("url") != true || native["url"] as? String != "" || wrapped["url"] as? String == eventsURL.absoluteString }
-                  && wrappedEvents.allSatisfy { [eventsURL.absoluteString, ""].contains((($0["tab"] as? [String: Any])?["url"] as? String) ?? "") },
-                  "a blank changeInfo.url was not filled with the tab's own URL, or another URL appeared: \(wrappedEvents)")
+                      let tab = deliveredTab(wrapped), supplemented = !((tab["url"] as? String) ?? "").isEmpty
+                      let urlOK = !blank(native, "url") || (supplemented ? wrapped["url"] as? String == tab["url"] as? String : ((wrapped["url"] as? String) ?? "").isEmpty)
+                      let titleOK = !blank(native, "title") || (supplemented && !((tab["title"] as? String) ?? "").isEmpty
+                          ? wrapped["title"] as? String == tab["title"] as? String : ((wrapped["title"] as? String) ?? "").isEmpty)
+                      return urlOK && titleOK },
+                  "a blank changeInfo url or title did not carry the supplemented tab's own value: \(wrappedEvents) vs \(nativeEvents)")
+        try check(wrappedEvents.allSatisfy { [eventsURL.absoluteString, navigatedURL.absoluteString, ""].contains(deliveredTab($0)["url"] as? String ?? "-") && leaksNothing([deliveredTab($0)]) },
+                  "an event carried another tab's or another profile's URL: \(wrappedEvents)")
+        // onCreated of a tab that loads at once: Bam's topology changes while it loads, so a blank (WebKit's own) tab
+        // is allowed by the facade's contract; a wrong URL never is.
         let created = tabs(events["created"])
         try check(created.count == 1 && [eventsURL.absoluteString, ""].contains(created[0]["url"] as? String ?? "-"), "onCreated was missing, repeated or showed another URL: \(created)")
-        _ = try await js(noHost.page, "browser.tabs.onUpdated.removeListener(__wrappedUpdated); return {};")
-        let removedAt = wrappedEvents.count, nativeAt = nativeEvents.count
+        // onCreated of a tab whose URL and title Bam already knows and that doesn't load (as a restored, not yet
+        // loaded tab): nothing changes while the facade answers, so the delivered tab must carry both.
+        let readyURL = page("/next.html", "ready"), readyTitle = "Ready metadata"
+        let createdBefore = tabs(try await js(noHost.page, "return {created: __events.created};")["created"]).count
+        let ready = BrowserTab(title: readyTitle, address: readyURL.absoluteString, space: controller.session.spaceID(forProfile: profile)!)
+        controller.session.tabs.append(ready)
+        defer { controller.session.tabs.removeAll { $0.id == ready.id }; host.reconcile() }
+        host.reconcile()
+        try await wait("onCreated was not delivered for a ready tab") {
+            ((try? await js(noHost.page, "return {created: __events.created};"))?["created"] as? [Any])?.count ?? 0 > createdBefore
+        }
+        let readyCreated = Array(tabs(try await js(noHost.page, "return {created: __events.created};")["created"]).dropFirst(createdBefore))
+        try check(readyCreated.count == 1 && readyCreated[0]["url"] as? String == readyURL.absoluteString && readyCreated[0]["title"] as? String == readyTitle,
+                  "onCreated for a tab with known metadata was not supplemented with its URL and title: \(readyCreated)")
+        // Removal: the cut is taken in the same evaluation that removes the listener, and the control is a later
+        // navigation event (a url key), not any event that was already on its way.
+        let cut = try await js(noHost.page, """
+            browser.tabs.onUpdated.removeListener(__wrappedUpdated);
+            return {wrapped: __events.wrapped.filter((e) => e.id === id).length,
+                    nativeURL: __events.native.filter((e) => e.id === id && e.keys.includes('url')).length};
+            """, ["id": eventsJS])
+        guard let removedAt = cut["wrapped"] as? Int, let urlEventsAt = cut["nativeURL"] as? Int else { throw Failure(description: "Tab metadata: no removal cut: \(cut)") }
         controller.navigatePane(eventsID, address: page("/next.html", "events-after").absoluteString)
-        try await wait("WebKit reported no event after the listener was removed") {
-            ((try? await js(noHost.page, eventsProbe, ["id": eventsJS]))?["native"] as? [Any])?.count ?? 0 > nativeAt
+        try await wait("WebKit reported no navigation event after the listener was removed") {
+            let native = tabs((try? await js(noHost.page, eventsProbe, ["id": eventsJS]))?["native"])
+            return native.filter { ($0["keys"] as? [String])?.contains("url") == true }.count > urlEventsAt
         }
         try await Task.sleep(nanoseconds: 1_500_000_000)
         try check(tabs(try await js(noHost.page, eventsProbe, ["id": eventsJS])["wrapped"]).count == removedAt, "a removed listener was called again")
@@ -312,7 +380,9 @@ import WebKit
         try check(runtime.answerTabMetadata(for: noHost.context, issued: binding, request: request) == nil && runtime.tabMetadataBinding(for: noHost.context) == nil,
                   "an unloaded context was answered or issued a token")
 
-        // Cleanup: extensions, tabs (the moved one first returns home), fixture Spaces.
+        // Cleanup. The moved tab returns home and the extensions are removed here (strictly: a failed removal fails the
+        // run); the opened tabs close on return and the hook is cleared (defers above). The two fixture profiles and
+        // their Spaces stay in the caller's ephemeral controller, which it closes without persisting.
         _ = controller.session.moveTab(id: aID, toSpace: controller.session.spaceID(forProfile: profile)!)
         for id in installed { try await host.remove(id: id) }
         installed.removeAll()
