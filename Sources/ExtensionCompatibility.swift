@@ -130,9 +130,11 @@ enum ExtensionCompatibility {
       __WASM_ADAPTER__
       // Explicit resource management: TypeScript `using` helpers throw, and wasm-bindgen
       // classes omit their dispose methods, when the engine lacks these well-known symbols
-      // (Bitwarden's SDK client relies on both). Native symbols are never replaced.
+      // (Bitwarden's SDK client relies on both). Native symbols are never replaced. Like a
+      // well-known symbol, the fallback is shared by every realm of the agent (registry key),
+      // so a resource made in a same-origin extension frame can be disposed by its parent.
       for (const name of ["dispose", "asyncDispose"]) {
-        try { if (typeof Symbol[name] !== "symbol") Object.defineProperty(Symbol, name, { value: Symbol("Symbol." + name) }); } catch (error) {}
+        try { if (typeof Symbol[name] !== "symbol") Object.defineProperty(Symbol, name, { value: Symbol.for("Symbol." + name) }); } catch (error) {}
       }
       const isWorker = __WORKER__;
       const nativeSend = isWorker && api.runtime && typeof api.runtime.sendNativeMessage === "function" ? api.runtime.sendNativeMessage.bind(api.runtime) : null;
