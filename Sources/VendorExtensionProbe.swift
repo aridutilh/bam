@@ -1,8 +1,14 @@
 import AppKit
 import WebKit
 
-/// Bounded, disposable observation of an explicitly supplied vendor package.
-/// This is not a compatibility test: no account sign-in or vault operation is performed.
+/// Bounded, disposable observation of one official vendor extension
+/// (`--vendor-extension-probe`, BAM_VENDOR_CHROME_ID). It installs exactly as a
+/// user would, through Bam's normal Chrome Web Store installer, and requires the
+/// CRX3 publisher signature to verify for that ID. Everything runs in a private
+/// controller: non-persistent website data and temporary extension storage that
+/// is removed at the end. No vendor files are kept, no native companion is
+/// granted, and no account sign-in or vault operation is performed.
+/// This is an observation, not a compatibility test.
 @MainActor final class VendorExtensionProbe {
     private var watchdog: Timer?
     private var task: Task<Void, Never>?
@@ -12,7 +18,7 @@ import WebKit
     private var initialized = false
     private var finished = false
     private var pages: [String: [String: Any]] = [:]
-    private var observations: [String: Any] = ["scope": "fresh private profile; no sign-in; no compatibility claim"]
+    private var observations: [String: Any] = ["scope": "official Chrome Web Store CRX, signature verified for the requested ID; fresh private profile and temporary extension storage; no sign-in; no native companion; no compatibility claim"]
     private var blockedNavigations: [[String: Any]] = []
     private var reviewEvents: [[String: Any]] = []
 
@@ -75,22 +81,14 @@ import WebKit
     @available(macOS 15.4, *)
     private func run() async throws {
         let env = ProcessInfo.processInfo.environment
-        guard let raw = env["BAM_VENDOR_EXTENSION"], raw.hasPrefix("/") else {
-            throw BrowserExtensions.failure("Set BAM_VENDOR_EXTENSION to an absolute unpacked package directory")
+        // The only intake is Bam's normal store installation: the official
+        // Chrome Web Store CRX, whose publisher signature must verify for
+        // exactly this ID. No unpacked or locally supplied vendor folders.
+        guard let expected = env["BAM_VENDOR_CHROME_ID"]?.trimmingCharacters(in: .whitespaces).lowercased(),
+              expected.range(of: "^[a-p]{32}$", options: .regularExpression) != nil else {
+            throw BrowserExtensions.failure("Set BAM_VENDOR_CHROME_ID to a 32-letter Chrome Web Store extension ID")
         }
-        let package = URL(fileURLWithPath: raw, isDirectory: true)
-        let metadata = try package.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
-        guard metadata.isDirectory == true, metadata.isSymbolicLink != true else {
-            throw BrowserExtensions.failure("BAM_VENDOR_EXTENSION must be a real unpacked directory")
-        }
-        let manifestData = try Data(contentsOf: package.appendingPathComponent("manifest.json"))
-        guard manifestData.count < 1_048_576,
-              let manifest = try JSONSerialization.jsonObject(with: manifestData) as? [String: Any] else {
-            throw BrowserExtensions.failure("Invalid or oversized manifest")
-        }
-        observations["manifest_version"] = manifest["manifest_version"]
-        observations["package_version"] = manifest["version"]
-        observations["package_directory"] = package.lastPathComponent
+        observations["chrome_web_store_id"] = expected
 
         let sessionURL = FileManager.default.temporaryDirectory.appendingPathComponent("unused-vendor-probe-\(UUID().uuidString).json")
         let browser = BrowserController(sessionURL: sessionURL, ephemeral: true)
@@ -139,12 +137,31 @@ import WebKit
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = browser.profileStores.store(for: profile)
         host.configure(configuration, profileID: profile)
-        let id = try await host.importPackage(at: package, profileID: profile)
+        let installer = host.installer
+        let listing = try await installer.chromeWebStore.candidate(for: expected)
+        guard listing.source == .chromeWebStore, listing.upstreamID == expected else {
+            throw BrowserExtensions.failure("The Chrome Web Store did not resolve \(expected) to that listing")
+        }
+        let id = try await installer.install(listing, profileID: profile)
         guard !finished else { return }
         extensionID = id
-        guard let context = host.context(for: id) else {
-            throw BrowserExtensions.failure(host.errors[id] ?? host.lastError ?? "The host imported the manifest but did not load an extension context")
+        guard let record = host.items(profileID: profile).first(where: { $0.id == id }), let origin = record.catalog,
+              origin.source == .chromeWebStore, origin.upstreamID == expected, origin.verifiedChromeExtensionID == expected else {
+            throw BrowserExtensions.failure("The installed package is not a CRX3 publisher-signature-verified build of \(expected)")
         }
+        observations["provenance"] = origin.provenance
+        observations["package_version"] = record.version
+        observations["package_sha256"] = origin.sha256
+        observations["installed_into_temporary_storage"] = host.storageURL.path.hasPrefix(FileManager.default.temporaryDirectory.path)
+        guard record.nativeHost == nil else { throw BrowserExtensions.failure("A native companion was granted during installation") }
+        observations["native_companion_granted"] = false
+        guard let context = host.context(for: id) else {
+            throw BrowserExtensions.failure(host.errors[id] ?? host.lastError ?? "The host installed the package but did not load an extension context")
+        }
+        let manifest = context.webExtension.manifest
+        let package = host.storageURL.appendingPathComponent(record.id.uuidString, isDirectory: true).appendingPathComponent(record.packageName, isDirectory: true)
+        observations["manifest_version"] = manifest["manifest_version"]
+        observations["requests_native_messaging"] = (manifest["permissions"] as? [String] ?? []).contains("nativeMessaging")
         initialized = true
         observations["extension_name"] = context.webExtension.displayName ?? ""
         observations["has_background"] = context.webExtension.hasBackgroundContent
@@ -329,15 +346,28 @@ import WebKit
         observations["pages"] = pages
         observations["permission_reviews"] = reviewEvents
         observations["blocked_external_tab_requests"] = blockedNavigations
-        if #available(macOS 15.4, *), let browser = controller, let id = extensionID {
+        var temporaryStorage: URL?
+        if #available(macOS 15.4, *), let browser = controller {
             let host = browser.browserExtensions
-            if let context = host.context(for: id) {
-                observations["context_errors"] = context.errors.prefix(20).map(errorDescription)
-                observations["context_error_count"] = context.errors.count
+            temporaryStorage = host.storageURL
+            if let id = extensionID {
+                if let context = host.context(for: id) {
+                    observations["context_errors"] = context.errors.prefix(20).map(errorDescription)
+                    observations["context_error_count"] = context.errors.count
+                }
+                observations["host_error"] = host.errors[id] ?? host.lastError
+                observations["native_companion_granted"] = host.items(profileID: browser.session.currentProfileID).first { $0.id == id }?.nativeHost != nil
             }
-            observations["host_error"] = host.errors[id] ?? host.lastError
         }
         controller?.prepareToClose(persistSession: false)
+        // The private host deletes its temporary package storage on shutdown;
+        // confirm that, and remove only that folder if teardown did not.
+        if let storage = temporaryStorage, storage.path.hasPrefix(FileManager.default.temporaryDirectory.path) {
+            let leftover = FileManager.default.fileExists(atPath: storage.path)
+            if leftover { try? FileManager.default.removeItem(at: storage) }
+            observations["temporary_storage_removed_by_host"] = !leftover
+            observations["temporary_storage_remaining"] = FileManager.default.fileExists(atPath: storage.path)
+        }
         window?.orderOut(nil); window?.close()
         controller = nil; window = nil
         if let data = try? JSONSerialization.data(withJSONObject: observations, options: [.sortedKeys]),
