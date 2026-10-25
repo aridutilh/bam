@@ -7,16 +7,50 @@ import WebKit
         // for every sidebar row. A thousand metadata-only tabs must stay cheap.
         let tabsByID = Dictionary(snapshot.tabs.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         let favoriteCount = snapshot.favoriteTabs.count
-        var companions: [UUID: BrowserTab] = [:]
-        for split in snapshot.splits ?? [] { companions[split.primaryID] = tabsByID[split.secondaryID] }
-        return snapshot.visibleTabs.map { tab in
+        var companions: [UUID: BrowserTab] = [:], splitMembers = Set<UUID>()
+        for split in snapshot.splits ?? [] {
+            companions[split.primaryID] = tabsByID[split.secondaryID]
+            splitMembers.insert(split.primaryID); splitMembers.insert(split.secondaryID)
+        }
+        let arcFolders = SidebarDisplayPolicy.arcImportedFolderIDs(snapshot.importLinks)
+        func item(_ tab: BrowserTab, depth: Int = 0, parent: UUID? = nil, earlier: Bool = false, later: Bool = false) -> SidebarTabItem {
             let companion = companions[tab.id]
             return SidebarTabItem(id: tab.id, title: companion.map { "\(tab.displayTitle) · \($0.displayTitle)" } ?? tab.displayTitle,
-                subtitle: companion.map { "\(tab.address) | \($0.address)" } ?? tab.address,
+                subtitle: companion.map { [tab.address, $0.address].map(SidebarDisplayPolicy.visibleAddress).filter { !$0.isEmpty }.joined(separator: " | ") }
+                    ?? SidebarDisplayPolicy.visibleAddress(tab.address),
                 symbol: companion == nil ? tab.symbol : "rectangle.split.2x1", isPinned: tab.pinned,
                 isActive: tab.id == snapshot.activeID, isFavorite: tab.isFavorite, isUnloaded: tab.isUnloaded, isSleeping: tab.isSleeping,
-                isSplit: companion != nil, canFavorite: companion == nil && (tab.isFavorite || favoriteCount < BrowserSession.maximumFavorites))
+                isSplit: companion != nil, canFavorite: companion == nil && (tab.isFavorite || favoriteCount < BrowserSession.maximumFavorites),
+                depth: depth, parentFolderID: parent, hasEarlierSibling: earlier, hasLaterSibling: later,
+                canWrapInFolder: !tab.isFavorite && URLInput.extensionURL(tab.address) == nil,
+                monogram: companion == nil ? tab.monogram : nil)
         }
+        let visible = snapshot.visibleTabs
+        // Stable indent: from the whole tree, so collapsing the deepest branch doesn't shift rows.
+        let treeDepth = snapshot.keptLayout(in: snapshot.space).map(\.depth).max() ?? 0
+        var result = visible.filter(\.isFavorite).map { item($0) }
+        var siblings: [BrowserSession.KeptContainer: [UUID]] = [:]
+        for entry in snapshot.visibleKeptLayout(in: snapshot.space, revealing: snapshot.activeID) {
+            let container: BrowserSession.KeptContainer = entry.parentID.map { .folder($0) } ?? .root(snapshot.space)
+            if siblings[container] == nil { siblings[container] = snapshot.keptChildren(of: container) }
+            let order = siblings[container] ?? []
+            let index = order.firstIndex(of: entry.id)
+            let earlier = (index ?? 0) > 0, later = index.map { $0 + 1 < order.count } ?? false
+            if entry.isFolder, let folder = snapshot.folder(entry.id) {
+                result.append(SidebarTabItem(id: folder.id, title: folder.name, subtitle: "", symbol: "folder", isPinned: true,
+                    isActive: false, canFavorite: false, depth: entry.depth, isFolder: true, isExpanded: !folder.isCollapsed,
+                    parentFolderID: entry.parentID, hasEarlierSibling: earlier, hasLaterSibling: later,
+                    folderTabCount: snapshot.tabIDs(inFolder: folder.id).count,
+                    canNestFolder: snapshot.canCreateFolder(inside: folder.id), importedFromArc: arcFolders.contains(folder.id)))
+            } else if let tab = tabsByID[entry.id] {
+                result.append(item(tab, depth: entry.depth, parent: entry.parentID, earlier: earlier, later: later))
+            }
+        }
+        // Blank New Tab placeholders that aren't selected get no row (display only; the tabs stay in the session).
+        result += visible.filter { !$0.isSaved && !SidebarDisplayPolicy.hidesPlaceholder($0, activeID: snapshot.activeID, inSplit: splitMembers.contains($0.id)) }
+            .map { item($0) }
+        for index in result.indices { result[index].treeDepth = treeDepth }
+        return result
     }
     func showSplit(_ group: BrowserSplit) {
         guard let left = session.tabs.first(where: { $0.id == group.primaryID }), let right = session.tabs.first(where: { $0.id == group.secondaryID }) else { return }
@@ -59,9 +93,14 @@ import WebKit
     func navigatePane(_ id: UUID, address: String) {
         returnPaneVideo(id)
         guard let i = session.tabs.firstIndex(where: { $0.id == id }) else { return }
+        // An Easel row shows a native view; giving it a web address (e.g. an
+        // extension's tabs.update) must make the new page the visible host.
+        let leavingNativeView = session.tabs[i].isArcEasel
         session.tabs[i].address = address
         session.tabs[i].title = URL(string: address)?.host ?? "New tab"
-        load(address, in: webView(for: session.tabs[i]), id: id); refresh(); save()
+        load(address, in: webView(for: session.tabs[i]), id: id)
+        if leavingNativeView && id == session.activeID { showActive() } else { refresh() }
+        save()
     }
     func openSplit(adopting web: WKWebView, beside owner: UUID) {
         guard let primary = session.tabs.first(where: { $0.id == owner }) else { _ = adoptWebView(web); return }
@@ -92,8 +131,15 @@ import WebKit
     @objc func splitWithNewPage(_ sender: Any?) {
         let primary = session.activeID
         if session.split(for: primary) != nil || session.active?.isFavorite == true { return }
-        let id = session.add()
-        session.makeSplit(primary: primary, secondary: id); showActive(); save()
+        // All or nothing: a refused Split (e.g. an Arc Easel reference, which
+        // has no page) must not leave a new blank tab created and selected.
+        var draft = session
+        let id = draft.add()
+        guard draft.makeSplit(primary: primary, secondary: id) else {
+            if session.active?.isArcEasel == true { pageFeedback.show("Easels can’t be in a Split", symbol: "rectangle.split.2x1", in: webHost) }
+            return
+        }
+        session = draft; showActive(); save()
         splitCoordinators[primary]?.focusAddress(.right)
     }
     @objc func unsplitCurrent(_ sender: Any?) { unsplit(session.activeID) }

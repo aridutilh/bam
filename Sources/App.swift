@@ -14,11 +14,15 @@ import WebKit
     var pipSmoke: PictureInPictureSmokeTest?
     var interactionSmoke: InteractionSmokeTest?
     var autoPiPSmoke: AutomaticPiPSmokeTest?
-    var pendingExternalURLs: [URL] = []
+    var profileInstanceSmoke: ProfileInstanceSmokeTest?
+    var arcImportSmoke: ArcImportSmokeTest?
+    private let externalURLs = ExternalURLDelivery()
+    private let profileInstance = ProfileInstance()
     var spacesMenu: NSMenu?
     var onboarding: OnboardingController?
     var settings: SettingsController?
     var extensionsMenu: NSMenu?
+    var appearanceMenu: NSMenu?
     private let quitCoordinator = QuitCoordinator()
     private var mainWindowWasClosed = false
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -27,6 +31,8 @@ import WebKit
         if CommandLine.arguments.contains("--vendor-extension-probe") { vendorProbe = VendorExtensionProbe(); vendorProbe?.start(); return }
         if CommandLine.arguments.contains("--extension-test") { extensionSmoke = ExtensionRuntimeSmokeTest(); extensionSmoke?.start(); return }
         if CommandLine.arguments.contains("--profile-test") { profileSmoke = ProfileSmokeTest(); profileSmoke?.start(); return }
+        if CommandLine.arguments.contains("--profile-instance-test") { profileInstanceSmoke = ProfileInstanceSmokeTest(); profileInstanceSmoke?.start(); return }
+        if CommandLine.arguments.contains("--arc-import-test") { arcImportSmoke = ArcImportSmokeTest(); arcImportSmoke?.start(); return }
         if CommandLine.arguments.contains("--resource-test") { resourceSmoke = TabResourceSmokeTest(); resourceSmoke?.start(); return }
         if CommandLine.arguments.contains("--feature-test") { featureSmoke = FeatureSmokeTest(); featureSmoke?.start(); return }
         if CommandLine.arguments.contains("--auto-pip-test") { autoPiPSmoke = AutomaticPiPSmokeTest(); autoPiPSmoke?.start(); return }
@@ -40,9 +46,37 @@ import WebKit
         catch { fputs("\(error.localizedDescription)\n", stderr); NSApp.terminate(nil); return }
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent(launch.supportDirectoryName, isDirectory: true)
         let preview = launch.isEphemeral
+        PreviewIcon.apply(for: launch)
+        profileInstance.onActivation = { [weak self] in self?.activateMainWindow() }
+        profileInstance.onOpenURLs = { [weak self] urls in self?.receiveExternalURLs(urls) }
+        do {
+            // This precedes all session/preferences/controller/store access.
+            // Persistent development previews lock their own isolated profile.
+            guard try profileInstance.start(in: support, ephemeral: preview) else {
+                profileInstance.beginHandoff(completed: { exit(0) }, failed: {
+                    let alert = NSAlert()
+                    alert.messageText = "Bam couldn’t hand this launch to its running window"
+                    alert.informativeText = "The running Bam did not confirm receipt. Try opening the link again after that window is ready."
+                    alert.addButton(withTitle: "Quit This Launch")
+                    alert.runModal()
+                    exit(1)
+                })
+                externalURLs.connect { [weak self] urls in self?.profileInstance.forwardURLs(urls) }
+                return
+            }
+        } catch {
+            let alert = NSAlert()
+            alert.messageText = "Bam couldn’t open this profile safely"
+            alert.informativeText = "The profile lock could not be opened. Check access to \(support.path) and try again.\n\n\(error.localizedDescription)"
+            alert.addButton(withTitle: "Quit Bam")
+            alert.runModal()
+            exit(1)
+        }
         let sessionFileExists = FileManager.default.fileExists(atPath: support.appendingPathComponent("session.json").path)
         if !preview { BrowserController.restoreDefaultSearchEngine() }
         ShortcutStore.shared.configure(persists: !preview)
+        // Before any window exists, so every window opens in the chosen appearance.
+        BrowserAppearance.restore(persists: !preview)
         if #available(macOS 15.4, *) {
             ExtensionManagement.dress = { BamSheetStyle.dress(window: $0, root: $1) }
             ExtensionManagement.rowView = { BamTableRowView() }
@@ -55,13 +89,13 @@ import WebKit
         window.title = launch.windowTitle; window.titleVisibility = .hidden; window.titlebarAppearsTransparent = true
         window.isReleasedWhenClosed = false; window.delegate = self
         window.isMovableByWindowBackground = false; window.minSize = NSSize(width: 760, height: 540)
-        window.backgroundColor = NSColor(white: 0.10, alpha: 1)
+        window.backgroundColor = BrowserChrome.windowBackground
         window.contentViewController = controller
         let available = NSScreen.main?.visibleFrame.size ?? NSSize(width: 1440, height: 900)
         window.setContentSize(NSSize(width: min(1260, available.width - 60), height: min(800, available.height - 60)))
         window.center()
         if !preview { window.setFrameAutosaveName(launch.windowAutosaveName) }
-        window.appearance = NSAppearance(named: .darkAqua)
+        // The window follows NSApp.appearance (View ▸ Appearance / Settings).
         controller.onSpacesChanged = { [weak self] in
             self?.rebuildSpacesMenu()
             if self?.settings?.window.isVisible == true { self?.settings?.refresh() }
@@ -70,8 +104,13 @@ import WebKit
         NotificationCenter.default.addObserver(forName: ShortcutStore.didChange, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.applyShortcuts() }
         }
+        NotificationCenter.default.addObserver(forName: BrowserAppearance.didChange, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.appearanceDidChange() }
+        }
         ShortcutStore.shared.reservedOwner = { [weak self] combo in self?.fixedMenuItem(wearing: combo)?.title }
-        for url in pendingExternalURLs { controller.openLittleOrbit(url: url) }; pendingExternalURLs.removeAll()
+        externalURLs.connect { [weak self] urls in
+            for url in urls { self?.controller?.openLittleOrbit(url: url) }
+        }
         // Development extension tests start at the browser without importing
         // favorites or changing the default browser through first-run setup.
         // The welcome remains available explicitly from the menu or flag.
@@ -193,11 +232,15 @@ import WebKit
     }
     func applicationWillTerminate(_ notification: Notification) { controller?.prepareToClose(persistSession: false) }
     func application(_ application: NSApplication, open urls: [URL]) {
-        for url in urls where URLInput.directURL(url.absoluteString) != nil {
-            if let controller { controller.openLittleOrbit(url: url) } else { pendingExternalURLs.append(url) }
-        }
+        receiveExternalURLs(urls)
     }
-    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { window?.makeKeyAndOrderFront(nil); return true }
+    private func receiveExternalURLs(_ urls: [URL]) {
+        externalURLs.receive(urls.filter { URLInput.directURL($0.absoluteString) != nil })
+    }
+    private func activateMainWindow() {
+        ProfileInstance.activate(window: window)
+    }
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { activateMainWindow(); return true }
     func menuNeedsUpdate(_ menu: NSMenu) {
         if menu === extensionsMenu { controller?.updateExtensionsMenu(menu) }
     }
@@ -218,6 +261,18 @@ import WebKit
             let combo = ShortcutStore.shared.combo(for: command)
             item.keyEquivalent = combo.key; item.keyEquivalentModifierMask = combo.modifiers
         }
+    }
+    @objc func chooseAppearance(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String, let choice = BrowserAppearance(rawValue: raw) else { return }
+        BrowserAppearance.apply(choice)
+    }
+    /// Keeps the View ▸ Appearance checkmark and an open Settings window in step.
+    func appearanceDidChange() {
+        for entry in appearanceMenu?.items ?? [] {
+            entry.state = (entry.representedObject as? String) == BrowserAppearance.current.rawValue ? .on : .off
+        }
+        // In place, so a keyboard user on the Appearance chips keeps focus.
+        settings?.syncAppearance()
     }
     func rebuildSpacesMenu() {
         guard let spacesMenu, let controller else { return }
@@ -273,6 +328,7 @@ import WebKit
         bound(file, "Open Location…", #selector(BrowserController.focusAddress(_:)), .openLocation, controller)
         item(file, "Close Tab", #selector(BrowserController.closeTab(_:)), "w", .command, controller)
         item(file, "Reopen Closed Tab", #selector(BrowserController.reopenTab(_:)), "t", [.command, .shift], controller)
+        file.addItem(.separator()); item(file, "Import from Arc…", #selector(BrowserController.importFromArc(_:)), "", .command, controller)
         file.addItem(.separator()); item(file, "Print…", #selector(BrowserController.printPage(_:)), "p", .command, controller)
         let edit = menu("Edit")
         item(edit, "Undo", Selector(("undo:")), "z"); item(edit, "Redo", Selector(("redo:")), "z", [.command, .shift]); edit.addItem(.separator())
@@ -283,6 +339,17 @@ import WebKit
         item(edit, "Find Previous", #selector(BrowserController.findPrevious(_:)), "g", [.command, .shift], controller)
         item(edit, "Copy Current URL", #selector(BrowserController.copyCurrentURL(_:)), "c", [.command, .shift], controller)
         let view = menu("View")
+        let appearanceItem = NSMenuItem(title: "Appearance", action: nil, keyEquivalent: "")
+        let appearanceMenu = NSMenu(title: "Appearance")
+        for choice in BrowserAppearance.allCases {
+            let entry = NSMenuItem(title: choice.title, action: #selector(chooseAppearance(_:)), keyEquivalent: "")
+            entry.target = self; entry.representedObject = choice.rawValue
+            entry.state = choice == BrowserAppearance.current ? .on : .off
+            appearanceMenu.addItem(entry)
+        }
+        appearanceItem.submenu = appearanceMenu; view.addItem(appearanceItem); self.appearanceMenu = appearanceMenu
+        item(view, "Focus Sidebar", #selector(BrowserController.focusSidebar(_:)), "s", [.command, .control], controller)
+        view.addItem(.separator())
         bound(view, "Toggle Sidebar", #selector(BrowserController.toggleSidebar(_:)), .toggleSidebar, controller)
         item(view, "Reset Sidebar Width", #selector(BrowserController.resetSidebar(_:)), "s", [.command, .shift], controller)
         bound(view, "Keep / Unkeep Tab", #selector(BrowserController.togglePin(_:)), .keepTab, controller)
@@ -319,6 +386,8 @@ import WebKit
         item(tabs, "Previous Tab", #selector(BrowserController.previousTab(_:)), "\t", [.control, .shift], controller)
         bound(tabs, "Next Space", #selector(BrowserController.nextSpace(_:)), .nextSpace, controller)
         bound(tabs, "Previous Space", #selector(BrowserController.previousSpace(_:)), .previousSpace, controller)
+        tabs.addItem(.separator())
+        item(tabs, "New Folder…", #selector(BrowserController.newFolder(_:)), "", .command, controller)
         tabs.addItem(.separator())
         item(tabs, "Manage Spaces…", #selector(BrowserController.manageSpaces(_:)), "", .command, controller)
         let chooseSpace = NSMenuItem(title: "Go to Space", action: nil, keyEquivalent: "")
@@ -377,6 +446,7 @@ import WebKit
 
 @main enum OrbitMain {
     @MainActor static func main() {
+        ProfileInstanceSmokeTest.runChildIfRequested() // Fixture duplicates exit before NSApplication.
         let application = NSApplication.shared
         application.setActivationPolicy(.regular)
         let delegate = AppDelegate(); application.delegate = delegate

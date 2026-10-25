@@ -1,28 +1,7 @@
 import AppKit
 import WebKit
 
-/// A store is chosen before constructing a web view. Sharing a profile means
-/// sharing this same store, including in nonpersistent previews.
-@MainActor final class WebsiteProfileStore {
-    let ephemeral: Bool
-    private var stores: [UUID: WKWebsiteDataStore] = [:]
-    init(ephemeral: Bool) { self.ephemeral = ephemeral }
-    func store(for profileID: UUID) -> WKWebsiteDataStore {
-        if let existing = stores[profileID] { return existing }
-        let store: WKWebsiteDataStore
-        if ephemeral { store = .nonPersistent() }
-        else if let identifier = PreviewProfile.persistentIdentifier(for: profileID) { store = WKWebsiteDataStore(forIdentifier: identifier) }
-        else { store = .default() }
-        stores[profileID] = store
-        return store
-    }
-    func profileID(for store: WKWebsiteDataStore) -> UUID? {
-        if let match = stores.first(where: { $0.value === store })?.key { return match }
-        if !ephemeral, let identifier = store.identifier,
-           let profile = stores.keys.first(where: { PreviewProfile.persistentIdentifier(for: $0) == identifier }) { return profile }
-        return nil
-    }
-}
+// WebsiteProfileStore (store choice per profile, standard or isolated) lives in WebsiteProfileStore.swift.
 
 @MainActor extension BrowserController {
     var commandProfileID: UUID {
@@ -69,6 +48,9 @@ import WebKit
             self.restoreClosed(record, profileID: profileID)
         }
         profileLibraries[profileID] = value
+        // A library created after the extension host exists is wired now. This reads the stored host and never
+        // calls the `browserExtensions` getter, so creating a library can't create the host (no recursion).
+        if #available(macOS 15.4, *), let host = extensionStorage as? BrowserExtensions { wireExtensionHistory(value, profileID: profileID, host: host) }
         return value
     }
     /// Floating windows retain their originating sign-in even after the main
@@ -148,7 +130,7 @@ import WebKit
         return alert.runModal()
     }
     func retireProfilePage(_ id: UUID) {
-        invalidateFaviconDocument(id)
+        invalidateFaviconDocument(id); historyTitleFollowUps.removeValue(forKey: id)
         peeks[id]?.dismiss()
         if let group = session.split(for: id), let split = splitCoordinators.removeValue(forKey: group.primaryID) {
             split.detach(); split.view.removeFromSuperview()

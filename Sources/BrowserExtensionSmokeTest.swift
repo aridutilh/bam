@@ -330,6 +330,166 @@ import Darwin
             // The changeInfo must carry the status: a title-driven update also reads `status: "complete"` live.
             return records.contains { ($0["infoStatus"] as? String) == "complete" && ($0["url"] as? String)?.contains("extension-test.html") == true }
         }
+        // Measurement, not a pass/fail: idle-callback availability in the three page-side worlds
+        // (Proton Pass and uBOL page scripts call requestIdleCallback without a feature check).
+        let idlePage = (try? await controller.browsers[id]?.evaluateJavaScript("typeof requestIdleCallback + ',' + typeof cancelIdleCallback")) as? String ?? "unknown"
+        let idleContent = (try? await controller.browsers[id]?.evaluateJavaScript("document.documentElement.dataset.bamContentIdle || 'unreported'")) as? String ?? "unknown"
+        let idleExtension = (try? await popup.evaluateJavaScript("typeof requestIdleCallback + ',' + typeof cancelIdleCallback")) as? String ?? "unknown"
+        print("EXTENSION_ENVIRONMENT requestIdleCallback,cancelIdleCallback page=\(idlePage) content=\(idleContent) extensionPage=\(idleExtension) macOS=\(ProcessInfo.processInfo.operatingSystemVersionString)"); fflush(stdout)
+        // Bam supplies them to the extension's own worlds when WebKit lacks them; the website's world is untouched.
+        try check(idleContent == "function,function" && idleExtension == "function,function",
+                  "Idle callbacks were missing in the extension's content-script world or page: content=\(idleContent) extensionPage=\(idleExtension)")
+        if idlePage == "function,function" { print("EXTENSION_ENVIRONMENT note: the engine provides idle callbacks in website pages") }
+        else { try check(idlePage == "undefined,undefined", "A website's page world gained idle callbacks from Bam: \(idlePage)") }
+        let idleRun = try? await popup.callAsyncJavaScript("""
+            return await new Promise(resolve => {
+              const order = [];
+              const cancelled = requestIdleCallback(() => order.push('cancelled'));
+              requestIdleCallback(deadline => order.push(['first', deadline.didTimeout, deadline.timeRemaining() <= 50]));
+              requestIdleCallback(() => { order.push('second'); resolve(JSON.stringify(order)); });
+              cancelIdleCallback(cancelled);
+            });
+            """, arguments: [:], contentWorld: .page) as? String
+        try check(idleRun == #"[["first",false,true],"second"]"#, "Idle callbacks did not run in order with a bounded deadline and cancellation in an extension page: \(idleRun ?? "nil")")
+        // tabs.detectLanguage (Dashlane): page text first, then the declaration, in callback and promise forms.
+        guard let languageWeb = controller.browsers[id] else { throw ExtensionSmokeTest.Failure(description: "Missing tabs.detectLanguage page") }
+        _ = try await languageWeb.evaluateJavaScript("""
+            document.documentElement.lang = 'pt-BR';
+            const bamLanguage = document.createElement('p'); bamLanguage.id = 'bam-language';
+            bamLanguage.textContent = 'Die Kinder spielen am Nachmittag im großen Garten hinter dem Haus, während ihre Eltern in der Küche gemeinsam das Abendessen vorbereiten.';
+            document.body.append(bamLanguage); true
+            """)
+        let detectLanguage = """
+            const tab = (await browser.tabs.query({})).find(tab => tab.url?.includes('profile=browser-adapter'));
+            const promised = await browser.tabs.detectLanguage(tab.id);
+            const callback = await new Promise(resolve => chrome.tabs.detectLanguage(tab.id, value => resolve({value, error: chrome.runtime.lastError?.message || ''})));
+            let missing = '';
+            try { await browser.tabs.detectLanguage(987654321); } catch (error) { missing = String(error?.message || error); }
+            const missingCallback = await new Promise(resolve => chrome.tabs.detectLanguage(987654321, value => resolve(chrome.runtime.lastError ? 'error' : 'value:' + value)));
+            return JSON.stringify({promised, callback, missing, missingCallback});
+            """
+        func detectedLanguage() async throws -> [String: Any] {
+            let text = try await popup.callAsyncJavaScript(detectLanguage, arguments: [:], contentWorld: .page) as? String
+            guard let data = text?.data(using: .utf8), let result = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                throw ExtensionSmokeTest.Failure(description: "tabs.detectLanguage returned no result: \(text ?? "nil")")
+            }
+            return result
+        }
+        let recognized = try await detectedLanguage()
+        try check(recognized["promised"] as? String == "de" && (recognized["callback"] as? [String: Any])?["value"] as? String == "de"
+                  && (recognized["callback"] as? [String: Any])?["error"] as? String == "", "tabs.detectLanguage did not recognize page text in both forms: \(recognized)")
+        try check(!(recognized["missing"] as? String ?? "").isEmpty && recognized["missingCallback"] as? String == "error",
+                  "tabs.detectLanguage did not report a missing tab as an error: \(recognized)")
+        // Hidden fixture text leaves too little to recognize, so only the declaration remains.
+        _ = try await languageWeb.evaluateJavaScript("document.getElementById('bam-language').remove(); for (const node of document.body.children) node.hidden = true; true")
+        let declared = try await detectedLanguage()
+        try check(declared["promised"] as? String == "pt-BR", "tabs.detectLanguage ignored the declared language: \(declared)")
+        _ = try await languageWeb.evaluateJavaScript("document.documentElement.removeAttribute('lang'); true")
+        let undetermined = try await detectedLanguage()
+        try check(undetermined["promised"] as? String == "und", "tabs.detectLanguage did not report und for an undeclared page without text: \(undetermined)")
+        _ = try await languageWeb.evaluateJavaScript("for (const node of document.body.children) node.hidden = false; true")
+
+        // scripting.ExecutionWorld (Bitwarden): the enum exists in the prepared worker and in an extension
+        // page, and executeScript with files/frameIds/injectImmediately/world: ExecutionWorld.ISOLATED injects.
+        func executionWorldResult(_ text: Any?) -> [String: Any] {
+            (text as? String).flatMap { $0.data(using: .utf8) }.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? ["error": "no result: \(String(describing: text))"]
+        }
+        let fromWorker = executionWorldResult(try await popup.callAsyncJavaScript("return JSON.stringify(await browser.runtime.sendMessage({kind: 'execution-world'}));", arguments: [:], contentWorld: .page))
+        let fromPage = executionWorldResult(try await popup.callAsyncJavaScript("""
+            const world = chrome.scripting.ExecutionWorld;
+            try {
+              const tab = (await browser.tabs.query({})).find(tab => tab.url?.includes('profile=browser-adapter'));
+              const results = await chrome.scripting.executeScript({target: {tabId: tab.id, frameIds: [0]}, files: ['inject.js'], injectImmediately: true, world: world.ISOLATED});
+              return JSON.stringify({type: typeof world, isolated: world.ISOLATED, main: world.MAIN, frozen: Object.isFrozen(world), result: results?.[0]?.result ?? null, frameId: results?.[0]?.frameId ?? null});
+            } catch (error) { return JSON.stringify({type: typeof world, error: String(error?.message || error)}); }
+            """, arguments: [:], contentWorld: .page))
+        for (label, report) in [("worker", fromWorker), ("extension page", fromPage)] {
+            let injected = report["result"] as? [String: Any]
+            // Values only: a future engine-provided enum need not be frozen (Bam's own is checked frozen in components).
+            try check(report["type"] as? String == "object" && report["isolated"] as? String == "ISOLATED" && report["main"] as? String == "MAIN",
+                      "scripting.ExecutionWorld was missing or wrong in the \(label): \(report)")
+            try check(injected?["injected"] as? Bool == true && injected?["title"] as? String == "Bam extension page" && report["frameId"] as? Int == 0,
+                      "Bitwarden-shaped executeScript did not inject into the tab from the \(label): \(report)")
+        }
+        let injections = (try? await controller.browsers[id]?.evaluateJavaScript("document.documentElement.dataset.bamInjected || '0'")) as? String
+        try check(injections == "2", "The two injections did not both run in the page: \(injections ?? "nil")")
+
+        // activeTab only: no access to any tab before the user's action gesture, then only to
+        // that tab, until the gesture is cleared or the tab navigates.
+        let activeFixture = FileManager.default.temporaryDirectory.appendingPathComponent("bam-active-tab-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: activeFixture, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: activeFixture) }
+        try JSONSerialization.data(withJSONObject: ["manifest_version": 3, "name": "Bam activeTab fixture", "version": "1.0",
+            "description": "Original activeTab-only fixture", "permissions": ["activeTab"], "action": ["default_title": "Bam activeTab"]])
+            .write(to: activeFixture.appendingPathComponent("manifest.json"))
+        try Data("<!doctype html><meta charset='utf-8'><title>activeTab page</title>".utf8).write(to: activeFixture.appendingPathComponent("page.html"))
+        let activeID = try await host.importPackage(at: activeFixture, profileID: profile)
+        // Built from components: `url` carries `?profile=…`, which path edits would keep.
+        func secondPage(host: String? = nil, query: String? = nil) -> URL {
+            var components = URLComponents(url: url, resolvingAgainstBaseURL: false)!
+            components.path = "/next.html"; components.query = query
+            if let host { components.host = host }
+            return components.url!
+        }
+        let secondURL = secondPage()
+        guard let activeContext = host.context(for: activeID), let activeConfiguration = activeContext.webViewConfiguration,
+              let secondID = controller.openProfileTab(secondURL, profileID: profile, active: false) else { throw ExtensionSmokeTest.Failure(description: "activeTab fixture did not load") }
+        try await wait("activeTab second tab did not load") { controller.browsers[secondID]?.url == secondURL && controller.browsers[secondID]?.isLoading == false }
+        host.reconcile()
+        let activePage = WKWebView(frame: NSRect(x: 0, y: 0, width: 320, height: 240), configuration: activeConfiguration)
+        activePage.load(URLRequest(url: activeContext.baseURL.appendingPathComponent("page.html")))
+        try await wait("activeTab extension page did not load") { activePage.title == "activeTab page" }
+        func activeTabAccess() async throws -> (allowed: [Int], denied: Int, callback: String) {
+            let text = try await activePage.callAsyncJavaScript("""
+                const allowed = [], denied = [];
+                for (const tab of await browser.tabs.query({})) {
+                  try { await browser.tabs.detectLanguage(tab.id); allowed.push(tab.id); } catch (error) { denied.push(String(error?.message || error)); }
+                }
+                const target = allowed[0] ?? (await browser.tabs.query({}))[0].id;
+                const callback = await new Promise(resolve => chrome.tabs.detectLanguage(target, value => resolve(chrome.runtime.lastError ? 'error' : 'value:' + value)));
+                return JSON.stringify({allowed, denied: denied.length, callback});
+                """, arguments: [:], contentWorld: .page) as? String
+            guard let data = text?.data(using: .utf8), let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                throw ExtensionSmokeTest.Failure(description: "activeTab detectLanguage probe failed: \(text ?? "nil")")
+            }
+            return (value["allowed"] as? [Int] ?? [], value["denied"] as? Int ?? -1, value["callback"] as? String ?? "")
+        }
+        let before = try await activeTabAccess()
+        try check(before.allowed.isEmpty && before.denied >= 2 && before.callback == "error", "activeTab-only extension read a tab's language before any gesture: \(before)")
+        guard let secondTab = runtime.tabs[secondID] else { throw ExtensionSmokeTest.Failure(description: "Missing activeTab second tab adapter") }
+        activeContext.performAction(for: secondTab)
+        let granted = try await activeTabAccess()
+        try check(granted.allowed.count == 1 && granted.denied == before.denied - 1 && granted.callback.hasPrefix("value:"),
+                  "activeTab gesture did not grant exactly its tab in promise and callback forms: \(granted)")
+        activeContext.clearUserGesture(in: secondTab)
+        let cleared = try await activeTabAccess()
+        try check(cleared.allowed.isEmpty && cleared.callback == "error", "Clearing the gesture did not revoke activeTab language access: \(cleared)")
+        activeContext.performAction(for: secondTab)
+        try check(try await activeTabAccess().allowed == granted.allowed, "A repeated gesture did not restore activeTab access")
+        // Same-origin navigation: Chrome keeps the activeTab grant. Record WebKit's actual
+        // behavior; a dropped grant is a limitation, not something Bam re-grants.
+        controller.navigatePane(secondID, address: secondPage(query: "same-origin").absoluteString)
+        try await wait("activeTab second tab did not navigate within its origin") { controller.browsers[secondID]?.url?.query == "same-origin" && controller.browsers[secondID]?.isLoading == false }
+        let sameOrigin = try await activeTabAccess()
+        if sameOrigin.allowed == granted.allowed { try check(true, "") }
+        else if ProcessInfo.processInfo.environment["BAM_REQUIRE_ACTIVE_TAB_SAME_ORIGIN"] == "1" {
+            throw ExtensionSmokeTest.Failure(description: "Same-origin navigation ended the activeTab grant, unlike Chrome: \(sameOrigin)")
+        } else {
+            print("KNOWN_LIMITATION activeTab: same-origin navigation ended the grant (gesture active: \(activeContext.hasActiveUserGesture(in: secondTab))); Chrome keeps it. Not counted as passed. Set BAM_REQUIRE_ACTIVE_TAB_SAME_ORIGIN=1 for the strict reproducer."); fflush(stdout)
+        }
+        // Cross-origin navigation must end it. Start from a fresh gesture so the check does not
+        // depend on the same-origin outcome above.
+        activeContext.performAction(for: secondTab)
+        try check(try await activeTabAccess().allowed == granted.allowed, "A fresh gesture did not grant access before the cross-origin check")
+        let crossURL = secondPage(host: "localhost", query: "cross-origin")
+        controller.navigatePane(secondID, address: crossURL.absoluteString)
+        try await wait("activeTab second tab did not navigate to another origin") { controller.browsers[secondID]?.url?.host == "localhost" && controller.browsers[secondID]?.isLoading == false }
+        let crossOrigin = try await activeTabAccess()
+        try check(crossOrigin.allowed.isEmpty && crossOrigin.callback == "error", "Cross-origin navigation did not end the tab's activeTab grant: \(crossOrigin)")
+        activePage.stopLoading()
+        _ = host.closeTab?(secondID)
+        try await host.remove(id: activeID)
+        host.reconcile()
         _ = try await popup.evaluateJavaScript("document.getElementById('open-page').click(); true")
         try await wait("Browser adapter did not open its own extension page") { controller.session.tabs.contains { URLInput.extensionURL($0.address) != nil } }
         guard let tab = controller.session.tabs.first(where: { URLInput.extensionURL($0.address) != nil }), let extensionWeb = controller.browsers[tab.id] else { throw ExtensionSmokeTest.Failure(description: "Missing extension renderer") }

@@ -1,5 +1,6 @@
 # Bam development
 
+- Bam has exactly two app names: **Bam Preview** tests unmerged/branch work, and **Bam** is the latest merged main/live version. Prepare every interactive test build at `/Applications/Bam Preview.app` with `scripts/preview-draft.sh` (existing fresh/ephemeral fixture modes are also allowed). Never create other named Bam app bundles. Replacing `/Applications/Bam.app` still requires Ari's shipping approval.
 - Implement each feature as a coherent interaction, including departure, return, cancellation, focus, persistence, and accessibility where applicable.
 - Split independent features between agents with explicit file ownership. Have another agent review behavior before calling a feature complete. Coordinate native UI tests so they do not compete for focus.
 - After finishing and verifying each feature or fix, make a focused Git commit. Record the meaningful verification and remaining limitations; do not mark inventory items complete solely because they compile.

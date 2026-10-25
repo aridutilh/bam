@@ -47,8 +47,9 @@ struct LittleBamDestination: Equatable {
         window.titleVisibility = .hidden; window.titlebarAppearsTransparent = true
         window.isMovableByWindowBackground = false
         window.isReleasedWhenClosed = false; window.delegate = self
-        window.contentView = root; window.appearance = NSAppearance(named: .darkAqua)
-        window.backgroundColor = NSColor(white: 0.10, alpha: 1)
+        // Follows Bam's Appearance preference (NSApp.appearance), like the main window.
+        window.contentView = root
+        window.backgroundColor = BrowserChrome.pageSurface
         window.onEscape = { [weak self] in self?.close() }
         window.onPromote = { [weak self] in self?.promoteToOrbit() }
         window.onLocation = { [weak self] in self?.focusAddress() }
@@ -292,21 +293,20 @@ struct LittleBamDestination: Equatable {
     override var isFlipped: Bool { true }
     override init(frame: NSRect) {
         super.init(frame: frame)
-        wantsLayer = true; layer?.backgroundColor = NSColor(white: 0.10, alpha: 1).cgColor
-        bar.material = .hudWindow
+        wantsLayer = true
         bar.blendingMode = .behindWindow
         bar.state = .active
         bar.wantsLayer = true
-        let edge = CALayer(); edge.backgroundColor = NSColor.white.withAlphaComponent(0.08).cgColor
+        let edge = CALayer()
         edge.name = "edge"; bar.layer?.addSublayer(edge)
         addSubview(browserHost)
         addSubview(bar)
         [profile, back, forward, reload, site, address, extensions, copyLink, promote, progress].forEach(bar.addSubview)
         profile.toolTip = "Login profile"
         address.placeholderString = "Search or enter a web address"; address.setAccessibilityLabel("Little Bam address")
-        address.font = BamType.sans(13, weight: .medium); address.textColor = .white
+        address.font = BamType.sans(13, weight: .medium); address.textColor = LittleBamTone.tone(1)
         address.isBezeled = false; address.isBordered = false; address.drawsBackground = true
-        address.backgroundColor = NSColor.white.withAlphaComponent(0.08)
+        address.backgroundColor = LittleBamTone.tone(0.08)
         address.wantsLayer = true; address.layer?.cornerRadius = 8
         address.focusRingType = .none; address.alignment = .center
         address.usesSingleLineMode = true; address.lineBreakMode = .byTruncatingTail
@@ -318,8 +318,15 @@ struct LittleBamDestination: Equatable {
         progress.style = .bar; progress.isIndeterminate = false; progress.minValue = 0; progress.maxValue = 1
         progress.controlSize = .small
         progress.isHidden = true
+        applyAppearanceColors()
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+    private func applyAppearanceColors() {
+        layer?.backgroundColor = resolvedCGColor(BrowserChrome.pageSurface, for: self)
+        bar.material = effectiveAppearance.isDarkChrome ? .hudWindow : .titlebar
+        (bar.layer?.sublayers?.first { $0.name == "edge" })?.backgroundColor = resolvedCGColor(LittleBamTone.tone(0.08), for: self)
+    }
+    override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); applyAppearanceColors() }
     override func layout() {
         super.layout()
         let width = bounds.width, barHeight = Self.barHeight
@@ -355,6 +362,13 @@ struct LittleBamDestination: Equatable {
     override var isFlipped: Bool { true }
 }
 
+/// Little Bam's bar tones: white on dark chrome, near-black on light chrome.
+@MainActor enum LittleBamTone {
+    static func tone(_ alpha: CGFloat) -> NSColor {
+        .chrome(light: NSColor(white: 0.08, alpha: min(1, alpha)), dark: NSColor(white: 1, alpha: alpha))
+    }
+}
+
 /// A translucent 30-point square with one symbol; hover lifts it.
 @MainActor final class LittleBamIconButton: NSButton {
     var symbol: String { didSet { paint() } }
@@ -374,9 +388,10 @@ struct LittleBamDestination: Equatable {
     private func paint() {
         image = NSImage(systemSymbolName: symbol, accessibilityDescription: accessibilityLabel())?
             .withSymbolConfiguration(.init(pointSize: 13, weight: .semibold))
-        contentTintColor = NSColor.white.withAlphaComponent(isEnabled ? 0.85 : 0.35)
-        layer?.backgroundColor = (hovering && isEnabled ? NSColor.white.withAlphaComponent(0.12) : NSColor.clear).cgColor
+        contentTintColor = LittleBamTone.tone(isEnabled ? 0.85 : 0.35)
+        layer?.backgroundColor = hovering && isEnabled ? resolvedCGColor(LittleBamTone.tone(0.12), for: self) : NSColor.clear.cgColor
     }
+    override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); paint() }
     override var isEnabled: Bool { didSet { paint() } }
     override var isHighlighted: Bool { didSet { layer?.opacity = isHighlighted ? 0.7 : 1 } }
     override func updateTrackingAreas() {
@@ -415,16 +430,20 @@ struct LittleBamDestination: Equatable {
         image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?.withSymbolConfiguration(.init(pointSize: 11, weight: .semibold))
         imagePosition = .imageLeading; imageHugsTitle = true
         layer?.cornerRadius = 8
-        layer?.backgroundColor = NSColor.white.withAlphaComponent(0.08).cgColor
+        layer?.backgroundColor = resolvedCGColor(LittleBamTone.tone(0.08), for: self)
         self.title = title
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        layer?.backgroundColor = resolvedCGColor(LittleBamTone.tone(0.08), for: self)
+    }
     override var title: String {
         didSet {
             attributedTitle = NSAttributedString(string: title, attributes: [
-                .font: BamType.sans(12.5, weight: .semibold), .foregroundColor: NSColor.white.withAlphaComponent(0.8)
+                .font: BamType.sans(12.5, weight: .semibold), .foregroundColor: LittleBamTone.tone(0.8)
             ])
-            contentTintColor = NSColor.white.withAlphaComponent(0.7)
+            contentTintColor = LittleBamTone.tone(0.7)
         }
     }
     override var intrinsicContentSize: NSSize { var size = super.intrinsicContentSize; size.width += 22; return size }
@@ -446,7 +465,7 @@ struct LittleBamDestination: Equatable {
     override var title: String {
         didSet {
             attributedTitle = NSAttributedString(string: title, attributes: [
-                .font: BamType.sans(13.5, weight: .semibold), .foregroundColor: NSColor.white.withAlphaComponent(0.92)
+                .font: BamType.sans(13.5, weight: .semibold), .foregroundColor: LittleBamTone.tone(0.92)
             ])
         }
     }
@@ -456,7 +475,7 @@ struct LittleBamDestination: Equatable {
         trackingAreas.forEach(removeTrackingArea)
         addTrackingArea(NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self))
     }
-    override func mouseEntered(with event: NSEvent) { hovering = true; layer?.backgroundColor = NSColor.white.withAlphaComponent(0.1).cgColor }
+    override func mouseEntered(with event: NSEvent) { hovering = true; layer?.backgroundColor = resolvedCGColor(LittleBamTone.tone(0.1), for: self) }
     override func mouseExited(with event: NSEvent) { hovering = false; layer?.backgroundColor = NSColor.clear.cgColor }
     override func resetCursorRects() { addCursorRect(bounds, cursor: .iBeam) }
 }
@@ -487,16 +506,15 @@ struct LittleBamDestination: Equatable {
         main.wantsLayer = true; main.layer?.cornerRadius = 8
         picker.isBordered = false; picker.setButtonType(.momentaryChange)
         picker.image = NSImage(systemSymbolName: "chevron.down", accessibilityDescription: "Choose a Space")?.withSymbolConfiguration(.init(pointSize: 10, weight: .bold))
-        picker.contentTintColor = NSColor.white.withAlphaComponent(0.8)
+        picker.contentTintColor = LittleBamTone.tone(0.8)
         picker.target = self; picker.action = #selector(pickAction)
         picker.setAccessibilityLabel("Choose a Space to open in")
         picker.wantsLayer = true; picker.layer?.cornerRadius = 8
         keycap.font = BamType.mono(10.5, weight: .semibold)
-        keycap.textColor = NSColor.white.withAlphaComponent(0.85)
+        keycap.textColor = LittleBamTone.tone(0.85)
         keycap.wantsLayer = true; keycap.layer?.cornerRadius = 5
-        keycap.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.14).cgColor
         keycap.alignment = .center
-        divider.wantsLayer = true; divider.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.14).cgColor
+        divider.wantsLayer = true
         label.lineBreakMode = .byTruncatingTail
         [main, label, keycap, divider, picker].forEach(addSubview)
         paint()
@@ -504,17 +522,20 @@ struct LittleBamDestination: Equatable {
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
     private func paint() {
         let text = NSMutableAttributedString(string: "Open in ", attributes: [
-            .font: BamType.sans(13, weight: .medium), .foregroundColor: NSColor.white.withAlphaComponent(0.78)
+            .font: BamType.sans(13, weight: .medium), .foregroundColor: LittleBamTone.tone(0.78)
         ])
         text.append(NSAttributedString(string: spaceName, attributes: [
-            .font: BamType.sans(13, weight: .bold), .foregroundColor: NSColor.white
+            .font: BamType.sans(13, weight: .bold), .foregroundColor: LittleBamTone.tone(1)
         ]))
         label.attributedStringValue = text
         main.setAccessibilityLabel("Open in \(spaceName)")
-        layer?.backgroundColor = NSColor.white.withAlphaComponent(hovering || pickerHovering ? 0.16 : 0.10).cgColor
-        layer?.borderColor = NSColor.white.withAlphaComponent(0.12).cgColor
-        picker.layer?.backgroundColor = (pickerHovering ? NSColor.white.withAlphaComponent(0.12) : NSColor.clear).cgColor
+        layer?.backgroundColor = resolvedCGColor(LittleBamTone.tone(hovering || pickerHovering ? 0.16 : 0.10), for: self)
+        layer?.borderColor = resolvedCGColor(LittleBamTone.tone(0.12), for: self)
+        picker.layer?.backgroundColor = pickerHovering ? resolvedCGColor(LittleBamTone.tone(0.12), for: self) : NSColor.clear.cgColor
+        keycap.layer?.backgroundColor = resolvedCGColor(LittleBamTone.tone(0.14), for: self)
+        divider.layer?.backgroundColor = resolvedCGColor(LittleBamTone.tone(0.14), for: self)
     }
+    override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); paint() }
     override var intrinsicContentSize: NSSize {
         let labelWidth = min(220, ceil(label.attributedStringValue.size().width) + 6)
         return NSSize(width: 12 + labelWidth + 8 + 30 + (hasChoices ? 1 + 26 : 0) + 8, height: 30)

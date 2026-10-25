@@ -1,6 +1,28 @@
 import AppKit
 
 /// Offscreen AppKit coverage: no window is ordered front and no system input is posted.
+/// Just enough NSDraggingInfo to call the table's drop methods directly; no drag session runs.
+@MainActor final class FakeDraggingInfo: NSObject, @preconcurrency NSDraggingInfo {
+    let draggingPasteboard: NSPasteboard
+    init(pasteboard: NSPasteboard) { draggingPasteboard = pasteboard }
+    var draggingDestinationWindow: NSWindow? { nil }
+    var draggingSourceOperationMask: NSDragOperation { .move }
+    var draggingLocation: NSPoint { .zero }
+    var draggedImageLocation: NSPoint { .zero }
+    var draggedImage: NSImage? { nil }
+    var draggingSource: Any? { nil }
+    var draggingSequenceNumber: Int { 1 }
+    func slideDraggedImage(to screenPoint: NSPoint) {}
+    var draggingFormation: NSDraggingFormation = .none
+    var animatesToDestination = false
+    var numberOfValidItemsForDrop = 1
+    func enumerateDraggingItems(options enumOpts: NSDraggingItemEnumerationOptions = [], for view: NSView?, classes classArray: [AnyClass],
+                                searchOptions: [NSPasteboard.ReadingOptionKey: Any] = [:],
+                                using block: (NSDraggingItem, Int, UnsafeMutablePointer<ObjCBool>) -> Void) {}
+    var springLoadingHighlight: NSSpringLoadingHighlight { .none }
+    func resetSpringLoading() {}
+}
+
 @main enum SidebarPerformanceTests {
     @MainActor static func main() {
         _ = NSApplication.shared
@@ -198,6 +220,523 @@ import AppKit
         sidebar.updateExtensions([]); sidebar.layoutSubtreeIfNeeded()
         require(descendants(sidebar).allSatisfy { $0.identifier?.rawValue.hasPrefix("extension-action-") != true }, "Removing or switching profiles clears old actions")
         require(descendants(sidebar).first { $0.identifier?.rawValue == "extension-library" }?.isHidden == false, "Empty profiles offer Add extensions directly")
+
+        // Folder rows: deep nesting keeps titles readable at the narrowest width,
+        // and pressing a folder toggles it instead of selecting a page.
+        sidebar.setFrameSize(NSSize(width: 164, height: 720))
+        let folderIDs = (0..<12).map { _ in UUID() }, leaf = UUID()
+        var toggled: [UUID] = []
+        sidebar.onToggleFolder = { toggled.append($0) }
+        let nested = folderIDs.enumerated().map { depth, id in
+            SidebarTabItem(id: id, title: "Folder level \(depth) with a long name", subtitle: "", symbol: "folder", isPinned: true,
+                           isActive: false, depth: depth, isFolder: true, isExpanded: true)
+        } + [SidebarTabItem(id: leaf, title: "Deep leaf page title", subtitle: "https://deep.invalid", symbol: "globe",
+                            isPinned: true, isActive: true, depth: 12, parentFolderID: folderIDs.last)]
+        update(0, nested)
+        let deepTable = table(in: 0)
+        let deepRow = row(deepTable, 12)
+        let deepTitle = descendants(deepRow).compactMap { $0 as? NSTextField }.first { $0.stringValue == "Deep leaf page title" }!
+        require(deepTitle.frame.width >= 60 && deepTitle.frame.minX > 36 && deepTitle.frame.maxX <= deepRow.bounds.width,
+                "Depth-12 title stays readable and still indented at 164pt: \(deepTitle.frame)")
+        let narrowIndent = deepTitle.frame.minX
+        sidebar.setFrameSize(NSSize(width: 228, height: 720)); update(0, nested)
+        let wideTitle = descendants(row(table(in: 0), 12)).compactMap { $0 as? NSTextField }.first { $0.stringValue == "Deep leaf page title" }!
+        require(wideTitle.frame.width >= 64 && wideTitle.frame.minX > narrowIndent, "Wider sidebars restore deeper indentation: \(wideTitle.frame)")
+        // Visual review: one indent step per list, so every level stays distinct
+        // at the narrowest width (depth 1 and depth 5 never line up).
+        for width in [164, 200, 240] as [CGFloat] {
+            let xs = (0...5).map { ArkRowLayout(width: width, height: 34, depth: $0, listMaxDepth: 5, isFolder: false, showsClose: true).title.minX }
+            require(zip(xs, xs.dropFirst()).allSatisfy { $1 - $0 >= 5 }, "Every folder level indents further at \(width)pt: \(xs)")
+            let deepest = ArkRowLayout(width: width, height: 34, depth: 5, listMaxDepth: 5, isFolder: false, showsClose: true)
+            require(deepest.visibleTitleEnd - deepest.title.minX >= ArkMetrics.minimumTitleWidth - 0.5,
+                    "Deepest title keeps its minimum readable width with the close button showing at \(width)pt")
+        }
+        // Trailing fade: the title frame is the same with or without the close
+        // button (no glyph moves on hover); only the visible end moves before it.
+        let quiet = ArkRowLayout(width: 240, height: 34, depth: 1, listMaxDepth: 1, isFolder: false, showsClose: false)
+        let busy = ArkRowLayout(width: 240, height: 34, depth: 1, listMaxDepth: 1, isFolder: false, showsClose: true)
+        require(quiet.title == busy.title && quiet.title.maxX <= 240 - ArkMetrics.trailingGap + 0.5,
+                "Showing the close button doesn't change the title frame: \(quiet.title) vs \(busy.title)")
+        require(quiet.visibleTitleEnd == quiet.title.maxX && busy.visibleTitleEnd <= busy.close.minX - 4 && busy.visibleTitleEnd < quiet.visibleTitleEnd - 20,
+                "The readable end moves before the close button only while it shows")
+        let folderLayout = ArkRowLayout(width: 240, height: 34, depth: 1, listMaxDepth: 1, isFolder: true, showsClose: true)
+        require(folderLayout.title.maxX <= folderLayout.chevron.minX && folderLayout.visibleTitleEnd == folderLayout.title.maxX,
+                "Folder titles stay before the chevron")
+        require(ArkTitleFade.stops(textWidth: 80, frameWidth: 180, visibleWidth: 120) == nil, "Text that fits gets no fade")
+        let stops = ArkTitleFade.stops(textWidth: 300, frameWidth: 180, visibleWidth: 120)!
+        require(abs(stops.end * 180 - 120) < 0.01 && abs((stops.end - stops.start) * 180 - ArkTitleFade.width) < 0.01
+                && ArkTitleFade.width >= 16 && ArkTitleFade.width <= 20,
+                "A long title fades over 16–20pt ending exactly at the readable end")
+        let leafNow = row(table(in: 0), 12)
+        let leafTitle = descendants(leafNow).compactMap { $0 as? NSTextField }.first { $0.stringValue == "Deep leaf page title" }!
+        let closeShown = descendants(leafNow).first { !$0.isHidden && ["Close tab", "Unload tab"].contains($0.accessibilityLabel() ?? "") }
+        let leafMask = leafTitle.layer?.mask as? CAGradientLayer
+        let fadeEndX = leafMask.flatMap { $0.locations?[2] }.map { leafTitle.frame.minX + CGFloat($0.doubleValue) * leafTitle.bounds.width }
+        require(closeShown != nil && leafTitle.lineBreakMode == .byClipping && fadeEndX.map { $0 <= closeShown!.frame.minX } == true,
+                "On the selected row the long title has faded out before its close button (no ellipsis, no overlap)")
+        require(leafNow.accessibilityLabel() == "Deep leaf page title" && leafNow.toolTip?.hasPrefix("Deep leaf page title") == true,
+                "The full title stays in the accessibility label and tooltip")
+        // Hover on a long unselected title: glyphs stay put; only the fade moves.
+        let hoverRow = row(table(in: 0), 11)
+        let hoverTitle = descendants(hoverRow).compactMap { $0 as? NSTextField }.first { $0.stringValue.hasPrefix("Folder level 11") }!
+        @MainActor func fadeEnd(_ title: NSTextField) -> CGFloat? {
+            ((title.layer?.mask as? CAGradientLayer)?.locations?[2]).map { title.frame.minX + CGFloat($0.doubleValue) * title.bounds.width }
+        }
+        let restingFrame = hoverTitle.frame, restingEnd = fadeEnd(hoverTitle)
+        hoverRow.mouseEntered(with: NSEvent.enterExitEvent(with: .mouseEntered, location: .zero, modifierFlags: [], timestamp: 0,
+                                                         windowNumber: window.windowNumber, context: nil, eventNumber: 0, trackingNumber: 0, userData: nil)!)
+        hoverRow.layoutSubtreeIfNeeded()
+        require(hoverTitle.frame == restingFrame && fadeEnd(hoverTitle) == restingEnd,
+                "Hovering a folder (no close button) changes nothing about its title")
+        hoverRow.mouseExited(with: NSEvent.enterExitEvent(with: .mouseExited, location: .zero, modifierFlags: [], timestamp: 0,
+                                                        windowNumber: window.windowNumber, context: nil, eventNumber: 0, trackingNumber: 0, userData: nil)!)
+        let longID = UUID()
+        update(0, nested.dropLast() + [SidebarTabItem(id: longID, title: "A rather long unselected page title that cannot fit", subtitle: "", symbol: "globe",
+                                                      isPinned: true, isActive: false, depth: 1, parentFolderID: folderIDs[0], treeDepth: 12)])
+        let longRow = row(table(in: 0), 12)
+        require(longRow.identifier?.rawValue == "tab-row-\(longID.uuidString)", "The long-title row is materialized")
+        let longTitle = descendants(longRow).compactMap { $0 as? NSTextField }.first { $0.stringValue.hasPrefix("A rather long") }!
+        longRow.layoutSubtreeIfNeeded()
+        let longFrame = longTitle.frame, longEnd = fadeEnd(longTitle)
+        longRow.mouseEntered(with: NSEvent.enterExitEvent(with: .mouseEntered, location: .zero, modifierFlags: [], timestamp: 0,
+                                                        windowNumber: window.windowNumber, context: nil, eventNumber: 0, trackingNumber: 0, userData: nil)!)
+        longRow.layoutSubtreeIfNeeded()
+        let hoverClose = descendants(longRow).first { !$0.isHidden && $0.accessibilityLabel() == "Unload tab" }
+        require(longTitle.frame == longFrame && hoverClose != nil, "Hover shows the close button without moving the title's glyphs")
+        require(longEnd != nil && fadeEnd(longTitle).map { $0 <= hoverClose!.frame.minX && $0 < longEnd! } == true,
+                "On hover the fade moves left to end before the close button")
+        longRow.mouseExited(with: NSEvent.enterExitEvent(with: .mouseExited, location: .zero, modifierFlags: [], timestamp: 0,
+                                                       windowNumber: window.windowNumber, context: nil, eventNumber: 0, trackingNumber: 0, userData: nil)!)
+        longRow.layoutSubtreeIfNeeded()
+        require(longTitle.frame == longFrame && fadeEnd(longTitle) == longEnd, "Leaving hover restores the resting fade")
+        update(0, nested)
+
+        // Saved rows that haven't been opened (every fresh import) read at full
+        // contrast; only memory-slept pages are quieted, and only slightly.
+        require(ArkRowInk.title(sleeping: false) == ArkPalette.ink && ArkRowInk.iconAlpha(sleeping: false) == 1
+                && ArkRowInk.iconAlpha(sleeping: true) >= 0.75, "Dormant saved rows are not dimmed")
+        let dormantItems = Array(nested.dropLast()) + [SidebarTabItem(id: leaf, title: "Deep leaf page title", subtitle: "https://deep.invalid", symbol: "globe",
+                                                                         isPinned: true, isActive: false, isUnloaded: true, depth: 12, parentFolderID: folderIDs.last)]
+        update(0, dormantItems)
+        let dormantRow = row(table(in: 0), 12)
+        let dormantTitle = descendants(dormantRow).compactMap { $0 as? NSTextField }.first { $0.stringValue == "Deep leaf page title" }!
+        let dormantIcon = descendants(dormantRow).compactMap { $0 as? NSImageView }.first { $0.identifier?.rawValue != "folder-chevron" }!
+        require(dormantTitle.textColor == ArkPalette.ink && dormantIcon.alphaValue == 1, "An unloaded saved row keeps full ink and icon")
+        update(0, nested)
+
+        let folderRow = row(deepTable, 0)
+        // Folders show a disclosure chevron that follows their state.
+        let chevron = descendants(folderRow).first { $0.identifier?.rawValue == "folder-chevron" } as? NSImageView
+        require(chevron?.isHidden == false && chevron?.image?.name() == nil, "Folder rows show a chevron")
+        require(descendants(leafNow).first { $0.identifier?.rawValue == "folder-chevron" }?.isHidden != false, "Tab rows show no chevron")
+        let folderTitle = descendants(folderRow).compactMap { $0 as? NSTextField }.first { $0.stringValue.hasPrefix("Folder level 0") }!
+        require(chevron.map { folderTitle.frame.maxX <= $0.frame.minX } == true, "Folder titles stop before the chevron")
+        // Hierarchy pass: folders recede to the tabs' weight; glyphs in ink; chevrons quiet at rest.
+        func weight(_ field: NSTextField) -> CGFloat {
+            ((field.font?.fontDescriptor.object(forKey: .traits) as? [NSFontDescriptor.TraitKey: Any])?[.weight] as? NSNumber).map { CGFloat($0.doubleValue) } ?? 0
+        }
+        require(abs(weight(folderTitle) - NSFont.Weight.medium.rawValue) < 0.01, "Folder titles are medium, not semibold")
+        let folderGlyph = descendants(folderRow).compactMap { $0 as? NSImageView }.first { $0.identifier?.rawValue != "folder-chevron" }!
+        require(folderGlyph.identifier?.rawValue.hasPrefix("folder-glyph") == true && folderGlyph.contentTintColor == nil
+                && chevron?.contentTintColor === ArkPalette.ink, "Folders show Bam's own tinted folder glyph; chevrons use Bam's ink")
+        require(chevron?.alphaValue == ArkTabRowChevron.rest && ArkTabRowChevron.rest == 0, "At rest the glyph shows open/closed; no chevron")
+        window.makeFirstResponder(folderRow)
+        require(chevron?.alphaValue == ArkTabRowChevron.emphasized, "Keyboard focus brings the chevron up")
+        window.makeFirstResponder(nil)
+        require(chevron?.alphaValue == ArkTabRowChevron.rest, "Leaving focus quiets it again")
+        folderRow.mouseEntered(with: NSEvent.enterExitEvent(with: .mouseEntered, location: .zero, modifierFlags: [], timestamp: 0,
+                                                          windowNumber: window.windowNumber, context: nil, eventNumber: 0, trackingNumber: 0, userData: nil)!)
+        require(chevron?.alphaValue == ArkTabRowChevron.emphasized, "Hover brings the chevron up")
+        folderRow.mouseExited(with: NSEvent.enterExitEvent(with: .mouseExited, location: .zero, modifierFlags: [], timestamp: 0,
+                                                         windowNumber: window.windowNumber, context: nil, eventNumber: 0, trackingNumber: 0, userData: nil)!)
+        require(chevron?.alphaValue == ArkTabRowChevron.rest, "Leaving hover quiets it again")
+        // When shown (hover/keyboard focus), the chevron keeps >=3:1 over Bam's lightest and darkest sidebars.
+        for (dark, background) in [(false, 0.90), (true, 0.20)] {
+            let ink = BamInk.primary(dark: dark).red, a = Double(ArkTabRowChevron.emphasized)
+            let shown = ink * a + background * (1 - a)
+            let mixed = SpaceTheme.RGBA(red: shown, green: shown, blue: shown)!, behind = SpaceTheme.RGBA(red: background, green: background, blue: background)!
+            require(mixed.contrast(with: behind) >= 3, "A shown chevron is clearly visible (dark: \(dark))")
+        }
+        // Visual review P2: a materialized row reused between an unloaded tab and
+        // a folder (same depth, close hidden in both) must re-lay out its title.
+        // Scrolling recycles cells, so a row that was an unloaded tab comes back
+        // as a folder and vice versa (period 3 ensures both directions).
+        let flipIDs = (0..<400).map { _ in UUID() }
+        let flipList = flipIDs.enumerated().map { index, id in
+            let folder = index % 3 == 0
+            return SidebarTabItem(id: id, title: "Flip row \(index) with a fairly long title", subtitle: "", symbol: folder ? "folder" : "globe",
+                                  isPinned: true, isActive: false, isUnloaded: !folder, depth: 1, isFolder: folder, treeDepth: 1)
+        }
+        update(0, flipList)
+        let flipTable = table(in: 0)
+        var kindByRow: [ObjectIdentifier: Bool] = [:]
+        var reusedTabAsFolder = 0, reusedFolderAsTab = 0
+        @MainActor func checkMaterialized(_ label: String) {
+            prepare(flipTable)
+            let range = flipTable.rows(in: flipTable.visibleRect)
+            for index in range.location..<(range.location + range.length) {
+                guard let cell = flipTable.view(atColumn: 0, row: index, makeIfNecessary: false),
+                      let flipRow = descendants(cell).first(where: { $0.identifier?.rawValue.hasPrefix("tab-row-") == true }),
+                      let title = descendants(flipRow).compactMap({ $0 as? NSTextField }).first(where: { $0.stringValue.hasPrefix("Flip row ") }),
+                      let chevronView = descendants(flipRow).first(where: { $0.identifier?.rawValue == "folder-chevron" }) else { continue }
+                cell.layoutSubtreeIfNeeded()
+                let isFolder = !chevronView.isHidden
+                if let was = kindByRow[ObjectIdentifier(flipRow)], was != isFolder {
+                    if isFolder { reusedTabAsFolder += 1 } else { reusedFolderAsTab += 1 }
+                }
+                kindByRow[ObjectIdentifier(flipRow)] = isFolder
+                if isFolder {
+                    require(title.frame.maxX <= chevronView.frame.minX, "\(label): folder title stops before its chevron: \(title.frame) vs \(chevronView.frame)")
+                } else {
+                    require(title.frame.maxX >= flipRow.bounds.width - ArkMetrics.trailingGap - 0.5, "\(label): tab title reaches the edge: \(title.frame)")
+                }
+            }
+        }
+        checkMaterialized("top")
+        for target in stride(from: 40, to: 400, by: 37) { flipTable.scrollRowToVisible(target); checkMaterialized("row \(target)") }
+        require(reusedTabAsFolder > 0 && reusedFolderAsTab > 0,
+                "Scrolling reused cells in both directions (tab→folder \(reusedTabAsFolder), folder→tab \(reusedFolderAsTab))")
+        // Collapsing the deepest branch doesn't shift the remaining rows sideways:
+        // the indent step comes from the whole tree, not just the visible rows.
+        let stableShallow = [SidebarTabItem(id: flipIDs[0], title: "Flip row 0 with a fairly long title", subtitle: "", symbol: "globe",
+                                            isPinned: true, isActive: false, depth: 1, treeDepth: 8)]
+        update(0, stableShallow)
+        let shallowX = descendants(row(table(in: 0), 0)).compactMap { $0 as? NSTextField }.first { $0.stringValue.hasPrefix("Flip row 0 ") }!.frame.minX
+        let expectedX = ArkRowLayout(width: row(table(in: 0), 0).bounds.width, height: 34, depth: 1, listMaxDepth: 8, isFolder: false, showsClose: false).title.minX
+        require(abs(shallowX - expectedX) < 0.5, "Indent follows the whole tree depth even when deep rows are hidden: \(shallowX) vs \(expectedX)")
+        update(0, nested)
+
+        selected.removeAll()
+        _ = folderRow.accessibilityPerformPress()
+        require(toggled == [folderIDs[0]] && selected.isEmpty, "Pressing a folder toggles it and selects nothing")
+        require(folderRow.isAccessibilityDisclosed() && folderRow.isAccessibilityExpanded() && (folderRow.accessibilityValue() as? NSNumber)?.intValue == 1
+                && folderRow.accessibilityRole() == .disclosureTriangle && folderRow.accessibilityLabel()?.hasPrefix("Folder level 0") == true,
+                "Folder is one disclosure control with its name and expanded state")
+        require(descendants(folderRow).filter { $0 !== folderRow && $0.isAccessibilityElement() && !($0 is NSButton) }.isEmpty,
+                "Folder label and icon are not separate accessibility elements")
+        let leafRow = row(table(in: 0), 12)
+        require(leafRow.accessibilityRole() == .button && !leafRow.isAccessibilityDisclosed(), "Tab rows stay buttons without disclosure state")
+        require(deepTable.delegate?.tableView?(deepTable, shouldSelectRow: 0) == false, "Folder rows are not table selections")
+
+        // Keyboard-only: arrows from the selected tab reach folder rows, which
+        // toggle on Return. Events go straight to the views; nothing is posted.
+        @MainActor func key(_ code: UInt16, to view: NSView) {
+            let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber,
+                                         context: nil, characters: code == 36 ? "\r" : "", charactersIgnoringModifiers: code == 36 ? "\r" : "",
+                                         isARepeat: false, keyCode: code)!
+            view.keyDown(with: event)
+        }
+        let keyTable = table(in: 0)
+        keyTable.selectRowIndexes(IndexSet(integer: 12), byExtendingSelection: false)
+        window.makeFirstResponder(keyTable)
+        key(126, to: keyTable)
+        let focusedFolder = window.firstResponder as? NSView
+        require(focusedFolder?.identifier?.rawValue == "tab-row-\(folderIDs[11].uuidString)", "Up arrow from a tab focuses the folder above it")
+        key(126, to: focusedFolder!)
+        require((window.firstResponder as? NSView)?.identifier?.rawValue == "tab-row-\(folderIDs[10].uuidString)", "Up arrow moves between folders")
+        toggled.removeAll()
+        key(36, to: window.firstResponder as! NSView)
+        require(toggled == [folderIDs[10]], "Return toggles the focused folder")
+        key(123, to: window.firstResponder as! NSView)
+        require(toggled == [folderIDs[10], folderIDs[10]], "Left arrow collapses an expanded folder")
+
+        // No table selection (active page is a Favorite; the Space holds only folders):
+        // Down enters at the first folder, Up at the last; nothing is selected as a tab.
+        let onlyFolders = folderIDs.prefix(3).enumerated().map { index, id in
+            SidebarTabItem(id: id, title: "Only folder \(index)", subtitle: "", symbol: "folder", isPinned: true,
+                           isActive: false, isFolder: true, isExpanded: false)
+        } + [SidebarTabItem(id: leaf, title: "Favorite page", subtitle: "", symbol: "star", isPinned: true, isActive: true, isFavorite: true)]
+        update(0, Array(onlyFolders))
+        let folderTable = table(in: 0)
+        prepare(folderTable)
+        require(folderTable.selectedRow == -1, "A Favorite selection leaves the Space list without a selected row")
+        selected.removeAll()
+        window.makeFirstResponder(folderTable); key(125, to: folderTable)
+        require((window.firstResponder as? NSView)?.identifier?.rawValue == "tab-row-\(folderIDs[0].uuidString)" && selected.isEmpty,
+                "Down with no selection focuses the first folder without selecting a tab")
+        window.makeFirstResponder(folderTable); key(126, to: folderTable)
+        require((window.firstResponder as? NSView)?.identifier?.rawValue == "tab-row-\(folderIDs[2].uuidString)" && selected.isEmpty,
+                "Up with no selection focuses the last folder")
+
+        // Native regression: a click expands a folder, the sidebar reloads, and
+        // the folder must still hold focus so Left collapses it again.
+        var tree = [SidebarTabItem(id: folderIDs[0], title: "Projects", subtitle: "", symbol: "folder", isPinned: true, isActive: false,
+                                   isFolder: true, isExpanded: false),
+                    SidebarTabItem(id: leaf, title: "Selected page", subtitle: "", symbol: "globe", isPinned: false, isActive: true)]
+        let child = UUID()
+        sidebar.onToggleFolder = { id in
+            let expanding = !tree[0].isExpanded
+            tree[0].isExpanded = expanding
+            if expanding {
+                tree.insert(SidebarTabItem(id: child, title: "Inside", subtitle: "", symbol: "globe", isPinned: true, isActive: false,
+                                           depth: 1, parentFolderID: id), at: 1)
+            } else { tree.removeAll { $0.id == child } }
+            update(0, tree)
+        }
+        update(0, tree)
+        let projects = row(table(in: 0), 0)
+        @MainActor func mouse(_ type: NSEvent.EventType) -> NSEvent {
+            NSEvent.mouseEvent(with: type, location: .zero, modifierFlags: [], timestamp: 0,
+                               windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
+        }
+        projects.mouseDown(with: mouse(.leftMouseDown))
+        require(tree.count == 2, "A folder doesn't toggle on mouse-down, so it can be dragged")
+        projects.mouseUp(with: mouse(.leftMouseUp))
+        require(tree.count == 3 && (window.firstResponder as? NSView)?.identifier?.rawValue == "tab-row-\(folderIDs[0].uuidString)",
+                "Clicking a folder expands it and keeps focus on it after the reload")
+        key(123, to: window.firstResponder as! NSView)
+        require(tree.count == 2 && (window.firstResponder as? NSView)?.identifier?.rawValue == "tab-row-\(folderIDs[0].uuidString)",
+                "Left then collapses it and focus stays on the folder")
+
+        // Drag and drop: the table's own drop methods map rows to model targets,
+        // only accept what the model accepts, and change nothing when refused.
+        let k1 = UUID(), box = UUID(), boxChild = UUID(), k2 = UUID(), t1 = UUID(), t2 = UUID()
+        let dndItems = [
+            SidebarTabItem(id: k1, title: "Kept one", subtitle: "", symbol: "globe", isPinned: true, isActive: false),
+            SidebarTabItem(id: box, title: "Box", subtitle: "", symbol: "folder", isPinned: true, isActive: false, isFolder: true, isExpanded: true),
+            SidebarTabItem(id: boxChild, title: "In box", subtitle: "", symbol: "globe", isPinned: true, isActive: false, depth: 1, parentFolderID: box),
+            SidebarTabItem(id: k2, title: "Kept two", subtitle: "", symbol: "globe", isPinned: true, isActive: false),
+            SidebarTabItem(id: t1, title: "Today one", subtitle: "", symbol: "globe", isPinned: false, isActive: true),
+            SidebarTabItem(id: t2, title: "Today two", subtitle: "", symbol: "globe", isPinned: false, isActive: false)
+        ]
+        update(0, dndItems)
+        let dndTable = table(in: 0)   // rows: k1, box, child, k2, divider, New Tab, t1, t2
+        var asked: [BrowserSession.SidebarDropTarget] = [], dropped: [BrowserSession.SidebarDropTarget] = []
+        var accept = true
+        sidebar.canDrop = { _, target, space in asked.append(target); return accept && space == 0 }
+        sidebar.onDrop = { _, target, _ in dropped.append(target); return true }
+        let board = NSPasteboard(name: NSPasteboard.Name("bam-sidebar-dnd-test-\(UUID().uuidString)"))
+        defer { board.releaseGlobally() }
+        board.clearContents(); board.setString(k2.uuidString, forType: .bamSidebarRow)
+        let info = FakeDraggingInfo(pasteboard: board)
+        @MainActor func validate(_ row: Int, _ operation: NSTableView.DropOperation) -> (NSDragOperation, BrowserSession.SidebarDropTarget?) {
+            asked.removeAll()
+            let result = dndTable.dataSource!.tableView!(dndTable, validateDrop: info, proposedRow: row, proposedDropOperation: operation)
+            return (result, asked.last)
+        }
+        require(validate(1, .on) == (.move, .into(box)), "Dropping on a folder files the row inside it")
+        require(validate(2, .on) == (.move, .before(boxChild)), "Dropping on a tab means just before it")
+        require(validate(0, .above) == (.move, .before(k1)), "Between rows means before that row")
+        require(validate(4, .above).1 == .keptEnd && validate(5, .above).1 == .keptEnd, "The divider/New Tab gap is the end of the kept section")
+        require(validate(6, .above).1 == .today(before: t1) && validate(8, .above).1 == .today(before: nil), "Today rows and the list end unkeep into Today")
+        accept = false
+        require(validate(1, .on).0 == [], "No drop indicator where the model refuses (cycle, depth, folder into Today)")
+        accept = true
+        require(dndTable.dataSource!.tableView!(dndTable, acceptDrop: info, row: 1, dropOperation: .on) && dropped == [.into(box)],
+                "Dropping commits exactly the validated target")
+        board.clearContents(); board.setString("not a row", forType: .string)
+        require(validate(1, .on).0 == [] && asked.isEmpty, "Foreign drags are ignored")
+
+        // Regression: mouse-down selects, selection reloads the list (a revealed
+        // child under a collapsed folder disappears), and the pressed view may be
+        // reused for another row. A following drag must never carry another ID.
+        let folder = UUID(), revealed = UUID(), pressed = UUID(), today = UUID()
+        func layout(active: UUID) -> [SidebarTabItem] {
+            var items = [SidebarTabItem(id: folder, title: "Closed", subtitle: "", symbol: "folder", isPinned: true, isActive: false,
+                                        isFolder: true, isExpanded: false)]
+            if active == revealed {
+                items.append(SidebarTabItem(id: revealed, title: "Revealed", subtitle: "", symbol: "globe", isPinned: true, isActive: true,
+                                            depth: 1, parentFolderID: folder))
+            }
+            items.append(SidebarTabItem(id: pressed, title: "Pressed", subtitle: "", symbol: "globe", isPinned: true, isActive: active == pressed))
+            items.append(SidebarTabItem(id: today, title: "Today", subtitle: "", symbol: "globe", isPinned: false, isActive: false))
+            return items
+        }
+        update(0, layout(active: revealed))
+        var started: [UUID] = []
+        sidebar.onRowDragWillBegin = { started.append($0); return false }   // Observe; never start a real session offscreen.
+        sidebar.onSelectTab = { id in update(0, layout(active: id)) }       // Selection reloads synchronously.
+        let pressTable = table(in: 0)
+        let pressedView = row(pressTable, 2)
+        require(pressedView.identifier?.rawValue == "tab-row-\(pressed.uuidString)", "Fixture: row 2 is the pressed tab")
+        pressedView.mouseDown(with: mouse(.leftMouseDown))
+        let drag = NSEvent.mouseEvent(with: .leftMouseDragged, location: NSPoint(x: 40, y: 40), modifierFlags: [], timestamp: 0,
+                                      windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
+        pressedView.mouseDragged(with: drag)
+        require(started.allSatisfy { $0 == pressed }, "A drag only ever carries the pressed row's ID: \(started)")
+        // Force reuse mid-press: in a long list, the pressed view is recycled for
+        // a far row once that row scrolls in (as a reload/scroll during a press can).
+        started.removeAll()
+        let crowd = (0..<600).map { SidebarTabItem(id: UUID(), title: "Crowd \($0)", subtitle: "", symbol: "globe", isPinned: false, isActive: $0 == 0) }
+        sidebar.onSelectTab = { _ in }
+        update(0, crowd)
+        let crowdTable = table(in: 0)
+        let reusedView = row(crowdTable, 2)   // rows 0/1 are the divider-less New Tab and first item
+        let pressedCrowdID = reusedView.identifier?.rawValue
+        reusedView.mouseDown(with: mouse(.leftMouseDown))
+        _ = row(crowdTable, crowdTable.numberOfRows - 1)
+        require(reusedView.identifier?.rawValue != pressedCrowdID, "Fixture: the pressed view now shows another row")
+        reusedView.mouseDragged(with: drag)
+        require(started.isEmpty, "A recycled view abandons the press instead of dragging the row it now shows: \(started)")
+        reusedView.mouseUp(with: mouse(.leftMouseUp))
+        // A plain press-and-drag with no reload drags the pressed row.
+        started.removeAll(); sidebar.onSelectTab = { _ in }
+        let stable = row(table(in: 0), 1)
+        let stableID = stable.identifier?.rawValue
+        stable.mouseDown(with: mouse(.leftMouseDown)); stable.mouseDragged(with: drag)
+        require(started.count == 1 && "tab-row-\(started[0].uuidString)" == stableID, "Without a reload the pressed row is dragged")
+        sidebar.onRowDragWillBegin = nil
+
+        // Accessibility, pointer and keyboard model for rows.
+        let navFolder = UUID(), navChild = UUID(), navKept = UUID(), navToday = UUID(), navOther = UUID()
+        let navItems = [
+            SidebarTabItem(id: navFolder, title: "Work", subtitle: "", symbol: "folder", isPinned: true, isActive: false, isFolder: true, isExpanded: true),
+            SidebarTabItem(id: navChild, title: "Inside work", subtitle: "", symbol: "globe", isPinned: true, isActive: false, isUnloaded: true,
+                           depth: 1, parentFolderID: navFolder),
+            SidebarTabItem(id: navKept, title: "Kept", subtitle: "", symbol: "globe", isPinned: true, isActive: false, isUnloaded: true),
+            SidebarTabItem(id: navToday, title: "Today", subtitle: "", symbol: "globe", isPinned: false, isActive: true),
+            SidebarTabItem(id: navOther, title: "Other", subtitle: "", symbol: "globe", isPinned: false, isActive: false)
+        ]
+        var navSelected: [UUID] = [], pageFocused = 0
+        sidebar.onSelectTab = { navSelected.append($0) }
+        sidebar.onToggleFolder = { _ in }
+        sidebar.onFocusPage = { pageFocused += 1 }
+        update(0, navItems)
+        let navTable = table(in: 0)   // rows: Work, Inside work, Kept, divider, New Tab, Today, Other
+        func focusedID() -> String? { (window.firstResponder as? NSView)?.identifier?.rawValue }
+        func rowID(_ id: UUID) -> String { "tab-row-\(id.uuidString)" }
+        let folderView = row(navTable, 0), childView = row(navTable, 1)
+        require(folderView.isAccessibilityElement() && childView.isAccessibilityElement(), "Rows are real accessibility elements, not just table cells")
+        require(folderView.accessibilityRole() == .disclosureTriangle && folderView.accessibilityRoleDescription() == "folder"
+                && childView.accessibilityRole() == .button && childView.accessibilityLabel() == "Inside work",
+                "Folders announce as disclosure controls; tabs as buttons with their titles")
+        // Pointer: nothing opens on mouse-down; release opens; a drag never does.
+        childView.mouseDown(with: mouse(.leftMouseDown))
+        require(navSelected.isEmpty, "Mouse-down alone neither selects nor wakes a dormant tab")
+        childView.mouseUp(with: mouse(.leftMouseUp))
+        require(navSelected == [navChild], "Releasing without a drag opens the tab")
+        navSelected.removeAll()
+        sidebar.onRowDragWillBegin = { _ in false }
+        childView.mouseDown(with: mouse(.leftMouseDown)); childView.mouseDragged(with: drag); childView.mouseUp(with: mouse(.leftMouseUp))
+        require(navSelected.isEmpty, "Dragging a tab never selects or wakes it")
+        sidebar.onRowDragWillBegin = nil
+        // Keyboard entry (View ▸ Focus Sidebar) and navigation without selection.
+        window.makeFirstResponder(nil)
+        require(sidebar.focusTabList() && focusedID() == rowID(navToday) && navSelected.isEmpty,
+                "Focus Sidebar lands on the selected tab's row without selecting anything")
+        key(126, to: window.firstResponder as! NSView)
+        require(focusedID() == rowID(navKept) && navSelected.isEmpty, "Up moves focus past the divider to a kept row; nothing opens")
+        key(126, to: window.firstResponder as! NSView)
+        require(focusedID() == rowID(navChild) && navSelected.isEmpty, "Arrows reach rows inside folders without opening them")
+        key(123, to: window.firstResponder as! NSView)
+        require(focusedID() == rowID(navFolder), "Left from a row in a folder moves focus to the folder")
+        key(125, to: window.firstResponder as! NSView); key(125, to: window.firstResponder as! NSView)
+        require(focusedID() == rowID(navKept), "Down continues row by row")
+        key(36, to: window.firstResponder as! NSView)
+        require(navSelected == [navKept], "Return opens the focused tab (only then is it woken)")
+        key(53, to: window.firstResponder as! NSView)
+        require(pageFocused == 1, "Escape hands focus back to the page")
+        // A list with no selected row (active page is a Favorite) still has an entry point.
+        update(0, navItems.map { item in
+            SidebarTabItem(id: item.id, title: item.title, subtitle: item.subtitle, symbol: item.symbol, isPinned: item.isPinned, isActive: false,
+                           isUnloaded: item.isUnloaded, depth: item.depth, isFolder: item.isFolder, isExpanded: item.isExpanded,
+                           parentFolderID: item.parentFolderID)
+        })
+        window.makeFirstResponder(nil)
+        require(sidebar.focusTabList() && focusedID() == rowID(navFolder), "With no selection, Focus Sidebar starts at the first row")
+
+        // Edges: Up at the first row / Down at the last row do nothing, with the
+        // active tab elsewhere (no fall-through to table selection).
+        update(0, navItems)
+        let edgeTable = table(in: 0)
+        let selectedBefore = edgeTable.selectedRow
+        navSelected.removeAll()
+        sidebar.focusTabList()
+        key(126, to: window.firstResponder as! NSView); key(126, to: window.firstResponder as! NSView); key(126, to: window.firstResponder as! NSView)
+        require(focusedID() == rowID(navFolder), "Focus reaches the first row")
+        key(126, to: window.firstResponder as! NSView)
+        require(focusedID() == rowID(navFolder) && navSelected.isEmpty && edgeTable.selectedRow == selectedBefore,
+                "Up at the first row is a no-op: no selection change, nothing opens")
+        for _ in 0..<6 { key(125, to: window.firstResponder as! NSView) }
+        require(focusedID() == rowID(navOther), "Focus reaches the last row")
+        key(125, to: window.firstResponder as! NSView)
+        require(focusedID() == rowID(navOther) && navSelected.isEmpty && edgeTable.selectedRow == selectedBefore,
+                "Down at the last row is a no-op")
+        window.makeFirstResponder(edgeTable)
+        edgeTable.selectRowIndexes(IndexSet(integer: edgeTable.numberOfRows - 1), byExtendingSelection: false)
+        navSelected.removeAll()
+        key(125, to: edgeTable)
+        require(navSelected.isEmpty, "Down past the end with the list itself focused selects nothing")
+        update(0, navItems); navSelected.removeAll()
+
+        // Focus survives a reorder/insertion and cell reuse; Return opens exactly that row.
+        sidebar.focusTabList()                                   // on Today (active A)
+        key(126, to: window.firstResponder as! NSView)           // to Kept (dormant B)
+        require(focusedID() == rowID(navKept), "Fixture: dormant B is focused while A is active")
+        let inserted = (0..<30).map { SidebarTabItem(id: UUID(), title: "New \($0)", subtitle: "", symbol: "globe", isPinned: false, isActive: false) }
+        let reordered = [navItems[2], navItems[0], navItems[1]] + inserted + [navItems[4], navItems[3]]   // B moves up; 30 rows inserted
+        update(0, reordered); prepare(table(in: 0))
+        require(focusedID() == rowID(navKept) && navSelected.isEmpty, "Focus stays on B through a reorder, insertion and reload")
+        key(36, to: window.firstResponder as! NSView)
+        require(navSelected == [navKept], "Return then opens B, exactly once")
+        // A removed focused row falls back nearby without opening anything.
+        navSelected.removeAll()
+        update(0, reordered); sidebar.focusTabList()
+        for _ in 0..<3 { key(125, to: window.firstResponder as! NSView) }
+        let doomed = focusedID()
+        update(0, reordered.filter { rowID($0.id) != doomed })
+        require(focusedID() != nil && focusedID() != doomed && navSelected.isEmpty, "Removing the focused row moves focus nearby; nothing opens")
+        // Assistive label matches the shown fallback for a blank title.
+        update(0, [SidebarTabItem(id: UUID(), title: "", subtitle: "", symbol: "globe", isPinned: false, isActive: true)])
+        require(row(table(in: 0), 1).accessibilityLabel() == "New Tab", "A blank tab is announced as New Tab, as shown")
+        // An empty list still accepts focus, and arrows there are harmless.
+        update(0, [])
+        require(!sidebar.focusTabList() && window.firstResponder === table(in: 0), "Focus Sidebar on an empty list focuses the list itself")
+        key(125, to: table(in: 0))
+        require(navSelected.isEmpty, "Arrows in an empty list do nothing")
+
+        // A theme-only change to the same Space (import upgrade, undo) re-tints
+        // the footer icon, the heading and the rows already on screen.
+        func rgba(_ r: Double, _ g: Double, _ b: Double) -> SpaceTheme.RGBA { SpaceTheme.RGBA(red: r, green: g, blue: b)! }
+        let theme = SpaceTheme(gradient: [rgba(0.62, 0.78, 0.96), rgba(0.95, 0.70, 0.80)],
+                               light: .init(background: rgba(0.95, 0.94, 0.97), backgroundExtra: nil, title: rgba(0.08, 0.08, 0.10), subtitle: nil),
+                               dark: .init(background: rgba(0.10, 0.10, 0.13), backgroundExtra: nil, title: rgba(0.95, 0.95, 0.97), subtitle: nil),
+                               accent: rgba(0.30, 0.45, 0.85), accentLight: rgba(0.80, 0.86, 0.98), accentDark: rgba(0.20, 0.30, 0.65))!
+        let plainSpaces = BrowserSpace.defaults
+        var themedSpaces = plainSpaces; themedSpaces[0].theme = theme
+        update(0, (0..<4).map { SidebarTabItem(id: UUID(), title: "Tinted \($0)", subtitle: "", symbol: "globe", isPinned: true, isActive: $0 == 0) })
+        sidebar.configureSpaces(plainSpaces); sidebar.layoutSubtreeIfNeeded(); _ = row(table(in: 0), 0)
+        @MainActor func tints() -> [NSColor] {
+            let footer = descendants(sidebar).filter { $0.accessibilityLabel() == "Switch to Studio space" }
+            let heading = descendants(sidebar).filter { $0.accessibilityLabel()?.hasPrefix("Manage Spaces — Studio") == true }
+            let rows = descendants(table(in: 0)).filter { $0.identifier?.rawValue.hasPrefix("tab-row-") == true }
+            require(!footer.isEmpty && !heading.isEmpty && !rows.isEmpty, "Footer, heading and rows are present")
+            return (footer + heading + rows).compactMap { ($0 as? SpaceTinted)?.displayedSpaceTint }
+        }
+        require(tints().allSatisfy { $0 === ArkPalette.spaceTint(0) }, "An unthemed Space uses its flat tint")
+        sidebar.configureSpaces(themedSpaces); sidebar.layoutSubtreeIfNeeded()
+        let themedTint = ArkPalette.spaceTint(for: themedSpaces[0])
+        require(themedTint !== ArkPalette.spaceTint(0) && tints().allSatisfy { $0 === themedTint },
+                "Adding only a theme re-tints the footer icon, heading and visible rows")
+        sidebar.configureSpaces(plainSpaces); sidebar.layoutSubtreeIfNeeded()
+        require(tints().allSatisfy { $0 === ArkPalette.spaceTint(0) }, "Removing only the theme (undo) restores the flat tint everywhere")
+        // Monograms: rows without a favicon show their mark on a Space-tinted
+        // disc; a favicon replaces it and losing the favicon brings it back;
+        // a custom/special symbol (no monogram) keeps the symbol.
+        let markedID = UUID(), symbolID = UUID()
+        func marked(_ mark: String?) -> [SidebarTabItem] {
+            [SidebarTabItem(id: markedID, title: "Gamma notes", subtitle: "", symbol: "globe", isPinned: true, isActive: false, monogram: mark),
+             SidebarTabItem(id: symbolID, title: "Book", subtitle: "", symbol: "book", isPinned: true, isActive: false)]
+        }
+        sidebar.configureSpaces(plainSpaces); cache[markedID] = nil
+        sidebar.faviconProvider = { id in cache[id] }
+        update(0, marked("G")); sidebar.refreshFavicons()
+        let markedIcon = icon(row(table(in: 0), 0)), symbolIcon = icon(row(table(in: 0), 1))
+        require(markedIcon.identifier?.rawValue == "monogram-G" && markedIcon.image?.isTemplate == false && markedIcon.frame.size == NSSize(width: 16, height: 16),
+                "An icon-less row shows its monogram in the 16pt icon slot")
+        require(symbolIcon.identifier == nil && symbolIcon.image?.isTemplate == true, "A row with a custom symbol keeps the symbol")
+        let firstMark = markedIcon.image
+        sidebar.configureSpaces(themedSpaces); sidebar.layoutSubtreeIfNeeded()
+        require(icon(row(table(in: 0), 0)).image !== firstMark && icon(row(table(in: 0), 0)).identifier?.rawValue == "monogram-G",
+                "A Space tint change redraws the monogram's disc")
+        cache[markedID] = red; sidebar.refreshFavicons()
+        require(icon(row(table(in: 0), 0)).image === red && icon(row(table(in: 0), 0)).identifier?.rawValue == "website-favicon", "A favicon wins over the monogram")
+        cache[markedID] = nil; update(0, marked("H")); sidebar.refreshFavicons()
+        require(icon(row(table(in: 0), 0)).identifier?.rawValue == "monogram-H", "Losing the favicon brings the (updated) monogram back")
+        update(0, marked(nil))
+        require(icon(row(table(in: 0), 0)).identifier == nil && icon(row(table(in: 0), 0)).image?.isTemplate == true,
+                "A row whose monogram goes away shows its symbol again")
+        sidebar.configureSpaces(plainSpaces); sidebar.faviconProvider = nil
         print("PASS: \(checks) sidebar virtualization, identity, scrolling, paging and extension action checks")
         window.contentView = nil
     }

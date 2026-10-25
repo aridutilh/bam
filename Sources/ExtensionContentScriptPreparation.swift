@@ -36,7 +36,11 @@ enum ExtensionContentScriptPreparation {
     })();
     """
 
-    static let adapterSource = ExtensionSelectPickerCompatibility.source + "\n" + legacyAdapterSource
+    /// The adapter Bam writes now: idle callbacks (absent in WebKit's isolated worlds), the
+    /// select-picker state fix, then callback-style messaging.
+    static let adapterSource = ExtensionIdleCallbackCompatibility.source + "\n" + ExtensionSelectPickerCompatibility.source + "\n" + legacyAdapterSource
+    /// Every earlier adapter Bam wrote, byte for byte. Only these are ever replaced.
+    static let previousAdapterSources = [legacyAdapterSource, ExtensionSelectPickerCompatibility.source + "\n" + legacyAdapterSource]
 
     /// Updates only byte-exact, previously generated Bam adapters. Vendor files,
     /// the manifest, permissions and signed Safari bundles are not rewritten.
@@ -81,7 +85,8 @@ enum ExtensionContentScriptPreparation {
         let mainLocations = Set(main.compactMap { $0.removingPercentEncoding }.map {
             package.appendingPathComponent($0).resolvingSymlinksInPath().standardizedFileURL.path
         })
-        let legacy = Data(legacyAdapterSource.utf8)
+        let previous = previousAdapterSources.map { Data($0.utf8) }
+        let longest = previous.map(\.count).max() ?? 0
         var replacements: [URL] = []
         for path in isolated.subtracting(main).sorted() {
             let prefix = "__bam_messaging_", suffix = ".js"
@@ -91,8 +96,8 @@ enum ExtensionContentScriptPreparation {
             try ExtensionPackagePreparation.validateScript(path, in: package, kind: "Bam adapter")
             let url = package.appendingPathComponent(path)
             guard !mainLocations.contains(url.resolvingSymlinksInPath().standardizedFileURL.path) else { continue }
-            guard try url.resourceValues(forKeys: [.fileSizeKey]).fileSize == legacy.count else { continue }
-            if try readBounded(url, limit: legacy.count) == legacy { replacements.append(url) }
+            guard let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize, previous.contains(where: { $0.count == size }) else { continue }
+            if previous.contains(try readBounded(url, limit: longest)) { replacements.append(url) }
         }
         for url in replacements { try Data(adapterSource.utf8).write(to: url, options: .atomic) }
         return replacements.count

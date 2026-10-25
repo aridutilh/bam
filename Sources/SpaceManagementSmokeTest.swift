@@ -58,7 +58,20 @@ import WebKit
 
         // Cancelling must discard only the sheet draft. A navigation/title update
         // arriving while it is open must not be rolled back to its opening snapshot.
-        try button("Manage Spaces", in: browser.sidebar).performClick(nil)
+        // The sidebar's Manage Spaces entries since the Arc-like footer (b11ccba): the current Space's heading
+        // ("Manage Spaces — <name>"), and Manage Spaces… in the footer Downloads button's menu. The heading is
+        // the visible control that is pressed; the menu entry must exist and reach the same action.
+        let visible = descendants(browser.sidebar).compactMap { $0 as? NSButton }.filter { $0.window != nil && !$0.isHiddenOrHasHiddenAncestor }
+        guard let heading = visible.first(where: { ($0.accessibilityLabel() ?? "").hasPrefix("Manage Spaces — ") }) else {
+            throw Failure.assertion("Missing editable Spaces native button: the Space heading's Manage Spaces")
+        }
+        guard let downloads = visible.first(where: { $0.identifier?.rawValue == "sidebar-downloads" }),
+              let manageItem = downloads.menu?.items.first(where: { $0.title == "Manage Spaces…" }), manageItem.target != nil, manageItem.action != nil else {
+            throw Failure.assertion("Missing editable Spaces native menu entry: Downloads ▸ Manage Spaces…")
+        }
+        try check(!visible.contains { $0.accessibilityLabel() == "Manage Spaces" && $0.frame.minY >= browser.sidebar.bounds.height - 40 },
+                  "The removed footer Manage Spaces stack button is back")
+        heading.performClick(nil)
         try await wait("Space management sheet attaches") { browser.spaceManager?.window === fixtureWindow.attachedSheet }
         guard let cancelled = browser.spaceManager else { throw Failure.assertion("Manage Spaces action did not retain its sheet") }
         for (title, action) in [("Close Tab", #selector(BrowserController.closeTab(_:))),
@@ -85,7 +98,9 @@ import WebKit
         try check(browser.browsers[first.id] === original && retainedAfterCancel,
                   "Cancel replaced or reloaded the live page")
 
-        browser.manageSpaces(nil)
+        // Reopen through the footer Downloads menu's Manage Spaces… item: it must reach the same real action.
+        try check(NSApp.sendAction(manageItem.action!, to: manageItem.target, from: manageItem),
+                  "Downloads ▸ Manage Spaces… did not perform its action")
         try await wait("Space management sheet reopens") { browser.spaceManager?.window === fixtureWindow.attachedSheet }
         guard let editor = browser.spaceManager else { throw Failure.assertion("Second Space editor missing") }
         fields(editor, name: "", symbol: "terminal", color: 3)

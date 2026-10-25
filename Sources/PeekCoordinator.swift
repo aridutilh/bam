@@ -192,10 +192,11 @@ typealias PreviewNavigationReadiness = @MainActor (@escaping @MainActor () -> Vo
 
     override init(frame: NSRect) {
         super.init(frame: frame)
-        wantsLayer = true; layer?.backgroundColor = NSColor.black.withAlphaComponent(0.48).cgColor
-        card.wantsLayer = true; card.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        wantsLayer = true
+        card.wantsLayer = true
         card.layer?.cornerRadius = 12; card.layer?.masksToBounds = true
-        card.layer?.borderWidth = 1; card.layer?.borderColor = NSColor.white.withAlphaComponent(0.18).cgColor
+        card.layer?.borderWidth = 1
+        applyAppearanceColors()
         addSubview(card)
         [browserHost, title, address, closeButton, tabButton, splitButton, littleButton, progress].forEach(card.addSubview)
         title.font = .systemFont(ofSize: 12, weight: .medium); title.lineBreakMode = .byTruncatingTail
@@ -209,6 +210,14 @@ typealias PreviewNavigationReadiness = @MainActor (@escaping @MainActor () -> Vo
         setAccessibilityElement(false); card.setAccessibilityLabel("Peek preview")
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+    /// A lighter scrim and a dark hairline on light chrome; the dark look is unchanged.
+    private func applyAppearanceColors() {
+        let dark = effectiveAppearance.isDarkChrome
+        layer?.backgroundColor = NSColor.black.withAlphaComponent(dark ? 0.48 : 0.26).cgColor
+        card.layer?.backgroundColor = resolvedCGColor(.windowBackgroundColor, for: card)
+        card.layer?.borderColor = (dark ? NSColor.white.withAlphaComponent(0.18) : NSColor.black.withAlphaComponent(0.12)).cgColor
+    }
+    override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); applyAppearanceColors() }
     override func mouseDown(with event: NSEvent) { onOutsideClick?() }
     override func layout() {
         super.layout()

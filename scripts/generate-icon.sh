@@ -3,21 +3,24 @@ set -euo pipefail
 
 # Package the authored master PNG; this script does not draw or add artwork.
 ROOT=$(cd -- "$(dirname -- "$0")/.." && pwd)
-INPUT="$ROOT/Resources/BamIcon.png"
-OUTPUT="$ROOT/Resources/BamIcon.icns"
-
 fail() { printf 'generate-icon: %s\n' "$*" >&2; exit 1; }
-[ -f "$INPUT" ] || fail "Missing Resources/BamIcon.png. Add a square PNG of at least 1024 × 1024 pixels first."
+[ "$#" -le 1 ] || fail "Usage: generate-icon.sh [icon-stem]"
+ICON_STEM=${1-BamIcon}
+[[ "$ICON_STEM" =~ ^[A-Za-z][A-Za-z0-9_-]*$ ]] || fail "Icon stem must start with a letter and contain only letters, numbers, underscores or hyphens."
+INPUT="$ROOT/Resources/$ICON_STEM.png"
+OUTPUT="$ROOT/Resources/$ICON_STEM.icns"
+
+[ -f "$INPUT" ] || fail "Missing Resources/$ICON_STEM.png. Add a square PNG of at least 1024 × 1024 pixels first."
 [ -x /usr/bin/sips ] && [ -x /usr/bin/iconutil ] || fail "macOS sips and iconutil are required."
 
 if ! METADATA=$(/usr/bin/sips -g format -g pixelWidth -g pixelHeight -g hasAlpha "$INPUT"); then
-    fail "Cannot read Resources/BamIcon.png."
+    fail "Cannot read Resources/$ICON_STEM.png."
 fi
 FORMAT=$(printf '%s\n' "$METADATA" | awk '$1 == "format:" {print $2}')
 WIDTH=$(printf '%s\n' "$METADATA" | awk '$1 == "pixelWidth:" {print $2}')
 HEIGHT=$(printf '%s\n' "$METADATA" | awk '$1 == "pixelHeight:" {print $2}')
 ALPHA=$(printf '%s\n' "$METADATA" | awk '$1 == "hasAlpha:" {print $2}')
-[ "$FORMAT" = png ] || fail "Resources/BamIcon.png must be a PNG image."
+[ "$FORMAT" = png ] || fail "Resources/$ICON_STEM.png must be a PNG image."
 [[ "$WIDTH" =~ ^[1-9][0-9]*$ && "$HEIGHT" =~ ^[1-9][0-9]*$ ]] || fail "Cannot determine PNG dimensions."
 (( WIDTH == HEIGHT && WIDTH >= 1024 )) || fail "Master PNG must be square and at least 1024 × 1024 pixels (found ${WIDTH} × ${HEIGHT})."
 [ "$ALPHA" = yes ] || fail "Master PNG must include an alpha channel for transparent icon corners."
@@ -27,7 +30,7 @@ cleanup() { rm -rf -- "$WORK_DIR"; }
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
-ICONSET="$WORK_DIR/BamIcon.iconset"
+ICONSET="$WORK_DIR/$ICON_STEM.iconset"
 mkdir -p "$ICONSET"
 
 # All ten standard iconset representations, each resampled from the master.
@@ -44,9 +47,9 @@ for POINTS in 16 32 128 256 512; do
     done
 done
 
-if ! /usr/bin/iconutil --convert icns --output "$WORK_DIR/BamIcon.icns" "$ICONSET"; then
+if ! /usr/bin/iconutil --convert icns --output "$WORK_DIR/$ICON_STEM.icns" "$ICONSET"; then
     fail "iconutil could not package the generated iconset. In a restricted automation sandbox, retry with normal macOS process/file access: sandbox restrictions can produce a misleading Invalid Iconset error."
 fi
-[ -s "$WORK_DIR/BamIcon.icns" ] || fail "iconutil produced an empty icon file."
-mv -f -- "$WORK_DIR/BamIcon.icns" "$OUTPUT"
+[ -s "$WORK_DIR/$ICON_STEM.icns" ] || fail "iconutil produced an empty icon file."
+mv -f -- "$WORK_DIR/$ICON_STEM.icns" "$OUTPUT"
 printf 'Generated %s from a %s × %s PNG (10 standard representations).\n' "$OUTPUT" "$WIDTH" "$HEIGHT"

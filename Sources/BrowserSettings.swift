@@ -10,6 +10,7 @@ import AppKit
         snapshot.keepAwakeHost = currentSleepProtectionHost
         snapshot.keepsCurrentSiteAwake = currentSleepProtectionHost.map { keepAwakeHosts.contains($0) } ?? false
         snapshot.searchEngine = URLInput.searchEngine
+        snapshot.appearance = BrowserAppearance.current
         snapshot.spaces = session.spaces
         snapshot.currentSpaceID = session.space
         snapshot.profileName = session.profileName(commandProfileID)
@@ -39,6 +40,11 @@ import AppKit
         actions.manageSpaces = { [weak self] in self?.manageSpaces(nil) }
         actions.manageExtensions = { [weak self] in self?.manageExtensions(nil) }
         actions.showWelcome = showWelcome
+        actions.setAppearance = { BrowserAppearance.apply($0) }
+        actions.importFromArc = { [weak self] in
+            self?.view.window?.makeKeyAndOrderFront(nil)
+            self?.importFromArc(nil)
+        }
         actions.openURL = { [weak self] url in
             guard let self, URLInput.directURL(url.absoluteString) != nil else { return }
             self.cancelPaging(); self.dismissAddress()

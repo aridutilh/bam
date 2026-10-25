@@ -121,11 +121,16 @@ struct SpaceEditPlan {
     }
     @discardableResult func moveTab(_ id: UUID, toSpace destination: Int) -> Bool {
         guard session.spaceDefinition(destination) != nil else { return false }
+        // A folder moves with its nested folders and tabs.
+        let isFolder = session.folder(id) != nil
+        func apply(_ value: inout BrowserSession) -> Bool {
+            isFolder ? value.moveFolder(id: id, toSpace: destination) : value.moveTab(id: id, toSpace: destination)
+        }
         var updated = session
-        guard updated.moveTab(id: id, toSpace: destination) else { return false }
+        guard apply(&updated) else { return false }
         guard applyProfileAwareSession(updated, rebase: { current in
             var latest = current
-            return latest.moveTab(id: id, toSpace: destination) ? latest : nil
+            return apply(&latest) ? latest : nil
         }) else { return false }
         dismissAddress()
         return true

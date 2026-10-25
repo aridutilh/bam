@@ -113,6 +113,9 @@ enum ExtensionBuildResolver {
     private(set) var searchNotices: [String] = []
     private(set) var isBusy = false
     var statusChanged: ((String) -> Void)?
+    /// Parent of per-operation staging folders (download bytes and the unpacked package).
+    /// Each folder is removed when its operation ends; a probe may point this at a folder it owns.
+    var stagingRoot = FileManager.default.temporaryDirectory
 
     init(host: BrowserExtensions, client: any ExtensionHTTPClient = URLSessionExtensionHTTPClient(), bamVersion: String = BrowserExtensions.browserVersion) {
         self.host = host
@@ -239,7 +242,7 @@ enum ExtensionBuildResolver {
             if !record.enabled { try await host.setEnabled(true, id: record.id) }
             return record.id
         }
-        let staging = FileManager.default.temporaryDirectory.appendingPathComponent("bam-extension-install-\(UUID().uuidString)", isDirectory: true)
+        let staging = stagingRoot.appendingPathComponent("bam-extension-install-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: staging) }
         statusChanged?("Downloading \(candidate.name)…")
@@ -371,7 +374,7 @@ enum ExtensionBuildResolver {
         statusChanged?("Resolving the official 1Password Chrome package…")
         let candidate = try await chromeWebStore.candidate(for: expected)
         try Task.checkCancellation(); _ = try liveRecord()
-        let staging = FileManager.default.temporaryDirectory.appendingPathComponent("bam-native-verification-\(UUID().uuidString)", isDirectory: true)
+        let staging = stagingRoot.appendingPathComponent("bam-native-verification-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: staging) }
         let fetched = try await fetcher.fetch(candidate, into: staging)
@@ -407,7 +410,7 @@ enum ExtensionBuildResolver {
             try await host.replacePackage(id: record.id, with: bundle.appexURL, catalog: safariCatalog(candidate, bundle: bundle, previous: catalog), safariBundle: bundle)
             return
         }
-        let staging = FileManager.default.temporaryDirectory.appendingPathComponent("bam-extension-update-\(UUID().uuidString)", isDirectory: true)
+        let staging = stagingRoot.appendingPathComponent("bam-extension-update-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: staging) }
         statusChanged?("Downloading \(candidate.name) \(candidate.version)…")

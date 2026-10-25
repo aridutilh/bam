@@ -12,7 +12,7 @@ import WebKit
             print("SKIP: Extensions — macOS 15.4 or later is required")
             fflush(stdout); exit(0)
         }
-        watchdog = Timer.scheduledTimer(withTimeInterval: 120, repeats: false) { [weak self] _ in
+        watchdog = Timer.scheduledTimer(withTimeInterval: 300, repeats: false) { [weak self] _ in
             Task { @MainActor [weak self] in self?.finish(false, "Overall fixture timeout") }
         }
         task = Task { @MainActor [weak self] in
@@ -38,13 +38,45 @@ import WebKit
                 guard let page = components.url else {
                     throw ExtensionSmokeTest.Failure(description: "Could not construct the local extension test page URL")
                 }
+                if CommandLine.arguments.contains("--extension-favicon-probe") {
+                    // Measurement only: complete negative results are not an Extensions suite pass.
+                    // Its native deadline and cleanup precede the outer runner watchdog.
+                    let probe = await ExtensionFaviconProbe.run(pageURL: page)
+                    fflush(stdout); exit(probe.complete ? 0 : 2)
+                }
+                if CommandLine.arguments.contains("--extension-identity-probe") {
+                    // Measurement only, not a suite: the probe owns its 45 s budget, output, cleanup and exit.
+                    self.watchdog?.invalidate(); self.watchdog = nil
+                    ExtensionIdentityProbe.start()
+                    return
+                }
+                if CommandLine.arguments.contains("--extension-gesture-probe") {
+                    // Measurement only, not a suite: the probe owns its 60 s budget, output, cleanup and exit.
+                    self.watchdog?.invalidate(); self.watchdog = nil
+                    ExtensionGestureProbe.start(pageURL: page)
+                    return
+                }
+                if CommandLine.arguments.contains("--extension-focus-probe") {
+                    // Measurement only: one BAM_FOCUS_CASE per run; this probe owns its budget and cleanup.
+                    self.watchdog?.invalidate(); self.watchdog = nil
+                    ExtensionFocusProbe.start(pageURL: page)
+                    return
+                }
+                // Diagnostic modifier: `--extension-test --extension-dnr-only` runs only the
+                // declarativeNetRequest suite. The full run (no modifier) always includes it.
+                if CommandLine.arguments.contains("--extension-dnr-only") {
+                    let dnrChecks = try await ExtensionDeclarativeNetRequestSmokeTest.run(pageURL: page)
+                    self.finish(true, "\(dnrChecks) (declarativeNetRequest only; not a full extension run)")
+                    return
+                }
                 let isolatedChecks = try await ExtensionSmokeTest.run(fixtureURL: fixture, pageURL: page)
                 let frameChecks = try await ExtensionFrameMessagingSmokeTest.runIntegrated(fixtureURL: fixture, pageURL: page)
                 let integratedChecks = try await BrowserExtensionSmokeTest.run(fixtureURL: fixture, pageURL: page)
                 let workerChecks = try await ExtensionWorkerSmokeTest.run(pageURL: page)
+                let dnrChecks = try await ExtensionDeclarativeNetRequestSmokeTest.run(pageURL: page)
                 let safariChecks = try await SafariExtensionSmokeTest.run(pageURL: page)
                 let bridgeChecks = try await ExtensionBridgeCapabilityProbe.run()
-                let checks = isolatedChecks + frameChecks + integratedChecks + workerChecks + safariChecks + bridgeChecks
+                let checks = isolatedChecks + frameChecks + integratedChecks + workerChecks + dnrChecks + safariChecks + bridgeChecks
                 self.finish(true, "\(checks)")
             } catch { self.finish(false, String(describing: error)) }
         }

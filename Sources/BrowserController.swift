@@ -5,11 +5,11 @@ import QuartzCore
 /// The slowly shifting spectrum a Prism Space wears. Hues stay dark and
 /// desaturated enough that sidebar text keeps its contrast at every phase.
 @MainActor enum PrismBackground {
-    static func makeLayer() -> CAGradientLayer {
+    static func makeLayer(dark: Bool = true) -> CAGradientLayer {
         let layer = CAGradientLayer()
         layer.startPoint = CGPoint(x: 0.1, y: 1)
         layer.endPoint = CGPoint(x: 0.9, y: 0)
-        let frames = colorFrames()
+        let frames = colorFrames(dark: dark)
         layer.colors = frames[0]
         guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { return layer }
         let cycle = CAKeyframeAnimation(keyPath: "colors")
@@ -20,12 +20,15 @@ import QuartzCore
         layer.add(cycle, forKey: "prism")
         return layer
     }
-    private static func colorFrames() -> [[CGColor]] {
+    private static func colorFrames(dark: Bool) -> [[CGColor]] {
         // A curated hue path (blue → violet → magenta → red → amber → teal)
         // that skips the muddy yellow-green band a plain wheel sweep hits.
+        // Light chrome keeps the same path as pale washes so dark text reads.
         [0.62, 0.75, 0.88, 0.98, 0.08, 0.45].map { (hue: CGFloat) in
-            [NSColor(calibratedHue: hue, saturation: 0.56, brightness: 0.34, alpha: 1).cgColor,
-             NSColor(calibratedHue: fmod(hue + 0.12, 1), saturation: 0.48, brightness: 0.47, alpha: 1).cgColor]
+            dark ? [NSColor(calibratedHue: hue, saturation: 0.56, brightness: 0.34, alpha: 1).cgColor,
+                    NSColor(calibratedHue: fmod(hue + 0.12, 1), saturation: 0.48, brightness: 0.47, alpha: 1).cgColor]
+                 : [NSColor(calibratedHue: hue, saturation: 0.16, brightness: 0.95, alpha: 1).cgColor,
+                    NSColor(calibratedHue: fmod(hue + 0.12, 1), saturation: 0.12, brightness: 0.97, alpha: 1).cgColor]
         }
     }
 }
@@ -34,16 +37,36 @@ import QuartzCore
     var onLayout: (() -> Void)?
     var space = 0 {
         didSet {
-            if space != oldValue { previewSpace = nil; previewProgress = 0; updateAppearanceLayers() }
+            if space != oldValue { previewSpace = nil; previewTheme = nil; previewProgress = 0; updateAppearanceLayers() }
             needsDisplay = true
         }
     }
     var previewSpace: Int? { didSet { needsDisplay = true; updatePreviewEffects() } }
     var previewProgress: CGFloat = 0 { didSet { needsDisplay = true; updatePreviewEffects() } }
+    /// The selected Space's imported Arc colors, drawn instead of its flat pair.
+    var theme: SpaceTheme? { didSet { if theme != oldValue { needsDisplay = true } } }
+    /// The theme of the Space a swipe is previewing, if it has one.
+    var previewTheme: SpaceTheme? { didSet { if previewTheme != oldValue { needsDisplay = true } } }
     /// Fires when the selected Space's appearance needs the window itself to
     /// turn translucent (Clear) or opaque again.
     var onTranslucencyChange: ((Bool) -> Void)?
+    /// Fires after the window's light/dark appearance changes, for layer colors.
+    var onAppearanceChange: (() -> Void)?
     private var prism: CAGradientLayer?
+    private var prismIsDark = true
+    var isDark: Bool { effectiveAppearance.isDarkChrome }
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        needsDisplay = true
+        if let prism, prismIsDark != isDark {
+            // Rebuild the spectrum for the new appearance, keeping its visibility.
+            let hidden = prism.isHidden, opacity = prism.opacity
+            prism.removeFromSuperlayer(); self.prism = nil
+            installPrism(); self.prism?.isHidden = hidden; self.prism?.opacity = opacity
+        }
+        glass?.material = isDark ? .hudWindow : .sidebar
+        onAppearanceChange?()
+    }
     private var glass: NSVisualEffectView?
     override var isFlipped: Bool { true }
     override func layout() {
@@ -67,13 +90,27 @@ import QuartzCore
         [NSColor(srgbRed: 0.19, green: 0.12, blue: 0.30, alpha: 1), NSColor(srgbRed: 0.31, green: 0.15, blue: 0.28, alpha: 1)],
         [NSColor(srgbRed: 0.12, green: 0.12, blue: 0.14, alpha: 1), NSColor(srgbRed: 0.18, green: 0.18, blue: 0.21, alpha: 1)]
     ]
+    /// Light chrome: pale washes of each Space color (Arc/Yab light windows),
+    /// light enough for near-black sidebar text, tinted enough to tell Spaces apart.
+    static let lightPalettes: [[NSColor]] = [
+        [NSColor(srgbRed: 0.89, green: 0.86, blue: 0.96, alpha: 1), NSColor(srgbRed: 0.94, green: 0.89, blue: 0.94, alpha: 1)],
+        [NSColor(srgbRed: 0.87, green: 0.93, blue: 0.89, alpha: 1), NSColor(srgbRed: 0.93, green: 0.93, blue: 0.87, alpha: 1)],
+        [NSColor(srgbRed: 0.86, green: 0.92, blue: 0.96, alpha: 1), NSColor(srgbRed: 0.90, green: 0.89, blue: 0.97, alpha: 1)],
+        [NSColor(srgbRed: 0.97, green: 0.87, blue: 0.90, alpha: 1), NSColor(srgbRed: 0.98, green: 0.91, blue: 0.90, alpha: 1)],
+        [NSColor(srgbRed: 0.97, green: 0.92, blue: 0.84, alpha: 1), NSColor(srgbRed: 0.98, green: 0.94, blue: 0.88, alpha: 1)],
+        [NSColor(srgbRed: 0.88, green: 0.88, blue: 0.90, alpha: 1), NSColor(srgbRed: 0.93, green: 0.93, blue: 0.94, alpha: 1)],
+        [NSColor(srgbRed: 0.90, green: 0.86, blue: 0.97, alpha: 1), NSColor(srgbRed: 0.97, green: 0.87, blue: 0.93, alpha: 1)],
+        [NSColor(srgbRed: 0.94, green: 0.94, blue: 0.96, alpha: 1), NSColor(srgbRed: 0.97, green: 0.97, blue: 0.98, alpha: 1)]
+    ]
     override func draw(_ dirtyRect: NSRect) {
-        let palettes = Self.palettes
-        func pair(_ index: Int) -> [NSColor] { palettes[min(palettes.count - 1, max(0, index))] }
-        var colors = pair(space)
+        let palettes = isDark ? Self.palettes : Self.lightPalettes
+        func pair(_ index: Int, _ theme: SpaceTheme?) -> [NSColor] {
+            NSColor.themedCanvas(theme, colorIndex: index, dark: isDark) ?? palettes[min(palettes.count - 1, max(0, index))]
+        }
+        var colors = pair(space, theme)
         if let previewSpace {
             let progress = min(1, max(0, previewProgress))
-            colors = zip(colors, pair(previewSpace)).map { $0.blended(withFraction: progress, of: $1) ?? $0 }
+            colors = zip(colors, pair(previewSpace, previewTheme)).map { $0.blended(withFraction: progress, of: $1) ?? $0 }
             // Glass hides during swipes, so previews into or out of Clear fade
             // the gradient itself toward transparency.
             let fromClear = space == BrowserSpace.clearColorIndex
@@ -103,7 +140,7 @@ import QuartzCore
         if clear, glass == nil {
             wantsLayer = true
             let view = NSVisualEffectView(frame: bounds)
-            view.material = .hudWindow
+            view.material = isDark ? .hudWindow : .sidebar
             view.blendingMode = .behindWindow
             view.state = .active
             view.autoresizingMask = [.width, .height]
@@ -126,7 +163,8 @@ import QuartzCore
         guard prism == nil else { return }
         wantsLayer = true
         // Re-creating per visit also re-samples Reduce Motion.
-        let layer = PrismBackground.makeLayer()
+        prismIsDark = isDark
+        let layer = PrismBackground.makeLayer(dark: prismIsDark)
         layer.frame = bounds
         self.layer?.insertSublayer(layer, at: 0)
         prism = layer
@@ -186,6 +224,16 @@ import QuartzCore
     var faviconRefreshWork: DispatchWorkItem?
     var faviconDiscoveryWork: [UUID: DispatchWorkItem] = [:]
     var faviconDocumentGenerations: [UUID: UUID] = [:]
+    /// Fixture seam (default on, normal behavior unchanged): when false, Bam runs no document favicon discovery script
+    /// in any page, and pending discovery work and in-flight generations are dropped. Measurement fixtures that must
+    /// not evaluate page JavaScript set it before loading their page.
+    var documentFaviconDiscoveryEnabled = true {
+        didSet {
+            guard !documentFaviconDiscoveryEnabled else { return }
+            faviconDiscoveryWork.values.forEach { $0.cancel() }; faviconDiscoveryWork.removeAll()
+            faviconDocumentGenerations.removeAll()
+        }
+    }
     var profileLibraries: [UUID: BrowserLibrary] = [:]
     var library: BrowserLibrary { library(for: commandProfileID) }
     var confirmProfileChange: ((String) -> Bool)?
@@ -257,6 +305,19 @@ import QuartzCore
     var privateMode: Bool
     var spaceManager: SpaceManagementController?
     var savedTabEditor: SavedTabEditorController?
+    var arcImporter: ArcImportController?
+    /// Icons carried over from Arc's cache for imported tabs, shown from memory.
+    let importedTabIcons = ImportedTabIcons()
+    /// Their bounded on-disk copy in Bam's support folder; nil for disposable
+    /// (private/fresh preview) sessions, which keep imported icons in memory only.
+    lazy var importedIconDisk: ImportedIconDiskCache? = privateMode ? nil
+        : ImportedIconDiskCache(directory: sessionURL.deletingLastPathComponent().appendingPathComponent("ImportedIcons", isDirectory: true))
+    let importedIconQueue = DispatchQueue(label: "com.ari.bam.imported-icons", qos: .utility)
+    /// Icon batches from successive imports, decoded one at a time; cancelled at shutdown.
+    let arcIconQueue = ArcIconImportQueue()
+    /// Tabs created by an import, which must not reach the network for icons
+    /// until the user opens them. Rebuilt when provenance changes.
+    var importedTabIDsCache: (count: Int, ids: Set<UUID>)?
     var onSpacesChanged: (() -> Void)?
     var saveWork: DispatchWorkItem?
     var sessionWriter: SessionWriter?
@@ -264,6 +325,8 @@ import QuartzCore
     var tabErrors: [UUID: String] = [:]
     var pendingHome: Set<UUID> = []
     var pendingLoads: Set<UUID> = []
+    /// Main tab views only: the visit each view's current document recorded, so its late title can correct that entry.
+    var historyTitleFollowUps: [UUID: HistoryTitleFollowUp] = [:]
     var requestedAddresses: [UUID: String] = [:]
     let tabActivityProbe = TabActivityProbe()
     let tabResourcePolicy = TabResourcePolicy()
@@ -278,10 +341,13 @@ import QuartzCore
     var automaticTabSleeping = true
     var keepAwakeHosts: Set<String> = []
 
-    init(sessionURL: URL, ephemeral: Bool = false, downloadCoordinator: DownloadCoordinator? = nil) {
+    /// `profileStores` is for disposable runs only (e.g. an isolated store from
+    /// `WebsiteProfileStore(isolated:)`); nil keeps the standard store for `ephemeral`.
+    init(sessionURL: URL, ephemeral: Bool = false, downloadCoordinator: DownloadCoordinator? = nil,
+         profileStores: WebsiteProfileStore? = nil) {
         self.downloads = downloadCoordinator ?? DownloadCoordinator()
         self.sessionURL = sessionURL; self.privateMode = ephemeral
-        self.profileStores = WebsiteProfileStore(ephemeral: ephemeral)
+        self.profileStores = profileStores ?? WebsiteProfileStore(ephemeral: ephemeral)
         self.favicons = WebsiteFaviconStore(directory: ephemeral ? nil : sessionURL.deletingLastPathComponent().appendingPathComponent("Favicons", isDirectory: true))
         session = ephemeral ? .fresh() : SessionFile.load(sessionURL)
         if !ephemeral, UserDefaults.standard.object(forKey: "AutomaticallyShowPlayingVideo") != nil { automaticallyShowsVideo = UserDefaults.standard.bool(forKey: "AutomaticallyShowPlayingVideo") }
@@ -303,13 +369,15 @@ import QuartzCore
         animator.animationView = root; pagingAnimator.animationView = root
         root.onLayout = { [weak self] in self?.layoutBrowser() }
         root.onTranslucencyChange = { [weak self] clear in self?.windowTranslucent = clear }
+        root.onAppearanceChange = { [weak self] in self?.applyChromeColors() }
         [sidebar, card, handle].forEach(root.addSubview)
-        card.wantsLayer = true; card.layer?.backgroundColor = NSColor(white: 0.10, alpha: 1).cgColor
-        card.layer?.cornerRadius = 9; card.layer?.masksToBounds = true
-        card.layer?.borderWidth = 1; card.layer?.borderColor = NSColor.white.withAlphaComponent(0.30).cgColor
+        card.wantsLayer = true
+        card.layer?.cornerRadius = 10; card.layer?.masksToBounds = true
+        card.layer?.borderWidth = 1
         card.addSubview(webHost)
-        progress.wantsLayer = true; progress.layer?.backgroundColor = NSColor(srgbRed: 0.47, green: 0.39, blue: 0.66, alpha: 1).cgColor
+        progress.wantsLayer = true
         card.addSubview(progress)
+        applyChromeColors()
         configureFavicons()
         sidebar.onSelectTab = { [weak self] id in self?.select(id) }
         sidebar.onCloseTab = { [weak self] id in self?.close(id) }
@@ -327,10 +395,15 @@ import QuartzCore
         sidebar.onSpaceChange = { [weak self] space in self?.changeSpace(space) }
         sidebar.onManageSpaces = { [weak self] in self?.manageSpaces(nil) }
         sidebar.onMoveTab = { [weak self] id, space in self?.moveTab(id, toSpace: space) }
-        sidebar.onPictureInPicture = { [weak self] in self?.togglePictureInPicture(nil) }
+        // Footer Downloads button and its menu: the existing windows (View > Downloads ⌘J, History ⌘Y, Recently Closed).
+        // Picture in Picture left the footer; it stays in View > Picture in Picture (⌥⌘P) and the command palette.
+        sidebar.onShowDownloads = { [weak self] in self?.showDownloads(nil) }
+        sidebar.onShowHistory = { [weak self] in self?.showHistory(nil) }
+        sidebar.onShowRecentlyClosed = { [weak self] in self?.showArchive(nil) }
         sidebar.onExtensionAction = { [weak self] id, anchor in self?.invokeSidebarExtension(id, anchor: anchor) }
         sidebar.onExtensionsMenu = { [weak self] anchor in self?.showSidebarExtensions(anchor: anchor) }
         sidebar.onExtensionLibrary = { [weak self] in self?.showExtensionLibrary(nil) }
+        connectFolderCommands()
         sidebar.onSpaceScroll = { [weak self] event, source in
             guard let self else { return false }
             return self.handleSpaceScroll(event, source: source) == nil
@@ -349,6 +422,7 @@ import QuartzCore
         handle.onCollapse = { [weak self] in self?.setSidebar(false) }
         handle.onReset = { [weak self] in self?.resetSidebar(nil) }
         startTabResourceMonitoring(); showActive(); refresh()
+        restoreImportedIcons()
     }
 
     /// A Clear Space needs the window itself non-opaque so the desktop shows
@@ -357,7 +431,7 @@ import QuartzCore
     func applyWindowTranslucency() {
         guard let window = view.window else { return }
         window.isOpaque = !windowTranslucent
-        window.backgroundColor = windowTranslucent ? .clear : NSColor(white: 0.10, alpha: 1)
+        window.backgroundColor = windowTranslucent ? .clear : BrowserChrome.windowBackground
         window.invalidateShadow()
     }
     override func viewDidAppear() { super.viewDidAppear(); applyWindowTranslucency(); layoutBrowser() }
@@ -407,8 +481,9 @@ import QuartzCore
         let collapse = 1 - min(1, max(0, width / 80))
         let inset = 8 * (1 - collapse)
         card.frame = NSRect(x: width + inset, y: inset, width: max(100, w - width - 2 * inset), height: h - 2 * inset)
-        card.layer?.cornerRadius = 9 * (1 - collapse)
-        card.layer?.borderColor = NSColor.white.withAlphaComponent(0.30 * (1 - collapse)).cgColor
+        // Arc/Yab frame the page with a soft corner and a barely-there edge.
+        card.layer?.cornerRadius = 10 * (1 - collapse)
+        card.layer?.borderColor = resolvedCGColor(BrowserChrome.cardEdge, for: card).copy(alpha: (root.isDark ? 0.09 : 0.10) * (1 - collapse))
         applyWindowButtons(collapse: collapse)
         webHost.frame = card.bounds
         if let web = activeWebView, web.superview === webHost { web.frame = webHost.bounds }
@@ -459,7 +534,7 @@ import QuartzCore
     }
     func load(_ address: String, in browser: WKWebView, id: UUID) {
         guard let tab = session.tabs.first(where: { $0.id == id }), browsers[id] === browser else { return }
-        invalidateFaviconDocument(id)
+        invalidateFaviconDocument(id); historyTitleFollowUps.removeValue(forKey: id)
         let profile = session.profileID(for: tab), token = UUID()
         navigationTokens[id] = token
         tabActivityProbe.invalidate(browser); sleepRestores.removeValue(forKey: id)
@@ -499,7 +574,10 @@ import QuartzCore
             requestedAddresses[id] = address; pendingLoads.insert(id)
             if wasVisible { showActive() }
         }
-        if address == "orbit://newtab" || address == "orbit://video" {
+        if ArcEaselReference.isReference(address) {
+            // Never requested: an Easel reference has no page and no URL to load.
+            pendingLoads.remove(id); pendingHome.remove(id)
+        } else if address == "orbit://newtab" || address == "orbit://video" {
             pendingHome.insert(id)
             if let file = Bundle.main.url(forResource: address == "orbit://video" ? "PiPDemo" : "Home", withExtension: "html") { destination.loadFileURL(file, allowingReadAccessTo: file.deletingLastPathComponent()) }
             else { destination.loadHTMLString("<h1>Bam</h1><p>Press Command-L to explore.</p>", baseURL: nil) }
@@ -537,7 +615,13 @@ import QuartzCore
         }
         for (id, peek) in peeks { peek.setVisible(id == tab.id) }
         if let group = session.split(for: tab.id) { showSplit(group) }
-        else {
+        else if tab.isArcEasel {
+            // An Arc Easel reference has no web page: a native explanation, no
+            // renderer, no network. A page left from navigating away (then
+            // resetting back to the reference) is retired, never shown.
+            if browsers[tab.id] != nil { teardownPage(tab.id) }
+            installActiveHost(EaselReferenceView(title: tab.displayTitle))
+        } else {
             let browser = webView(for: tab)
             if pictureInPicture.owns(browser) {
                 let placeholder = PiPPlaceholder(frame: webHost.bounds)
@@ -645,6 +729,7 @@ import QuartzCore
         spaceManager?.cancel(nil)
         savedTabEditor?.cancel(nil)
         isShuttingDown = true; cancelAutomaticDepartures(); findBar.hide(); pageFeedback.hide(); downloads.cancelAll(); pictureInPicture.restore()
+        arcIconQueue.cancelAll()
         for peek in Array(peeks.values) { peek.dismiss() }
         for little in Array(littleWindows.values) { little.close() }
         if let monitor = scrollMonitor { NSEvent.removeMonitor(monitor); scrollMonitor = nil }
@@ -660,6 +745,7 @@ import QuartzCore
     func updateMetadata(_ web: WKWebView) {
         guard let pair = browsers.first(where: { $0.value === web }), let i = session.tabs.firstIndex(where: { $0.id == pair.key }) else { return }
         guard !pendingLoads.contains(pair.key), tabErrors[pair.key] == nil else { return }
+        applyHistoryTitle(web, id: pair.key)
         let previous = session.tabs[i]
         if let url = web.url, ["https", "http"].contains(url.scheme ?? "") || allowsExtensionPage(url, profileID: session.profileID(for: session.tabs[i])) {
             session.tabs[i].address = url.absoluteString
@@ -675,6 +761,15 @@ import QuartzCore
         if tab.isFavorite || tab.space == session.space || tab.space == pagingTarget { scheduleChromeRefresh() }
         scheduleSave()
     }
+    /// The current document's title, which WebKit often reports after didFinish, corrects the visit that
+    /// document recorded. Memory only: the profile's library is already loaded (it recorded the visit) and
+    /// is never created here. No new visit, event, time or order; bounded by HistoryTitleFollowUp.
+    private func applyHistoryTitle(_ web: WKWebView, id: UUID) {
+        guard !isShuttingDown, var followUp = historyTitleFollowUps[id] else { return }
+        if followUp.apply(url: web.url, title: web.title, profileID: profileID(of: web), library: profileLibraries[followUp.profileID]) {
+            historyTitleFollowUps[id] = followUp.isSpent ? nil : followUp
+        }
+    }
     private func scheduleChromeRefresh() {
         guard chromeRefreshWork == nil, !isShuttingDown else { return }
         let work = DispatchWorkItem { [weak self] in
@@ -687,6 +782,7 @@ import QuartzCore
         guard isViewLoaded else { return }
         scheduleExtensionRefresh()
         refreshExtensionActions()
+        root.theme = session.spaceDefinition(session.space)?.theme
         root.space = session.spaceDefinition(session.space)?.colorIndex ?? 0
         sidebar.configureSpaces(session.spaces)
         let tabs = sidebarItems(in: session)
@@ -695,7 +791,7 @@ import QuartzCore
             sidebar.beginPaging(tabs: sidebarItems(for: target), space: target, direction: spaceDirection(to: target))
         }
         if let tab = session.active {
-            let host = URL(string: tab.address)?.host ?? tab.address
+            let host = tab.addressLabel
             sidebar.setAddress(tab.address, title: tabErrors[tab.id] ?? (tab.isHome ? "Search or enter URL" : host))
             view.window?.title = "\(tab.displayTitle) — Bam"
         }
@@ -720,25 +816,29 @@ import QuartzCore
             split.detach(); split.view.removeFromSuperview()
             retiringViews.removeValue(forKey: ObjectIdentifier(split.view))
         }
-        for closingID in closingIDs {
-            invalidateFaviconDocument(closingID)
-            peeks[closingID]?.dismiss()
-            observations.removeValue(forKey: closingID)
-            let web = browsers.removeValue(forKey: closingID)
-            if let web { tabActivityProbe.invalidate(web) }
-            tabLastUsed.removeValue(forKey: closingID); sleepRestores.removeValue(forKey: closingID); nonGetDocuments.remove(closingID); pendingNonGetDocuments.removeValue(forKey: closingID)
-            web?.navigationDelegate = nil; web?.uiDelegate = nil; web?.stopLoading()
-            // PiP restoration can synchronously re-enter showActive. The closed
-            // view must no longer be discoverable by metadata or return callbacks.
-            if let web, pictureInPicture.references(web) { pictureInPicture.restore() }
-            if let web {
-                web.pauseAllMediaPlayback(completionHandler: nil)
-                retiringViews.removeValue(forKey: ObjectIdentifier(web)); web.removeFromSuperview()
-            }
-            navigationTokens.removeValue(forKey: closingID); browserExtensionOrigins.removeValue(forKey: closingID)
-            pendingHome.remove(closingID); tabErrors.removeValue(forKey: closingID); pendingLoads.remove(closingID); requestedAddresses.removeValue(forKey: closingID)
-        }
+        for closingID in closingIDs { teardownPage(closingID) }
         showActive(); save()
+    }
+    /// Retires a tab's page completely: its web view, callbacks, load state,
+    /// Peek and floating video. Used when a tab closes, and when a tab that had
+    /// a page becomes an Arc Easel reference again (which has no page).
+    func teardownPage(_ id: UUID) {
+        invalidateFaviconDocument(id); historyTitleFollowUps.removeValue(forKey: id)
+        peeks[id]?.dismiss()
+        observations.removeValue(forKey: id)
+        let web = browsers.removeValue(forKey: id)
+        if let web { tabActivityProbe.invalidate(web) }
+        tabLastUsed.removeValue(forKey: id); sleepRestores.removeValue(forKey: id); nonGetDocuments.remove(id); pendingNonGetDocuments.removeValue(forKey: id)
+        web?.navigationDelegate = nil; web?.uiDelegate = nil; web?.stopLoading()
+        // PiP restoration can synchronously re-enter showActive. The retired
+        // view must no longer be discoverable by metadata or return callbacks.
+        if let web, pictureInPicture.references(web) { pictureInPicture.restore() }
+        if let web {
+            web.pauseAllMediaPlayback(completionHandler: nil)
+            retiringViews.removeValue(forKey: ObjectIdentifier(web)); web.removeFromSuperview()
+        }
+        navigationTokens.removeValue(forKey: id); browserExtensionOrigins.removeValue(forKey: id)
+        pendingHome.remove(id); tabErrors.removeValue(forKey: id); pendingLoads.remove(id); requestedAddresses.removeValue(forKey: id)
     }
     func pinTab(_ id: UUID) {
         cancelPaging()
@@ -954,6 +1054,7 @@ import QuartzCore
                 }
             } else if pagingTarget != nil { sidebar.endPaging(); pagingTarget = nil }
             sidebar.setPagingOffset(offset)
+            root.previewTheme = pagingTarget.flatMap { session.spaceDefinition($0)?.theme }
             root.previewSpace = pagingTarget.flatMap { session.spaceDefinition($0)?.colorIndex }; root.previewProgress = abs(offset) / max(1, sidebar.bounds.width)
         }
         // Never advertise creation that the Space cap would refuse.
@@ -987,6 +1088,7 @@ import QuartzCore
             self.pagingOffset = offset; self.sidebar.setPagingOffset(offset)
             // The creation panel owns the gradient preview while it is open.
             if commit == nil, self.spaceCreationPanel == nil {
+                self.root.previewTheme = self.pagingTarget.flatMap { self.session.spaceDefinition($0)?.theme }
                 self.root.previewSpace = self.pagingTarget.flatMap { self.session.spaceDefinition($0)?.colorIndex }
                 self.root.previewProgress = abs(offset) / max(1, self.sidebar.bounds.width)
             }
@@ -1094,9 +1196,14 @@ import QuartzCore
         returnActiveVideo()
         let id = focusedTabID
         guard let i = session.tabs.firstIndex(where: { $0.id == id }) else { return }
+        // Leaving an Easel reference (a native view) for a web address must
+        // install the new page as the visible host, not just load it hidden.
+        let leavingNativeView = session.tabs[i].isArcEasel
         session.tabs[i].address = address; session.tabs[i].title = address == "orbit://newtab" ? "New tab" : (address == "orbit://video" ? "Picture in Picture demo" : URL(string: address)?.host ?? address)
         let browser = webView(for: session.tabs[i]); load(address, in: browser, id: id)
-        dismissAddress(); refresh(); save()
+        dismissAddress()
+        if leavingNativeView { showActive() } else { refresh() }
+        save()
     }
     func scheduleSave() {
         saveWork?.cancel(); let work = DispatchWorkItem { [weak self] in self?.save() }; saveWork = work
@@ -1135,7 +1242,7 @@ import QuartzCore
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
         tabActivityProbe.invalidate(webView)
         if let id = browsers.first(where: { $0.value === webView })?.key {
-            invalidateFaviconDocument(id)
+            invalidateFaviconDocument(id); historyTitleFollowUps.removeValue(forKey: id)
             tabErrors.removeValue(forKey: id); pendingLoads.insert(id)
         }
         if visibleMemberIDs.contains(where: { browsers[$0] === webView }) { scheduleChromeRefresh() }
@@ -1154,14 +1261,19 @@ import QuartzCore
         updateMetadata(webView)
         restoreSleepingPage(webView)
         scheduleFaviconDiscovery(in: webView)
-        if let url = webView.url, let profile = profileID(of: webView) { library(for: profile).recordVisit(title: webView.title ?? url.host ?? "Page", address: url.absoluteString) }
+        if let id = browsers.first(where: { $0.value === webView })?.key { historyTitleFollowUps.removeValue(forKey: id) }
+        if let url = webView.url, let profile = profileID(of: webView),
+           let visit = library(for: profile).recordVisit(title: webView.title ?? url.host ?? "Page", address: url.absoluteString),
+           let id = browsers.first(where: { $0.value === webView })?.key {
+            historyTitleFollowUps[id] = HistoryTitleFollowUp(profileID: profile, visit: visit)
+        }
     }
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) { showError(error, web: webView) }
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) { showError(error, web: webView) }
     func showError(_ error: Error, web: WKWebView) {
         guard (error as NSError).code != NSURLErrorCancelled else { return }
         if let id = browsers.first(where: { $0.value === web })?.key {
-            pendingLoads.remove(id); pendingNonGetDocuments.removeValue(forKey: id)
+            pendingLoads.remove(id); pendingNonGetDocuments.removeValue(forKey: id); historyTitleFollowUps.removeValue(forKey: id)
             if let failed = (error as NSError).userInfo[NSURLErrorFailingURLStringErrorKey] as? String, URLInput.directURL(failed) != nil { requestedAddresses[id] = failed }
             tabErrors[id] = "Couldn’t load page — ⌘R to retry"; refresh()
         }
@@ -1169,6 +1281,7 @@ import QuartzCore
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
         tabActivityProbe.invalidate(webView)
         guard let id = browsers.first(where: { $0.value === webView })?.key else { return }
+        historyTitleFollowUps.removeValue(forKey: id)
         if nonGetDocuments.contains(id) {
             if pictureInPicture.references(webView) { pictureInPicture.restore() }
             pendingLoads.remove(id)
@@ -1258,18 +1371,80 @@ import QuartzCore
     }
 }
 
+/// Shown when an Arc Easel reference is selected: what it is, honestly, with
+/// no web content and no link to Arc (Bam can't open or verify the canvas).
+@MainActor final class EaselReferenceView: NSView {
+    private let icon = NSImageView()
+    private let title = NSTextField(labelWithString: "")
+    private let message = NSTextField(wrappingLabelWithString: "")
+    override var isFlipped: Bool { true }
+    var shownName: String { title.stringValue }
+    init(title name: String) {
+        super.init(frame: .zero)
+        wantsLayer = true
+        icon.image = NSImage(systemSymbolName: "scribble.variable", accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: 34, weight: .regular))
+        icon.contentTintColor = .secondaryLabelColor; icon.setAccessibilityElement(false)
+        title.stringValue = name; title.font = .systemFont(ofSize: 20, weight: .semibold); title.alignment = .center
+        title.lineBreakMode = .byTruncatingTail; title.textColor = .labelColor
+        message.stringValue = "An Easel from Arc. Bam kept its name and its place in your sidebar, but not its canvas — that stays in Arc. Bam can’t open Easels."
+        message.font = .systemFont(ofSize: 13); message.alignment = .center; message.textColor = .secondaryLabelColor
+        [icon, title, message].forEach(addSubview)
+        setAccessibilityElement(true); setAccessibilityRole(.group)
+        setAccessibilityLabel("\(name). Easel from Arc; its canvas wasn’t imported.")
+        applyColors()
+    }
+    required init?(coder: NSCoder) { fatalError() }
+    private func applyColors() { layer?.backgroundColor = resolvedCGColor(BrowserChrome.pageSurface, for: self) }
+    override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); applyColors() }
+    override func layout() {
+        super.layout()
+        let width = min(420, max(0, bounds.width - 48)), x = (bounds.width - width) / 2
+        let messageHeight = message.cell?.cellSize(forBounds: NSRect(x: 0, y: 0, width: width, height: 400)).height ?? 40
+        let total = 44 + 14 + 26 + 10 + messageHeight
+        var y = max(24, (bounds.height - total) / 2)
+        icon.frame = NSRect(x: bounds.midX - 22, y: y, width: 44, height: 44); y += 58
+        title.frame = NSRect(x: x, y: y, width: width, height: 26); y += 36
+        message.frame = NSRect(x: x, y: y, width: width, height: messageHeight)
+    }
+}
+
 @MainActor final class PiPPlaceholder: NSView {
     var returnVideo: (() -> Void)?
     private let title = NSTextField(labelWithString: "Playing in Picture in Picture")
     private let button = NSButton(title: "Return video to tab", target: nil, action: nil)
     override var isFlipped: Bool { true }
     override init(frame: NSRect) {
-        super.init(frame: frame); wantsLayer = true; layer?.backgroundColor = NSColor(white: 0.12, alpha: 1).cgColor
-        title.textColor = .white; title.font = .systemFont(ofSize: 20, weight: .medium); title.alignment = .center
+        super.init(frame: frame); wantsLayer = true; layer?.backgroundColor = resolvedCGColor(BrowserChrome.pageSurface, for: self)
+        title.textColor = .labelColor; title.font = .systemFont(ofSize: 20, weight: .medium); title.alignment = .center
         button.bezelStyle = .rounded; button.target = self; button.action = #selector(returnClicked)
         addSubview(title); addSubview(button)
     }
     required init?(coder: NSCoder) { fatalError() }
     override func layout() { super.layout(); title.frame = NSRect(x: 20, y: bounds.midY-36, width: bounds.width-40, height: 30); button.frame = NSRect(x: bounds.midX-95, y: bounds.midY+10, width: 190, height: 32) }
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        layer?.backgroundColor = resolvedCGColor(BrowserChrome.pageSurface, for: self)
+    }
     @objc func returnClicked() { returnVideo?() }
+}
+
+/// Window and page-frame colors for both appearances.
+@MainActor enum BrowserChrome {
+    /// Behind the page while it loads, and the blank new-tab surface.
+    static let pageSurface = NSColor.chrome(light: NSColor(white: 0.985, alpha: 1), dark: NSColor(white: 0.10, alpha: 1))
+    static let windowBackground = NSColor.chrome(light: NSColor(white: 0.93, alpha: 1), dark: NSColor(white: 0.10, alpha: 1))
+    static let cardEdge = NSColor.chrome(light: .black, dark: .white)
+    static let progress = NSColor.chrome(light: NSColor(srgbRed: 0.42, green: 0.33, blue: 0.70, alpha: 1),
+                                         dark: NSColor(srgbRed: 0.47, green: 0.39, blue: 0.66, alpha: 1))
+}
+
+@MainActor extension BrowserController {
+    /// Layer-backed chrome stores fixed CGColors; re-resolve them for the current appearance.
+    func applyChromeColors() {
+        card.layer?.backgroundColor = resolvedCGColor(BrowserChrome.pageSurface, for: card)
+        progress.layer?.backgroundColor = resolvedCGColor(BrowserChrome.progress, for: progress)
+        if isViewLoaded { layoutBrowser() }
+        applyWindowTranslucency()
+    }
 }

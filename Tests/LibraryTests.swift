@@ -47,6 +47,16 @@ import AppKit
         check(memory.popClosed()?.tabs == [home], "Closed records reopen last-in first-out")
         check(memory.popClosed()?.tabs == [first, second] && memory.popClosed() == nil, "A split consumes one archive record containing both panes")
 
+        // A closed (Today/unkept) Arc Easel reference can be reopened, and survives a restart.
+        let easelFile = root.appendingPathComponent("easel/library.json")
+        let easelLibrary = BrowserLibrary(storageURL: easelFile)
+        let easel = tab(ArcEaselReference.address(for: UUID()), "Canvas from Arc")
+        easelLibrary.recordClosed(tabs: [easel], split: false)
+        check(easelLibrary.closedRecords.first?.tabs == [easel], "A closed Easel reference is archived for reopening")
+        check(BrowserLibrary(storageURL: easelFile).popClosed()?.tabs == [easel], "Its archive survives restart and reopens unchanged")
+        easelLibrary.recordClosed(tabs: [tab("orbit://arc-easel/not-a-uuid", "Bad")], split: false)
+        check(easelLibrary.closedRecords.count == 1, "Malformed reference addresses are still refused")
+
         let customFile = root.appendingPathComponent("custom-spaces/library.json")
         let custom = BrowserLibrary(storageURL: customFile)
         let customLeft = tab("https://example.com/custom", "Custom Space", space: 1042)
@@ -147,6 +157,165 @@ import AppKit
         check(failed.history.count == 1 && failed.closedRecords.isEmpty && errors == 2 && failed.lastStorageError != nil,
               "Explicit write failures roll back archive changes while retaining dirty visits")
         check(mixedLoaded.flush(), "Pending salvaged-library visits finish before fixture cleanup")
+
+        // Genuine history-change events (extension history seam).
+        var events: [BrowserLibrary.HistoryChange] = []
+        let eventful = BrowserLibrary(storageURL: nil)
+        eventful.onHistoryChange = { events.append($0) }
+        eventful.recordVisit(title: "One", address: "https://events.example/one")
+        guard case .visited(let firstVisit)? = events.first, events.count == 1 else { check(false, "An accepted visit sends exactly one event"); return }
+        check(firstVisit == eventful.history[0] && firstVisit.address == "https://events.example/one", "The event carries the entry as it now stands")
+        events.removeAll()
+        eventful.recordVisit(title: "One again", address: "https://events.example/one")
+        check(events == [.visited(eventful.history[0])] && eventful.history.count == 1 && eventful.history[0].id == firstVisit.id
+              && eventful.history[0].title == "One again", "A coalesced revisit is still a visit, with the updated entry")
+        events.removeAll()
+        eventful.recordVisit(title: "Nope", address: "orbit://newtab")
+        eventful.recordVisit(title: "Nope", address: "https://user:pw@events.example/")
+        check(events.isEmpty, "Rejected visits send nothing")
+        // Trimming past 5,000: the visit, then the trimmed addresses.
+        let trimming = BrowserLibrary(storageURL: nil)
+        for n in 0..<5_000 { trimming.recordVisit(title: "T\(n)", address: "https://trim.example/\(n % 2 == 0 ? "even" : "odd\(n)")") }
+        var trimEvents: [BrowserLibrary.HistoryChange] = []
+        trimming.onHistoryChange = { trimEvents.append($0) }
+        let oldest = trimming.history.last!.address
+        trimming.recordVisit(title: "Newest", address: "https://trim.example/newest")
+        check(trimEvents.count == 2 && trimEvents[0] == .visited(trimming.history[0]) && trimEvents[1] == .trimmed(addresses: [oldest])
+              && trimming.history.count == 5_000, "A visit past the limit sends the visit, then exactly the trimmed address")
+        trimEvents.removeAll()
+        trimming.recordVisit(title: "Newest again", address: "https://trim.example/newest")
+        check(trimEvents.count == 1, "A coalesced revisit trims nothing")
+        // Clearing: only after a successful commit.
+        events.removeAll()
+        check(eventful.clearHistory() && events == [.cleared] && eventful.history.isEmpty, "A successful clear sends cleared, after the commit")
+        // Storage failures: an accepted visit is still a visit (no durability claim); a failed clear rolls back silently.
+        struct WriteRefused: Error {}
+        let failingFile = root.appendingPathComponent("failing/library.json")
+        let failing = BrowserLibrary(storageURL: failingFile, write: { _, _ in throw WriteRefused() })
+        var failingEvents: [BrowserLibrary.HistoryChange] = []
+        failing.onHistoryChange = { failingEvents.append($0) }
+        failing.recordVisit(title: "Kept in memory", address: "https://failing.example/a")
+        _ = failing.flush()
+        check(failingEvents == [.visited(failing.history[0])] && failing.history.count == 1 && failing.lastStorageError != nil,
+              "A visit accepted in memory sends visited even though its write failed")
+        failingEvents.removeAll()
+        check(!failing.clearHistory() && failingEvents.isEmpty && failing.history.count == 1, "A failed clear rolls back and sends nothing")
+        // Startup load sends nothing; an unwritable (future-version) library sends nothing either.
+        let loadedFile = root.appendingPathComponent("events/library.json")
+        let seeding = BrowserLibrary(storageURL: loadedFile)
+        seeding.recordVisit(title: "Saved", address: "https://saved.example/")
+        check(seeding.flush(), "Fixture library saved")
+        var loadEvents: [BrowserLibrary.HistoryChange] = []
+        let reloaded = BrowserLibrary(storageURL: loadedFile)
+        reloaded.onHistoryChange = { loadEvents.append($0) }
+        check(reloaded.history.count == 1 && loadEvents.isEmpty, "Loading history at startup sends nothing")
+        let futureFile = root.appendingPathComponent("future-events/library.json")
+        try FileManager.default.createDirectory(at: futureFile.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try JSONSerialization.data(withJSONObject: ["version": 99, "history": [], "closedRecords": []]).write(to: futureFile)
+        let futureLibrary = BrowserLibrary(storageURL: futureFile)
+        var futureEvents: [BrowserLibrary.HistoryChange] = []
+        futureLibrary.onHistoryChange = { futureEvents.append($0) }
+        futureLibrary.recordVisit(title: "Refused", address: "https://future.example/")
+        check(!futureLibrary.clearHistory() && futureEvents.isEmpty, "When the library can't be changed, nothing is sent")
+        check(futureLibrary.recordVisit(title: "Refused", address: "https://future.example/") == nil, "A refused visit has no token")
+
+        // Recently Closed shows Bam's own pages by name (display only); the stored record and restore keep the real addresses.
+        let internalClosed = BrowserLibrary(storageURL: nil)
+        var closedEvents: [BrowserLibrary.HistoryChange] = []
+        internalClosed.onHistoryChange = { closedEvents.append($0) }
+        let closedEasel = ArcEaselReference.address(for: UUID())
+        internalClosed.recordClosed(tabs: [BrowserTab(title: "New tab", address: "orbit://newtab", space: 0)], split: false)
+        internalClosed.recordClosed(tabs: [BrowserTab(title: "Board", address: closedEasel, space: 0)], split: false)
+        let shownAddresses = internalClosed.closedRecords.flatMap(\.tabs).map { SidebarDisplayPolicy.readableAddress($0.address) }
+        check(Set(shownAddresses) == ["New Tab", "Arc Easel"] && !shownAddresses.contains { $0.contains("orbit") }, "Recently Closed names never show orbit://")
+        let restoredEasel = internalClosed.closedRecords.first { $0.tabs.first?.address == closedEasel }.flatMap { internalClosed.takeClosed(id: $0.id) }
+        check(restoredEasel?.tabs.first?.address == closedEasel && closedEvents.isEmpty, "Restore still gets the stored internal address; no history events")
+
+        // Late document titles (history-title-approval.md): only the recorded visit's title changes.
+        final class Writes: @unchecked Sendable {
+            private let lock = NSLock(); private var value = 0
+            var count: Int { lock.lock(); defer { lock.unlock() }; return value }
+            func add() { lock.lock(); value += 1; lock.unlock() }
+        }
+        let writes = Writes()
+        let titledFile = root.appendingPathComponent("titles/library.json")
+        let titled = BrowserLibrary(storageURL: titledFile, write: { snapshot, url in writes.add(); try LibraryWriter.writeFile(snapshot, to: url) })
+        var titleEvents: [BrowserLibrary.HistoryChange] = []
+        titled.onHistoryChange = { titleEvents.append($0) }
+        check(titled.recordVisit(title: "", address: "orbit://newtab") == nil, "A rejected visit has no token")
+        let beta = titled.recordVisit(title: "", address: "http://127.0.0.1:9/bookmarks/beta.html")!
+        check(titled.history[0].title == "127.0.0.1", "Empty title at didFinish: the host stands in (the observed defect)")
+        let betaBefore = titled.history[0]
+        let other = titled.recordVisit(title: "Other", address: "https://other.example/")!
+        check(titled.flush(), "Fixture visits saved")
+        titleEvents.removeAll()
+        let writesBefore = writes.count
+        check(titled.updateVisitTitle("Bam bookmark beta", for: beta), "The late title corrects the recorded visit")
+        let betaAfter = titled.history[1]
+        check(betaAfter.id == betaBefore.id && betaAfter.visitedAt == betaBefore.visitedAt && betaAfter.address == betaBefore.address
+              && betaAfter.title == "Bam bookmark beta" && titled.history.count == 2 && titled.history[0].id == other.id
+              && titled.history[0].title == "Other", "Only that entry's title changes: same id, time, order and count; the newer entry is untouched")
+        check(titleEvents.isEmpty, "A title correction sends no event (no new visit)")
+        check(titled.flush() && writes.count == writesBefore + 1, "The correction is one ordered write")
+        let reread = BrowserLibrary(storageURL: titledFile)
+        check(reread.history.map(\.title) == ["Other", "Bam bookmark beta"] && abs(reread.history[1].visitedAt.timeIntervalSince(betaBefore.visitedAt)) < 0.002,
+              "The corrected title is saved with the original visit time (stored to the millisecond)")
+        check(reread.recordVisit(title: "x", address: "https://reread.example/") != nil && !reread.updateVisitTitle("Stolen", for: beta),
+              "A token from another library instance (or a startup-loaded entry) never matches")
+        // Rejected corrections change and write nothing.
+        let quiet = writes.count
+        check(!titled.updateVisitTitle("Bam bookmark beta", for: beta), "An unchanged title is refused")
+        check(!titled.updateVisitTitle("   ", for: beta) && !titled.updateVisitTitle("", for: beta), "An empty title is refused")
+        let wrongAddress = BrowserLibrary.VisitToken(id: beta.id, address: "http://127.0.0.1:9/bookmarks/alpha.html", revision: beta.revision)
+        check(!titled.updateVisitTitle("Wrong", for: wrongAddress), "Another address is refused even with the right id and revision")
+        check(titled.flush() && writes.count == quiet && titled.history[1].title == "Bam bookmark beta", "Refused corrections write nothing")
+        // A coalesced revisit reuses the id: the earlier visit's late title must not overwrite the newer visit.
+        let revisitFirst = titled.recordVisit(title: "", address: "https://same.example/page")!
+        let revisitSecond = titled.recordVisit(title: "Newer visit", address: "https://same.example/page")!
+        check(revisitFirst.id == revisitSecond.id && revisitFirst.revision != revisitSecond.revision, "A coalesced revisit keeps the id with a new revision")
+        check(!titled.updateVisitTitle("Older document", for: revisitFirst) && titled.history[0].title == "Newer visit",
+              "The earlier visit's late title is stale after the coalesced revisit")
+        check(titled.updateVisitTitle("Newer document", for: revisitSecond) && titled.history[0].title == "Newer document", "The newest visit's title applies")
+        // Trimmed and cleared visits.
+        let trimTitles = BrowserLibrary(storageURL: nil)
+        let oldestToken = trimTitles.recordVisit(title: "", address: "https://oldest.example/")!
+        for n in 0..<5_000 { trimTitles.recordVisit(title: "F\(n)", address: "https://fill.example/\(n)") }
+        check(!trimTitles.updateVisitTitle("Late", for: oldestToken) && !trimTitles.history.contains { $0.title == "Late" }, "A trimmed visit can't be retitled")
+        let survivor = trimTitles.recordVisit(title: "", address: "https://survivor.example/")!
+        check(trimTitles.clearHistory() && !trimTitles.updateVisitTitle("Late", for: survivor) && trimTitles.history.isEmpty, "A cleared visit can't be retitled")
+        let failingTitles = BrowserLibrary(storageURL: root.appendingPathComponent("failing-titles/library.json"), write: { _, _ in throw WriteRefused() })
+        let kept = failingTitles.recordVisit(title: "", address: "https://kept.example/")!
+        check(!failingTitles.clearHistory() && failingTitles.updateVisitTitle("Still here", for: kept) && failingTitles.history[0].title == "Still here",
+              "A failed clear keeps the visit retitlable; a failing write keeps the in-memory title")
+
+        // The per-view follow-up: current document and profile only; only accepted changes use the budget.
+        let profile = UUID(), elsewhere = UUID()
+        let follow = BrowserLibrary(storageURL: nil)
+        let page = URL(string: "http://127.0.0.1:9/passwords/plain.html")!
+        var followUp = HistoryTitleFollowUp(profileID: profile, visit: follow.recordVisit(title: "", address: page.absoluteString)!)
+        check(followUp.candidate(url: page, title: "Bam plain login comparison", profileID: profile) == "Bam plain login comparison", "Same document and profile: offered")
+        check(followUp.candidate(url: URL(string: page.absoluteString + "#x"), title: "T", profileID: profile) == nil
+              && followUp.candidate(url: URL(string: "http://127.0.0.1:9/bookmarks/beta.html"), title: "T", profileID: profile) == nil,
+              "A fragment change or another document is skipped (an old title delivered after a new navigation can't land)")
+        check(followUp.candidate(url: page, title: "T", profileID: elsewhere) == nil && followUp.candidate(url: page, title: "T", profileID: nil) == nil,
+              "Another or unknown profile is skipped")
+        check(!followUp.apply(url: page, title: "", profileID: profile, library: follow) && !followUp.apply(url: page, title: nil, profileID: profile, library: follow)
+              && !followUp.apply(url: page, title: "T", profileID: profile, library: nil) && followUp.updates == 0, "Empty, missing or no library: budget untouched")
+        check(followUp.apply(url: page, title: "Bam plain login comparison", profileID: profile, library: follow) && followUp.updates == 1
+              && follow.history[0].title == "Bam plain login comparison", "An accepted change counts once")
+        for _ in 0..<10 { _ = followUp.apply(url: page, title: "Bam plain login comparison", profileID: profile, library: follow) }
+        check(followUp.updates == 1, "Repeated unchanged observations don't use the budget")
+        for n in 2...5 { check(followUp.apply(url: page, title: "Title \(n)", profileID: profile, library: follow), "Change \(n) accepted") }
+        check(followUp.isSpent && !followUp.apply(url: page, title: "Title 6", profileID: profile, library: follow) && follow.history[0].title == "Title 5",
+              "After five accepted changes nothing more is written")
+        // Two tabs, same URL: the coalesced revisit invalidates the first tab's follow-up.
+        let shared = URL(string: "https://shared.example/")!
+        var firstTab = HistoryTitleFollowUp(profileID: profile, visit: follow.recordVisit(title: "", address: shared.absoluteString)!)
+        var secondTab = HistoryTitleFollowUp(profileID: profile, visit: follow.recordVisit(title: "Second", address: shared.absoluteString)!)
+        check(!firstTab.apply(url: shared, title: "First tab's old title", profileID: profile, library: follow) && firstTab.updates == 0
+              && follow.history[0].title == "Second", "The earlier tab's late title doesn't overwrite the newer visit, and costs nothing")
+        check(secondTab.apply(url: shared, title: "Second document", profileID: profile, library: follow) && follow.history[0].title == "Second document",
+              "The newer tab's title applies")
         print("PASS: \(checks) library metadata checks")
     }
 }

@@ -5,12 +5,30 @@ import WebKit
     @available(macOS 15.4, *)
     var browserExtensions: BrowserExtensions {
         if let existing = extensionStorage as? BrowserExtensions { return existing }
-        let value = BrowserExtensions(storageURL: privateMode ? nil : sessionURL.deletingLastPathComponent().appendingPathComponent("Extensions", isDirectory: true), isPrivate: privateMode)
+        // A disposable isolated store policy always gets non-persistent extension controllers: WebKit
+        // offers no public removal for a persistent controller configuration. Standard runs are unchanged.
+        let isolated: Bool
+        if case .isolated = profileStores.policy { isolated = true } else { isolated = false }
+        let value = BrowserExtensions(storageURL: privateMode ? nil : sessionURL.deletingLastPathComponent().appendingPathComponent("Extensions", isDirectory: true),
+                                      isPrivate: privateMode, controllerStorage: isolated ? .nonPersistent : .automatic)
         extensionStorage = value
         value.profileName = { [weak self] in self?.session.profileName($0) ?? "Profile" }
         value.surfaces = { [weak self] in self?.extensionSurfaces(profileID: $0) ?? [] }
         value.surface = { [weak self] profile, id in self?.extensionSurface(profileID: profile, id: id) }
         value.surfaceRevision = { [weak self] _ in self?.extensionTopologyRevision() }
+        // bookmarks.getTree: the engine has already checked the calling context's own profile, the explicit
+        // grant and that this isn't a private host. Read-only snapshot of that profile's saved items; nil
+        // (an error for the extension, never an empty tree) when closing, mid profile change, unknown or over budget.
+        value.bookmarkSnapshot = { [weak self] profileID in
+            guard let self else { return nil }
+            return BookmarkSessionSnapshot.input(from: self.session, profileID: profileID,
+                                                 isShuttingDown: self.isShuttingDown, isApplyingProfileChange: self.isApplyingProfileChange)
+        }
+        // history: a read-only snapshot of the profile's in-memory library, and genuine change events from each
+        // profile library: the ones that exist now are wired here, later ones when library(for:) creates them
+        // (extensionStorage is already set, so neither path re-enters this getter). Nothing in private windows.
+        value.historySnapshot = { [weak self] profileID in self?.extensionHistorySnapshot(profileID: profileID) }
+        for (profile, library) in profileLibraries { wireExtensionHistory(library, profileID: profile, host: value) }
         value.selectTab = { [weak self] id in
             guard let self else { return false }
             if self.session.tabs.contains(where: { $0.id == id }) {
@@ -31,7 +49,11 @@ import WebKit
         }
         value.navigateTab = { [weak self] id, url in
             guard let self else { return false }
-            if self.session.tabs.contains(where: { $0.id == id }) { self.navigatePane(id, address: url.absoluteString); return true }
+            if let tab = self.session.tabs.first(where: { $0.id == id }) {
+                // An Arc Easel is a native reference, not a web page: extensions cannot navigate it into one.
+                guard !tab.isArcEasel else { return false }
+                self.navigatePane(id, address: url.absoluteString); return true
+            }
             if let little = self.littleWindows[id] { return little.open(url: url) }
             if let owner = self.peekExtensionIDs.first(where: { $0.value == id })?.key,
                let web = self.peeks[owner]?.webView, URLInput.directURL(url.absoluteString) != nil {
@@ -42,7 +64,11 @@ import WebKit
         value.reloadTab = { [weak self] id, fromOrigin in
             guard let self else { return false }
             var web = self.extensionWebView(id)
-            if web == nil, let tab = self.session.tabs.first(where: { $0.id == id }) { web = self.webView(for: tab) }
+            if web == nil, let tab = self.session.tabs.first(where: { $0.id == id }) {
+                // Never allocate a renderer for an Arc Easel's native reference.
+                guard !tab.isArcEasel else { return false }
+                web = self.webView(for: tab)
+            }
             guard let web else { return false }
             if fromOrigin { web.reloadFromOrigin() } else { web.reload() }
             return true
@@ -78,7 +104,17 @@ import WebKit
         return value
     }
     func configureExtensions(_ configuration: WKWebViewConfiguration, profileID: UUID) {
-        if #available(macOS 15.4, *) { browserExtensions.configure(configuration, profileID: profileID) }
+        if #available(macOS 15.4, *) {
+            preloadHistoryForExtensions(profileID: profileID)
+            browserExtensions.configure(configuration, profileID: profileID)
+        }
+    }
+    /// The profile's library is loaded as part of preparing its extension runtime, before any of that
+    /// profile's extensions can run. So history.search reads memory only and never triggers disk I/O.
+    /// Not in private windows (no library file, and history is unavailable there).
+    func preloadHistoryForExtensions(profileID: UUID) {
+        guard !privateMode else { return }
+        _ = library(for: profileID)
     }
     func whenExtensionsReady(profileID: UUID, perform: @escaping @MainActor () -> Void) {
         if #available(macOS 15.4, *) { browserExtensions.whenReady(profileID: profileID, perform: perform) }
@@ -151,13 +187,15 @@ import WebKit
         extensionLoadingChanges.subtract(members.map(\.id))
         for (owner, peek) in peeks {
             guard let web = peek.webView, self.profileID(of: web) == profileID, let id = peekExtensionIDs[owner] else { continue }
+            // Shown after the window's tabs: new extension tabs land before it.
             result.append(BrowserExtensionSurface(id: id, title: web.title ?? "Peek", url: web.url, webView: web, window: viewIfLoaded?.window,
-                isActive: session.activeID == owner && peek.isPresented, isSelected: session.activeID == owner && peek.isPresented, isLoading: web.isLoading))
+                isActive: session.activeID == owner && peek.isPresented, isSelected: session.activeID == owner && peek.isPresented, isLoading: web.isLoading, isPeek: true))
         }
         for (id, little) in littleWindows {
             guard let web = little.webView, self.profileID(of: web) == profileID else { continue }
+            // One page, no tabs: reported to extensions as a popup window, which cannot take new tabs.
             result.append(BrowserExtensionSurface(id: id, title: web.title ?? "Little Bam", url: web.url, webView: web, window: little.window,
-                isActive: true, isSelected: true, isLoading: web.isLoading))
+                isActive: true, isSelected: true, isLoading: web.isLoading, isSinglePage: true))
         }
         return result
     }
@@ -227,6 +265,7 @@ import WebKit
         guard #available(macOS 15.4, *) else { manageExtensions(sender); return }
         let profile = commandProfileID
         let configuration = WKWebViewConfiguration(); configuration.websiteDataStore = profileStores.store(for: profile)
+        preloadHistoryForExtensions(profileID: profile)
         browserExtensions.configure(configuration, profileID: profile)
         browserExtensions.showLibrary(profileID: profile, relativeTo: NSApp.keyWindow ?? view.window)
     }
@@ -237,6 +276,7 @@ import WebKit
         }
         let profile = commandProfileID
         let configuration = WKWebViewConfiguration(); configuration.websiteDataStore = profileStores.store(for: profile)
+        preloadHistoryForExtensions(profileID: profile)
         browserExtensions.configure(configuration, profileID: profile)
         browserExtensions.showManager(profileID: profile, relativeTo: NSApp.keyWindow ?? view.window)
     }
@@ -269,6 +309,32 @@ import WebKit
                let tab = session.tabs.first(where: { $0.id == id }) {
                 load(tab.address, in: web, id: id)
             } else if self.profileID(of: web) == profileID { web.reload() }
+        }
+    }
+
+    /// history.search's data: the registered profile's in-memory library, newest first. Memory only: no
+    /// file or page is ever read on request (the library is preloaded when the profile's extension runtime is
+    /// prepared). nil (an error for the extension, never an empty history) when that library isn't in memory,
+    /// in private windows, while closing or switching profiles, or for an unknown profile.
+    @available(macOS 15.4, *)
+    func extensionHistorySnapshot(profileID: UUID) -> [ExtensionHistory.Visit]? {
+        let available = !privateMode && !isShuttingDown && !isApplyingProfileChange && session.profiles.contains(where: { $0.id == profileID })
+        return LibraryHistoryEvents.snapshot(of: profileLibraries[profileID], available: available)
+    }
+
+    /// Sends this profile library's genuine changes to the extension engine. Assigning replaces any earlier
+    /// handler, so a library is never wired twice. Weak captures; each event re-checks that the profile is
+    /// registered and that the controller isn't closing. (A visit during a profile switch is still a genuine
+    /// visit of this library's own profile, so it isn't dropped; the engine re-checks grant and contexts.)
+    /// Nothing in private windows.
+    @available(macOS 15.4, *)
+    func wireExtensionHistory(_ library: BrowserLibrary, profileID: UUID, host: BrowserExtensions) {
+        guard !privateMode else { return }
+        library.onHistoryChange = { [weak self, weak library, weak host] change in
+            guard let self, let library, let host, !self.isShuttingDown,
+                  self.session.profiles.contains(where: { $0.id == profileID }),
+                  let event = LibraryHistoryEvents.change(change, history: library.history) else { return }
+            host.historyChanged(profileID: profileID, change: event)
         }
     }
 }

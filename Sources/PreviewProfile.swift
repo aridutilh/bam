@@ -3,8 +3,8 @@ import Foundation
 /// The development app has its own bundle, preferences, session and WebKit stores.
 /// A launch flag alone must never make the release app persist a preview session.
 struct PreviewProfile {
-    static let bundleIdentifier = "com.ari.bam.extensionpreview"
-    static let defaultStoreIdentifier = UUID(uuidString: "6C811B15-1181-4DA2-9184-09EF50B9F902")!
+    static let bundleIdentifier = "com.ari.bam.preview"
+    static let defaultStoreIdentifier = UUID(uuidString: "D3E83D79-9B31-4C32-83CD-3A6C06BDF593")!
     private static let legacyDefaultIdentifier = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
 
     enum Mode: Equatable { case regular, fresh, persistent }
@@ -15,9 +15,9 @@ struct PreviewProfile {
     let mode: Mode
     var isEphemeral: Bool { mode == .fresh }
     var isPersistentPreview: Bool { mode == .persistent }
-    var supportDirectoryName: String { isPersistentPreview ? "BamExtensionPreview" : "OrbitPrototype" }
-    var windowTitle: String { isPersistentPreview ? "Bam Extension Preview" : "Bam" }
-    var windowAutosaveName: String { isPersistentPreview ? "BamExtensionPreviewWindow" : "OrbitPrototypeWindow" }
+    var supportDirectoryName: String { isPersistentPreview ? "BamPreview" : "OrbitPrototype" }
+    var windowTitle: String { mode == .regular ? "Bam" : "Bam Preview" }
+    var windowAutosaveName: String { isPersistentPreview ? "BamPreviewWindow" : "OrbitPrototypeWindow" }
 
     init(arguments: [String], bundleIdentifier: String?) throws {
         let persistentRequested = arguments.contains("--persistent-preview")
@@ -26,7 +26,11 @@ struct PreviewProfile {
             throw InvalidLaunch(errorDescription: "Choose either --persistent-preview or --fresh-preview.")
         }
         guard !persistentRequested || bundleIdentifier == Self.bundleIdentifier else {
-            throw InvalidLaunch(errorDescription: "Persistent previews require the separate Bam Extension Preview app. Run bash scripts/preview-draft.sh to prepare it.")
+            throw InvalidLaunch(errorDescription: "Persistent previews require Bam Preview. Run bash scripts/preview-draft.sh to prepare /Applications/Bam Preview.app.")
+        }
+        if let identifier = bundleIdentifier, identifier.hasPrefix("com.ari.bam."), identifier.hasSuffix("preview"),
+           identifier != Self.bundleIdentifier, !freshRequested {
+            throw InvalidLaunch(errorDescription: "This preview identity is obsolete. Run bash scripts/preview-draft.sh to prepare Bam Preview; existing preview data will be preserved.")
         }
         // A direct launch of the dedicated bundle is also isolated, even when
         // its wrapper was bypassed and no command-line flag was supplied.

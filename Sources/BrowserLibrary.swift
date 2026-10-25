@@ -23,6 +23,28 @@ struct ClosedRecord: Codable, Identifiable, Equatable {
     var onOpenURL: ((String) -> Void)?
     var onRestoreClosed: ((ClosedRecord) -> Void)?
     var onStorageError: ((String) -> Void)?
+    /// A genuine change to in-memory history, for extension history events. Never sent at startup load.
+    enum HistoryChange: Equatable {
+        /// `recordVisit` accepted this visit (a new entry or a coalesced revisit, as it now stands). Sent even if
+        /// the following asynchronous write later fails: it describes in-memory history, not durability.
+        case visited(BrowserHistoryEntry)
+        /// The same visit trimmed these entries past the history limit (their addresses, oldest last).
+        case trimmed(addresses: [String])
+        /// `clearHistory()` committed successfully. A failed clear rolls back and sends nothing.
+        case cleared
+    }
+    var onHistoryChange: ((HistoryChange) -> Void)?
+    /// One accepted visit exactly as recorded. A coalesced revisit reuses the entry's id but gets a new
+    /// revision, so a token from an earlier visit of that entry no longer matches.
+    struct VisitToken: Equatable {
+        let id: UUID
+        let address: String
+        let revision: UInt64
+    }
+    /// In memory only (never stored): the revision of each entry's latest accepted visit this session.
+    /// Entries loaded at startup have none, so no token can match them.
+    private var visitRevisions: [UUID: UInt64] = [:]
+    private var lastVisitRevision: UInt64 = 0
     var profileName: String?
     let storageURL: URL?
     private var loadFailure: String?
@@ -80,23 +102,50 @@ struct ClosedRecord: Codable, Identifiable, Equatable {
     }
     private func reloadWindows() { historyWindow?.reload(); archiveWindow?.reload() }
 
-    func recordVisit(title: String, address: String) {
-        guard let url = Self.webURL(address) else { return }
+    @discardableResult func recordVisit(title: String, address: String) -> VisitToken? {
+        guard let url = Self.webURL(address) else { return nil }
         let address = url.absoluteString
         let title = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard canMutate() else { return }
+        guard canMutate() else { return nil }
+        var trimmed: [String] = []
         if history.first?.address == address {
             // Only consecutive visits coalesce; earlier visits stay visible.
             history[0].title = title.isEmpty ? (url.host ?? address) : title
             history[0].visitedAt = Date()
         } else {
             history.insert(BrowserHistoryEntry(title: title.isEmpty ? (url.host ?? address) : title, address: address), at: 0)
-            if history.count > Self.historyLimit { history.removeLast(history.count - Self.historyLimit) }
+            if history.count > Self.historyLimit {
+                trimmed = history[Self.historyLimit...].map(\.address)
+                for entry in history[Self.historyLimit...] { visitRevisions.removeValue(forKey: entry.id) }
+                history.removeLast(history.count - Self.historyLimit)
+            }
         }
         // Encoding and disk replacement happen on the ordered worker. Keep an
         // accepted visit in memory if storage fails, and retry on a visit/flush.
         writer?.enqueue(snapshot)
         reloadWindows()
+        // Accepted into in-memory history (as search sees it); the write's outcome is not implied.
+        lastVisitRevision += 1
+        visitRevisions[history[0].id] = lastVisitRevision
+        let token = VisitToken(id: history[0].id, address: address, revision: lastVisitRevision)
+        onHistoryChange?(.visited(history[0]))
+        if !trimmed.isEmpty { onHistoryChange?(.trimmed(addresses: trimmed)) }
+        return token
+    }
+
+    /// The recorded document's title arrived after its visit. Changes only that entry's title: same id,
+    /// visitedAt and position; no event, no new visit. The save is the same ordered write a visit uses.
+    /// False, with nothing changed or written, when the token is stale (a later coalesced revisit, a trim,
+    /// a clear), the address differs, the title is empty or unchanged, or the library can't be changed.
+    @discardableResult func updateVisitTitle(_ title: String, for token: VisitToken) -> Bool {
+        let title = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty, visitRevisions[token.id] == token.revision,
+              let index = history.firstIndex(where: { $0.id == token.id }), history[index].address == token.address,
+              history[index].title != title, canMutate() else { return false }
+        history[index].title = title
+        writer?.enqueue(snapshot)
+        reloadWindows()
+        return true
     }
 
     func recordClosed(tabs: [BrowserTab], split: Bool) {
@@ -121,7 +170,12 @@ struct ClosedRecord: Codable, Identifiable, Equatable {
     }
 
     // Low-level mutations; the native window's Clear buttons confirm first.
-    @discardableResult func clearHistory() -> Bool { commit { history.removeAll() } }
+    @discardableResult func clearHistory() -> Bool {
+        guard commit({ history.removeAll() }) else { return false }
+        visitRevisions.removeAll()
+        onHistoryChange?(.cleared)
+        return true
+    }
     @discardableResult func clearArchive() -> Bool { commit { closedRecords.removeAll() } }
 
     func searchHistory(_ query: String) -> [BrowserHistoryEntry] {
@@ -205,7 +259,7 @@ struct ClosedRecord: Codable, Identifiable, Equatable {
 
     private func acceptLoaded(history entries: [BrowserHistoryEntry], closedRecords records: [ClosedRecord]) {
         var historyIDs = Set<UUID>()
-        history = []
+        history = []; visitRevisions.removeAll()
         for entry in entries {
             guard entry.visitedAt.timeIntervalSince1970.isFinite, Self.webURL(entry.address) != nil,
                   historyIDs.insert(entry.id).inserted else { continue }
@@ -234,7 +288,8 @@ struct ClosedRecord: Codable, Identifiable, Equatable {
               Set(record.tabs.map(\.id)).count == record.tabs.count else { return false }
         if record.split, record.tabs[0].space != record.tabs[1].space { return false }
         return record.tabs.allSatisfy { tab in
-            tab.space >= 0 && (tab.address == "orbit://newtab" || tab.address == "orbit://video" || webURL(tab.address) != nil)
+            tab.space >= 0 && (tab.address == "orbit://newtab" || tab.address == "orbit://video" || webURL(tab.address) != nil
+                                || ArcEaselReference.isReference(tab.address))
         }
     }
     private static func queryWords(_ query: String) -> [String] { query.split(whereSeparator: \.isWhitespace).map(String.init) }
@@ -334,7 +389,9 @@ extension BrowserLibrary {
         if mode == .history {
             rows = library.searchHistory(search.stringValue).map { Row(id: $0.id, title: $0.title, address: $0.address, date: $0.visitedAt) }
         } else {
-            rows = library.searchClosed(search.stringValue).map { Row(id: $0.id, title: $0.tabs.map(\.title).joined(separator: "\n"), address: $0.tabs.map(\.address).joined(separator: "\n"), date: $0.closedAt) }
+            // Display only: restore takes the stored record by id, with its addresses unchanged.
+            rows = library.searchClosed(search.stringValue).map { Row(id: $0.id, title: $0.tabs.map(\.title).joined(separator: "\n"),
+                address: $0.tabs.map { SidebarDisplayPolicy.readableAddress($0.address) }.joined(separator: "\n"), date: $0.closedAt) }
         }
         table.reloadData()
         if let selectedID, let index = rows.firstIndex(where: { $0.id == selectedID }) { table.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false) }

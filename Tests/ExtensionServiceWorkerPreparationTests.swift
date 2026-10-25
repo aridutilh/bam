@@ -143,7 +143,7 @@ import JavaScriptCore
             do { _ = try prepare(url, backup: backupLocation?(url), source: source) } catch { rejected = true }
             try check(rejected && snapshot(url) == before, "Invalid input is rejected without package mutations: \(name)")
         }
-        for (index, path) in ["../outside.js", "/lib/worker.js", "https://example.com/a.js", "lib\\worker.js", "lib//worker.js", "lib/./worker.js", "lib/%2e%2e/a.js", "lib%2fworker.js", "lib/worker.js?x", "lib/worker.js#x", "lib/bad%ZZ.js", ""].enumerated() {
+        for (index, path) in ["../outside.js", "https://example.com/a.js", "lib\\worker.js", "lib//worker.js", "lib/./worker.js", "lib/%2e%2e/a.js", "lib%2fworker.js", "lib/worker.js?x", "lib/worker.js#x", "lib/bad%ZZ.js", ""].enumerated() {
             try reject("path-\(index)", bytes: manifest(worker: path))
         }
         try reject("missing", bytes: manifest(worker: "missing.js"))
@@ -154,6 +154,10 @@ import JavaScriptCore
         try reject("empty-adapter", source: "")
         try reject("large-adapter", source: String(repeating: "x", count: ExtensionPackagePreparation.maximumManifestBytes + 1))
         try reject("inside-backup", backupLocation: { $0.appendingPathComponent("original.json") })
+        try reject("rooted-worker-symlink", bytes: manifest(worker: "/lib/worker.js"), setup: { url in
+            try fm.removeItem(at: url.appendingPathComponent("lib/worker.js"))
+            try fm.createSymbolicLink(at: url.appendingPathComponent("lib/worker.js"), withDestinationURL: url.appendingPathComponent("lib/helper.js"))
+        })
         try reject("worker-symlink", setup: { url in
             try fm.removeItem(at: url.appendingPathComponent("lib/worker.js"))
             try fm.createSymbolicLink(at: url.appendingPathComponent("lib/worker.js"), withDestinationURL: url.appendingPathComponent("lib/helper.js"))
@@ -186,5 +190,123 @@ import JavaScriptCore
         var rejectedTamper = false
         do { _ = try prepare(classic) } catch { rejectedTamper = true }
         try check(rejectedTamper && snapshot(classic) == tampered, "A modified prepared wrapper is rejected without overwriting evidence")
+        // A root-relative worker path ("/js/background.js", as uBlock Origin Lite ships) is the same file
+        // for Chrome; it prepares to package-relative paths. Only one leading slash is accepted.
+        for type in [nil, "module"] as [String?] {
+            let name = "rooted-" + (type ?? "classic")
+            let url = try package(name, try manifest(worker: "/lib/worker.js", type: type), scripts: [:])
+            _ = try prepare(url)
+            let prepared = try object(url.appendingPathComponent("manifest.json"))
+            let rootedMarker = prepared[ExtensionServiceWorkerPreparation.markerKey] as! [String: Any]
+            let entryPath = (prepared["background"] as! [String: Any])["service_worker"] as! String
+            try check(rootedMarker["original"] as? String == "lib/worker.js" && !entryPath.hasPrefix("/") && entryPath.hasPrefix("lib/") &&
+                      ExtensionServiceWorkerPreparation.isPrepared(manifest: prepared), "\(name): a root-relative worker did not prepare to package-relative paths")
+            try check(try prepare(url) == nil, "\(name): a prepared root-relative worker did not verify on repeat")
+            try check(((try object(root.appendingPathComponent(name + "-original.json")))["background"] as? [String: Any])?["service_worker"] as? String == "/lib/worker.js",
+                      "\(name): the preserved original manifest lost the declared root-relative path")
+            try check(try ExtensionServiceWorkerPreparation.refreshAdapter(package: url, originalManifestURL: root.appendingPathComponent(name + "-original.json"), adapterSource: adapter + "// next\n"),
+                      "\(name): a prepared root-relative worker could not refresh its adapter")
+        }
+        // An earlier step (content-script preparation) already saved the original manifest: its declared
+        // root-relative worker must still match, and the saved bytes keep the declared form.
+        do {
+            let original = try manifest(worker: "/lib/worker.js", type: nil)
+            let url = try package("rooted-with-backup", original, scripts: [:])
+            let backupURL = root.appendingPathComponent("rooted-with-backup-original.json")
+            try original.write(to: backupURL)
+            _ = try prepare(url, backup: backupURL)
+            try check(try Data(contentsOf: backupURL) == original &&
+                      ((try object(backupURL))["background"] as? [String: Any])?["service_worker"] as? String == "/lib/worker.js",
+                      "A pre-existing original manifest was not accepted or did not keep the declared root-relative path")
+            try check(try prepare(url, backup: backupURL) == nil, "A root-relative preparation with a pre-existing backup did not verify on repeat")
+        }
+        for (index, path) in ["//lib/worker.js", "/../lib/worker.js", "/", "/lib/../lib/worker.js", "/lib//worker.js", "///lib/worker.js",
+                              "/lib/worker.js?x", "/c:/lib/worker.js", "/lib%2fworker.js", "/lib/%2e%2e/worker.js", "/%2flib/worker.js"].enumerated() {
+            try reject("rooted-\(index)", bytes: manifest(worker: path))
+        }
+        try refreshChecks(root: root, manifest: manifest, package: package, snapshot: snapshot, object: object, adapter: adapter)
+    }
+
+    /// Adapter refresh for existing installs: only Bam's own byte-exact adapter changes.
+    static func refreshChecks(root: URL, manifest: (Any, Any?, Any, Int) throws -> Data, package: (String, Data, [String: String]) throws -> URL,
+                              snapshot: (URL) throws -> [String: Data], object: (URL) throws -> [String: Any], adapter: String) throws {
+        let fm = FileManager.default
+        let newer = adapter + "globalThis.adapterGeneration = 2;\n"
+        func backup(_ url: URL) -> URL { root.appendingPathComponent(url.lastPathComponent + "-original.json") }
+        func metadata(_ url: URL) -> URL { backup(url).appendingPathExtension("worker-preparation.json") }
+        func refresh(_ url: URL, _ source: String) throws -> Bool {
+            try ExtensionServiceWorkerPreparation.refreshAdapter(package: url, originalManifestURL: backup(url), adapterSource: source)
+        }
+        func refused(_ url: URL, _ source: String) -> Bool { do { _ = try refresh(url, source); return false } catch { return true } }
+        func adapterPath(_ url: URL) throws -> String { (try object(url.appendingPathComponent("manifest.json"))[ExtensionServiceWorkerPreparation.markerKey] as! [String: Any])["adapter"] as! String }
+
+        for type in [nil, "module"] as [String?] {
+            let name = "refresh-" + (type ?? "classic")
+            let url = try package(name, try manifest("lib/worker.js", type, ["storage"], 3), [:])
+            // Unprepared packages are left to the reviewed first preparation.
+            let unprepared = try snapshot(url)
+            try check(try !refresh(url, newer) && snapshot(url) == unprepared && !fm.fileExists(atPath: metadata(url).path), "\(name): refresh touched an unprepared package")
+            _ = try ExtensionServiceWorkerPreparation.prepare(package: url, originalManifestURL: backup(url), adapterSource: adapter)
+            let prepared = try snapshot(url), shim = try adapterPath(url)
+            try check(try !refresh(url, adapter) && snapshot(url) == prepared, "\(name): a current adapter was rewritten")
+
+            // Upgrade: only the adapter file changes, and the result is a verified preparation for the new adapter.
+            try check(try refresh(url, newer), "\(name): an outdated adapter was not refreshed")
+            var upgraded = try snapshot(url)
+            try check(upgraded[shim] == Data(newer.utf8), "\(name): adapter bytes were not replaced")
+            upgraded[shim] = prepared[shim]
+            try check(upgraded == prepared, "\(name): refresh changed something other than the adapter")
+            try check(try ExtensionServiceWorkerPreparation.prepare(package: url, originalManifestURL: backup(url), adapterSource: newer) == nil,
+                      "\(name): the refreshed package did not verify as prepared for the new adapter")
+            try check(refused(url, adapter) == false && (try snapshot(url))[shim] == Data(adapter.utf8), "\(name): refresh could not move between Bam adapters")
+
+            // Interrupted refresh: the adapter was written but the metadata was not.
+            try Data(newer.utf8).write(to: url.appendingPathComponent(shim))
+            let interrupted = try snapshot(url)
+            try check(try refresh(url, newer) && snapshot(url) == interrupted, "\(name): an interrupted refresh was not completed")
+            try check(try ExtensionServiceWorkerPreparation.prepare(package: url, originalManifestURL: backup(url), adapterSource: newer) == nil, "\(name): repaired metadata did not verify")
+
+            // A real metadata-write failure after the adapter write: the next refresh completes it.
+            try check(try refresh(url, adapter), "\(name): could not reset before the failure case")
+            let metadataFolder = metadata(url).deletingLastPathComponent()
+            try fm.setAttributes([.posixPermissions: 0o555], ofItemAtPath: metadataFolder.path)
+            let failedWrite = refused(url, newer)
+            try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: metadataFolder.path)
+            try check(failedWrite && (try Data(contentsOf: url.appendingPathComponent(shim))) == Data(newer.utf8),
+                      "\(name): the metadata write did not fail after the adapter write")
+            try check(try refresh(url, newer) && ExtensionServiceWorkerPreparation.prepare(package: url, originalManifestURL: backup(url), adapterSource: newer) == nil,
+                      "\(name): the next refresh did not complete an interrupted metadata write")
+
+            // Tampering anywhere is refused without changes, and a tampered adapter is never trusted or replaced.
+            try Data("// edited adapter\n".utf8).write(to: url.appendingPathComponent(shim))
+            let edited = try snapshot(url), editedMetadata = try Data(contentsOf: metadata(url))
+            try check(refused(url, adapter) && snapshot(url) == edited && (try Data(contentsOf: metadata(url))) == editedMetadata, "\(name): an edited adapter was replaced")
+            try Data(newer.utf8).write(to: url.appendingPathComponent(shim))
+            let markerSource = (try object(url.appendingPathComponent("manifest.json"))[ExtensionServiceWorkerPreparation.markerKey] as! [String: Any])["source"] as! String
+            let vendor = try Data(contentsOf: url.appendingPathComponent(markerSource))
+            try Data("// changed vendor source\n".utf8).write(to: url.appendingPathComponent(markerSource))
+            try check(refused(url, adapter) && (try Data(contentsOf: url.appendingPathComponent(shim))) == Data(newer.utf8), "\(name): refresh accepted a changed vendor script")
+            try vendor.write(to: url.appendingPathComponent(markerSource))
+            let original = try Data(contentsOf: backup(url))
+            try Data("{}".utf8).write(to: backup(url))
+            try check(refused(url, adapter), "\(name): refresh accepted a changed original-manifest backup")
+            try original.write(to: backup(url))
+            let entryPath = (try object(url.appendingPathComponent("manifest.json"))["background"] as! [String: Any])["service_worker"] as! String
+            let loader = try Data(contentsOf: url.appendingPathComponent(entryPath))
+            try Data("importScripts('evil.js');\n".utf8).write(to: url.appendingPathComponent(entryPath))
+            try check(refused(url, adapter), "\(name): refresh accepted a changed entry loader")
+            try loader.write(to: url.appendingPathComponent(entryPath))
+            try fm.removeItem(at: url.appendingPathComponent(shim))
+            try fm.createSymbolicLink(at: url.appendingPathComponent(shim), withDestinationURL: url.appendingPathComponent("lib/helper.js"))
+            try check(refused(url, adapter), "\(name): refresh followed a symbolic-link adapter")
+            try fm.removeItem(at: url.appendingPathComponent(shim)); try Data(newer.utf8).write(to: url.appendingPathComponent(shim))
+            try check(try refresh(url, adapter), "\(name): a restored package could not be refreshed")
+            // Metadata from another preparation schema is never rewritten here.
+            let current = try Data(contentsOf: metadata(url))
+            var other = try JSONSerialization.jsonObject(with: current) as! [String: Any]; other["schemaVersion"] = 1
+            try JSONSerialization.data(withJSONObject: other).write(to: metadata(url))
+            let otherSchema = try snapshot(url), otherMetadata = try Data(contentsOf: metadata(url))
+            try check(try !refresh(url, newer) && snapshot(url) == otherSchema && Data(contentsOf: metadata(url)) == otherMetadata, "\(name): refresh rewrote another schema's preparation")
+        }
     }
 }
