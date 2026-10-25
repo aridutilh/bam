@@ -499,6 +499,45 @@ enum ExtensionCompatibility {
         managedStorage = ns;
       }
 
+      // declarativeNetRequest: refuse added rules that WebKit would apply more broadly than written. Measured:
+      // a rule whose excludedResourceTypes covers every type WebKit supports matched an XHR (WebKit does not
+      // validate exclusions and writes an empty resource-type list). Valid updates reach WebKit's own method with
+      // the original receiver, arguments, callback and return value. A refused update never reaches WebKit:
+      // the promise form rejects; the callback form throws synchronously, because Bam cannot set
+      // runtime.lastError and a callback without an error would look like success.
+      const webkitResourceTypes = ["font", "image", "main_frame", "media", "other", "ping", "script", "stylesheet", "sub_frame", "websocket", "xmlhttprequest"];
+      const broadeningReason = (rule) => {
+        const excluded = rule && rule.condition && rule.condition.excludedResourceTypes;
+        if (Array.isArray(excluded) && webkitResourceTypes.every((type) => excluded.includes(type))) {
+          return "Rule with id " + (rule && rule.id) + " excludes every resource type this browser supports, so it would match all requests here.";
+        }
+        return null;
+      };
+      const dnrGuardHeld = [];
+      const applyDNRGuard = () => {
+        for (const root of new Set([globalThis.browser, globalThis.chrome])) {
+          const holder = root && root.declarativeNetRequest;
+          if (!holder) continue;
+          for (const name of ["updateDynamicRules", "updateSessionRules"]) {
+            const native = holder[name];
+            if (typeof native !== "function" || native.__bamDNRGuard) continue;
+            const guarded = function (options, ...rest) {
+              const added = options && Array.isArray(options.addRules) ? options.addRules : [];
+              for (const rule of added) {
+                const reason = broadeningReason(rule);
+                if (!reason) continue;
+                const error = new Error(reason);
+                if (typeof rest[rest.length - 1] === "function") throw error;
+                return Promise.reject(error);
+              }
+              return native.apply(this && typeof this === "object" ? this : holder, [options, ...rest]);
+            };
+            Object.defineProperty(guarded, "__bamDNRGuard", { value: true });
+            try { Object.defineProperty(holder, name, { value: guarded, writable: true, configurable: true, enumerable: true }); dnrGuardHeld.push(holder); } catch (error) {}
+          }
+        }
+      };
+
       // Members added to WebKit's own namespaces. WebKit can hand the page a
       // fresh namespace object after document start (observed with 1Password's
       // HTML background page, where webNavigation lost members added at start),
@@ -512,6 +551,7 @@ enum ExtensionCompatibility {
       // members added here. Holding them keeps the same objects alive.
       const held = {};
       const applyExtensions = () => {
+        applyDNRGuard();
         let missing = false;
         for (const x of extensions) {
           const holder = api[x.ns];
