@@ -9,6 +9,8 @@ import WebKit
 /// `contentWindow.focus()`, child timer), or `c` (pointer-click positive control). Real keys and clicks are root's only.
 /// Page-side evidence is passive and reaches the host only through a run-unique host-world script message handler; the
 /// host evaluates no page JavaScript. Results are observations; nothing here attributes a cause to WebKit or Bam.
+/// `BAM_FOCUS_HOST=plain` hosts the same page in a bare WKWebView (no BrowserController) with the same kind of owned
+/// transient extension host, to compare Bam's browser layer against WebKit alone.
 @available(macOS 15.4, *)
 @MainActor final class ExtensionFocusProbe {
     private static var current: ExtensionFocusProbe?
@@ -323,6 +325,13 @@ import WebKit
     private var extensionID: UUID?
     private var hostStorage: URL?
     private var tabID: UUID?
+    /// `BAM_FOCUS_HOST`: `bam` (BrowserController tab) or `plain` (bare WKWebView); both use these shared references.
+    private var hostMode: Rules.Host = .bam
+    private var extensionHost: BrowserExtensions?
+    private var profileID: UUID?
+    private var plainWeb: WKWebView?
+    /// The probe page's web view in either host.
+    private func probeWeb() -> WKWebView? { plainWeb ?? tabID.flatMap { controller?.browsers[$0] } }
     private var probeCase: Rules.Case?
     private var structure: Set<Rules.Factor> = []
     private let runToken = UUID().uuidString
@@ -345,7 +354,7 @@ import WebKit
 
     /// This run's world, main frame, probe tab and exact probe URL, bounded shape; evidence only, nothing is granted.
     private func receive(_ message: WKScriptMessage) {
-        guard message.world == hostWorld, message.frameInfo.isMainFrame, let id = tabID, message.webView === controller?.browsers[id],
+        guard message.world == hostWorld, message.frameInfo.isMainFrame, let web = probeWeb(), message.webView === web,
               let expected = probePageURL, message.frameInfo.request.url?.absoluteString == expected.absoluteString,
               let body = message.body as? [String: Any], body.count <= 6, let event = body["event"] as? String, ["ready", "state"].contains(event),
               body["perf"] is NSNumber, body["wall"] is NSNumber else { rejectedHostMessages += 1; return }
@@ -372,7 +381,7 @@ import WebKit
         entry["key_window_is_probe"] = key != nil && key === window
         let responder = window?.firstResponder
         entry["first_responder_class"] = responder.map { String(describing: type(of: $0)) } ?? "none"
-        if let id = tabID, let web = controller?.browsers[id], let view = responder as? NSView {
+        if let web = probeWeb(), let view = responder as? NSView {
             entry["first_responder_is_tab_web_view"] = view === web
             entry["first_responder_inside_tab_web_view"] = view === web || view.isDescendant(of: web)
         } else { entry["first_responder_inside_tab_web_view"] = false }
@@ -413,6 +422,14 @@ import WebKit
             throw BrowserExtensions.failure("Set BAM_FOCUS_CASE to <so|xo|ex>:<p1|p2|p3|p4|c>, one case per run")
         }
         self.probeCase = probeCase
+        guard let hostMode = Rules.parseHost(env["BAM_FOCUS_HOST"]) else {
+            throw BrowserExtensions.failure("BAM_FOCUS_HOST must be bam (default) or plain")
+        }
+        self.hostMode = hostMode
+        observations["host"] = hostMode.rawValue
+        if hostMode == .plain {
+            observations["scope"] = "original MV3 fixture (content script and one web-accessible child page; no API permissions) on the loopback page; PLAIN host: a bare WKWebView in its own window registered as the extension host's only tab surface (no BrowserController, sidebar, overlays or Bam navigation/UI delegates); owned transient extension host with a non-persistent controller and data store; passive host-world observation; no page JavaScript evaluated by the host; measurement only, no WebKit or Bam root-cause attribution"
+        }
         guard let structure = Rules.parseStructure(env["BAM_FOCUS_STRUCTURE"]) else {
             throw BrowserExtensions.failure("BAM_FOCUS_STRUCTURE must be none, vimium, vimium-minus-<factor> or a comma list of " +
                                             Rules.Factor.allCases.map(\.rawValue).joined(separator: "/"))
@@ -443,27 +460,38 @@ import WebKit
         let package = directory.appendingPathComponent("package", isDirectory: true)
         try Self.writePackage(to: package)
 
-        let home = BrowserTab(title: "Focus probe", address: "orbit://newtab", space: 0)
-        let browser = BrowserController(sessionURL: directory.appendingPathComponent("session.json"), ephemeral: true)
-        browser.session = BrowserSession(tabs: [home], activeID: home.id)
-        // Bam's own automatic page evaluations are off before any page loads (property sets; nothing written to preferences).
-        browser.automaticallyShowsVideo = false
-        browser.documentFaviconDiscoveryEnabled = false
-        browser.automaticTabSleeping = false
-        observations["host_automatic_page_evaluations"] = ["favicon_document_discovery": "disabled", "tab_sleep_activity_inspection": "disabled",
-                                                           "automatic_playing_video_pip": "disabled"]
-        controller = browser
         let main = NSWindow(contentRect: NSRect(x: 140, y: 120, width: 900, height: 640), styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
         main.isReleasedWhenClosed = false
-        main.title = "Bam focus probe \(probeCase.label) \(runToken.prefix(8))"
-        main.contentViewController = browser
-        main.setContentSize(NSSize(width: 900, height: 640))
-        browser.view.frame = NSRect(x: 0, y: 0, width: 900, height: 640)
-        window = main; main.makeKeyAndOrderFront(nil)
-        browser.layoutBrowser(); browser.view.layoutSubtreeIfNeeded()
+        main.title = "Bam focus probe \(hostMode == .plain ? "plain " : "")\(probeCase.label) \(runToken.prefix(8))"
+        let host: BrowserExtensions, profile: UUID
+        var browser: BrowserController?
+        if hostMode == .bam {
+            let home = BrowserTab(title: "Focus probe", address: "orbit://newtab", space: 0)
+            let bam = BrowserController(sessionURL: directory.appendingPathComponent("session.json"), ephemeral: true)
+            bam.session = BrowserSession(tabs: [home], activeID: home.id)
+            // Bam's own automatic page evaluations are off before any page loads (property sets; nothing written to preferences).
+            bam.automaticallyShowsVideo = false
+            bam.documentFaviconDiscoveryEnabled = false
+            bam.automaticTabSleeping = false
+            observations["host_automatic_page_evaluations"] = ["favicon_document_discovery": "disabled", "tab_sleep_activity_inspection": "disabled",
+                                                               "automatic_playing_video_pip": "disabled"]
+            controller = bam; browser = bam
+            main.contentViewController = bam
+            main.setContentSize(NSSize(width: 900, height: 640))
+            bam.view.frame = NSRect(x: 0, y: 0, width: 900, height: 640)
+            window = main; main.makeKeyAndOrderFront(nil)
+            bam.layoutBrowser(); bam.view.layoutSubtreeIfNeeded()
+            host = bam.browserExtensions; profile = bam.session.currentProfileID
+        } else {
+            // Plain host: no BrowserController, sidebar, overlays, Bam navigation/UI delegates or Bam page evaluations. The same
+            // kind of owned transient extension host and non-persistent controller as the ephemeral Bam browser uses.
+            host = BrowserExtensions(storageURL: nil, isPrivate: true)
+            profile = UUID()
+            window = main; main.makeKeyAndOrderFront(nil)
+            observations["host_automatic_page_evaluations"] = "none (plain WKWebView: no Bam browser layer)"
+        }
+        extensionHost = host; profileID = profile
         observations["window_title"] = main.title
-
-        let host = browser.browserExtensions
         host.onReloadNeeded = nil
         hostStorage = host.storageURL
         host.permissionPrompt = { [weak self] review in
@@ -473,9 +501,8 @@ import WebKit
                                   "websites": review.websites, "answer": allowed ? "approved (install, loopback only)" : "denied"])
             return allowed
         }
-        let profile = browser.session.currentProfileID
         let configuration = WKWebViewConfiguration()
-        configuration.websiteDataStore = browser.profileStores.store(for: profile)
+        configuration.websiteDataStore = browser.map { $0.profileStores.store(for: profile) } ?? .nonPersistent()
         host.configure(configuration, profileID: profile)
         await host.ready(profileID: profile)
         let id = try await host.importPackage(at: package, profileID: profile)
@@ -485,19 +512,40 @@ import WebKit
         }
         observations["granted_permissions"] = context.grantedPermissions.keys.map(\.rawValue).sorted()
 
-        // The plain page first (no marker: the content script stays inert), then the observer, then the probe page.
-        guard let opened = browser.openProfileTab(page, profileID: profile, active: true) else { throw BrowserExtensions.failure("Could not open the loopback tab") }
-        tabID = opened
-        browser.select(opened); browser.refresh()
         let setupDeadline = started + 15
-        guard try await poll(until: setupDeadline, { browser.browsers[opened]?.url == page && browser.browsers[opened]?.isLoading == false }),
-              let web = browser.browsers[opened] else { throw BrowserExtensions.failure("The loopback fixture page did not load") }
-        let content = web.configuration.userContentController
-        let proxy = HostMessages(); proxy.owner = self; messageProxy = proxy; observedContent = content
-        content.add(proxy, contentWorld: hostWorld, name: Self.hostMessageName)
-        content.addUserScript(WKUserScript(source: Self.hostScript, injectionTime: .atDocumentStart, forMainFrameOnly: true, in: hostWorld))
-        probePageURL = probePage
-        browser.navigatePane(opened, address: probePage.absoluteString)
+        let installObserver = { (content: WKUserContentController) in
+            let proxy = HostMessages(); proxy.owner = self; self.messageProxy = proxy; self.observedContent = content
+            content.add(proxy, contentWorld: self.hostWorld, name: Self.hostMessageName)
+            content.addUserScript(WKUserScript(source: Self.hostScript, injectionTime: .atDocumentStart, forMainFrameOnly: true, in: self.hostWorld))
+        }
+        let opened: UUID
+        if let browser {
+            // The plain page first (no marker: the content script stays inert), then the observer, then the probe page.
+            guard let tab = browser.openProfileTab(page, profileID: profile, active: true) else { throw BrowserExtensions.failure("Could not open the loopback tab") }
+            opened = tab; tabID = tab
+            browser.select(tab); browser.refresh()
+            guard try await poll(until: setupDeadline, { browser.browsers[tab]?.url == page && browser.browsers[tab]?.isLoading == false }),
+                  let web = browser.browsers[tab] else { throw BrowserExtensions.failure("The loopback fixture page did not load") }
+            installObserver(web.configuration.userContentController)
+            probePageURL = probePage
+            browser.navigatePane(tab, address: probePage.absoluteString)
+        } else {
+            // Plain: we own the configuration, so the observer is installed before the first (probe-page) load. The web view
+            // is registered as the host's one tab surface so the extension runtime sees it as a tab.
+            opened = UUID(); tabID = opened
+            installObserver(configuration.userContentController)
+            let web = WKWebView(frame: NSRect(x: 0, y: 0, width: 900, height: 640), configuration: configuration)
+            plainWeb = web
+            main.contentView = web
+            host.surfaces = { [weak web, weak main] requested in
+                guard requested == profile, let web else { return [] }
+                return [BrowserExtensionSurface(id: opened, title: "Focus probe", url: web.url, webView: web, window: main, isActive: true, isSelected: true)]
+            }
+            host.reconcile()
+            probePageURL = probePage
+            web.load(URLRequest(url: probePage))
+            main.makeFirstResponder(web)
+        }
 
         // Handshake before READY: the child's ready acknowledgement and the parent's armed record, both preloaded. With
         // `lazy` the child is created by the trigger, so only the parent's armed record precedes READY.
@@ -506,7 +554,8 @@ import WebKit
             throw BrowserExtensions.failure(hostReady ? "The child frame did not complete the handshake (\(probeCase.frame.rawValue) child)"
                                                       : "The passive host-world observer did not report from the probe page")
         }
-        main.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true); browser.select(opened)
+        main.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
+        if let browser { browser.select(opened) } else if let web = plainWeb { main.makeFirstResponder(web) }
         snapshotResponder("ready")
 
         if probeCase.pattern == .c {
@@ -600,24 +649,31 @@ import WebKit
             report["host_message_handler_removed"] = true
         }
         messageProxy?.owner = nil; messageProxy = nil
-        if let id = extensionID, let browser = controller {
+        // Same removal and confirmation in both hosts, through the shared extension host and profile.
+        if let id = extensionID, let host = extensionHost, let profile = profileID {
             final class Outcome { var done = false; var error: String? }
             let outcome = Outcome()
             let removal = Task { @MainActor in
-                do { try await browser.browserExtensions.remove(id: id) } catch { outcome.error = String(describing: error) }
+                do { try await host.remove(id: id) } catch { outcome.error = String(describing: error) }
                 outcome.done = true
             }
             let deadline = ProcessInfo.processInfo.systemUptime + 3
             while !outcome.done, ProcessInfo.processInfo.systemUptime < deadline { try? await Task.sleep(nanoseconds: 50_000_000) }
             if !outcome.done { removal.cancel(); report["fixture_removal_timed_out"] = true }
             if let error = outcome.error { report["fixture_removal_error"] = error }
-            let host = browser.browserExtensions
             report["fixture_removed"] = outcome.done && outcome.error == nil && host.context(for: id) == nil
-                && !host.items(profileID: browser.session.currentProfileID).contains { $0.id == id }
+                && !host.items(profileID: profile).contains { $0.id == id }
         }
-        controller?.prepareToClose(persistSession: false)
-        window?.contentViewController = nil; window?.orderOut(nil); window?.close()
-        controller = nil; window = nil
+        if let browser = controller {
+            browser.prepareToClose(persistSession: false)   // also shuts its extension host down
+        } else if let host = extensionHost {
+            // Plain host: stop the page, detach the surface, shut the host down (removes its temporary storage).
+            plainWeb?.stopLoading()
+            host.surfaces = nil
+            host.shutdown()
+        }
+        window?.contentViewController = nil; window?.contentView = nil; window?.orderOut(nil); window?.close()
+        controller = nil; window = nil; plainWeb = nil; extensionHost = nil
         let fm = FileManager.default
         if let storage = hostStorage {
             if storage.standardizedFileURL.path.hasPrefix(fm.temporaryDirectory.standardizedFileURL.path + "/") {

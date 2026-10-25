@@ -21,6 +21,16 @@ enum ExtensionFocusProbeRules {
         return Case(frame: frame, pattern: pattern)
     }
 
+    /// Where the fixture page is hosted, from `BAM_FOCUS_HOST`: `bam` (default) is a real Bam window and tab
+    /// (BrowserController); `plain` is a bare WKWebView in its own window with no BrowserController, sidebar, overlays or Bam
+    /// navigation/UI delegates, but the same owned transient extension host, controller and non-persistent data store.
+    enum Host: String, CaseIterable { case bam, plain }
+    /// Absent → `bam` (the reviewed default); `bam` or `plain`; anything else is refused (nil).
+    static func parseHost(_ raw: String?) -> Host? {
+        guard let raw else { return .bam }
+        return Host(rawValue: raw.trimmingCharacters(in: .whitespaces).lowercased())
+    }
+
     /// Vimium-like structural factors (original code only), from `BAM_FOCUS_STRUCTURE`.
     /// Not Comparable on purpose: a module-level `<` overload slows type-checking of unrelated expressions.
     enum Factor: String, CaseIterable {

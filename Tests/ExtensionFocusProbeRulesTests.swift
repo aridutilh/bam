@@ -224,6 +224,11 @@ import Foundation
         malformedSnapshot.ingest(state: snapshot(1...2), run: "RUN-1", case: xo, phase: "trigger")
         check(malformedSnapshot.faults == ["a snapshot contained malformed records"], "a malformed snapshot is a permanent fault")
 
+        // Host (BAM_FOCUS_HOST): absent keeps the reviewed Bam host; only bam/plain are accepted.
+        check(R.parseHost(nil) == .bam && R.parseHost("bam") == .bam && R.parseHost(" PLAIN ") == .plain, "absent is bam; bam and plain parse")
+        check(R.parseHost("") == nil && R.parseHost("safari") == nil && R.parseHost("plain,bam") == nil, "anything else is refused")
+        check(R.Host.allCases == [.bam, .plain], "exactly two hosts")
+
         // Structure (BAM_FOCUS_STRUCTURE): parsing, canonical labels and the lazy handshake contract.
         let all = Set(R.Factor.allCases)
         check(R.parseStructure(nil) == [] && R.parseStructure("") == [] && R.parseStructure(" none ") == [], "absent/none is the reviewed baseline")
