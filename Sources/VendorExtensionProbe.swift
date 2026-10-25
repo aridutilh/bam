@@ -38,6 +38,8 @@ import WebKit
     private var observations: [String: Any] = ["scope": "official Chrome Web Store CRX, signature verified for the requested ID; fresh private profile and temporary extension storage; no sign-in; no native companion; no compatibility claim"]
     private var blockedNavigations: [[String: Any]] = []
     private var reviewEvents: [[String: Any]] = []
+    /// IDs seeded by BAM_VENDOR_SEED_BOOKMARKS (empty when off), for the no-loaded-views check.
+    private var seededBookmarkIDs: [UUID] = []
     /// Opt-in normal-profile mode (`BAM_VENDOR_PROFILE=normal`): this run's own identities,
     /// directory and isolated website store; nil in today's default private mode.
     private struct NormalRun {
@@ -203,10 +205,20 @@ import WebKit
             throw BrowserExtensions.failure("BAM_VENDOR_PROFILE must be private (default) or normal")
         }
         observations["profile_mode"] = mode.rawValue
+        // Opt-in bookmark fixture: decided (and refused) before anything is created or mutated.
+        let seedDecision = BookmarkVendorSeed.decide(flag: env[BookmarkVendorSeed.flag], isNormalMode: mode == .normal, site: env["BAM_VENDOR_SITE"])
+        if case .refused(let why) = seedDecision { throw BrowserExtensions.failure(why) }
         let home = BrowserTab(title: "Vendor observation", address: "orbit://newtab", space: 0)
         let browser: BrowserController
         if mode == .normal {
             browser = try makeNormalController(home: home)
+            // Into the run's own profile and Space, before any view or page exists; the blank tab stays selected.
+            if case .seed(let origin) = seedDecision, let run = normalRun {
+                let seeded = BookmarkVendorSeed.seed(into: &browser.session, profileID: run.ids.profile, space: 0, origin: origin)
+                seededBookmarkIDs = Array(seeded.ids.values)
+                observations["bookmark_seed"] = ["items": seeded.itemCount, "bookmark_pages": seeded.bookmarkPages,
+                                                 "ids": seeded.ids.mapValues(\.uuidString)]
+            }
             observations["scope"] = "official Chrome Web Store CRX, signature verified for the requested ID; normal (non-private) semantics on a new random profile whose website store is task-owned and removed; non-persistent extension controller configuration; run-directory session and extension storage; no sign-in; no native companion; no compatibility claim"
         } else {
             let sessionURL = FileManager.default.temporaryDirectory.appendingPathComponent("unused-vendor-probe-\(UUID().uuidString).json")
@@ -226,6 +238,9 @@ import WebKit
         browser.view.frame = NSRect(x: 0, y: 0, width: 920, height: 680)
         window = main; main.makeKeyAndOrderFront(nil)
         browser.layoutBrowser(); browser.view.layoutSubtreeIfNeeded()
+        if !seededBookmarkIDs.isEmpty {
+            observations["bookmark_seed_views_loaded_after_layout"] = seededBookmarkIDs.filter { browser.browsers[$0] != nil }.count
+        }
 
         let host = browser.browserExtensions
         host.onReloadNeeded = nil
@@ -577,6 +592,10 @@ import WebKit
         }
         // Normal mode is only claimed when measured; otherwise it is reported as not normal or unmeasured.
         var modeValid = true
+        if !seededBookmarkIDs.isEmpty, let browser = controller {
+            // Seeded items stay dormant unless the extension or the operator opens one.
+            observations["bookmark_seed_views_loaded_at_end"] = seededBookmarkIDs.filter { browser.browsers[$0] != nil }.count
+        }
         if let run = normalRun {
             observations["opened_persistent_store_ids"] = run.stores.openedPersistentIdentifiers.map(\.uuidString)
             observations["unlisted_profile_requests"] = run.stores.unlistedProfileRequests.map(\.uuidString)
