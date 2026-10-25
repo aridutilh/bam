@@ -40,6 +40,14 @@ struct BrowserExtensionRecord: Codable, Identifiable {
     var safariBundle: SafariExtensionBundle? = nil
     /// Separately reviewed desktop host, scoped by this record's extension/profile.
     var nativeHost: ExtensionNativeMessaging.Host? = nil
+    /// Static declarativeNetRequest disclosure for `version`; replaced (never appended) when re-audited.
+    var staticRuleAudit: ExtensionStaticRuleAudit? = nil
+    /// Everything Bam discloses about this install: the current static-rule audit first (it can change what the
+    /// extension does), then preparation notes.
+    var disclosedNote: String? {
+        let notes = [staticRuleAudit?.note, compatibilityNote].compactMap { $0 }
+        return notes.isEmpty ? nil : notes.joined(separator: " ")
+    }
 }
 
 /// Lightweight native action state for visible chrome. Reading it never opens a popup.
@@ -426,6 +434,14 @@ struct BrowserExtensionPermissionReview {
         replacement.name = ext.displayName ?? before.name; replacement.version = ext.version ?? ""
         replacement.compatibilityNote = note; replacement.catalog = catalog
         replacement.safariBundle = safariBundle
+        // The new package's own static-rule audit (Safari bundles are not audited); load keeps it while current.
+        if safariBundle == nil {
+            let package = incoming, version = replacement.version
+            replacement.staticRuleAudit = await Task.detached(priority: .utility) { ExtensionStaticRuleAudit.audit(package: package, version: version) }.value
+            try Task.checkCancellation()
+            guard !stopped, mutationRevisions[id, default: 0] == initialRevision,
+                  runtime.contexts[id] === oldContext else { throw BrowserExtensionUpdateCancelled(name: before.name) }
+        } else { replacement.staticRuleAudit = nil }
         if !Self.supportsNativeCompanion(replacement) || !ext.requestedPermissions.contains(.init(rawValue: "nativeMessaging")) { replacement.nativeHost = nil }
         if before.enabled {
             let requested = Set(ext.requestedPermissions.map(\.rawValue))
@@ -434,7 +450,7 @@ struct BrowserExtensionPermissionReview {
             let patterns = ext.allRequestedMatchPatterns.map(\.string).sorted()
             let review = BrowserExtensionPermissionReview(name: replacement.name, profileName: profileName?(before.profileID) ?? "Current profile",
                 permissions: supported.sorted(), websites: patterns, unsupported: requested.subtracting(supported).subtracting(bridged).subtracting(Self.supportsNativeCompanion(replacement) ? ["nativeMessaging"] : []).sorted(),
-                isOptional: false, compatibilityNote: note, bridged: bridged,
+                isOptional: false, compatibilityNote: replacement.disclosedNote, bridged: bridged,
                 nativeCompanionAvailable: Self.supportsNativeCompanion(replacement) && requested.contains("nativeMessaging"))
             guard approve(review) else { throw BrowserExtensionUpdateCancelled(name: before.name) }
             try Task.checkCancellation()
@@ -638,6 +654,17 @@ struct BrowserExtensionPermissionReview {
                 }
             }
         }
+        // Static declarativeNetRequest disclosure: read-only, once per extension version and audit format, off the
+        // main actor. New installs, updates (which reset it) and installs from an earlier Bam all pass here.
+        if record.safariBundle == nil, record.staticRuleAudit?.isCurrent(for: record.version) != true {
+            let package = packageURL(record), version = record.version
+            let audit = await Task.detached(priority: .utility) { ExtensionStaticRuleAudit.audit(package: package, version: version) }.value
+            try Task.checkCancellation()
+            guard !stopped, loadGeneration[id] == token else { return }
+            if let index = records.firstIndex(where: { $0.id == id }), records[index].version == version {
+                records[index].staticRuleAudit = audit; record.staticRuleAudit = audit; try persist()
+            }
+        }
         let ext: WKWebExtension
         if let safari = record.safariBundle {
             try safariImporter.validate(safari)
@@ -660,7 +687,7 @@ struct BrowserExtensionPermissionReview {
             let supported = requested.intersection(Self.supportedPermissions)
             let patterns = ext.allRequestedMatchPatterns.map(\.string).sorted()
             let details = BrowserExtensionPermissionReview(name: record.name, profileName: profileName?(record.profileID) ?? "Current profile", permissions: supported.sorted(), websites: patterns,
-                unsupported: requested.subtracting(supported).subtracting(bridged).subtracting(Self.supportsNativeCompanion(record) ? ["nativeMessaging"] : []).sorted(), isOptional: false, compatibilityNote: record.compatibilityNote, bridged: bridged,
+                unsupported: requested.subtracting(supported).subtracting(bridged).subtracting(Self.supportsNativeCompanion(record) ? ["nativeMessaging"] : []).sorted(), isOptional: false, compatibilityNote: record.disclosedNote, bridged: bridged,
                 nativeCompanionAvailable: Self.supportsNativeCompanion(record) && requested.contains("nativeMessaging"))
             guard approve(details) else { changed(); return }
             try Task.checkCancellation()
