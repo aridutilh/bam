@@ -53,7 +53,7 @@ import WebKit
             chrome.cookies.onChanged.addListener(info => cookieEvents.push({type: typeof info, removed: info?.removed, name: info?.cookie?.name, cause: info?.cause}));
             // Diagnostics only (never delivered to the fixture's listener): raw firings of WebKit's own event.
             const nativeCookieFires = [];
-            globalThis.__bamCompatibility?.cookies?.nativeEvent?.addListener((...args) => nativeCookieFires.push(args.length));
+            globalThis.__bamCompatibility?.cookies?.rawAddListener?.((...args) => nativeCookieFires.push(args.length));
             // A class whose dispose key is computed at load, as wasm-bindgen and TypeScript `using` emit.
             class FixtureResource { [Symbol.dispose]() { return 'released'; } }
             const disposal = typeof Symbol.dispose === 'symbol' && typeof Symbol.asyncDispose === 'symbol' &&
@@ -80,10 +80,14 @@ import WebKit
               catch (error) { return String(error); }
             };
             api.runtime.onMessage.addListener(async message => {
+              if (message?.kind === 'last-error') {
+                return new Promise(resolve => chrome.fontSettings.setFont({genericFamily: 'serif', fontId: 'Fixture'}, () => resolve({lastError: chrome.runtime.lastError ? String(chrome.runtime.lastError.message) : null})));
+              }
               if (message?.kind === 'cookie-diagnostics') {
                 const describe = async details => { try { const list = await chrome.cookies.getAll(details); return {count: list.length, hasFixture: list.some(c => c.name === 'bam-fixture-cookie')}; } catch (error) { return 'error: ' + String(error?.message || error); } };
                 const proto = Object.getPrototypeOf(chrome.cookies), descriptor = proto && Object.getOwnPropertyDescriptor(proto, 'onChanged');
                 return {events: cookieEvents.slice(), nativeFires: nativeCookieFires.slice(), adapterInstalled: !!globalThis.__bamCompatibility?.cookies,
+                  intercepting: !!globalThis.__bamCompatibility?.cookies?.intercepting, listenerIsBam: chrome.cookies.onChanged.addListener === browser.cookies.onChanged.addListener && chrome.cookies.onChanged.hasListeners?.() === true,
                   sameEvent: chrome.cookies.onChanged === browser.cookies.onChanged, sameNamespace: chrome.cookies === browser.cookies,
                   marker: !!chrome.cookies.__bamChangeInfo, prototypeIsObject: proto === Object.prototype,
                   prototypeDescriptor: descriptor ? {configurable: descriptor.configurable, hasValue: 'value' in descriptor, hasGetter: typeof descriptor.get === 'function'} : null,
@@ -345,6 +349,13 @@ import WebKit
         try check(runtimeA.compatibility.offscreen.entry(for: contextA.uniqueIdentifier)?.isLoaded == false && runtimeB.compatibility.offscreen.has(contextB.uniqueIdentifier),
                   "Offscreen documents were not reopened for the lifecycle checks")
         weak var revokedWeb = runtimeA.compatibility.offscreen.currentDocument(for: contextA.uniqueIdentifier)
+        // Measurement only: whether a shimmed callback-form failure exposes runtime.lastError natively
+        // (WebKit's runtime.lastError is a native attribute Bam may not be able to shadow).
+        let pageLastError = (try? await popupA.callAsyncJavaScript("""
+            return await new Promise(resolve => chrome.fontSettings.setFont({genericFamily: 'serif', fontId: 'Fixture'}, () => resolve(chrome.runtime.lastError ? String(chrome.runtime.lastError.message) : null)));
+            """, arguments: [:], contentWorld: .page)) ?? nil
+        let workerLastError = await request(popupA, kind: "last-error")?["lastError"]
+        print("EXTENSION_LASTERROR page=\(String(describing: pageLastError)) worker=\(String(describing: workerLastError))"); fflush(stdout)
         // cookies.onChanged on real WebKit: a loopback cookie set and deleted in profile A's own store
         // reaches A's worker as Chrome-shaped changeInfo; profile B's worker sees nothing.
         let fixtureCookie = HTTPCookie(properties: [.name: "bam-fixture-cookie", .value: "1", .domain: "127.0.0.1", .path: "/"])!
@@ -361,8 +372,9 @@ import WebKit
         } catch {
             let storeHas = await configA.websiteDataStore.httpCookieStore.allCookies().contains { $0.name == "bam-fixture-cookie" }
             let diagnostics = await cookieDiagnostics()
-            print("EXTENSION_COOKIE_DIAGNOSTICS storeHasCookie=\(storeHas) worker=\(diagnostics)"); fflush(stdout)
-            throw Failure(description: "Setting a cookie did not reach the worker's cookies.onChanged as changeInfo (storeHasCookie=\(storeHas)): \(diagnostics)")
+            let privateAccess = "contextPrivateAccess=\(contextA.hasAccessToPrivateData) storePersistent=\(configA.websiteDataStore.isPersistent)"
+            print("EXTENSION_COOKIE_DIAGNOSTICS storeHasCookie=\(storeHas) \(privateAccess) worker=\(diagnostics)"); fflush(stdout)
+            throw Failure(description: "Setting a cookie did not reach the worker's cookies.onChanged as changeInfo (storeHasCookie=\(storeHas), \(privateAccess)): \(diagnostics)")
         }
         await configA.websiteDataStore.httpCookieStore.deleteCookie(fixtureCookie)
         try await wait("Deleting a cookie did not reach the worker's cookies.onChanged as changeInfo") {

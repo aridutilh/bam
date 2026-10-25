@@ -204,8 +204,16 @@ import JavaScriptCore
             Object.defineProperty(Cookies.prototype, 'onChanged', {get: function () { return nativeChanged; }, configurable: true});
             Cookies.prototype.getAll = function () { getAllCalls++; return Promise.resolve(jar.map(function (c) { return Object.assign({}, c); })); };
             function fire(info) { nativeListeners.slice().forEach(function (fn) { info === undefined ? fn() : fn(info); }); }
-            var browser = {runtime: {getURL: function(path) { return 'webkit-extension://fixture' + path; }, getManifest: function() { return {}; }}, cookies: new Cookies()};
-            var chrome = {runtime: browser.runtime, cookies: new Cookies()};
+            // WebKit's namespace attributes are native static values: reads always return the native event
+            // and a defined property does not replace them (unlike a plain JavaScript object).
+            function webkitNamespace(target, event) {
+              return new Proxy(target, {
+                get(t, key, receiver) { return key === 'onChanged' ? event : Reflect.get(t, key, receiver); },
+                defineProperty(t, key, descriptor) { return key === 'onChanged' ? true : Reflect.defineProperty(t, key, descriptor); }
+              });
+            }
+            var browser = {runtime: {getURL: function(path) { return 'webkit-extension://fixture' + path; }, getManifest: function() { return {}; }}, cookies: webkitNamespace(new Cookies(), nativeChanged)};
+            var chrome = {runtime: browser.runtime, cookies: webkitNamespace(new Cookies(), nativeChanged)};
             var seen = [];
             function cookie(name, value, extra) { return Object.assign({name: name, value: value, domain: '127.0.0.1', path: '/', storeId: '0', secure: false, httpOnly: false, session: true, hostOnly: true, sameSite: 'lax'}, extra || {}); }
             """)
@@ -218,7 +226,7 @@ import JavaScriptCore
             chrome.cookies.onChanged.addListener(grammarlyWatch);
             """)
         settle("")
-        try check(cookieJS.evaluateScript("chrome.cookies.onChanged === browser.cookies.onChanged && chrome.cookies.onChanged.hasListener(grammarlyWatch) && nativeListeners.length === 1 && seen.length === 0")!.toBool(),
+        try check(cookieJS.evaluateScript("__bamCompatibility.cookies.intercepting && chrome.cookies.onChanged === browser.cookies.onChanged && chrome.cookies.onChanged.hasListener(grammarlyWatch) && nativeListeners.length === 1 && seen.length === 0")!.toBool(),
                   "cookies.onChanged was not one shared event with a single native trigger and a silent baseline")
         settle("jar.push(cookie('session', 'a')); fire()")
         settle("jar[1] = cookie('session', 'b'); fire()")
@@ -256,7 +264,15 @@ import JavaScriptCore
                 function fire(info) { nativeListeners.slice().forEach(function (fn) { info === undefined ? fn() : fn(info); }); }
                 function release() { var next = held.shift(); if (next) next(); }
                 function cookie(name, value) { return {name: name, value: value, domain: '127.0.0.1', path: '/', storeId: '0'}; }
-                var browser = {runtime: {getURL: function(path) { return 'webkit-extension://fixture' + path; }, getManifest: function() { return {}; }}, cookies: new Cookies()};
+                // WebKit's namespace attributes are native static values: reads always return the native event
+                // and a defined property does not replace them (unlike a plain JavaScript object).
+                function webkitNamespace(target, event) {
+                  return new Proxy(target, {
+                    get(t, key, receiver) { return key === 'onChanged' ? event : Reflect.get(t, key, receiver); },
+                    defineProperty(t, key, descriptor) { return key === 'onChanged' ? true : Reflect.defineProperty(t, key, descriptor); }
+                  });
+                }
+                var browser = {runtime: {getURL: function(path) { return 'webkit-extension://fixture' + path; }, getManifest: function() { return {}; }}, cookies: webkitNamespace(new Cookies(), nativeChanged)};
                 var watch = function (n) { seen.push([n.removed, n.cookie.name, n.cause]); };
                 """)
             js.evaluateScript(ExtensionCompatibility.workerScript(manifest: ["permissions": ["cookies"]], browserVersion: "test"))
