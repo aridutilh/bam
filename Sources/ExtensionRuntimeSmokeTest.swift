@@ -38,6 +38,17 @@ import WebKit
                 guard let page = components.url else {
                     throw ExtensionSmokeTest.Failure(description: "Could not construct the local extension test page URL")
                 }
+                if let index = CommandLine.arguments.firstIndex(of: "--extension-verified-id-phase2") {
+                    // Measurement only: prints EXTENSION_VERIFIED_ID_PHASE2 and MEASUREMENT, never a PASS/FAIL Extensions
+                    // line. Exit 0 complete, 2 incomplete, 3 refused. Modes: write (creates the run), read --run <dir>
+                    // (after a real relaunch; cleans up), cleanup --run <dir> (for a run that stopped early).
+                    let arguments = CommandLine.arguments
+                    let mode = arguments.indices.contains(index + 1) ? ExtensionVerifiedIDPersistenceProbe.Mode(rawValue: arguments[index + 1]) : nil
+                    let run = arguments.firstIndex(of: "--run").flatMap { arguments.indices.contains($0 + 1) ? URL(fileURLWithPath: arguments[$0 + 1], isDirectory: true) : nil }
+                    guard let mode else { print("MEASUREMENT refused: --extension-verified-id-phase2 needs write, read or cleanup"); fflush(stdout); exit(3) }
+                    let code = await ExtensionVerifiedIDPersistenceProbe.run(mode: mode, runDirectory: run, pageURL: page)
+                    fflush(stdout); exit(code)
+                }
                 if CommandLine.arguments.contains("--extension-verified-id-probe") {
                     // Measurement only, not a suite: prints EXTENSION_VERIFIED_ID_PROBE and MEASUREMENT, never a PASS/FAIL
                     // Extensions line. Exit 0 = complete measurement, 2 = incomplete. The runner watchdog stays last resort.
