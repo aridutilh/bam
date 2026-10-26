@@ -100,8 +100,8 @@ import AppKit
         if let list = descendants(sidebar).compactMap({ $0 as? NSTableView }).first(where: { $0.identifier?.rawValue == "sidebar-tab-list" }),
            let listScroll = list.enclosingScrollView {
             let edge = listScroll.convert(listScroll.bounds, to: sidebar)
-            require(abs(edge.maxX - (sidebar.bounds.width - 1)) < 0.01 && listScroll.scrollerStyle == .overlay,
-                    "The tab list reaches the trailing content edge with an overlay scroller: \(edge.maxX) of \(sidebar.bounds.width)")
+            require(abs(edge.maxX - (sidebar.bounds.width - 1)) < 0.01 && !listScroll.hasVerticalScroller,
+                    "The tab list reaches the trailing content edge with no system scroller over its rows: \(edge.maxX) of \(sidebar.bounds.width)")
         } else { require(false, "The sidebar has a tab list") }
         @MainActor func render(_ view: NSView) -> NSBitmapImageRep {
             let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(ceil(view.bounds.width * 2)), pixelsHigh: Int(ceil(view.bounds.height * 2)),
@@ -454,6 +454,71 @@ import AppKit
         policySidebar.setAddress("orbit://newtab", title: "New tab"); policySidebar.layoutSubtreeIfNeeded()
         require(siteButton.isHidden && !library.isHidden, "Bam's own pages show no site settings; the library stays")
         withExtendedLifetime(footerWindow) {}; withExtendedLifetime(policyWindow) {}
+
+        // MARK: The list's scroll thumb sits in the gap beside the card, as in Arc, never over a row.
+        typealias Thumb = SidebarScrollIndicator
+        require(Thumb.knobRect(trackHeight: 400, contentHeight: 300, visibleHeight: 400, offset: 0, width: 4) == nil,
+                "A list that fits shows no thumb")
+        if let top = Thumb.knobRect(trackHeight: 400, contentHeight: 1600, visibleHeight: 400, offset: 0, width: ArkMetrics.scrollThumbWidth),
+           let end = Thumb.knobRect(trackHeight: 400, contentHeight: 1600, visibleHeight: 400, offset: 1200, width: ArkMetrics.scrollThumbWidth),
+           let tiny = Thumb.knobRect(trackHeight: 400, contentHeight: 100_000, visibleHeight: 400, offset: 50_000, width: 4) {
+            require(top.minX == ArkMetrics.scrollThumbLead && top.width == 4 && top.minY == ArkMetrics.scrollThumbInset &&
+                    abs(top.height - (400 - 2 * ArkMetrics.scrollThumbInset) / 4) < 0.01, "The thumb's lead, width, top inset and proportion: \(top)")
+            require(abs(end.maxY - (400 - ArkMetrics.scrollThumbInset)) < 0.01, "At the end the thumb rests its inset above the bottom: \(end)")
+            require(tiny.height == ArkMetrics.scrollThumbMinLength, "A very long list keeps a grabbable thumb")
+        } else { require(false, "An overflowing list has a thumb") }
+
+        let gap: CGFloat = 8, thumbSidebarWidth: CGFloat = 240
+        let thumbRoot = NSView(frame: NSRect(x: 0, y: 0, width: thumbSidebarWidth + gap + 200, height: 720))
+        let thumbWindow = NSWindow(contentRect: thumbRoot.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        thumbWindow.contentView = thumbRoot
+        let thumbSidebar = SidebarView(frame: NSRect(x: 0, y: 0, width: thumbSidebarWidth, height: 720))
+        let thumb = Thumb(frame: .zero)
+        thumbRoot.addSubview(thumbSidebar); thumbRoot.addSubview(thumb)
+        thumbSidebar.configureSpaces([BrowserSpace(id: 0, name: "One", symbol: "sparkles", colorIndex: 0)])
+        thumbSidebar.update(tabs: spaceZero, space: 0, canGoBack: false, canGoForward: false, isLoading: false)
+        // As BrowserController lays it out: from the rows' trailing edge across the gap to the card.
+        thumb.frame = NSRect(x: thumbSidebarWidth - ArkMetrics.sidebarTrailing, y: 0, width: gap + ArkMetrics.sidebarTrailing, height: 0)
+        thumbSidebar.onTabListChange = { thumb.scrollView = thumbSidebar.tabListScrollView; thumb.refresh() }
+        thumbRoot.layoutSubtreeIfNeeded(); thumbSidebar.layoutSubtreeIfNeeded(); spin()
+        let thumbList = thumbSidebar.tabListScrollView
+        let listRect = thumbList.convert(thumbList.bounds, to: thumbRoot)
+        require(thumb.scrollView === thumbList && abs(thumb.frame.minY - listRect.minY) < 0.01 && abs(thumb.frame.height - listRect.height) < 0.01,
+                "The thumb's column spans exactly the visible list: \(thumb.frame) vs \(listRect)")
+        require(thumb.hitTest(NSPoint(x: thumb.frame.midX, y: thumb.frame.midY)) == nil,
+                "At rest the thumb is hidden and the gap belongs to the resize handle")
+        let thumbClip = thumbList.contentView
+        thumbClip.scroll(to: NSPoint(x: 0, y: 200)); thumbList.reflectScrolledClipView(thumbClip); spin()
+        // The knob, in root coordinates.
+        let rows = descendants(thumbSidebar).filter { $0.accessibilityRole() == .button && ($0.accessibilityLabel() ?? "").hasPrefix("Zero ") && $0.window != nil }
+        let rowsMaxX = rows.map { $0.convert($0.bounds, to: thumbRoot).maxX }.max() ?? 0
+        let knobProbe = (0..<Int(thumb.frame.height)).map { CGFloat($0) + thumb.frame.minY + 0.5 }
+            .first { thumb.hitTest(NSPoint(x: thumb.frame.midX, y: $0)) != nil }
+        require(knobProbe != nil, "Scrolling shows the thumb, and it takes the pointer")
+        let knobMinX = thumb.frame.minX + ArkMetrics.scrollThumbLead, knobMaxX = knobMinX + ArkMetrics.scrollThumbWidth
+        require(!rows.isEmpty && rowsMaxX <= thumbSidebarWidth - ArkMetrics.sidebarTrailing + 0.01 && knobMinX >= rowsMaxX + 1,
+                "The thumb starts past the rows' trailing edge: rows end \(rowsMaxX), thumb \(knobMinX)")
+        require(knobMaxX <= thumbSidebarWidth + gap - 3 + 0.01, "The thumb keeps clear of the card: ends \(knobMaxX), card \(thumbSidebarWidth + gap)")
+        require(thumb.hitTest(NSPoint(x: thumb.frame.midX, y: thumb.frame.maxY - 1)) == nil || knobProbe! > thumb.frame.maxY - 30,
+                "Beside the thumb (not on it) the gap still belongs to the resize handle")
+        // Dragging the thumb scrolls the list, clamped to its ends.
+        let grab = thumb.convert(NSPoint(x: thumb.frame.midX, y: knobProbe! + 2), from: thumbRoot)
+        @MainActor func drag(_ type: NSEvent.EventType, _ local: NSPoint) -> NSEvent {
+            NSEvent.mouseEvent(with: type, location: thumb.convert(local, to: nil), modifierFlags: [], timestamp: 0,
+                               windowNumber: thumbWindow.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
+        }
+        let before = thumbClip.bounds.minY
+        thumb.mouseDown(with: drag(.leftMouseDown, grab))
+        thumb.mouseDragged(with: drag(.leftMouseDragged, NSPoint(x: grab.x, y: grab.y + 40)))
+        let dragged = thumbClip.bounds.minY
+        thumb.mouseDragged(with: drag(.leftMouseDragged, NSPoint(x: grab.x, y: grab.y + 5000)))
+        let travel = (thumbList.documentView?.frame.height ?? 0) - thumbClip.bounds.height
+        require(dragged > before + 40 && abs(thumbClip.bounds.minY - travel) < 0.5, "Dragging the thumb scrolls the list and stops at its end (\(before) → \(dragged) → \(thumbClip.bounds.minY) of \(travel))")
+        thumb.mouseUp(with: drag(.leftMouseUp, grab))
+        // Hidden while paging Spaces or with the sidebar away; no thumb, no hit.
+        thumb.isSuppressed = true
+        require(thumb.hitTest(NSPoint(x: thumb.frame.midX, y: thumb.frame.midY)) == nil, "A suppressed thumb never takes the pointer")
+        withExtendedLifetime(thumbWindow) {}
 
         print("PASS: \(checks) sidebar morning checks")
     }
