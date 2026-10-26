@@ -1,4 +1,4 @@
-## Local 0.23.0 — Site Access, explicit consent and tab metadata (Extensions suite passed at `4ed2f83`; full build, all eleven suites and vendor rechecks pending; held)
+## Local 0.23.0 — Site Access, explicit consent and tab metadata (Extensions suite and final vendor checks passed at `4ed2f83`; full build and all eleven suites pending; held)
 
 Nothing here claims full Chrome compatibility or readiness to ship.
 
