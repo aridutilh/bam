@@ -759,8 +759,11 @@ import Darwin
               let secondID = controller.openProfileTab(secondURL, profileID: profile, active: false) else { throw ExtensionSmokeTest.Failure(description: "activeTab fixture did not load") }
         try await wait("activeTab second tab did not load") { controller.browsers[secondID]?.url == secondURL && controller.browsers[secondID]?.isLoading == false }
         host.reconcile()
-        let activePage = WKWebView(frame: NSRect(x: 0, y: 0, width: 320, height: 240), configuration: activeConfiguration)
-        observeExtensionView("activeTab-extension-page(other extension)", activePage)
+        // Held only until its last use (below), like heldPopup: a raw extension page outside Bam's ownership must not
+        // outlive its check into the later withdrawal checks.
+        var activePageHolder: WKWebView? = WKWebView(frame: NSRect(x: 0, y: 0, width: 320, height: 240), configuration: activeConfiguration)
+        var activePage: WKWebView { activePageHolder! }
+        observeExtensionView("activeTab-extension-page(other extension)", activePageHolder)
         activePage.load(URLRequest(url: activeContext.baseURL.appendingPathComponent("page.html")))
         try await wait("activeTab extension page did not load") { activePage.title == "activeTab page" }
         func activeTabAccess() async throws -> (allowed: [Int], denied: Int, callback: String) {
@@ -811,9 +814,13 @@ import Darwin
         let crossOrigin = try await activeTabAccess()
         try check(crossOrigin.allowed.isEmpty && crossOrigin.callback == "error", "Cross-origin navigation did not end the tab's activeTab grant: \(crossOrigin)")
         activePage.stopLoading()
+        // Last use: release the test's raw page and require it gone (premise for the withdrawal checks later in this run).
+        weak let releasedActivePage = activePageHolder
+        activePageHolder = nil
         _ = host.closeTab?(secondID)
         try await host.remove(id: activeID)
         host.reconcile()
+        try await wait("The activeTab check's own extension page was not released after its last use") { releasedActivePage == nil }
         _ = try await popup.evaluateJavaScript("document.getElementById('open-page').click(); true")
         // Last use of the original popup: release the test's references to it (and the first action's popup).
         heldPopup = nil
