@@ -379,7 +379,7 @@ func storedZIP(_ files: [(String, Data)]) -> Data {
             let result = await host.restartCompletion(id: unapprovedID, generation: afterRevoke)
             try check(result == .restarted, "Revoke's restart must finish with a fresh context: \(String(describing: result))")
         }
-        guard let revokedContext = host.context(for: unapprovedID), host.isRestarting(id: unapprovedID) == false else {
+        guard let revokedContext = host.context(for: unapprovedID), revokedContext.isLoaded, host.isRestarting(id: unapprovedID) == false else {
             throw Failure(message: "The revoked extension must stay loaded (only its grants are revoked)")
         }
         try check(runtime.approvedNativeHost(revokedContext) == nil && host.records.first { $0.id == unapprovedID }?.nativeHost == nil &&
@@ -387,7 +387,8 @@ func storedZIP(_ files: [(String, Data)]) -> Data {
         var refusedRevokedConnection = false
         do { try await host.connectDesktopApp(id: unapprovedID) }
         catch { refusedRevokedConnection = true }
-        try check(refusedRevokedConnection && host.context(for: unapprovedID) === revokedContext && host.records.first { $0.id == unapprovedID }?.nativeHost == nil,
+        try check(refusedRevokedConnection && host.context(for: unapprovedID) === revokedContext && revokedContext.isLoaded &&
+            host.records.first { $0.id == unapprovedID }?.nativeHost == nil,
             "Connecting after permission revocation falsely reported success or persisted a desktop grant")
         // Create a real pending runtime session, then unload synchronously before
         // its launch Task runs. The injected validator additionally forbids any
