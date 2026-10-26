@@ -6,7 +6,9 @@ import WebKit
 /// the fresh context only once every probe of the old context is empty.
 final class RetiredRendererProbe {
     weak var web: WKWebView?
-    init(_ web: WKWebView?) { self.web = web }
+    /// What kind of view it was (tab, peek, little-bam, popup, offscreen): diagnostics only, never page content.
+    let role: String
+    init(_ web: WKWebView?, role: String = "view") { self.web = web; self.role = role }
 }
 
 /// A borrowed page surface. Enumerating extensions must not instantiate sleeping pages.
@@ -1095,7 +1097,7 @@ struct BrowserExtensionPermissionReview {
         // Snapshot the policy before anything is unloaded.
         let fresh = Self.freshContext(replacing: context)
         // Every view of the old context being let go is weakly probed: phase B loads only once all have deallocated.
-        var probes = runtime.extensionPageViews(of: context).map { RetiredRendererProbe($0) }
+        var probes = runtime.extensionPageViews(of: context)
         runtime.closePopup(for: context)
         probes += onExtensionRenderers?(.retire, profileID, baseURL) ?? []
         runtime.releaseRetiredSurfaceViews()
@@ -1161,6 +1163,9 @@ struct BrowserExtensionPermissionReview {
         if releaseBarrierHeld(id: id) {
             // Fail closed: loading now could inherit the old process's network access. The barrier stays.
             guard conclude() else { return }
+            // Which kinds of views were still alive (roles only, no page content): evidence for the run log.
+            let alive = (releaseBarriers[id] ?? []).filter { $0.web != nil }.map(\.role)
+            NSLog("Bam extension restart release timeout for %@: still alive %@", id.uuidString, alive.joined(separator: ", "))
             records[index].enabled = false
             var disableSaveError: Error?
             do { try persist() } catch { disableSaveError = error }
@@ -1956,14 +1961,16 @@ struct BrowserExtensionPermissionReview {
     /// popover's view hierarchy) and its offscreen document. Never `WKWebExtension.Action.popupWebView`: that getter
     /// preloads the popup page on access, so reading it during a restart would create and load a page of the old
     /// context right before it unloads.
-    func extensionPageViews(of context: WKWebExtensionContext) -> [WKWebView] {
+    func extensionPageViews(of context: WKWebExtensionContext) -> [RetiredRendererProbe] {
         func webViews(in view: NSView) -> [WKWebView] { (view as? WKWebView).map { [$0] } ?? view.subviews.flatMap(webViews) }
-        var views: [WKWebView] = []
+        var probes: [RetiredRendererProbe] = []
         if let action = activePopup, action.webExtensionContext === context, let root = activePopupPopover?.contentViewController?.view {
-            views += webViews(in: root)
+            probes += webViews(in: root).map { RetiredRendererProbe($0, role: "popup") }
         }
-        if let document = compatibility.offscreen?.currentDocument(for: context.uniqueIdentifier) { views.append(document) }
-        return views
+        if let document = compatibility.offscreen?.currentDocument(for: context.uniqueIdentifier) {
+            probes.append(RetiredRendererProbe(document, role: "offscreen"))
+        }
+        return probes
     }
     func closePopup(for context: WKWebExtensionContext) {
         if popupContextID == context.uniqueIdentifier { popupAnchor = nil; popupTabID = nil; popupContextID = nil }

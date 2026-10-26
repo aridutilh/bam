@@ -349,7 +349,7 @@ struct ExtensionHostOverride {
                 }
                 retiredRendererProbes.removeAll { $0.web == nil }   // released ones carry no evidence; don't accumulate
                 for id in ids {
-                    let probe = RetiredRendererProbe(browsers[id])
+                    let probe = RetiredRendererProbe(browsers[id], role: visibleMemberIDs.contains(id) ? "tab(visible)" : "tab")
                     retiredRendererProbes.append(probe); released.append(probe)
                 }
                 isApplyingProfileChange = true
@@ -367,10 +367,10 @@ struct ExtensionHostOverride {
         switch phase {
         case .retire:
             for (owner, peek) in peeks where showsThisExtension(peek.webView) {
-                released.append(RetiredRendererProbe(peek.webView))
+                released.append(RetiredRendererProbe(peek.webView, role: "peek"))
                 peek.dismiss(); peeks.removeValue(forKey: owner); peekExtensionIDs.removeValue(forKey: owner)
             }
-            for little in littleWindows.values where showsThisExtension(little.webView) { released.append(RetiredRendererProbe(little.webView)); little.close() }
+            for little in littleWindows.values where showsThisExtension(little.webView) { released.append(RetiredRendererProbe(little.webView, role: "little-bam")); little.close() }
             let ids = session.tabs.filter { session.profileID(for: $0) == profileID && browsers[$0.id] != nil && browserExtensionOrigins[$0.id] == origin }.map(\.id)
             retiredExtensionRenderers[origin, default: []].formUnion(ids)
             retire(ids)
