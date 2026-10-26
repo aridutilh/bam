@@ -35,6 +35,8 @@ struct SettingsSnapshot {
     var sleepsIdlePages = true
     var keepAwakeHost: String? = nil
     var keepsCurrentSiteAwake = false
+    /// Read from the preference itself, so it is right however the snapshot is built.
+    var asksBeforeQuitting = QuitConfirmationPreference().asksBeforeQuitting
     var searchEngine: DefaultSearchEngine = .duckDuckGo
     var appearance: BrowserAppearance = .system
     var spaces: [BrowserSpace] = BrowserSpace.defaults
@@ -50,6 +52,7 @@ struct SettingsActions {
     var setShowsPlayingVideo: (Bool) -> Void = { _ in }
     var setSleepsIdlePages: (Bool) -> Void = { _ in }
     var setKeepsSiteAwake: (String, Bool) -> Void = { _, _ in }
+    var setAsksBeforeQuitting: (Bool) -> Void = { QuitConfirmationPreference().asksBeforeQuitting = $0 }
     var setSearchEngine: (DefaultSearchEngine) -> Void = { _ in }
     var editSpace: (BrowserSpace) -> Bool = { _ in false }
     var switchSpace: (Int) -> Void = { _ in }
@@ -325,7 +328,12 @@ struct SettingsActions {
             choices.addArrangedSubview(chip)
         }
         look.add(BamRow(title: "Appearance", detail: "Light or dark browser chrome. System follows macOS; Space colors carry over in both.", control: choices))
-        return [caption("Look"), look, caption("Import"), bring, caption("Playback"), playback, caption("Memory"), memory, caption("Keyboard"), keys]
+        let quitting = BamCard(frame: .zero)
+        quitting.add(BamRow(title: "Ask before quitting",
+                            detail: "Confirm before Bam closes its windows. Turn this back on after choosing “don’t ask again”.",
+                            control: toggle(snapshot.asksBeforeQuitting, actions.setAsksBeforeQuitting)))
+        return [caption("Look"), look, caption("Import"), bring, caption("Playback"), playback, caption("Memory"), memory,
+                caption("Quitting"), quitting, caption("Keyboard"), keys]
     }
     private weak var appearanceChips: NSStackView?
     /// An appearance change (from here, the View menu or a relaunch) updates

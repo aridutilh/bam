@@ -180,13 +180,13 @@ import WebKit
         // normal browsing and the fresh private preview use this confirmation.
         guard let controller else { return .terminateNow }
         quitCoordinator.request(confirmation: {
-            let alert = NSAlert()
-            alert.messageText = "Are you sure you want to quit Bam?"
-            alert.informativeText = "All Bam windows will close. Playing audio and video will stop."
-            alert.addButton(withTitle: "Cancel")
-            alert.addButton(withTitle: "Quit Bam").keyEquivalent = ""
+            // Asked unless the person chose "don't ask again" (Settings › General restores it).
+            let preference = QuitConfirmationPreference()
+            guard preference.asksBeforeQuitting else { return true }
             sender.activate(ignoringOtherApps: true)
-            return self.runQuitAlert(alert) == .alertSecondButtonReturn
+            let choice = QuitConfirmationPanel.run(over: self.window, appName: QuitConfirmationModel.appName(info: Bundle.main.infoDictionary),
+                                                   icon: NSApp.applicationIconImage)
+            return QuitConfirmationModel.resolve(choice, preference: preference, persist: controller.privateMode != true)
         }, save: {
             await controller.flushSessionForTermination()
         }, saveFailure: {
