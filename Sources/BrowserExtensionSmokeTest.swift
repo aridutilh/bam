@@ -790,15 +790,19 @@ import Darwin
         let secondURL = secondPage()
         // N3: the activeTab fixture's context is held only until its last use (below); same lookups and order as before.
         var activeContextHolder: WKWebExtensionContext? = host.context(for: activeID)
-        guard let activeConfiguration = activeContextHolder?.webViewConfiguration,
+        // N3: its page configuration likewise, only until the page is built (below).
+        var activeConfigurationHolder: WKWebViewConfiguration? = activeContextHolder?.webViewConfiguration
+        guard activeConfigurationHolder != nil,
               let secondID = controller.openProfileTab(secondURL, profileID: profile, active: false) else { throw ExtensionSmokeTest.Failure(description: "activeTab fixture did not load") }
+        observeObject("activeConfiguration(other extension)", activeConfigurationHolder)
         var activeContext: WKWebExtensionContext { activeContextHolder! }
         observeObject("activeContext(other extension)", activeContextHolder)
         try await wait("activeTab second tab did not load") { controller.browsers[secondID]?.url == secondURL && controller.browsers[secondID]?.isLoading == false }
         host.reconcile()
         // Held only until its last use (below), like heldPopup: a raw extension page outside Bam's ownership must not
         // outlive its check into the later withdrawal checks.
-        var activePageHolder: WKWebView? = WKWebView(frame: NSRect(x: 0, y: 0, width: 320, height: 240), configuration: activeConfiguration)
+        var activePageHolder: WKWebView? = WKWebView(frame: NSRect(x: 0, y: 0, width: 320, height: 240), configuration: activeConfigurationHolder!)
+        activeConfigurationHolder = nil   // N3: its only use was building the page
         var activePage: WKWebView { activePageHolder! }
         observeExtensionView("activeTab-extension-page(other extension)", activePageHolder)
         activePage.load(URLRequest(url: activeContext.baseURL.appendingPathComponent("page.html")))
