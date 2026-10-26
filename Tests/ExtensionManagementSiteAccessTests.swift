@@ -210,6 +210,11 @@ import Foundation
                   && timeoutUnsaved.contains("saved, reduced"), "A timeout whose disable wasn't saved must not claim it stays off: \(timeoutUnsaved)")
         let timeoutBoth = BrowserExtensions.releaseTimeoutMessage(name: "Docs Helper", disableSaveError: SaveFailure(), accessSaved: false)
         try check(timeoutBoth.contains("which may be broader") && !timeoutBoth.contains("saved, reduced"), "Timeout after an unsaved reduction: \(timeoutBoth)")
+        // Update rollback turned off: the cause alone when saved; disclosed when saving "off" failed.
+        try check(BrowserExtensions.offAfterFailureMessage("Cause.", disableSaveError: nil) == "Cause.", "A saved off state adds nothing")
+        let offUnsaved = BrowserExtensions.offAfterFailureMessage("Cause.", disableSaveError: SaveFailure())
+        try check(offUnsaved.contains("off for now") && offUnsaved.contains("couldn’t save that it’s off (disk full)") && offUnsaved.contains("may load again"),
+                  "A failed save of off after an update rollback is disclosed: \(offUnsaved)")
 
         // MARK: The engine source is weak (the host owns the manager).
         do {

@@ -684,14 +684,12 @@ struct BrowserExtensionPermissionReview {
             } else if unloaded && restored.enabled && !interrupted {
                 if releaseBarrierHeld(id: id) {
                     // Fail closed: the old views are still alive, so reloading would only wait on the same barrier.
-                    if let index = records.firstIndex(where: { $0.id == id }) { records[index].enabled = false; try? persist() }
-                    setError(error, for: id)
+                    turnOffAfterFailedUpdate(id: id, cause: error)
                     if let baseURL { _ = onExtensionRenderers?(.unavailable, before.profileID, baseURL) }
                 } else {
                     do { try await load(id, review: false) }
                     catch {
-                        if let index = records.firstIndex(where: { $0.id == id }) { records[index].enabled = false; try? persist() }
-                        setError(error, for: id)
+                        turnOffAfterFailedUpdate(id: id, cause: error)
                         if let baseURL { _ = onExtensionRenderers?(.unavailable, before.profileID, baseURL) }
                     }
                 }
@@ -1233,6 +1231,21 @@ struct BrowserExtensionPermissionReview {
         runtime.reconcile()
         _ = onExtensionRenderers?(.restore, handoff.profileID, baseURL)
         finish(.restarted)
+    }
+    /// After a failed update rollback: turns the extension off and reports the cause. If saving "off" fails, the message
+    /// says so (it's off only for now and may load again at next launch), never implying it stays off.
+    private func turnOffAfterFailedUpdate(id: UUID, cause: Error) {
+        var disableSaveError: Error?
+        if let index = records.firstIndex(where: { $0.id == id }) {
+            records[index].enabled = false
+            do { try persist() } catch { disableSaveError = error }
+        }
+        setError(Self.failure(Self.offAfterFailureMessage(cause.localizedDescription, disableSaveError: disableSaveError)), for: id)
+    }
+    static func offAfterFailureMessage(_ cause: String, disableSaveError: Error?) -> String {
+        guard let disableSaveError else { return cause }
+        return cause + " It’s off for now, but Bam couldn’t save that it’s off (\(disableSaveError.localizedDescription)), so it may load again"
+            + " the next time Bam opens. Enable or disable it in Manage Extensions to settle it."
     }
     /// The fail-closed message. With `disableSaveError`, the record on disk may still say enabled, so Bam may load it
     /// again at next launch: never claim it stays off.
