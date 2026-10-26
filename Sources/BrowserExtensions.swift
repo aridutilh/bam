@@ -737,14 +737,24 @@ struct BrowserExtensionPermissionReview {
         try stopQuarantined(id: id, name: records[i].name)   // Remove calls this first: nothing is deleted on failure
         let profileID = records[i].profileID, name = records[i].name
         var unloadedBaseURL: URL?
+        var unloadNote: String?
         if let runtime = runtimes[profileID], let context = runtime.contexts[id] {
             // Like a restart's phase A: the old views join the release barrier, so a later Enable (same identity) waits
             // for them instead of loading next to them.
             retireViewsBeforeUnload(id: id, context: context, runtime: runtime, profileID: profileID)
-            do { try runtime.controller.unload(context) } catch {
-                // Still the loaded, owned context: its retired tabs come back on it; nothing claims it stopped.
-                _ = onExtensionRenderers?(.restore, profileID, context.baseURL)
-                throw error
+            do {
+                if let fault = Self.siteAccessRestartUnloadFault?(id) { throw fault }
+                try runtime.controller.unload(context)
+                if let fault = Self.disableUnloadFaultAfterUnload?(id) { throw fault }
+            } catch {
+                // As in a restart, WebKit's own list decides what happened.
+                if runtime.controller.extensionContexts.contains(context) {
+                    // Still loaded and owned: its retired tabs come back on it; nothing claims it stopped.
+                    _ = onExtensionRenderers?(.restore, profileID, context.baseURL)
+                    throw error
+                }
+                // WebKit no longer runs it: it is stopped. Finish the disable (the barrier and tabs stay as retired).
+                unloadNote = error.localizedDescription
             }
             runtime.disconnectNative(context); runtime.compatibility.remove(context)
             runtime.contexts.removeValue(forKey: id)
@@ -756,12 +766,15 @@ struct BrowserExtensionPermissionReview {
         // Retired tabs show the unavailable state and stay restorable: Enable's load recreates them (`.restore`).
         if let unloadedBaseURL { _ = onExtensionRenderers?(.unavailable, profileID, unloadedBaseURL) }
         onReloadNeeded?(profileID); changed()
+        let base = unloadNote.map { "\(name) was turned off, though WebKit reported an error while stopping it (\($0))." } ?? "\(name) was turned off."
         if let saveError {
             // It is off now, but the record on disk may still say enabled: say so, never that it stays off.
-            let error = Self.failure(Self.offAfterFailureMessage("\(name) was turned off.", disableSaveError: saveError))
+            let error = Self.failure(Self.offAfterFailureMessage(base, disableSaveError: saveError))
             setError(error, for: id)
             throw error
         }
+        // Stopped despite the reported error: say so, but don't fail the disable (Remove may proceed).
+        if unloadNote != nil { setError(Self.failure(base), for: id) }
     }
     func remove(id: UUID) async throws {
         guard let record = records.first(where: { $0.id == id }) else { return }
@@ -978,6 +991,9 @@ struct BrowserExtensionPermissionReview {
     static var siteAccessRestartDidLoad: ((UUID) -> Void)?
     /// Test seam: a non-nil error makes the restart's `unload` fail for that extension. nil in production.
     static var siteAccessRestartUnloadFault: ((UUID) -> Error?)?
+    /// Test seam: Disable's `unload` succeeds, then reports this error (WebKit no longer lists the context). nil in
+    /// production.
+    static var disableUnloadFaultAfterUnload: ((UUID) -> Error?)?
     /// Contexts WebKit still runs after a failed unload. Bam no longer owns them (no authority, no new renderer, no
     /// configuration) and the record is off; Enable tries the unload again first.
     private var quarantinedContexts: [UUID: WKWebExtensionContext] = [:]

@@ -971,6 +971,31 @@ extension ExtensionSiteAccessSmokeTest {
             try await showExtensionTab(extensionTab)
             diagnostic["disable_barrier"] = ["held_enable_error": disabledEnableError ?? "none"]
 
+            // MARK: 11b. Disable whose unload throws. Still listed by WebKit: the disable fails, the context stays loaded
+            // and owned, and E comes back on it. No longer listed: it's off, honestly reported, with E unavailable.
+            try await showExtensionTab(extensionTab)
+            let stillLoadedContext = host.context(for: subject)
+            BrowserExtensions.siteAccessRestartUnloadFault = { $0 == subject ? InjectedFailure(text: "injected disable unload failure (test)") : nil }
+            var listedError: String?
+            do { try host.disable(id: subject) } catch { listedError = error.localizedDescription }
+            BrowserExtensions.siteAccessRestartUnloadFault = nil
+            expect(listedError?.contains("injected disable unload failure") == true && host.context(for: subject) === stillLoadedContext
+                   && stillLoadedContext?.isLoaded == true && host.records.first { $0.id == subject }?.enabled == true,
+                   "an unload failure WebKit still lists didn't leave the extension loaded and owned: \(listedError ?? "no error") \(state(subject))")
+            try await showExtensionTab(extensionTab)   // E restored on the still-loaded context
+            BrowserExtensions.disableUnloadFaultAfterUnload = { $0 == subject ? InjectedFailure(text: "injected post-unload report (test)") : nil }
+            var unlistedError: String?
+            do { try host.disable(id: subject) } catch { unlistedError = error.localizedDescription }
+            BrowserExtensions.disableUnloadFaultAfterUnload = nil
+            let unlistedShown = await waitUntil({ (controller.tabErrors[extensionTab] ?? "").contains("unavailable") })
+            expect(unlistedError == nil && host.context(for: subject) == nil && stillLoadedContext?.isLoaded == false
+                   && host.records.first { $0.id == subject }?.enabled == false
+                   && (host.errors[subject] ?? "").contains("WebKit reported an error") && unlistedShown,
+                   "an unload error after WebKit stopped it wasn't finished as off: \(unlistedError ?? "no throw"), error \(host.errors[subject] ?? "none") \(state(subject))")
+            try await host.setEnabled(true, id: subject)
+            expect(host.context(for: subject)?.isLoaded == true, "Enable didn't recover after the reported unload error \(state(subject))")
+            try await showExtensionTab(extensionTab)
+
             diagnostic["findings"] = findings.count
             diagnostic["tab_ids"] = ["before": tabsBefore, "after": tabsAfter]
             diagnostic["subject_before"] = record(subjectBefore); diagnostic["subject_after"] = record(subjectAfter)
@@ -984,6 +1009,7 @@ extension ExtensionSiteAccessSmokeTest {
         // MARK: Cleanup: the owned persistent store (data, then its directory), verified.
         BrowserExtensions.siteAccessRestartLoadFault = nil; BrowserExtensions.siteAccessRestartUnloadFault = nil
         BrowserExtensions.siteAccessRestartWillLoad = nil; BrowserExtensions.siteAccessRestartDidLoad = nil
+        BrowserExtensions.disableUnloadFaultAfterUnload = nil
         BrowserExtensions.siteAccessRestartReleaseDeadline = 2
         try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: root.appendingPathComponent("host", isDirectory: true).path)
         var cleanup: [String: Any] = [:]
