@@ -77,10 +77,17 @@ struct LittleBamDestination: Equatable {
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
 
-    /// `extensionPage`: only for an extension's own page in the pop-out window Bam opened for it.
-    @discardableResult func open(url: URL, extensionPage: Bool = false) -> Bool {
+    @discardableResult func open(url: URL) -> Bool {
         guard !didClose else { return false }
-        return content?.load(url: url, extensionPage: extensionPage) ?? false
+        return content?.load(url: url) ?? false
+    }
+    /// A pop-out window Bam opened for an extension: its own page, in the extension's own WebKit configuration, with
+    /// `authorize` asked at both navigation gates (ordinary pages still load as usual).
+    @discardableResult func openExtensionPage(_ url: URL, configuration: WKWebViewConfiguration, authorize: @escaping (URL) -> Bool) -> Bool {
+        guard !didClose else { return false }
+        adopt(webView: PreviewWKWebView(frame: .zero, configuration: configuration))
+        content?.extensionPageAuthorization = authorize
+        return content?.load(url: url) ?? false
     }
 
     /// Moves an existing Peek web view into this window without reloading it.

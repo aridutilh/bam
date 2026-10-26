@@ -383,6 +383,31 @@ import WebKit
         let ownURL = contextA.baseURL.appendingPathComponent("page.html")
         try check(host.allowsExtensionURL(ownURL, profileID: profileA) && !host.allowsExtensionURL(ownURL, profileID: profileB), "Extension-origin validation crossed a login profile boundary")
         try check(host.configuration(forExtensionURL: contextB.baseURL.appendingPathComponent("page.html"), profileID: profileA) == nil, "Foreign-profile extension configuration was exposed")
+        // Pop-out window gates on a real PreviewWebContent (as Little Bam uses for windows.create): an extension's own
+        // page loads only with the window's live authorization, through both navigation gates, in the extension's own
+        // configuration, and runs as an extension page; withdrawing the authorization stops further navigation.
+        guard let popoutConfiguration = host.configuration(forExtensionURL: ownURL, profileID: profileA) else {
+            throw Failure(description: "The extension's own page configuration was unavailable for the pop-out check")
+        }
+        var popoutAuthorized = true
+        let popoutWeb = PreviewWKWebView(frame: NSRect(x: 0, y: 0, width: 400, height: 300), configuration: popoutConfiguration)
+        let popout = PreviewWebContent(webView: popoutWeb)
+        try check(!popout.load(url: ownURL), "A preview loaded an extension page without pop-out authorization")
+        popout.extensionPageAuthorization = { [weak host] url in
+            popoutAuthorized && url.host == ownURL.host && host?.allowsExtensionURL(url, profileID: profileA) == true
+        }
+        try check(popout.load(url: ownURL), "An authorized pop-out refused its extension's own page")
+        try await wait("The pop-out did not load and run its extension's own page through both navigation gates") {
+            let title = await javascript(popoutWeb, "document.title") as? String
+            let result = await javascript(popoutWeb, "document.getElementById('result').textContent") as? String
+            return title == "Bam extension page ready" && result != nil && result != "Loading"
+        }
+        popoutAuthorized = false
+        _ = await javascript(popoutWeb, "location.href = location.pathname + '?moved=1'; 'navigating'")
+        try await Task.sleep(nanoseconds: 800_000_000)
+        try check(popoutWeb.url?.query == nil && popout.status == "This link cannot open in the preview",
+                  "A pop-out kept navigating its extension page after authorization was withdrawn: \(String(describing: popoutWeb.url))")
+        popoutWeb.stopLoading()
         contextA.action(for: nil)?.closePopup()
         try host.revokePermissions(id: extensionA)
         try check(!contextA.hasPermission(.storage) && !contextA.hasAccess(to: urlA), "Revocation did not clear effective permissions")

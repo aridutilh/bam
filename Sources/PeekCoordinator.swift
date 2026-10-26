@@ -276,6 +276,10 @@ enum PreviewURLPolicy {
     var onCloseRequest: (() -> Void)?
     var onDownload: ((WKDownload) -> Void)?
     var onVisit: ((String, String) -> Void)?
+    /// Set only for a pop-out window Bam opened for an extension: whether this extension page may load now. Both
+    /// navigation gates ask it every time (same extension origin, still owned and enabled in this profile); while it
+    /// is nil only http/https load.
+    var extensionPageAuthorization: ((URL) -> Bool)?
     private var uploadPanel: NSOpenPanel?
     private var uploadCompletion: (([URL]?) -> Void)?
     private var expectedDownloadNavigation = false
@@ -300,8 +304,11 @@ enum PreviewURLPolicy {
         ]
     }
 
-    @discardableResult func load(url: URL, extensionPage: Bool = false) -> Bool {
-        guard PreviewURLPolicy.allows(url) || (extensionPage && PreviewURLPolicy.allowsExtensionWindowPage(url)) else { status = "Only HTTP and HTTPS pages can open here"; onChange?(); return false }
+    private func allowsNavigation(to url: URL) -> Bool {
+        PreviewURLPolicy.allows(url) || (PreviewURLPolicy.allowsExtensionWindowPage(url) && extensionPageAuthorization?(url) == true)
+    }
+    @discardableResult func load(url: URL) -> Bool {
+        guard allowsNavigation(to: url) else { status = "Only HTTP and HTTPS pages can open here"; onChange?(); return false }
         guard let web = webView else { return false }
         status = nil
         let token = UUID(); loadGeneration = token
@@ -333,7 +340,7 @@ enum PreviewURLPolicy {
 
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
                  decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
-        guard let url = navigationAction.request.url, PreviewURLPolicy.allows(url) else {
+        guard let url = navigationAction.request.url, allowsNavigation(to: url) else {
             if navigationAction.targetFrame?.isMainFrame != false { status = "This link cannot open in the preview"; onChange?() }
             decisionHandler(.cancel); return
         }
@@ -354,7 +361,7 @@ enum PreviewURLPolicy {
 
     func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse,
                  decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
-        guard let url = navigationResponse.response.url, PreviewURLPolicy.allows(url) else {
+        guard let url = navigationResponse.response.url, allowsNavigation(to: url) else {
             status = "This content cannot be displayed in the preview"; onChange?(); decisionHandler(.cancel); return
         }
         let attachment = (navigationResponse.response as? HTTPURLResponse)?

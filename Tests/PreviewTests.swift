@@ -81,7 +81,7 @@ import WebKit
             try check(splitWeb === cookieWeb, "Split promotion recreated the page")
             try check(!PreviewURLPolicy.allows(URL(string:"javascript:alert(1)")!), "JavaScript URL allowed")
             try check(!PreviewURLPolicy.allows(URL(string:"file:///tmp/private")!), "File URL allowed")
-            // Extension pop-out pages are a separate, explicit allowance; ordinary loads still refuse them.
+            // Extension pop-out pages are a separate allowance (which also needs the window's live authorization); ordinary loads refuse them.
             try check(!PreviewURLPolicy.allows(URL(string:"webkit-extension://4f2a/ui/editor.html")!)
                       && PreviewURLPolicy.allowsExtensionWindowPage(URL(string:"webkit-extension://4f2a/ui/editor.html")!)
                       && !PreviewURLPolicy.allowsExtensionWindowPage(URL(string:"https://example.com/")!)
