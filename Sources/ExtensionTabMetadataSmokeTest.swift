@@ -329,6 +329,16 @@ import WebKit
         var fragmentComponents = URLComponents(url: navigatedURL, resolvingAgainstBaseURL: false)!
         fragmentComponents.fragment = "supplemented"
         let fragmentURL = fragmentComponents.url!
+        // A title-only change of a tab outside the shown Space (no load, no commit) must still reach tabs.onUpdated,
+        // delivered with the tab's new title (BrowserController.updateMetadata publishes every tab's change).
+        let eventsBeforeTitle = tabs((try await js(noHost.page, eventsProbe, ["id": eventsJS]))["native"]).count
+        try await retitle(eventsID, "Events retitled")
+        try await wait("a background tab's title-only change was not published to tabs.onUpdated, or not delivered with its title") {
+            guard let value = try? await js(noHost.page, eventsProbe, ["id": eventsJS]) else { return false }
+            let wrapped = tabs(value["wrapped"]), native = tabs(value["native"])
+            return native.count > eventsBeforeTitle && wrapped.count == native.count
+                && (wrapped.last?["tab"] as? [String: Any])?["title"] as? String == "Events retitled"
+        }
         let eventsBeforeFragment = tabs((try await js(noHost.page, eventsProbe, ["id": eventsJS]))["native"]).count
         _ = try await controller.browsers[eventsID]?.evaluateJavaScript("location.hash = 'supplemented'; 0")
         // On timeout the failure carries the evidence that separates the causes: whether Bam's tab address followed the
