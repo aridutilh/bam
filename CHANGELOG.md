@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.23.0 build 47 — local draft, Chrome compatibility
+## 0.23.0 build 47 — Chrome compatibility
 
 - Assign the verified Chrome Web Store ID to new store installs through the public native runtime API. Keep legacy installs, folder imports, unverified packages and Safari bundles on their existing installation IDs. Resource origins remain per-installation UUIDs.
 - Resolve host authorization through exact loaded contexts and their profiles, and refuse duplicate verified runtime IDs within a profile.

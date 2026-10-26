@@ -1,6 +1,6 @@
-## Local 0.23.0 — Site Access, explicit consent and tab metadata (full build, all eleven native suites, the repository runtime script and final vendor checks passed at `4ed2f83`; ready for Ari's publication approval; local, not published)
+## 0.23.0 — Site Access, explicit consent and tab metadata (full build, all eleven native suites, the repository runtime script and final vendor checks passed at `4ed2f83`)
 
-Nothing here claims full Chrome compatibility, and nothing has been published.
+Nothing here claims full Chrome compatibility.
 
 **Final candidate `4ed2f83`** (logs `chrome-4ed2f83-integration-*.log`, `chrome-4ed2f83-full-native-driver.log`): the full integrated `bash build.sh` passed, including every component suite, and **all eleven native suites passed** in canonical Bam Preview: WebKit, PiP, Interactions **173**, Auto PiP **85**, Features **371**, Resources **37**, Profiles **98**, Extensions **818**, Favicons **85**, Profile Activation **45** and Arc import **155**. The repository-mandated `bash scripts/test-runtime.sh` then passed all eleven suites again on the same candidate (`chrome-4ed2f83-repository-runtime.log`).
 
@@ -9,7 +9,7 @@ The Extensions suite includes:
 - site access **158** (two-phase restart, Update and Disable/Enable release barriers, the declined-popup barrier), tab metadata **58** and the renderer fixture;
 - the worker fixture after Revoke Permissions: restart into a fresh context, the retired context refused, exact history and bookmarks denials with no data, events or snapshot reads, then Disable/Enable and reload with storage kept.
 
-Every required app gate has passed. The candidate stays local until Ari approves publication.
+Every required app gate passed on this candidate, and Ari approved shipping it.
 
 **What made it pass:**
 - **Product:** the restart's release barrier now also waits for a popup WebKit prepared and asked Bam to present, even when Bam declined (`1da37b3`).
@@ -38,7 +38,7 @@ Every required app gate has passed. The candidate stays local until Ari approves
 
 **Limits regardless:** the release barrier waits only for views Bam can name — its tabs and previews, popups it presented or was asked to present, offscreen documents (a popup page created some other way, WebKit-internal views and views outside Bam aren't inventoried); the expiry check runs about a second after a grant expires, not at the exact deadline; WebKit doesn't enforce Chrome's user-gesture rule for `permissions.request`; Safari-imported extensions no longer prompt per site; a restart in a private window resets the extension's in-memory storage; tabs in several Little Bam windows stay blank for `tabs`-only extensions; `favIconUrl`/`pendingUrl` aren't provided; favicon routing (`_favicon/`) remains unsupported.
 
-## Local 0.23.0 build 47 — Chrome identity and kept-tab restoration; broader compatibility incomplete
+## 0.23.0 build 47 — Chrome identity and kept-tab restoration; broader compatibility incomplete
 
 The integrated `e4ae8eb` full build and all eleven canonical Bam Preview native suites passed: WebKit, PiP, Interactions **173**, Auto PiP **85**, Features **371**, Resources **37**, Profiles **98**, Extensions **435**, Favicons **85**, Profile Activation **45**, and Arc Import **155**. Identity component checks include verified-ID **15**, enumeration **91**, startup **16**, management disclosure **11**, and compatibility **77**. This covers the verified-ID product implementation and notification reinstall correction; later diagnostic-only cleanup changes compiled separately.
 
