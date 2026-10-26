@@ -4,7 +4,7 @@ import Darwin
 
 /// Session-only native downloads. Nothing resumes after Orbit quits.
 /// https://developer.apple.com/documentation/webkit/wkdownloaddelegate
-@MainActor final class DownloadCoordinator: NSObject, WKDownloadDelegate, NSOpenSavePanelDelegate {
+@MainActor final class DownloadCoordinator: NSObject, WKDownloadDelegate, NSOpenSavePanelDelegate, NSPopoverDelegate {
     typealias Status = DownloadStatus
     typealias Snapshot = DownloadSnapshot
     typealias DestinationChooser = (String, URL?, @escaping (URL?) -> Void) -> Void
@@ -22,6 +22,7 @@ import Darwin
     private var popover: NSPopover?
     private var popoverList: DownloadsPopoverController?
     private var library: DownloadsLibraryWindowController?
+    private var popoverClosedAt: TimeInterval?
     private var terminateObserver: NSObjectProtocol?
 
     /// The optional chooser is a test seam; ordinary callers receive NSSavePanel.
@@ -64,7 +65,15 @@ import Darwin
         guard let window = anchor?.window ?? parent, window.isVisible, !window.isMiniaturized, let content = window.contentView else {
             showLibrary(relativeTo: parent); return
         }
-        if popover?.isShown == true { return }
+        let clickTypes: [NSEvent.EventType] = [.leftMouseDown, .leftMouseUp]
+        let fromClick = NSApp.currentEvent.map { clickTypes.contains($0.type) } ?? false
+        switch DownloadPresentation.toggle(isShown: popover?.isShown == true,
+                                           secondsSinceClose: popoverClosedAt.map { ProcessInfo.processInfo.systemUptime - $0 },
+                                           fromClick: fromClick) {
+        case .close: popover?.performClose(nil); return
+        case .stayClosed: popoverClosedAt = nil; return
+        case .open: break
+        }
         let list = DownloadsPopoverController(actions: surfaceActions(), thumbnails: thumbnails)
         list.update(snapshots, now: Date())
         let surface = NSPopover()
@@ -72,6 +81,7 @@ import Darwin
         surface.animates = !BamTheme.reduceMotion
         surface.hasFullSizeContent = true
         surface.contentViewController = list
+        surface.delegate = self
         surface.contentSize = list.preferredContentSize
         popover = surface; popoverList = list
         if let button = anchor ?? Self.sidebarDownloadsButton(in: content) {
@@ -96,6 +106,11 @@ import Darwin
         if root.identifier?.rawValue == "sidebar-downloads", !root.isHiddenOrHasHiddenAncestor, !root.visibleRect.isEmpty { return root }
         for child in root.subviews { if let found = sidebarDownloadsButton(in: child) { return found } }
         return nil
+    }
+
+    func popoverDidClose(_ notification: Notification) {
+        guard (notification.object as? NSPopover) === popover else { return }
+        popoverClosedAt = ProcessInfo.processInfo.systemUptime
     }
 
     private func surfaceActions() -> DownloadActions {

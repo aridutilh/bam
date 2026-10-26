@@ -101,6 +101,15 @@ enum DownloadPresentation {
         return formatter.localizedString(for: date, relativeTo: now)
     }
 
+    enum PopoverToggle: Equatable { case open, close, stayClosed }
+    /// The Downloads button and ⌘J toggle the compact list. A transient popover closes on the
+    /// click outside it first, so a click arriving just after it closed is that same click.
+    static func toggle(isShown: Bool, secondsSinceClose: TimeInterval?, fromClick: Bool) -> PopoverToggle {
+        if isShown { return .close }
+        if fromClick, let since = secondsSinceClose, since >= 0, since < 0.35 { return .stayClosed }
+        return .open
+    }
+
     /// Plain-language count for the "Show All" control.
     static func showAllTitle(more: Int) -> String { more > 0 ? "Show All (\(more) more)" : "Show All" }
 }

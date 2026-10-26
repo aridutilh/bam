@@ -73,6 +73,15 @@ import Foundation
         try FileManager.default.removeItem(at: path)
         try check(DownloadFileIdentity.of(path) == nil, "A deleted file still had an identity")
 
+        // The Downloads button toggles: open → close; the click that just closed it doesn't reopen it.
+        try check(DownloadPresentation.toggle(isShown: true, secondsSinceClose: nil, fromClick: true) == .close
+                  && DownloadPresentation.toggle(isShown: true, secondsSinceClose: nil, fromClick: false) == .close, "An open list did not close")
+        try check(DownloadPresentation.toggle(isShown: false, secondsSinceClose: 0.05, fromClick: true) == .stayClosed,
+                  "The click that dismissed the list reopened it")
+        try check(DownloadPresentation.toggle(isShown: false, secondsSinceClose: 2, fromClick: true) == .open
+                  && DownloadPresentation.toggle(isShown: false, secondsSinceClose: nil, fromClick: true) == .open
+                  && DownloadPresentation.toggle(isShown: false, secondsSinceClose: 0.05, fromClick: false) == .open,
+                  "A later click or ⌘J did not open the list")
         try check(DownloadPresentation.showAllTitle(more: 2) == "Show All (2 more)" && DownloadPresentation.showAllTitle(more: 0) == "Show All", "Show All title was wrong")
     }
 }
