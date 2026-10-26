@@ -1,3 +1,14 @@
+## Local extension popup follow-up — targeted native acceptance
+
+On branch `overnight/popup-bounds-1026`, after the 0.24 visual candidate. This follow-up is not published or included in the preserved 0.24 release archive.
+
+- Independent review closed the height-clamp anchoring and stale popup ownership findings.
+- Targeted frame component checks: 25 pass; all sources typecheck.
+- Optimized app compiled, signed and packaged at `ab101a0`. The Documents copy failed signature verification because File Provider repeatedly attached FinderInfo. The signed staging ZIP was extracted in `/private/tmp`, verified strictly, and installed only into canonical Bam Preview.
+- Canonical Preview Extensions: **822 pass** on the corrected second run. The first run requested the browser's existing width and incorrectly expected a refusal; the corrected test requests an actual change, requires the explicit refusal, and checks both native and reported frames remain unchanged. Popup creation/update and stale ownership checks pass.
+- Fixtures use real WebKit APIs and windows matching Little Bam minimums. Actual third-party popup/vault sign-in, multi-display interaction and full multi-tab window restoration are not certified. Normal/multi-tab extension windows remain unsupported.
+- The other ten native suites were not repeated for this isolated follow-up. Canonical Preview was restored to the separately verified 0.24 visual candidate afterward; personal profile hashes remained unchanged.
+
 ## 0.24.0 build 48 — visual and interaction release (all eleven native suites passed across runs with two targeted retries; app-only rebuild at `67b9a57` passed a focused visual retest)
 
 Nothing here claims Arc or Yab parity.
