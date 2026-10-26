@@ -234,7 +234,10 @@ import WebKit
         // no fresh load at all; the extension stays off until Enable after the renderer is released.
         try await reallow()
         do {
-            var held: WKWebView? = controller.browsers[background]
+            // Premise: a Bam renderer exists and the fixture holds it strongly through every await below (pinned with
+            // withExtendedLifetime after the last one, so optimized ARC can't release it early); released at scope end.
+            let held = controller.browsers[background]
+            try check(held != nil, "the release-timeout case has no Bam renderer to hold (premise)")
             BrowserExtensions.siteAccessRestartReleaseDeadline = 0.3
             let timedOut = try await restart("release timeout", requested, tabs: [background], probes: [{ held }]) { try site(requested, .withheld) }
             BrowserExtensions.siteAccessRestartReleaseDeadline = earlierDeadline
@@ -243,7 +246,7 @@ import WebKit
                       host.records.first { $0.id == requested }?.enabled == false && timedOut.result.failure?.isEmpty == false,
                       "a release timeout loaded the fresh context, or did not leave the extension off with an error")
             try await wait("the visible tab of a timed-out restart did not show the unavailable error") { controller.tabErrors[background]?.contains("unavailable") == true }
-            held = nil
+            withExtendedLifetime(held) {}
         }
         try await enableAndCheck("after a release timeout")
 
