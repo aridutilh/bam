@@ -1190,6 +1190,7 @@ import Darwin
                 var secondPage = "not-built"
                 if let context = try? live(), let configuration = context.webViewConfiguration {
                     let web = WKWebView(frame: NSRect(x: 0, y: 0, width: 320, height: 240), configuration: configuration)
+                    observeExtensionView("discriminator-second-raw-page", web)
                     web.load(URLRequest(url: context.baseURL.appendingPathComponent("page.html")))
                     let deadline = ProcessInfo.processInfo.systemUptime + 5
                     while web.title != "Bam extension page ready" && ProcessInfo.processInfo.systemUptime < deadline { try await Task.sleep(nanoseconds: 40_000_000) }
@@ -1200,6 +1201,34 @@ import Darwin
                 if let page = consentPage { repeated = await discriminatorFetch(page) }
                 print("CONSENT_FETCH_DISCRIMINATOR consentPageRepeat=\(repeated) bamExtensionRenderers=\(bamRenderers) secondRawPage=\(secondPage)"); fflush(stdout)
                 extensionViewInventory("after-discriminator")
+                // Causal discriminator (native 3ab4043: the updated popup, preloaded by this fixture's popupWebView getter and
+                // never presented by Bam, was alive at the fresh load; every fresh page then read). Repeat the withdrawal
+                // once with no test-held page and that popup gone: re-allow, release this check's raw pages, withhold,
+                // and fetch from a page of the next fresh context and from Bam's renderer. Refused there points at the
+                // unseen popup alive at load; read there points at access retained below the views. Still fails below.
+                do {
+                    try await releaseConsentPage("causal-discriminator")
+                    _ = try perform(host.siteAccess(id: extensionID)!, .choose(.allRequested))
+                    try await buildConsentPage()
+                    let reallowedRead = consentPage == nil ? "no-page" : await discriminatorFetch(consentPage!)
+                    try await releaseConsentPage("causal-discriminator-reallowed")
+                    extensionViewInventory("causal-before-withhold")
+                    BrowserExtensions.siteAccessRestartWillLoad = { id in if id == extensionID { extensionViewInventory("causal-will-load-fresh-context") } }
+                    let beforeCausal = generationNow()
+                    _ = try perform(host.siteAccess(id: extensionID)!, .choose(.withheld))
+                    try await settleRestart("Causal discriminator Withhold", from: beforeCausal)
+                    BrowserExtensions.siteAccessRestartWillLoad = nil
+                    try await buildConsentPage()
+                    let causalPage = consentPage == nil ? "no-page" : await discriminatorFetch(consentPage!)
+                    var causalBam: [String] = []
+                    for (tabID, web) in controller.browsers where web.url?.scheme == "webkit-extension" && web.url?.host == extensionHost {
+                        causalBam.append("\(tabID.uuidString.prefix(8))=\(await discriminatorFetch(web))")
+                    }
+                    print("CONSENT_CAUSAL reallowedPositiveControl=\(reallowedRead) afterSecondWithholdFreshPage=\(causalPage) bamExtensionRenderers=\(causalBam)"); fflush(stdout)
+                    extensionViewInventory("causal-after")
+                } catch {
+                    print("CONSENT_CAUSAL aborted=\(error)"); fflush(stdout)
+                }
             }
             try check(failedWithheld.isEmpty,
                 "Using a withheld requested site prompted, granted, denied or changed Site Access: failed=\(failedWithheld) shown=\(reviewsShown), \(withheldUse); " +
