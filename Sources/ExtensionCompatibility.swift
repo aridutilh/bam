@@ -18,6 +18,9 @@ import UserNotifications
 @available(macOS 15.4, *)
 enum ExtensionCompatibility {
     static let nativeApplicationIdentifier = "com.ari.bam.compatibility"
+    /// The worker adapter's own refusal when the worker has no native transport (e.g. after Revoke Permissions, which
+    /// withdraws nativeMessaging): every bridged call rejects with exactly this text.
+    static let workerTransportUnavailable = "Bam's worker compatibility transport is unavailable."
     struct Plan: Codable, Equatable {
         /// Namespaces or members the layer defines when absent, in manifest order.
         var provided: [String] = []
@@ -72,6 +75,7 @@ enum ExtensionCompatibility {
             .replacingOccurrences(of: "__PAGE_ENVIRONMENT__", with: ExtensionIdleCallbackCompatibility.source)
             .replacingOccurrences(of: "__WASM_ADAPTER__", with: ExtensionWasmCompatibility.source)
             .replacingOccurrences(of: "__BRIDGE__", with: javaScriptString(bridge))
+            .replacingOccurrences(of: "__TRANSPORT_UNAVAILABLE__", with: javaScriptString(workerTransportUnavailable))
             .replacingOccurrences(of: "__PROVIDED__", with: provided)
             .replacingOccurrences(of: "__VERSION__", with: javaScriptString(browserVersion))
             + "\n" + documentActionIconBinding(baseURL: baseURL)
@@ -125,6 +129,7 @@ enum ExtensionCompatibility {
             .replacingOccurrences(of: "__PAGE_ENVIRONMENT__", with: "")
             .replacingOccurrences(of: "__WASM_ADAPTER__", with: ExtensionWasmCompatibility.source)
             .replacingOccurrences(of: "__BRIDGE__", with: javaScriptString(nativeApplicationIdentifier))
+            .replacingOccurrences(of: "__TRANSPORT_UNAVAILABLE__", with: javaScriptString(workerTransportUnavailable))
             .replacingOccurrences(of: "__PROVIDED__", with: provided)
             .replacingOccurrences(of: "__VERSION__", with: javaScriptString(browserVersion))
     }
@@ -155,7 +160,7 @@ enum ExtensionCompatibility {
       const isWorker = __WORKER__;
       const nativeSend = isWorker && api.runtime && typeof api.runtime.sendNativeMessage === "function" ? api.runtime.sendNativeMessage.bind(api.runtime) : null;
       const nativeConnect = isWorker && api.runtime && typeof api.runtime.connectNative === "function" ? api.runtime.connectNative.bind(api.runtime) : null;
-      const sendNative = (body) => nativeSend ? Promise.resolve(nativeSend(__BRIDGE__, body)) : Promise.reject(new Error("Bam's worker compatibility transport is unavailable."));
+      const sendNative = (body) => nativeSend ? Promise.resolve(nativeSend(__BRIDGE__, body)) : Promise.reject(new Error(__TRANSPORT_UNAVAILABLE__));
       try { install(); } catch (error) {
         console.error("[Bam compatibility] layer failed to install", error);
         const body = { kind: "scriptError", url: location.href, message: String(error && error.message || error), stack: String(error && error.stack || "").slice(0, 1200) };
@@ -171,7 +176,10 @@ enum ExtensionCompatibility {
       const nativeEvents = new Set(["notifications.onClosed", "notifications.onClicked", "notifications.onButtonClicked", "notifications.onShown", "idle.onStateChanged", "windows.onBoundsChanged", "history.onVisited", "history.onVisitRemoved"]);
       const subscribe = (name) => {
         if (!isWorker || !nativeEvents.has(name)) return;
-        if (!nativeConnect) throw unsupported("Worker event delivery");
+        // Without a native transport (Revoke Permissions withdraws nativeMessaging) the listener is kept but can never
+        // fire, and no port is opened. Registering must not throw: an ordinary top-level addListener would otherwise
+        // stop the whole worker from loading.
+        if (!nativeConnect) return;
         if (!eventPort) {
           eventPort = nativeConnect(bridgeName);
           const port = eventPort;

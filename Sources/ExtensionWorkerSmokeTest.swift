@@ -661,12 +661,14 @@ import WebKit
         host.historyChanged(profileID: profileA, change: .visited(ExtensionHistory.Visit(url: "https://after-revoke.example/", title: "Late", visitedAt: Date())))
         try await Task.sleep(nanoseconds: 500_000_000)
         // Revoke Permissions removes every grant, which also closes the worker's compatibility transport, so a worker
-        // call may be refused there (before the bridge). WebKit wraps the reply error, so the worker's message must
+        // call may be refused there (before the bridge, or in the adapter when the fresh context has no transport). WebKit wraps the reply error, so the worker's message must
         // contain the complete transport refusal or the complete bridge refusal; anything else, or any data, fails.
         // The bridge itself must still refuse with exactly its own text when called directly.
         func refusedAfterRevoke(_ error: Any?, bridgeText: String) -> Bool {
             guard let text = error as? String else { return false }
+            // After Revoke the fresh context has no nativeMessaging, so the worker adapter refuses with its own exact text.
             return text.contains(bridgeText) || text.contains(BrowserExtensions.compatibilityTransportUnavailable)
+                || text.contains(ExtensionCompatibility.workerTransportUnavailable)
         }
         let revokedHistory = await request(revokedPopupA, kind: "history")
         let revokedHistoryNative = await runtimeA.compatibility.receiveNativeMessage(["kind": "request", "method": "history.search", "params": ["text": ""]], context: revokedContextA)
