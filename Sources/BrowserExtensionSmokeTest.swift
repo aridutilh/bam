@@ -854,6 +854,21 @@ import Darwin
             host.persistPermissions(context)
         }
         // Site access on the live context through the panel's engine API (after the approved update).
+        /// A Site Access change that withdraws live access restarts the extension in two phases
+        /// (work/site-access-two-phase-final-contract.md): its context is nil until the restart completes. Wait for that
+        /// restart by its generation before reading the context; a change that withdrew nothing returns at once.
+        func settleRestart(_ label: String, from before: UInt64) async throws {
+            let started = host.restartGeneration[extensionID] ?? 0
+            guard started != before else { return }
+            try check(started == before + 1, "\(label): \(started - before) restarts started instead of one")
+            guard let result = await host.restartCompletion(id: extensionID, generation: started) else {
+                throw ExtensionSmokeTest.Failure(description: "\(label): no result for restart generation \(started)")
+            }
+            try check(result == .restarted && host.context(for: extensionID)?.isLoaded == true && !host.isRestarting(id: extensionID),
+                      "\(label): the restart finished \(result), or left no loaded context")
+            _ = host.takeSiteAccessNotice(id: extensionID)
+        }
+        func generationNow() -> UInt64 { host.restartGeneration[extensionID] ?? 0 }
         func checkSiteAccess() async throws {
             let ip = URL(string: "http://127.0.0.1/site-access")!, newSite = URL(string: "https://new.invalid/")!
             let ipPattern = try WKWebExtension.MatchPattern(string: "http://127.0.0.1/*")
@@ -870,7 +885,9 @@ import Darwin
                 updated.pending.isEmpty && granted(ip) && granted(newSite), "Approved update did not grant exactly the reviewed sites: \(updated.state)")
             try check(isFinite(updated.timed.optional[optionalGranted.string]) && updated.timed.requested.isEmpty,
                 "A time-limited optional grant lost its provenance or date: \(updated.timed)")
+            let beforeWithhold = generationNow()
             let withheld = try perform(updated, .choose(.withheld))
+            try await settleRestart("Withhold", from: beforeWithhold)
             try check(withheld.state.mode == .withheld && !granted(ip) && !granted(newSite) && withheld.timed.optional[optionalGranted.string] != nil &&
                 host.context(for: extensionID)?.grantedPermissionMatchPatterns[optionalGranted] != nil,
                 "Withholding must remove requested sites from the live extension and keep optional grants")
@@ -897,6 +914,8 @@ import Darwin
             // expirationDate:) on an already-granted pattern leaves its permanent expiry. The SDK's settable
             // grantedPermissionMatchPatterns ("replace all existing entries") sets the exact expiry instead; every other
             // entry is carried over unchanged.
+            // Scoped: no context is held past this block, so none survives the withdrawals below.
+            do {
             guard let live = host.context(for: extensionID) else { throw ExtensionSmokeTest.Failure(description: "Re-enable failed") }
             let desiredExpiry = Date(timeIntervalSinceNow: 3_600)
             let grantsBefore = live.grantedPermissionMatchPatterns
@@ -912,11 +931,14 @@ import Darwin
             let shortened = host.siteAccess(id: extensionID)
             try check(shortened?.state.mode == .withheld && isFinite(shortened?.timed.requested[ipPattern.string]),
                 "A shortened grant must leave the permanent choice as time-limited requested access: \(String(describing: shortened?.state)); native \(ipPattern.string) expiry=\(String(describing: live.grantedPermissionMatchPatterns[ipPattern]))")
+            }
             try await host.setEnabled(false, id: extensionID); try await host.setEnabled(true, id: extensionID)
             try check(isFinite(host.context(for: extensionID)?.grantedPermissionMatchPatterns[ipPattern]) && granted(ip),
                 "A reload restored a shortened grant to permanent")
             guard let reloaded = host.siteAccess(id: extensionID) else { throw ExtensionSmokeTest.Failure(description: "No snapshot after reload") }
+            let beforeEnd = generationNow()
             let ended = try perform(reloaded, .choose(.withheld))
+            try await settleRestart("Withholding a time-limited grant", from: beforeEnd)
             try check(ended.timed.requested.isEmpty && !granted(ip), "Withholding must end requested time-limited grants")
             // A runtime prompt whose dialog outlives a panel change neither grants nor denies (the Allow wins).
             guard let promptContext = host.context(for: extensionID), let promptController = promptContext.webExtensionController,
@@ -994,11 +1016,12 @@ import Darwin
             // A subset of the optional https://optional.invalid/* that overlaps no seeded grant or denial: WebKit can drop
             // grants a denied pattern covers, and the time-limited http://localhost/kept/* grant must survive for later steps.
             let optionalURL = URL(string: "https://optional.invalid/consent/page")!, optionalOrigin = "https://optional.invalid/consent/*"
+            let beforeConsentBase = generationNow()
             let consentBase = try perform(host.siteAccess(id: extensionID)!, .choose(.withheld))
+            try await settleRestart("Consent checks' first Withhold", from: beforeConsentBase)
             var implicitAnswer: Set<URL>?
             host.permissionPrompt = { _ in reviewsShown += 1; return true }
-            let implicitTarget = try live()
-            promptRuntime.webExtensionController(promptController, promptForPermissionToAccess: [optionalURL, ip], in: nil, for: implicitTarget) { granted, _ in implicitAnswer = granted }
+            promptRuntime.webExtensionController(promptController, promptForPermissionToAccess: [optionalURL, ip], in: nil, for: try live()) { granted, _ in implicitAnswer = granted }
             try check(reviewsShown == 0 && implicitAnswer == [] && !granted(ip) && deniedKeys(optionalURL).isEmpty && deniedKeys(ip).isEmpty &&
                 host.siteAccess(id: extensionID)?.state.mode == .withheld && host.siteAccess(id: extensionID)?.revision == consentBase.revision,
                 "An implicit URL request showed a review, granted, denied or changed Site Access: shown=\(reviewsShown), answer=\(String(describing: implicitAnswer))")
@@ -1006,8 +1029,7 @@ import Darwin
             let optionalPattern = try WKWebExtension.MatchPattern(string: optionalOrigin)
             var declinedAnswer: Set<WKWebExtension.MatchPattern>?
             host.permissionPrompt = { _ in reviewsShown += 1; return false }
-            let declineTarget = try live()
-            promptRuntime.webExtensionController(promptController, promptForPermissionMatchPatterns: [optionalPattern], in: nil, for: declineTarget) { granted, _ in declinedAnswer = granted }
+            promptRuntime.webExtensionController(promptController, promptForPermissionMatchPatterns: [optionalPattern], in: nil, for: try live()) { granted, _ in declinedAnswer = granted }
             try check(reviewsShown == 1 && declinedAnswer == [] && live().permissionStatus(for: optionalURL) == .deniedExplicitly && !deniedKeys(optionalURL).isEmpty,
                 "An offered and declined pattern must be denied: shown=\(reviewsShown), status=\(String(describing: try? live().permissionStatus(for: optionalURL).rawValue))")
             // Test cleanup only: drop the declined denial so the installed-engine checks below start from the same state.
@@ -1126,7 +1148,9 @@ import Darwin
             // This withdrawal may restart the extension: the old page belongs to the old context, so release it and build
             // the page for the approved request from the context loaded now.
             try await releaseConsentPage("before-second-withhold")
+            let beforeSecondWithhold = generationNow()
             _ = try perform(host.siteAccess(id: extensionID)!, .choose(.withheld))
+            try await settleRestart("Consent checks' second Withhold", from: beforeSecondWithhold)
             try check(!granted(ip), "The consent checks could not withhold the requested site again")
             try await buildConsentPage()
             reviewed = []
