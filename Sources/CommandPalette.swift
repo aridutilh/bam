@@ -57,22 +57,6 @@ import WebKit
     }
 }
 
-/// Palette geometry, as Arc's: about 60% of the window wide, vertically centered for a full list (the top stays put
-/// as results come and go, so the field never jumps), a 12pt corner and a 56pt input row.
-enum PaletteGeometry {
-    static let cornerRadius: CGFloat = 12
-    static let inputHeight: CGFloat = 56
-    static let rowHeight: CGFloat = 40
-    static let typicalRows = 6
-    static func width(forWindowWidth w: CGFloat) -> CGFloat {
-        min(max(0, w - 60), max(540, min(820, (w * 0.6).rounded())))
-    }
-    static func top(forWindowHeight h: CGFloat) -> CGFloat {
-        let typical = inputHeight + 7 + CGFloat(typicalRows) * rowHeight + 8
-        return max(40, ((h - typical) / 2).rounded())
-    }
-}
-
 /// The command palette: open/search, Arc-style Tab-to-search site scoping,
 /// remote suggestions, layout and dismissal.
 extension BrowserController {
@@ -123,13 +107,19 @@ extension BrowserController {
         let line = NSBox(); line.boxType = .separator
         box.addSubview(line)
         let results = TabSearchResultsView(frame: .zero)
+        let resultsScroll = NSScrollView()
+        resultsScroll.drawsBackground = false; resultsScroll.hasVerticalScroller = true
+        resultsScroll.autohidesScrollers = true; resultsScroll.scrollerStyle = .overlay
+        resultsScroll.hasHorizontalScroller = false; resultsScroll.horizontalScrollElasticity = .none
+        resultsScroll.verticalScrollElasticity = .none
+        resultsScroll.documentView = results
         results.faviconProvider = { [weak self] in self?.favicon(forTabID: $0) }
         results.siteFaviconProvider = { [weak self] url, allowFetch in self?.favicon(forSiteURL: url, allowFetch: allowFetch) }
         results.onSelect = { [weak self] id in self?.selectSearchResult(id) }
         results.onSubmitQuery = { [weak self] query in self?.submitAddressQuery(query) }
         results.onSearch = { [weak self] text in self?.submitPaletteSearch(text) }
         results.onCommand = { [weak self] command in self?.performPaletteCommand(command) }
-        box.addSubview(results)
+        box.addSubview(resultsScroll)
         overlay.addSubview(box); root.addSubview(overlay)
         addressOverlay = overlay; addressField = field; addressCard = box; tabSearchResults = results
         paletteIcon = icon; paletteHint = hint; paletteSeparator = line
@@ -146,7 +136,9 @@ extension BrowserController {
         let cw = PaletteGeometry.width(forWindowWidth: w)
         let inputHeight = PaletteGeometry.inputHeight
         let rowsHeight = tabSearchResults?.preferredHeight ?? 44
-        content.frame = NSRect(x: (w - cw) / 2, y: PaletteGeometry.top(forWindowHeight: h), width: cw, height: inputHeight + 7 + rowsHeight + 8)
+        // Stable centered top; moved up, and the results scroll, only when the whole card wouldn't fit the window.
+        let fit = PaletteGeometry.fit(windowHeight: h, resultsHeight: rowsHeight)
+        content.frame = NSRect(x: (w - cw) / 2, y: fit.top, width: cw, height: inputHeight + 7 + fit.visibleResultsHeight + 8)
         content.layer?.borderColor = (root.isDark ? NSColor(white: 1, alpha: 0.14) : NSColor(white: 0, alpha: 0.12)).cgColor
         paletteGlow?.frame = content.frame
         let radius = PaletteGeometry.cornerRadius
@@ -171,7 +163,13 @@ extension BrowserController {
         // the text does not sit below the pill's center.
         addressField?.frame = NSRect(x: fieldX, y: (inputHeight - 24) / 2 + 1, width: max(40, cw - fieldX - hintWidth - 34), height: 24)
         paletteSeparator?.frame = NSRect(x: 14, y: inputHeight, width: cw - 28, height: 1)
-        tabSearchResults?.frame = NSRect(x: 10, y: inputHeight + 7, width: cw - 20, height: rowsHeight)
+        if let results = tabSearchResults, let scroll = results.enclosingScrollView {
+            scroll.frame = NSRect(x: 10, y: inputHeight + 7, width: cw - 20, height: fit.visibleResultsHeight)
+            results.frame = NSRect(x: 0, y: 0, width: scroll.contentSize.width, height: rowsHeight)
+            results.revealSelection()
+        } else {
+            tabSearchResults?.frame = NSRect(x: 10, y: inputHeight + 7, width: cw - 20, height: rowsHeight)
+        }
     }
 
     @objc func submitAddress(_ sender: Any?) {

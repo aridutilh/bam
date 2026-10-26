@@ -239,6 +239,41 @@ import AppKit
             require(PaletteCommandCatalog.matches(query).contains { $0.command.id == id }, "\(query) finds \(id)")
         }
         require(Set(PaletteCommandCatalog.commands.map(\.id)).count == PaletteCommandCatalog.commands.count, "Command IDs are unique")
+        // The palette never extends past the window: ten rows (three commands, the query and six tabs) at the 540pt
+        // minimum window rise and scroll; a short list keeps the stable centered top.
+        for (height, rows) in [(CGFloat(540), 10), (540, 3), (900, 10), (300, 10)] {
+            let resultsHeight = CGFloat(rows) * PaletteGeometry.rowHeight + 8
+            let fit = PaletteGeometry.fit(windowHeight: height, resultsHeight: resultsHeight)
+            let bottom = fit.top + PaletteGeometry.chromeHeight + fit.visibleResultsHeight
+            require(fit.top >= 0 && bottom <= height - PaletteGeometry.margin + 0.001 || height < 2 * PaletteGeometry.margin + PaletteGeometry.chromeHeight,
+                    "The palette fits a \(height)pt window with \(rows) rows (top \(fit.top), bottom \(bottom))")
+            if bottom <= height - PaletteGeometry.margin, fit.visibleResultsHeight == resultsHeight {
+                require(fit.top == PaletteGeometry.top(forWindowHeight: height) || fit.top < PaletteGeometry.top(forWindowHeight: height),
+                        "A fitting card keeps or rises from the centered top")
+            }
+        }
+        let tenRows = 10 * PaletteGeometry.rowHeight + 8
+        let atMinimum = PaletteGeometry.fit(windowHeight: 540, resultsHeight: tenRows)
+        require(atMinimum.visibleResultsHeight == tenRows && atMinimum.top < PaletteGeometry.top(forWindowHeight: 540)
+                    && atMinimum.top + PaletteGeometry.chromeHeight + tenRows <= 540 - PaletteGeometry.margin,
+                "Ten rows at the 540pt minimum: the card rises from the centered top and shows every row unclipped")
+        let short = PaletteGeometry.fit(windowHeight: 400, resultsHeight: tenRows)
+        require(short.visibleResultsHeight < tenRows && short.top == PaletteGeometry.margin,
+                "Ten rows in a 400pt window: the card rises to the margin and its results scroll")
+        require(PaletteGeometry.fit(windowHeight: 900, resultsHeight: 3 * PaletteGeometry.rowHeight + 8).top == PaletteGeometry.top(forWindowHeight: 900),
+                "A short list keeps the stable centered top")
+        // Scrolling results keep the keyboard selection in view.
+        let scroller = NSScrollView(frame: NSRect(x: 0, y: 0, width: 540, height: 120))
+        let scrolled = TabSearchResultsView(frame: NSRect(x: 0, y: 0, width: 540, height: 400))
+        scroller.documentView = scrolled
+        let scrollRows = (0..<8).map { BrowserTab(title: "Row \($0)", address: "https://example.com/row/\($0)", space: 0) }
+        scrolled.update(tabs: scrollRows, query: "row", activeID: UUID(), canCreate: false)
+        scrolled.frame.size.height = scrolled.preferredHeight
+        for _ in 0..<7 { scrolled.moveSelection(delta: 1, repeating: true) }
+        let shown = scroller.contentView.documentVisibleRect
+        let selectedTop = CGFloat(scrolled.selectedIndex) * PaletteGeometry.rowHeight
+        require(selectedTop >= shown.minY - 0.5 && selectedTop + PaletteGeometry.rowHeight - 2 <= shown.maxY + 0.5,
+                "The selected row scrolls into view (row \(scrolled.selectedIndex), visible \(shown.minY)–\(shown.maxY))")
         // Held arrow keys (auto-repeat) step and stop at the ends; a discrete press still wraps.
         let held = (0..<4).map { BrowserTab(title: "Held \($0)", address: "https://example.com/held/\($0)", space: 0) }
         results.update(tabs: held, query: "held", activeID: UUID(), canCreate: false)

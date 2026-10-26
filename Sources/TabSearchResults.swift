@@ -93,6 +93,35 @@ enum TabSearchMatcher {
 
 /// Embed below the command palette's text field. The parent keeps first responder
 /// in that field and forwards arrow keys, Return and Tab to this view.
+/// Palette geometry, as Arc's: about 60% of the window wide, vertically centered for a full list (the top stays put
+/// as results come and go, so the field never jumps), a 12pt corner and a 56pt input row. When a long result list
+/// wouldn't fit the window, the card moves up only as far as needed and its results scroll.
+enum PaletteGeometry {
+    static let cornerRadius: CGFloat = 12
+    static let inputHeight: CGFloat = 56
+    static let rowHeight: CGFloat = 40
+    static let typicalRows = 6
+    /// Space kept clear above and below the card.
+    static let margin: CGFloat = 20
+    /// The input row, the separator gap and the bottom padding around the results.
+    static let chromeHeight: CGFloat = inputHeight + 7 + 8
+    static func width(forWindowWidth w: CGFloat) -> CGFloat {
+        min(max(0, w - 60), max(540, min(820, (w * 0.6).rounded())))
+    }
+    static func top(forWindowHeight h: CGFloat) -> CGFloat {
+        let typical = chromeHeight + CGFloat(typicalRows) * rowHeight
+        return max(40, ((h - typical) / 2).rounded())
+    }
+    /// Where the card goes and how much of its results show. The centered top holds while the card fits; otherwise
+    /// it rises toward the top margin, and past that the results are cut to the room left (they scroll).
+    static func fit(windowHeight h: CGFloat, resultsHeight: CGFloat) -> (top: CGFloat, visibleResultsHeight: CGFloat) {
+        let room = max(0, h - 2 * margin - chromeHeight)
+        let visible = min(resultsHeight, room)
+        let bottomLimit = h - margin - (chromeHeight + visible)
+        return (max(min(margin, h), min(top(forWindowHeight: h), bottomLimit)), visible)
+    }
+}
+
 @MainActor final class TabSearchResultsView: NSView {
     var faviconProvider: ((UUID) -> NSImage?)? { didSet { refreshFavicons() } }
     /// Unsubmitted URL text may consult the cache, but must not start a fetch.
@@ -317,6 +346,17 @@ enum TabSearchMatcher {
         if rows.indices.contains(selectedIndex) {
             NSAccessibility.post(element: rows[selectedIndex], notification: .selectedChildrenChanged)
         }
+        revealSelection()
+    }
+    /// When the results scroll (a long list in a short window), keeps the selected row in view, without animation.
+    func revealSelection() {
+        guard rows.indices.contains(selectedIndex), let clip = enclosingScrollView?.contentView else { return }
+        let target = rowFrame(at: selectedIndex)
+        let visible = clip.documentVisibleRect
+        guard target.minY < visible.minY || target.maxY > visible.maxY else { return }
+        let y = target.minY < visible.minY ? target.minY : target.maxY - visible.height
+        clip.scroll(to: NSPoint(x: 0, y: max(0, y)))
+        enclosingScrollView?.reflectScrolledClipView(clip)
     }
     private func rowFrame(at index: Int) -> NSRect {
         NSRect(x: 0, y: CGFloat(index) * Self.rowHeight, width: bounds.width, height: Self.rowHeight - 2)
