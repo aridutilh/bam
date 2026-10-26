@@ -38,6 +38,10 @@ import Darwin
         }
         let controller = BrowserController(sessionURL: FileManager.default.temporaryDirectory.appendingPathComponent("unused-extension-session.json"), ephemeral: true)
         controller.session.tabs.removeAll(); controller.automaticallyShowsVideo = false
+        /// Diagnostics (native 4e0092f consent fetch): every extension web view this run creates or observes, weakly, so
+        /// the consent checks can report which are still alive at each step of a restart. Observation only.
+        var observedExtensionViews: [(label: String, view: WeakReference<WKWebView>)] = []
+        func observeExtensionView(_ label: String, _ view: WKWebView?) { if let view { observedExtensionViews.append((label, WeakReference(view))) } }
         let profile = controller.session.currentProfileID
         let other = controller.session.createProfile(name: "Other")!
         let otherSpace = controller.session.createSpace(name: "Other", symbol: "briefcase", colorIndex: 1, profileID: other)!
@@ -339,6 +343,7 @@ import Darwin
         // Held only until its last use (below): a test-held extension web view keeps its web process, and with it every
         // CORS pattern it ever had, which would confound the withheld-fetch checks later in this run.
         var heldPopup: WKWebView? = context.action(for: nil)?.popupWebView
+        observeExtensionView("original-popup", heldPopup)
         var popup: WKWebView { heldPopup! }
         try await wait("Browser-adapter popup did not initialize") { (try? await popup.evaluateJavaScript("document.title")) as? String == "Bam fixture ready" }
         // A finished load must reach the extension as `tabs.onUpdated` with `status: "complete"`
@@ -755,6 +760,7 @@ import Darwin
         try await wait("activeTab second tab did not load") { controller.browsers[secondID]?.url == secondURL && controller.browsers[secondID]?.isLoading == false }
         host.reconcile()
         let activePage = WKWebView(frame: NSRect(x: 0, y: 0, width: 320, height: 240), configuration: activeConfiguration)
+        observeExtensionView("activeTab-extension-page(other extension)", activePage)
         activePage.load(URLRequest(url: activeContext.baseURL.appendingPathComponent("page.html")))
         try await wait("activeTab extension page did not load") { activePage.title == "activeTab page" }
         func activeTabAccess() async throws -> (allowed: [Int], denied: Int, callback: String) {
@@ -816,6 +822,7 @@ import Darwin
         guard let tab = controller.session.tabs.first(where: { URLInput.extensionURL($0.address) != nil }), controller.browsers[tab.id] != nil else { throw ExtensionSmokeTest.Failure(description: "Missing extension renderer") }
         // Bam owns its renderers; the test only observes them weakly, so it never keeps an old one (and its process) alive.
         weak let extensionWeb = controller.browsers[tab.id]
+        observeExtensionView("bam-tab-first-extension-renderer", extensionWeb)
         try await wait("Browser adapter used the wrong configuration for its extension page") { extensionWeb?.title == "Bam extension page ready" }
         try check(controller.session.profileID(for: tab) == profile && extensionWeb.map { controller.profileID(of: $0) } == profile, "Extension-created page escaped its source profile")
         let extensionURL = URL(string: tab.address)!
@@ -826,6 +833,7 @@ import Darwin
         try check(normal != nil, "The HTTP renderer was missing")
         controller.navigatePane(tab.id, address: extensionURL.absoluteString)
         try await wait("HTTP-to-extension navigation did not replace renderer") { controller.browsers[tab.id] !== normal && controller.browsers[tab.id]?.title == "Bam extension page ready" }
+        observeExtensionView("bam-tab-second-extension-renderer", controller.browsers[tab.id])
         // Cancellation is a no-op on the running package and signed-in storage.
         let updateFolder = FileManager.default.temporaryDirectory.appendingPathComponent("bam-action-update-\(UUID().uuidString)")
         try FileManager.default.copyItem(at: sourceFixture, to: updateFolder)
@@ -1023,9 +1031,26 @@ import Darwin
             // A subset of the optional https://optional.invalid/* that overlaps no seeded grant or denial: WebKit can drop
             // grants a denied pattern covers, and the time-limited http://localhost/kept/* grant must survive for later steps.
             let optionalURL = URL(string: "https://optional.invalid/consent/page")!, optionalOrigin = "https://optional.invalid/consent/*"
+            // Diagnostics (native 4e0092f: the withheld-use fetch read 200 once in the full run, refused in 52fdfae): which
+            // extension views are alive at each step of this restart, and at the will-load seam (just before the fresh load).
+            let extensionHost = host.context(for: extensionID)?.baseURL.host
+            func extensionViewInventory(_ stage: String) {
+                let alive = observedExtensionViews.filter { $0.view.value != nil }.map(\.label)
+                let bamExtensionRenderers = controller.browsers.filter { $0.value.url?.scheme == "webkit-extension" && $0.value.url?.host == extensionHost }
+                    .map { "\($0.key.uuidString.prefix(8)):\($0.value.url?.path ?? "-")" }.sorted()
+                print("CONSENT_VIEWS stage=\(stage) t=\(String(format: "%.3f", ProcessInfo.processInfo.systemUptime)) observedAlive=\(alive) " +
+                      "bamExtensionRenderers=\(bamExtensionRenderers) retiredRenderersAlive=\(controller.retiredRenderersAlive()) " +
+                      "restarting=\(host.isRestarting(id: extensionID)) generation=\(generationNow())"); fflush(stdout)
+            }
+            extensionViewInventory("before-first-withhold")
+            BrowserExtensions.siteAccessRestartWillLoad = { id in if id == extensionID { extensionViewInventory("will-load-fresh-context") } }
+            defer { BrowserExtensions.siteAccessRestartWillLoad = nil }
             let beforeConsentBase = generationNow()
             let consentBase = try perform(host.siteAccess(id: extensionID)!, .choose(.withheld))
+            extensionViewInventory("first-withhold-returned")
             try await settleRestart("Consent checks' first Withhold", from: beforeConsentBase)
+            BrowserExtensions.siteAccessRestartWillLoad = nil
+            extensionViewInventory("first-withhold-settled")
             var implicitAnswer: Set<URL>?
             host.permissionPrompt = { _ in reviewsShown += 1; return true }
             promptRuntime.webExtensionController(promptController, promptForPermissionToAccess: [optionalURL, ip], in: nil, for: try live()) { granted, _ in implicitAnswer = granted }
@@ -1068,6 +1093,7 @@ import Darwin
                 let web = WKWebView(frame: NSRect(x: 0, y: 0, width: 320, height: 240), configuration: configuration)
                 web.load(URLRequest(url: context.baseURL.appendingPathComponent("page.html")))
                 consentPage = web
+                observeExtensionView("consent-page#\(observedExtensionViews.count)", web)
                 try await wait("The extension page for consent checks did not load") { web.title == "Bam extension page ready" }
             }
             /// Drops the test's reference and reports (not asserts) whether WebKit deallocated it: cleanup, not policy.
@@ -1117,6 +1143,7 @@ import Darwin
                 probeBase.permissionEpoch > (epochAfterDecline ?? .max),
                 "Before the withheld-use probe, Site Access differs from the consent baseline beyond the fixture's two recorded permission changes: " +
                 "\(sinceConsentBase), epoch \(consentBase.revision.permissionEpoch)->\(epochAfterDecline.map(String.init) ?? "-")->\(probeBase.permissionEpoch)")
+            extensionViewInventory("before-withheld-use-probe")
             reviewsShown = 0
             host.permissionPrompt = { _ in reviewsShown += 1; return true }
             let withheldUse = try await consentProbe("""
@@ -1146,6 +1173,34 @@ import Darwin
                   "revisionDiffFromConsentBase=\(revisionDiff(consentBase.revision, afterUse?.revision)) " +
                   "epoch=\(consentBase.revision.permissionEpoch)->\(probeBase.permissionEpoch)->\(afterUse.map { String($0.revision.permissionEpoch) } ?? "-") " +
                   "record=\(recordBefore == recordState() ? "unchanged" : "\(recordBefore) -> \(recordState())")"); fflush(stdout)
+            if failedWithheld.contains("fetchRefused") {
+                // Discriminator, diagnostics only (the strict check below still fails): the same credentialed fetch from
+                // Bam's own extension renderers and from a second raw page built now from the live context. Together with
+                // CONSENT_VIEWS this separates a held old view from access retained below the view level.
+                func discriminatorFetch(_ web: WKWebView) async -> String {
+                    let result = try? await web.callAsyncJavaScript("""
+                        return await fetch(target, {credentials: 'include', cache: 'no-store'}).then(async (r) => { await r.text(); return 'read:' + r.status + ':' + r.type; }, () => 'refused');
+                        """, arguments: ["target": consentTabURL.absoluteString], contentWorld: .page)
+                    return (result as? String) ?? "nil"
+                }
+                var bamRenderers: [String] = []
+                for (tabID, web) in controller.browsers where web.url?.scheme == "webkit-extension" && web.url?.host == extensionHost {
+                    bamRenderers.append("\(tabID.uuidString.prefix(8))=\(await discriminatorFetch(web))")
+                }
+                var secondPage = "not-built"
+                if let context = try? live(), let configuration = context.webViewConfiguration {
+                    let web = WKWebView(frame: NSRect(x: 0, y: 0, width: 320, height: 240), configuration: configuration)
+                    web.load(URLRequest(url: context.baseURL.appendingPathComponent("page.html")))
+                    let deadline = ProcessInfo.processInfo.systemUptime + 5
+                    while web.title != "Bam extension page ready" && ProcessInfo.processInfo.systemUptime < deadline { try await Task.sleep(nanoseconds: 40_000_000) }
+                    secondPage = web.title == "Bam extension page ready" ? await discriminatorFetch(web) : "did-not-load"
+                    web.stopLoading()
+                }
+                var repeated = "no-page"
+                if let page = consentPage { repeated = await discriminatorFetch(page) }
+                print("CONSENT_FETCH_DISCRIMINATOR consentPageRepeat=\(repeated) bamExtensionRenderers=\(bamRenderers) secondRawPage=\(secondPage)"); fflush(stdout)
+                extensionViewInventory("after-discriminator")
+            }
             try check(failedWithheld.isEmpty,
                 "Using a withheld requested site prompted, granted, denied or changed Site Access: failed=\(failedWithheld) shown=\(reviewsShown), \(withheldUse); " +
                 loopbackState())
@@ -1301,6 +1356,7 @@ import Darwin
         do {
             // Scoped, so the test's reference to this popup ends here (see heldPopup above).
             guard let updatedPopup = host.context(for: extensionID)?.action(for: nil)?.popupWebView else { throw ExtensionSmokeTest.Failure(description: "Updated package has no popup") }
+            observeExtensionView("updated-popup", updatedPopup)
             try await wait("Updated extension still looked for scripts at the staging URL") { (try? await updatedPopup.evaluateJavaScript("document.title")) as? String == "Bam fixture ready" }
         }
         host.context(for: extensionID)?.action(for: nil)?.closePopup()
