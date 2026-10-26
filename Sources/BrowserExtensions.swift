@@ -616,11 +616,7 @@ struct BrowserExtensionPermissionReview {
                 // Like a restart's phase A: every view of the old context Bam can see joins the release barrier before
                 // the unload, so the updated same-identity context (`load` waits on the barrier) never shares an old
                 // view's process; on timeout the update fails closed.
-                var probes = runtime.extensionPageViews(of: oldContext)
-                runtime.closePopup(for: oldContext)
-                probes += onExtensionRenderers?(.retire, before.profileID, oldContext.baseURL) ?? []
-                runtime.releaseRetiredSurfaceViews()
-                releaseBarriers[id, default: []] += probes
+                retireViewsBeforeUnload(id: id, context: oldContext, runtime: runtime, profileID: before.profileID)
                 retired = true
                 try runtime.controller.unload(oldContext)
                 runtime.disconnectNative(oldContext); runtime.compatibility.remove(oldContext); runtime.contexts.removeValue(forKey: id); unloaded = true
@@ -738,16 +734,33 @@ struct BrowserExtensionPermissionReview {
         noteMutation(id)
         loadGeneration.removeValue(forKey: id)
         cancelRestartHandoff(id: id, retiredTabs: .unavailable)
-        do {
-            try stopQuarantined(id: id, name: records[i].name)   // Remove calls this first: nothing is deleted on failure
-            if let runtime = runtimes[records[i].profileID], let context = runtime.contexts[id] {
-                runtime.closePopup(for: context)
-                try runtime.controller.unload(context)
-                runtime.disconnectNative(context); runtime.compatibility.remove(context)
-                runtime.contexts.removeValue(forKey: id)
+        try stopQuarantined(id: id, name: records[i].name)   // Remove calls this first: nothing is deleted on failure
+        let profileID = records[i].profileID, name = records[i].name
+        var unloadedBaseURL: URL?
+        if let runtime = runtimes[profileID], let context = runtime.contexts[id] {
+            // Like a restart's phase A: the old views join the release barrier, so a later Enable (same identity) waits
+            // for them instead of loading next to them.
+            retireViewsBeforeUnload(id: id, context: context, runtime: runtime, profileID: profileID)
+            do { try runtime.controller.unload(context) } catch {
+                // Still the loaded, owned context: its retired tabs come back on it; nothing claims it stopped.
+                _ = onExtensionRenderers?(.restore, profileID, context.baseURL)
+                throw error
             }
-            records[i].enabled = false
-            try persist(); onReloadNeeded?(records[i].profileID); changed()
+            runtime.disconnectNative(context); runtime.compatibility.remove(context)
+            runtime.contexts.removeValue(forKey: id)
+            unloadedBaseURL = context.baseURL
+        }
+        records[i].enabled = false
+        var saveError: Error?
+        do { try persist() } catch { saveError = error }
+        // Retired tabs show the unavailable state and stay restorable: Enable's load recreates them (`.restore`).
+        if let unloadedBaseURL { _ = onExtensionRenderers?(.unavailable, profileID, unloadedBaseURL) }
+        onReloadNeeded?(profileID); changed()
+        if let saveError {
+            // It is off now, but the record on disk may still say enabled: say so, never that it stays off.
+            let error = Self.failure(Self.offAfterFailureMessage("\(name) was turned off.", disableSaveError: saveError))
+            setError(error, for: id)
+            throw error
         }
     }
     func remove(id: UUID) async throws {
@@ -1024,6 +1037,20 @@ struct BrowserExtensionPermissionReview {
     /// outlives the handoff (timeout, cancellation): no context of that install loads (restart, Enable, Update) while
     /// any of them is alive, so a same-identity context can't inherit the old process's network access.
     private var releaseBarriers: [UUID: [RetiredRendererProbe]] = [:]
+    /// The view handling shared by every unload of a loaded context (restart phase A, Update, Disable), before the
+    /// unload: probes every view of `context` Bam can see without creating one (presented and remembered popups,
+    /// offscreen document), closes its popups (default, active and per tab), retires Bam's renderers of its pages
+    /// (tabs, Peek, Little Bam), releases runtime snapshot views, and adds all of it to the install's release barrier,
+    /// so no later same-identity context loads while any of them is alive.
+    @discardableResult
+    private func retireViewsBeforeUnload(id: UUID, context: WKWebExtensionContext, runtime: BrowserExtensionRuntime, profileID: UUID) -> [RetiredRendererProbe] {
+        var probes = runtime.extensionPageViews(of: context)
+        runtime.closePopup(for: context)
+        probes += onExtensionRenderers?(.retire, profileID, context.baseURL) ?? []
+        runtime.releaseRetiredSurfaceViews()
+        releaseBarriers[id, default: []] += probes
+        return probes
+    }
     /// Whether views of an earlier context of `id` are still alive (prunes released ones).
     private func releaseBarrierHeld(id: UUID) -> Bool {
         let live = (releaseBarriers[id] ?? []).filter { $0.web != nil }
@@ -1121,11 +1148,7 @@ struct BrowserExtensionPermissionReview {
         // Snapshot the policy before anything is unloaded.
         let fresh = Self.freshContext(replacing: context)
         // Every view of the old context being let go is weakly probed: phase B loads only once all have deallocated.
-        var probes = runtime.extensionPageViews(of: context)
-        runtime.closePopup(for: context)
-        probes += onExtensionRenderers?(.retire, profileID, baseURL) ?? []
-        runtime.releaseRetiredSurfaceViews()
-        releaseBarriers[id, default: []] += probes   // before the unload: every outcome (incl. quarantine) keeps it
+        let probes = retireViewsBeforeUnload(id: id, context: context, runtime: runtime, profileID: profileID)   // every outcome keeps the barrier
         do {
             if let fault = Self.siteAccessRestartUnloadFault?(id) { throw fault }
             try runtime.controller.unload(context)
