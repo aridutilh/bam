@@ -177,6 +177,45 @@ import WebKit
         try await host.setEnabled(true, id: id)
         try check(host.context(for: id) != nil && host.errors[id] == nil && (try current()).grantedPermissionMatchPatterns[optionalSite] == nil,
                   "Enable must recover with the reduced access")
+
+        // MARK: Failed save AND failed unload (quarantine): says both, never "saved"; settles on a later save; Enable recovers.
+        await settle()
+        try await grantOptional()
+        try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: registry.path)
+        BrowserExtensions.siteAccessRestartUnloadFault = { $0 == id ? Failure(message: "injected unload failure") as NSError : nil }
+        defer { BrowserExtensions.siteAccessRestartUnloadFault = nil }
+        (try current()).setPermissionStatus(.unknown, for: optionalSite)
+        await settle()
+        let quarantined = host.errors[id] ?? ""
+        try check(host.context(for: id) == nil && record()?.enabled == false, "Fixture: the injected unload failure must quarantine the extension")
+        try check(quarantined.contains("couldn’t save that change") && quarantined.contains("or stop it") && quarantined.contains("until you quit Bam") &&
+                  !quarantined.contains("was saved") && !quarantined.contains("saved, reduced"),
+                  "A failed save plus a failed unload must say both and never claim it was saved: \(quarantined)")
+        BrowserExtensions.siteAccessRestartUnloadFault = nil
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: registry.path)
+        host.persistPermissions(other)
+        try check(host.errors[id]?.hasPrefix("Site access was saved, but Withdrawal fixture couldn’t be stopped to apply it.") == true,
+                  "Once saved, the warning must become the still-true quarantine outcome: \(host.errors[id] ?? "-")")
+        try await host.setEnabled(true, id: id)
+        try check(host.context(for: id) != nil && (try current()).grantedPermissionMatchPatterns[optionalSite] == nil,
+                  "Enable must stop the quarantined context and recover with the reduced access")
+
+        // MARK: The restart's own successful save settles the unsaved state mid-call: the final text is the saved one.
+        await settle()
+        try await grantOptional()
+        try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: registry.path)
+        BrowserExtensions.siteAccessRestartLoadFault = { $0 == id ? Failure(message: "injected load failure") as NSError : nil }
+        let midCall = try current()
+        midCall.setPermissionStatus(.unknown, for: optionalSite)
+        host.persistPermissions(midCall)                                        // detected; this save fails; restart queued
+        try check(host.errors[id]?.contains("couldn’t save that change") == true, "Fixture: the detection's save must fail")
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: registry.path)   // before the restart runs
+        await settle()
+        BrowserExtensions.siteAccessRestartLoadFault = nil
+        try check(record()?.enabled == false && host.errors[id] == "Withdrawal fixture stopped and couldn’t restart after its site access changed. Enable it again in Manage Extensions.",
+                  "When the helper's own save made the change durable, the final text must be the saved outcome: \(host.errors[id] ?? "-")")
+        try await host.setEnabled(true, id: id)
+        try check(host.context(for: id) != nil && (try current()).grantedPermissionMatchPatterns[optionalSite] == nil, "Enable must recover")
         return checks
     }
 }

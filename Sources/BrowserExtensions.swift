@@ -1330,27 +1330,39 @@ struct BrowserExtensionPermissionReview {
               let runtime = runtimes[records[index].profileID], let context = runtime.contexts[id] else { return }
         pendingWithdrawals.removeValue(forKey: id)
         Self.nativeWithdrawalRestartHook?(id)
-        let outcome = restartForSiteAccess(id: id, context: context)
-        // Still unsaved: the helper's messages assume a saved choice, so state what actually happened instead.
+        // Unsaved: the helper's texts then never claim a save; the engine composes the final warning below.
+        let unsavedBefore = unsavedWithdrawals[id]
+        let outcome = restartForSiteAccess(id: id, context: context, reducedAccessSaved: unsavedBefore == nil)
+        guard let before = unsavedBefore else { return }
+        // Durability now, not as captured: the helper's own successful save (turning it off) may have saved the reduced
+        // access mid-call, which settled the warning; then the saved wording is the true one.
+        let texts = Self.withdrawalOutcomeTexts(name: before.name, sites: before.sites, saveError: before.saveError, outcome: outcome)
         if var unsaved = unsavedWithdrawals[id] {
-            let lead = "\(unsaved.name) lost access to \(unsaved.sites)"
-            switch outcome {
-            case .restarted:
-                unsaved.message = "\(lead), and Bam restarted it without that access, but couldn’t save the change (\(unsaved.saveError)). " +
-                    "It may have that access again the next time Bam opens; change its site access in Manage Extensions to save it."
-                unsaved.afterSave = nil
-            case .unloadFailed(_, stillLoaded: true):
-                unsaved.message = "\(lead), but Bam couldn’t save that change (\(unsaved.saveError)) or restart it, so its earlier website access " +
-                    "may still apply now, and again after Bam reopens. Disable and enable it, or quit and reopen Bam."
-                unsaved.afterSave = "Site access was saved, but \(unsaved.name) couldn’t be restarted, so its earlier website access may still apply " +
-                    "until you disable and enable it, or quit and reopen Bam."
-            case .unloadFailed, .loadFailed:
-                unsaved.message = "\(lead) and stopped because it couldn’t restart. Bam couldn’t save that change (\(unsaved.saveError)), so it may " +
-                    "load again with that access the next time Bam opens. Enable or disable it in Manage Extensions to save the change."
-                unsaved.afterSave = "\(unsaved.name) stopped and couldn’t restart after its site access changed. Enable it again in Manage Extensions."
-            }
+            unsaved.message = texts.unsaved; unsaved.afterSave = texts.saved
             unsavedWithdrawals[id] = unsaved
-            setError(Self.failure(unsaved.message), for: id)
+            setError(Self.failure(texts.unsaved), for: id)
+        } else if let saved = texts.saved { setError(Self.failure(saved), for: id) }
+        else if errors[id] != nil, outcome == .restarted { errors.removeValue(forKey: id); changed() }
+    }
+    /// What to tell the user after a native-withdrawal restart, while the reduced access is unsaved and once saved
+    /// (nil: nothing remains to say once saved).
+    static func withdrawalOutcomeTexts(name: String, sites: String, saveError: String, outcome: SiteAccessRestart) -> (unsaved: String, saved: String?) {
+        let lead = "\(name) lost access to \(sites)"
+        switch outcome {
+        case .restarted:
+            return ("\(lead), and Bam restarted it without that access, but couldn’t save the change (\(saveError)). " +
+                    "It may have that access again the next time Bam opens; change its site access in Manage Extensions to save it.", nil)
+        case .unloadFailed(_, stillLoaded: true):
+            // Quarantined: Bam turned it off and closed its pages, but WebKit may keep running it until Bam quits.
+            return ("\(lead), but Bam couldn’t save that change (\(saveError)) or stop it. WebKit may still run it with its earlier website " +
+                    "access until you quit Bam; Bam turned it off and closed its pages. Because the change wasn’t saved, it may have that access " +
+                    "again after Bam reopens. Quit and reopen Bam, then set its site access in Manage Extensions.",
+                    "Site access was saved, but \(name) couldn’t be stopped to apply it. WebKit may still run it with its earlier website access " +
+                    "until you quit Bam; Bam turned it off. Quit and reopen Bam, then enable it in Manage Extensions.")
+        case .unloadFailed, .loadFailed:
+            return ("\(lead) and stopped because it couldn’t restart. Bam couldn’t save that change (\(saveError)), so it may load again " +
+                    "with that access the next time Bam opens. Enable or disable it in Manage Extensions to save the change.",
+                    "\(name) stopped and couldn’t restart after its site access changed. Enable it again in Manage Extensions.")
         }
     }
     /// Re-queues a withdrawal that waited for a load, update or Enable to finish.
