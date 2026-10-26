@@ -262,16 +262,20 @@ extension ExtensionSiteAccessSmokeTest {
         // MARK: Packages (original source, owned temporary directories).
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("bam-site-access-restart-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
-        func package(_ name: String, hosts: [String], matches: [String], marker: String, css: Bool) throws -> URL {
+        func package(_ name: String, hosts: [String], matches: [String], marker: String, css: Bool, popup: Bool = false) throws -> URL {
             let folder = root.appendingPathComponent(name, isDirectory: true)
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
             var script: [String: Any] = ["matches": matches, "js": ["marker.js"], "run_at": "document_start"]
             if css { script["css"] = ["marker.css"] }
-            let manifest: [String: Any] = [
+            var manifest: [String: Any] = [
                 "manifest_version": 3, "name": "Bam Site Access Restart \(name)", "version": "1.0.0",
                 "description": "Original fixture for the site-access restart.", "permissions": ["storage"],
                 "host_permissions": hosts, "background": ["service_worker": "background.js"], "content_scripts": [script]
             ]
+            if popup {
+                manifest["action"] = ["default_popup": "popup.html"]
+                try Data("<!doctype html><meta charset='utf-8'><title>restart fixture popup</title><p>popup</p>".utf8).write(to: folder.appendingPathComponent("popup.html"))
+            }
             try JSONSerialization.data(withJSONObject: manifest, options: .sortedKeys).write(to: folder.appendingPathComponent("manifest.json"))
             try Data("document.documentElement.dataset.\(marker) = 'js';\n".utf8).write(to: folder.appendingPathComponent("marker.js"))
             if css { try Data("html { \(cssProperty): injected; }\n".utf8).write(to: folder.appendingPathComponent("marker.css")) }
@@ -281,7 +285,7 @@ extension ExtensionSiteAccessSmokeTest {
             try Data("<!doctype html><meta charset='utf-8'><title>restart fixture page</title>".utf8).write(to: folder.appendingPathComponent("page.html"))
             return folder
         }
-        let subjectPackage = try package("subject", hosts: ["*://*/*"], matches: ["<all_urls>"], marker: jsMarker, css: true)
+        let subjectPackage = try package("subject", hosts: ["*://*/*"], matches: ["<all_urls>"], marker: jsMarker, css: true, popup: true)
         let otherPackage = try package("other", hosts: ["http://127.0.0.1/*"], matches: ["http://127.0.0.1/*"], marker: "bamOtherMarker", css: false)
 
         // MARK: Ephemeral window, owned persistent extension-controller store.
@@ -769,6 +773,39 @@ extension ExtensionSiteAccessSmokeTest {
                    "an Enable waiting on the barrier continued after a newer Disable: \(staleCancelError ?? "no error") \(state(subject))")
             try await host.setEnabled(true, id: subject)
             expect(host.context(for: subject)?.isLoaded == true, "Enable didn't load once the cancelled restart's renderer was released \(state(subject))")
+
+            // MARK: 7c. A popup Bam presented, then closed, whose actual view is still retained: the restart's release
+            // barrier must hold it (fail closed) until it is released; Enable then recovers.
+            try allow(subject)
+            controller.select(siteTab); controller.view.layoutSubtreeIfNeeded()
+            var popupPremise = false
+            var popupResult: BrowserExtensions.SiteAccessRestart?
+            if let liveContext = host.context(for: subject), let runtime {
+                host.performAction(extensionID: subject, tabID: siteTab, anchor: controller.sidebar)
+                let presented = await waitUntil({ !runtime.presentedPopupViews(of: liveContext).isEmpty }, seconds: 10)
+                var heldPopup: WKWebView? = runtime.presentedPopupViews(of: liveContext).first
+                popupPremise = presented && heldPopup != nil
+                runtime.closePopup(for: liveContext)
+                if popupPremise {
+                    BrowserExtensions.siteAccessRestartReleaseDeadline = 0.3
+                    try withhold(subject)
+                    popupResult = await awaitRestart(subject)
+                    withExtendedLifetime(heldPopup) {}   // the closed popup's view provably stays alive through the restart
+                    BrowserExtensions.siteAccessRestartReleaseDeadline = 2
+                }
+                heldPopup = nil
+            }
+            expect(popupPremise, "premise: the fixture popup couldn't be presented through Bam \(state(subject))")
+            if popupPremise {
+                var timedOut = false
+                if case .releaseTimedOut = popupResult { timedOut = true }
+                expect(timedOut && host.context(for: subject) == nil,
+                       "a closed but retained popup didn't hold the release barrier: \(String(describing: popupResult)) \(state(subject))")
+                host.permissionPrompt = { _ in true }
+                try await host.setEnabled(true, id: subject)
+                expect(host.context(for: subject)?.isLoaded == true, "Enable didn't recover once the retained popup was released \(state(subject))")
+            }
+            diagnostic["closed_popup_barrier"] = ["premise": popupPremise, "result": String(describing: popupResult)]
 
             // MARK: 8. Post-load reentrancy: a Disable while the fresh context loads (seam right after load) cancels it;
             // the loaded fresh context is unloaded, never published.
