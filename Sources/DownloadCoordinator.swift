@@ -5,18 +5,8 @@ import Darwin
 /// Session-only native downloads. Nothing resumes after Orbit quits.
 /// https://developer.apple.com/documentation/webkit/wkdownloaddelegate
 @MainActor final class DownloadCoordinator: NSObject, WKDownloadDelegate, NSOpenSavePanelDelegate {
-    enum Status: String { case choosingDestination, downloading, finished, cancelled, failed }
-    struct Snapshot {
-        let id: UUID
-        let filename: String
-        let sourceURL: URL?
-        let destinationURL: URL?
-        let status: Status
-        let detail: String
-        let fractionCompleted: Double?
-        let completedBytes: Int64
-        let totalBytes: Int64
-    }
+    typealias Status = DownloadStatus
+    typealias Snapshot = DownloadSnapshot
     typealias DestinationChooser = (String, URL?, @escaping (URL?) -> Void) -> Void
     var onChange: (() -> Void)?
     var snapshots: [Snapshot] { records.map(\.snapshot) }
@@ -28,16 +18,17 @@ import Darwin
     private var destinationQueue: [UUID] = []
     private var panel: NSSavePanel?
     private var panelRecordID: UUID?
-    private var downloadsWindow: NSWindow?
-    private var list: NSStackView?
-    private var emptyLabel: NSTextField?
-    private var rows: [UUID: DownloadRow] = [:]
+    private let thumbnails = DownloadThumbnails()
+    private var popover: NSPopover?
+    private var popoverList: DownloadsPopoverController?
+    private var library: DownloadsLibraryWindowController?
     private var terminateObserver: NSObjectProtocol?
 
     /// The optional chooser is a test seam; ordinary callers receive NSSavePanel.
     init(destinationChooser: DestinationChooser? = nil) {
         self.destinationChooser = destinationChooser
         super.init()
+        thumbnails.onUpdate = { [weak self] in self?.refreshSurfaces() }
         terminateObserver = NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification,
                                                                    object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.cancelAll() }
@@ -64,15 +55,58 @@ import Darwin
         changed()
     }
 
-    func showWindow(relativeTo parent: NSWindow? = nil) {
-        if downloadsWindow == nil { makeWindow() }
-        guard let window = downloadsWindow else { return }
-        if let parent, !window.isVisible {
-            window.setFrameOrigin(NSPoint(x: parent.frame.midX - window.frame.width / 2,
-                                          y: parent.frame.midY - window.frame.height / 2))
+    /// ⌘J and the sidebar's Downloads button: the compact list, anchored to that button.
+    func showWindow(relativeTo parent: NSWindow? = nil) { show(from: nil, in: parent) }
+
+    /// Shows the compact list above `anchor`, or above the sidebar's Downloads button found in
+    /// `parent`, or at the window's bottom-left. Without a visible window, opens the full library.
+    func show(from anchor: NSView?, in parent: NSWindow?) {
+        guard let window = anchor?.window ?? parent, window.isVisible, !window.isMiniaturized, let content = window.contentView else {
+            showLibrary(relativeTo: parent); return
         }
-        refreshList()
-        window.makeKeyAndOrderFront(nil)
+        if popover?.isShown == true { return }
+        let list = DownloadsPopoverController(actions: surfaceActions(), thumbnails: thumbnails)
+        list.update(snapshots, now: Date())
+        let surface = NSPopover()
+        surface.behavior = .transient
+        surface.animates = !BamTheme.reduceMotion
+        surface.hasFullSizeContent = true
+        surface.contentViewController = list
+        surface.contentSize = list.preferredContentSize
+        popover = surface; popoverList = list
+        if let button = anchor ?? Self.sidebarDownloadsButton(in: content) {
+            surface.show(relativeTo: button.bounds, of: button, preferredEdge: .maxY)
+        } else {
+            let y = content.isFlipped ? content.bounds.height - 40 : 12
+            surface.show(relativeTo: NSRect(x: 14, y: y, width: 28, height: 28), of: content, preferredEdge: .maxY)
+        }
+    }
+
+    /// Every download as a thumbnail grid in its own window.
+    func showLibrary(relativeTo parent: NSWindow? = nil) {
+        popover?.performClose(nil)
+        let library = self.library ?? DownloadsLibraryWindowController(actions: surfaceActions(), thumbnails: thumbnails)
+        self.library = library
+        library.update(snapshots, now: Date())
+        library.present(over: parent)
+    }
+
+    /// The sidebar's leading Downloads button, when it is on screen.
+    static func sidebarDownloadsButton(in root: NSView) -> NSView? {
+        if root.identifier?.rawValue == "sidebar-downloads", !root.isHiddenOrHasHiddenAncestor, !root.visibleRect.isEmpty { return root }
+        for child in root.subviews { if let found = sidebarDownloadsButton(in: child) { return found } }
+        return nil
+    }
+
+    private func surfaceActions() -> DownloadActions {
+        DownloadActions(cancel: { [weak self] in self?.cancel(id: $0) },
+                        open: { [weak self] in self?.openFile(id: $0, reveal: false) },
+                        reveal: { [weak self] in self?.openFile(id: $0, reveal: true) },
+                        showAll: { [weak self] in
+                            guard let self else { return }
+                            let parent = self.popover?.contentViewController?.view.window?.parent ?? NSApp.mainWindow
+                            self.showLibrary(relativeTo: parent)
+                        })
     }
 
     func cancelAll() {
@@ -278,55 +312,15 @@ import Darwin
         }
         changed()
     }
-    private func changed() { refreshList(); onChange?() }
+    private func changed() { refreshSurfaces(); onChange?() }
 
-    private func makeWindow() {
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 620, height: 400),
-                              styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
-        window.title = "Downloads"
-        window.minSize = NSSize(width: 480, height: 240)
-        window.isReleasedWhenClosed = false
-        window.center()
-        let scroll = NSScrollView(frame: window.contentView!.bounds.insetBy(dx: 16, dy: 16))
-        scroll.autoresizingMask = [.width, .height]; scroll.hasVerticalScroller = true
-        scroll.contentView = FlippedClipView()
-        let stack = NSStackView()
-        stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 8
-        stack.edgeInsets = NSEdgeInsets(top: 12, left: 12, bottom: 12, right: 12)
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        scroll.documentView = stack
-        NSLayoutConstraint.activate([
-            stack.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor),
-            stack.leadingAnchor.constraint(equalTo: scroll.contentView.leadingAnchor),
-            stack.topAnchor.constraint(equalTo: scroll.contentView.topAnchor)
-        ])
-        window.contentView?.addSubview(scroll)
-        if let root = window.contentView { BamSheetStyle.dress(window: window, root: root) }
-        downloadsWindow = window; list = stack
-        let empty = NSTextField(labelWithString: "Downloads appear here. Closing Bam cancels unfinished downloads.")
-        empty.textColor = BamTheme.muted; empty.font = BamType.sans(13)
-        empty.lineBreakMode = .byWordWrapping; empty.maximumNumberOfLines = 2
-        emptyLabel = empty; stack.addArrangedSubview(empty)
-        refreshList()
-    }
-
-    private func refreshList() {
-        guard let list else { return }
-        emptyLabel?.isHidden = !records.isEmpty
-        for record in records.reversed() {
-            if rows[record.id] == nil {
-                let row = DownloadRow()
-                row.translatesAutoresizingMaskIntoConstraints = false
-                row.onCancel = { [weak self] in self?.cancel(id: record.id) }
-                row.onOpen = { [weak self] in self?.openFile(id: record.id, reveal: false) }
-                row.onReveal = { [weak self] in self?.openFile(id: record.id, reveal: true) }
-                list.insertArrangedSubview(row, at: 0)
-                row.widthAnchor.constraint(equalTo: list.widthAnchor, constant: -24).isActive = true
-                row.heightAnchor.constraint(equalToConstant: 88).isActive = true
-                rows[record.id] = row
-            }
-            rows[record.id]?.update(record.snapshot)
+    private func refreshSurfaces() {
+        let items = snapshots, now = Date()
+        if popover?.isShown == true, let popoverList {
+            popoverList.update(items, now: now)
+            popover?.contentSize = popoverList.preferredContentSize
         }
+        if library?.window?.isVisible == true { library?.update(items, now: now) }
     }
 
     private func openFile(id: UUID, reveal: Bool) {
@@ -372,7 +366,6 @@ import Darwin
     var download: WKDownload?
     let sourceURL: URL?
     var filename = "Download"
-    var status = DownloadCoordinator.Status.choosingDestination
     var detail = "Preparing download…"
     var destinationURL: URL?
     var stagingURL: URL?
@@ -382,75 +375,21 @@ import Darwin
     var fraction: Double?
     var completedBytes: Int64 = 0
     var totalBytes: Int64 = -1
+    let startedAt = Date()
+    var endedAt: Date?
+    var status = DownloadCoordinator.Status.choosingDestination {
+        didSet { if !isActive, endedAt == nil { endedAt = Date() } }
+    }
     var isActive: Bool { status == .choosingDestination || status == .downloading }
     init(download: WKDownload, sourceURL: URL?) { self.download = download; self.sourceURL = sourceURL }
     var snapshot: DownloadCoordinator.Snapshot {
         .init(id: id, filename: filename, sourceURL: sourceURL, destinationURL: destinationURL,
-              status: status, detail: detail, fractionCompleted: fraction, completedBytes: completedBytes, totalBytes: totalBytes)
+              status: status, detail: detail, fractionCompleted: fraction, completedBytes: completedBytes, totalBytes: totalBytes,
+              startedAt: startedAt, endedAt: endedAt)
     }
 }
 
 private struct DownloadError: LocalizedError {
     let errorDescription: String?
     init(_ description: String) { errorDescription = description }
-}
-
-@MainActor private final class FlippedClipView: NSClipView {
-    override var isFlipped: Bool { true }
-}
-
-@MainActor private final class DownloadRow: NSView {
-    var onCancel: (() -> Void)?
-    var onOpen: (() -> Void)?
-    var onReveal: (() -> Void)?
-    private let title = NSTextField(labelWithString: "Download")
-    private let detail = NSTextField(labelWithString: "")
-    private let progress = NSProgressIndicator()
-    private let cancel = NSButton(title: "Cancel", target: nil, action: nil)
-    private let open = NSButton(title: "Open", target: nil, action: nil)
-    private let reveal = NSButton(title: "Reveal", target: nil, action: nil)
-    override var isFlipped: Bool { true }
-    override init(frame: NSRect) {
-        super.init(frame: frame)
-        wantsLayer = true; layer?.cornerRadius = 14
-        title.font = BamType.sans(14, weight: .semibold); title.textColor = BamTheme.ink; title.lineBreakMode = .byTruncatingMiddle
-        detail.font = BamType.sans(12); detail.textColor = BamTheme.muted; detail.lineBreakMode = .byTruncatingTail
-        progress.style = .bar; progress.minValue = 0; progress.maxValue = 1
-        for button in [cancel, open, reveal] { button.bezelStyle = .rounded; button.target = self }
-        cancel.action = #selector(cancelAction); open.action = #selector(openAction); reveal.action = #selector(revealAction)
-        [title, detail, progress, cancel, open, reveal].forEach(addSubview)
-        paint()
-    }
-    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-    private func paint() {
-        layer?.backgroundColor = bamCG(BamTheme.card)
-        layer?.borderWidth = 1.5; layer?.borderColor = bamCG(BamTheme.line)
-        for button in [cancel, open, reveal] { BamSheetStyle.pill(button, prominent: false) }
-    }
-    override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); paint() }
-    override func layout() {
-        super.layout()
-        title.frame = NSRect(x: 12, y: 10, width: max(0, bounds.width - 24), height: 18)
-        detail.frame = NSRect(x: 12, y: 32, width: max(0, bounds.width - 24), height: 16)
-        progress.frame = NSRect(x: 12, y: 62, width: max(0, bounds.width - 220), height: 10)
-        cancel.frame = NSRect(x: bounds.width - 198, y: 53, width: 60, height: 26)
-        open.frame = NSRect(x: bounds.width - 134, y: 53, width: 56, height: 26)
-        reveal.frame = NSRect(x: bounds.width - 74, y: 53, width: 64, height: 26)
-    }
-    func update(_ item: DownloadCoordinator.Snapshot) {
-        title.stringValue = item.filename
-        title.toolTip = item.destinationURL?.path ?? item.sourceURL?.absoluteString
-        detail.stringValue = item.detail; detail.toolTip = item.detail
-        detail.textColor = item.status == .failed ? BamTheme.red : BamTheme.muted
-        let active = item.status == .choosingDestination || item.status == .downloading
-        cancel.isEnabled = active
-        open.isEnabled = item.status == .finished; reveal.isEnabled = item.status == .finished
-        progress.isHidden = !active
-        progress.isIndeterminate = item.fractionCompleted == nil
-        if let fraction = item.fractionCompleted { progress.stopAnimation(nil); progress.doubleValue = fraction }
-        else if active { progress.startAnimation(nil) }
-    }
-    @objc private func cancelAction() { onCancel?() }
-    @objc private func openAction() { onOpen?() }
-    @objc private func revealAction() { onReveal?() }
 }
