@@ -1198,6 +1198,9 @@ import Darwin
                 """, ["target": consentTabURL.absoluteString])
             // Every predicate is named and reported, so a failure says which one (native 52fdfae reported only the composite).
             let afterUse = host.siteAccess(id: extensionID)
+            // The review counter as the probe left it; the failure-path diagnostics below install comparison fixtures
+            // whose own install reviews increment the same counter (native 5243ff1 reported shown=1 from them).
+            let reviewsShownAtProbe = reviewsShown
             let withheldPredicates: [(String, Bool)] = [
                 ("found", withheldUse["found"] as? Bool == true), ("got", withheldUse["got"] as? Bool == true), ("noReview", reviewsShown == 0),
                 ("injectionRefused", (withheldUse["injected"] as? String)?.hasPrefix("refused:") == true),
@@ -1323,7 +1326,7 @@ import Darwin
                 }
             }
             try check(failedWithheld.isEmpty,
-                "Using a withheld requested site prompted, granted, denied or changed Site Access: failed=\(failedWithheld) shown=\(reviewsShown), \(withheldUse); " +
+                "Using a withheld requested site prompted, granted, denied or changed Site Access: failed=\(failedWithheld) shownAtProbe=\(reviewsShownAtProbe) shownIncludingDiagnostics=\(reviewsShown), \(withheldUse); " +
                 loopbackState())
             // activeTab on the withheld site: a user gesture in the tab lets injection run with no review and no lasting grant.
             guard let consentAdapter = promptRuntime.tabs[consentTab] else { throw ExtensionSmokeTest.Failure(description: "No adapter for the consent tab") }
