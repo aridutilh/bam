@@ -500,11 +500,19 @@ struct BrowserExtensionPermissionReview {
         // A pending restart keeps its release barrier: an update can't load a same-identity context before the old
         // views are gone, and must not cancel the restart before its own checks pass.
         guard handoffs[id] == nil else { throw Self.failure("\(before.name) is restarting to apply a website access change. Try the update again in a moment.") }
-        try await awaitReleaseBarrier(id: id, name: before.name)
-        guard handoffs[id] == nil, !loading.contains(id), !updating.contains(id) else { throw Self.failure("This extension is not ready to update.") }
-        updating.insert(id); defer { updating.remove(id); armExpiryTimer(id); resumeWithdrawalRestart(id) }
+        // The update's identity, taken before any wait: `before` is its policy snapshot, valid only if nothing changed.
         let initialRevision = mutationRevisions[id, default: 0]
         let initialPermissionRevision = permissionRevisions[id, default: 0]
+        if releaseBarrierHeld(id: id) {
+            try await awaitReleaseBarrier(id: id, name: before.name)
+            guard !stopped, handoffs[id] == nil, !loading.contains(id), !updating.contains(id),
+                  mutationRevisions[id, default: 0] == initialRevision, permissionRevisions[id, default: 0] == initialPermissionRevision,
+                  let current = records.first(where: { $0.id == id && $0.profileID == before.profileID }), current.enabled == before.enabled,
+                  runtimes[before.profileID] === runtime else {
+                throw Self.failure("\(before.name) changed while the update waited for its earlier pages to close. Try the update again.")
+            }
+        }
+        updating.insert(id); defer { updating.remove(id); armExpiryTimer(id); resumeWithdrawalRestart(id) }
         let oldContext = runtime.contexts[id]
         try Task.checkCancellation()
         if let safariBundle { try safariImporter.validate(safariBundle) } else { try Self.validatePackageSize(source) }
@@ -1091,6 +1099,7 @@ struct BrowserExtensionPermissionReview {
         runtime.closePopup(for: context)
         probes += onExtensionRenderers?(.retire, profileID, baseURL) ?? []
         runtime.releaseRetiredSurfaceViews()
+        releaseBarriers[id, default: []] += probes   // before the unload: every outcome (incl. quarantine) keeps it
         do {
             if let fault = Self.siteAccessRestartUnloadFault?(id) { throw fault }
             try runtime.controller.unload(context)
@@ -1114,7 +1123,6 @@ struct BrowserExtensionPermissionReview {
                                      reducedAccessSaved: reducedAccessSaved, probes: probes,
                                      deadline: ProcessInfo.processInfo.systemUptime + Self.siteAccessRestartReleaseDeadline)
         let token = handoff.token
-        releaseBarriers[id, default: []] += probes
         handoff.task = Task { @MainActor [weak self] in await self?.completeRestart(id: id, token: token) }
         handoffs[id] = handoff
         siteAccessNotices[id] = reducedAccessSaved
@@ -1301,13 +1309,21 @@ struct BrowserExtensionPermissionReview {
         if runtime.contexts[id] != nil || handoffs[id] != nil { return }   // a pending restart loads it itself
         // A context WebKit still runs after a failed restart must stop before a new one can load.
         try stopQuarantined(id: id, name: stored.name)
-        // Views of an earlier context still alive (a timed-out or cancelled restart) keep its network access: wait.
+        // This load's identity, taken before any wait: a newer Disable, Revoke, Remove or load invalidates it.
+        let token = UUID(); loadGeneration[id] = token
+        let mutationAtStart = mutationRevisions[id, default: 0]
+        loading.insert(id); defer { loading.remove(id); if loadGeneration[id] == token { loadGeneration.removeValue(forKey: id) }; armExpiryTimer(id); resumeWithdrawalRestart(id) }
+        // Views of an earlier context still alive (a timed-out, cancelled or quarantined restart) keep its network
+        // access: wait for them, then continue only if nothing newer happened meanwhile (never a stale Enable).
         if releaseBarrierHeld(id: id) {
             try await awaitReleaseBarrier(id: id, name: stored.name)
-            guard runtime.contexts[id] == nil, handoffs[id] == nil, !loading.contains(id) else { return }
+            guard !stopped, loadGeneration[id] == token, mutationRevisions[id, default: 0] == mutationAtStart,
+                  runtime.contexts[id] == nil, handoffs[id] == nil,
+                  let current = records.first(where: { $0.id == id && $0.profileID == stored.profileID }) else {
+                throw Self.failure("\(stored.name) changed while it waited for its earlier pages to close, so it wasn’t started.")
+            }
+            record = current
         }
-        let token = UUID(); loadGeneration[id] = token
-        loading.insert(id); defer { loading.remove(id); if loadGeneration[id] == token { loadGeneration.removeValue(forKey: id) }; armExpiryTimer(id); resumeWithdrawalRestart(id) }
         // Older disabled worker installs gain the adapter only when explicitly
         // re-enabled and reviewed. Do not silently rewrite a running extension.
         if review, parsed == nil, record.safariBundle == nil {
