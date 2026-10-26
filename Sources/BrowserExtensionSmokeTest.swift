@@ -1100,17 +1100,10 @@ import Darwin
             noteSubject("consent-start")
             print("CONSENT_HISTORY sampledSteps=\(subjectHistory) distinctSampledContexts=\(subjectContextIDs.count) " +
                   "restartGeneration=\(generationNow()) heldObjects=\(heldObjectsState())"); fflush(stdout)
-            // N3: the fixture dropped its stale context and action references at their last uses. Establish (report, not
-            // require) whether WebKit actually released them before the first withdrawal: bounded wait, elapsed time
-            // printed, survivors named. Measured, so a survivor is evidence about what else retains it.
-            do {
-                let start = ProcessInfo.processInfo.systemUptime, deadline = start + 3
-                while observedObjects.contains(where: { $0.object.value != nil }) && ProcessInfo.processInfo.systemUptime < deadline {
-                    try await Task.sleep(nanoseconds: 40_000_000)
-                }
-                print("CONSENT_N3_RELEASE observed=\(observedObjects.map(\.label)) stillAlive=\(heldObjectsState()) " +
-                      "waited=\(String(format: "%.3f", ProcessInfo.processInfo.systemUptime - start))s"); fflush(stdout)
-            }
+            // N3: the fixture dropped its stale context and action references at their last uses. Report (not require)
+            // which are still alive at this moment: an immediate weak snapshot, no waiting (the earlier 3 s wait was a
+            // diagnostic delay, removed so the run has no artificial pause before the first withdrawal).
+            print("CONSENT_N3_RELEASE observed=\(observedObjects.map(\.label)) stillAlive=\(heldObjectsState()) waited=0s"); fflush(stdout)
             extensionViewInventory("before-first-withhold")
             BrowserExtensions.siteAccessRestartWillLoad = { id in if id == extensionID { extensionViewInventory("will-load-fresh-context") } }
             defer { BrowserExtensions.siteAccessRestartWillLoad = nil }
