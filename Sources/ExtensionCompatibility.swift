@@ -34,7 +34,8 @@ enum ExtensionCompatibility {
     /// Members the layer always offers when the host namespace exists but the member does not.
     static let runtimeExtras: [String] = ["runtime.getBrowserInfo", "runtime.onSuspend", "runtime.requestUpdateCheck", "runtime.getContexts",
                                           "webNavigation.onCreatedNavigationTarget", "storage.managed", "commands", "action.getUserSettings",
-                                          "scripting.ExecutionWorld", "runtime.onUpdateAvailable", "windows.onBoundsChanged"]
+                                          "scripting.ExecutionWorld", "runtime.onUpdateAvailable", "windows.onBoundsChanged",
+                                          "tabs.query.windowType"]
 
     /// Computes what the layer will define for a parsed extension, from its manifest.
     static func plan(manifest: [String: Any]) -> Plan {
@@ -600,6 +601,31 @@ enum ExtensionCompatibility {
         }
       };
 
+      // tabs.query windowType: Chrome also accepts 'app' and 'devtools'. Bam has no such windows, so no tab can match and
+      // the answer is [] (as Chrome gives without them). WebKit rejects those values instead, which broke callers that
+      // fall back to them: measured with Dark Reader's getActiveTab once its pop-out had focus, leaving its CSS editor
+      // blank. Every other query reaches WebKit's own method unchanged, with the original receiver and arguments.
+      const absentWindowTypes = ["app", "devtools"];
+      const tabsQueryGuardHeld = [];
+      const applyTabsQueryGuard = () => {
+        if (!provided.has("tabs.query.windowType")) return;
+        for (const root of new Set([globalThis.browser, globalThis.chrome])) {
+          const holder = root && root.tabs;
+          const native = holder && holder.query;
+          if (typeof native !== "function" || native.__bamTabsQueryGuard) continue;
+          const guarded = function (queryInfo, ...rest) {
+            if (queryInfo && typeof queryInfo === "object" && absentWindowTypes.includes(queryInfo.windowType)) {
+              const callback = typeof rest[rest.length - 1] === "function" ? rest[rest.length - 1] : null;
+              if (callback) { Promise.resolve().then(() => callback([])); return undefined; }
+              return Promise.resolve([]);
+            }
+            return native.apply(this && typeof this === "object" ? this : holder, [queryInfo, ...rest]);
+          };
+          Object.defineProperty(guarded, "__bamTabsQueryGuard", { value: true });
+          try { Object.defineProperty(holder, "query", { value: guarded, writable: true, configurable: true, enumerable: true }); tabsQueryGuardHeld.push(holder); } catch (error) {}
+        }
+      };
+
       // Tab metadata (Chrome's `tabs` contract: a tab's url and title without host access). WebKit blanks both unless
       // the extension has host access to the tab's site; this adds only those two values back, for an extension whose
       // live context holds `tabs` (checked natively on every request). It grants no site, and scripting, cookies,
@@ -925,6 +951,7 @@ enum ExtensionCompatibility {
       const held = {};
       const applyExtensions = () => {
         applyDNRGuard();
+        applyTabsQueryGuard();
         applyTabMetadata();
         let missing = false;
         for (const x of extensions) {

@@ -714,16 +714,56 @@ import JavaScriptCore
         try check(result.1 != nil, "Removed context retained native capability access")
         try offscreenAdapter(check)
         try revokedWorkerTransport(check)
+        try tabsQueryWindowTypes(check)
         print("PASS: Extension compatibility (\(checks) checks)")
     }
 
-    /// The worker adapter's offscreen, getContexts and runtime.lastError behavior, against
-    /// a fake native side that answers like Bam's bridge (one document, enveloped outcomes).
+    /// tabs.query with Chrome window types Bam never has ('app', 'devtools') answers [] without calling WebKit, which
+    /// rejects them (Dark Reader's getActiveTab falls back to 'app'); every other query reaches WebKit's method unchanged.
     @available(macOS 15.4, *)
+    static func tabsQueryWindowTypes(_ check: (Bool, String) throws -> Void) throws {
+        let manifest: [String: Any] = ["manifest_version": 3, "name": "Original Window Type Fixture", "version": "1.0", "permissions": ["storage"]]
+        let js = JSContext()!
+        var errors: [String] = []
+        js.exceptionHandler = { _, error in errors.append(error?.toString() ?? "JavaScript error") }
+        js.evaluateScript("""
+        var console = {error: function() {}, warn: function() {}}, performance = {now: function() { return 0; }};
+        var location = {origin: 'webkit-extension://fixture', href: 'webkit-extension://fixture/worker.js'};
+        var nativeCalls = [];
+        var browser = {runtime: {
+          getURL: function(path) { return 'webkit-extension://fixture' + path; },
+          getManifest: function() { return \(String(data: try! JSONSerialization.data(withJSONObject: manifest), encoding: .utf8)!); },
+          sendNativeMessage: function() { return Promise.resolve(true); }
+        }, tabs: {
+          query: function(info) {
+            nativeCalls.push(JSON.stringify(info));
+            if (info && (info.windowType === 'app' || info.windowType === 'devtools')) throw new Error("Invalid call to tabs.query(). The 'windowType' value is invalid");
+            return Promise.resolve([{id: 7, windowType: info && info.windowType}]);
+          }
+        }, storage: {}, action: {}};
+        var results = {};
+        """)
+        js.evaluateScript(ExtensionCompatibility.workerScript(manifest: manifest, browserVersion: "test"))
+        js.evaluateScript("""
+        browser.tabs.query({active: true, windowType: 'app'}).then(function(tabs) { results.appPromise = JSON.stringify(tabs); }, function(e) { results.appPromise = 'rejected: ' + e.message; });
+        results.appCallbackReturn = String(browser.tabs.query({windowType: 'devtools'}, function(tabs) { results.devtoolsCallback = JSON.stringify(tabs); }));
+        browser.tabs.query({active: true, windowType: 'normal'}).then(function(tabs) { results.normal = tabs.length + ':' + tabs[0].windowType; });
+        results.marked = browser.tabs.query.__bamTabsQueryGuard === true;
+        """)
+        try check(errors.isEmpty && js.evaluateScript("results.marked")!.toBool(), "The tabs.query window-type guard was not installed: \(errors)")
+        try check(js.evaluateScript("results.appPromise")?.toString() == "[]" && js.evaluateScript("results.devtoolsCallback")?.toString() == "[]"
+                  && js.evaluateScript("results.appCallbackReturn")?.toString() == "undefined",
+                  "An 'app' or 'devtools' query did not answer an empty list in promise and callback forms")
+        try check(js.evaluateScript("results.normal")?.toString() == "1:normal"
+                  && js.evaluateScript("JSON.stringify(nativeCalls)")?.toString() == "[\"{\\\"active\\\":true,\\\"windowType\\\":\\\"normal\\\"}\"]",
+                  "Other queries did not reach WebKit's method exactly once, unchanged: \(js.evaluateScript("JSON.stringify(nativeCalls)")?.toString() ?? "")")
+    }
+
     /// After Revoke Permissions the fresh worker context has no nativeMessaging, so WebKit exposes neither
     /// sendNativeMessage nor connectNative. Top-level listener registration must not throw (a throw stops the worker
     /// from loading, and WebKit then never answers its queued messages); nothing is delivered, no port is opened, and
     /// every bridged call rejects with exactly the adapter's transport text.
+    @available(macOS 15.4, *)
     static func revokedWorkerTransport(_ check: (Bool, String) throws -> Void) throws {
         let manifest: [String: Any] = ["manifest_version": 3, "name": "Original Revoked Worker Fixture", "version": "1.0",
                                       "permissions": ["notifications", "idle", "history", "bookmarks"]]
@@ -758,6 +798,8 @@ import JavaScriptCore
             try check(js.evaluateScript("results.\(name)")?.toString() == text, "A revoked worker's \(name) call did not refuse with the exact transport text: \(js.evaluateScript("results.\(name)")?.toString() ?? "")")
         }
     }
+    /// The worker adapter's offscreen, getContexts and runtime.lastError behavior, against
+    /// a fake native side that answers like Bam's bridge (one document, enveloped outcomes).
     @available(macOS 15.4, *)
     static func offscreenAdapter(_ check: (Bool, String) throws -> Void) throws {
         func context(permissions: [String], nativeFails: Bool = false) -> (JSContext, () -> [String]) {
