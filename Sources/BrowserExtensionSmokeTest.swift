@@ -1324,6 +1324,113 @@ import Darwin
                 } catch {
                     print("CONSENT_NEVER_UPDATED aborted=\(error)"); fflush(stdout)
                 }
+                // N2 lifecycle comparisons (native 5243ff1 and ecd3c0f: the never-updated control refused while the subject
+                // read). Two more local, ephemeral fixtures in the same run, each with a Bam tab of its page open and loaded
+                // while granted, then one lifecycle step the subject also went through before the consent checks:
+                // (U) a package update through replacePackage (same identity, version bump) and (R) two Disable/Enable
+                // reloads. Then a granted read on a fresh raw page (positive control, released and checked), a Withhold,
+                // its own restart awaited by generation, and a fetch from a raw page of its fresh context and from any Bam
+                // renderer of it. Outcomes are reported, not interpreted here; the subject's strict check still fails.
+                func lifecycleControl(_ name: String, step: String, _ lifecycle: (UUID) async throws -> String) async {
+                    var control: UUID?
+                    var tab: UUID?
+                    do {
+                        let title = "lifecycle control \(name)"
+                        func writePackage(version: String) throws -> URL {
+                            let folder = FileManager.default.temporaryDirectory.appendingPathComponent("bam-consent-lifecycle-\(name)-\(UUID().uuidString)")
+                            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+                            try JSONSerialization.data(withJSONObject: [
+                                "manifest_version": 3, "name": "Bam consent lifecycle comparison \(name)", "version": version,
+                                "description": "Original Bam fixture comparing a withdrawal after one lifecycle step.",
+                                "host_permissions": ["http://127.0.0.1/*"]
+                            ]).write(to: folder.appendingPathComponent("manifest.json"))
+                            try Data("<!doctype html><meta charset='utf-8'><title>\(title)</title>".utf8).write(to: folder.appendingPathComponent("page.html"))
+                            return folder
+                        }
+                        let initial = try writePackage(version: "1.0")
+                        defer { try? FileManager.default.removeItem(at: initial) }
+                        let id = try await host.importPackage(at: initial, profileID: profile)
+                        control = id
+                        func rawPage() async throws -> WKWebView? {
+                            guard let context = host.context(for: id), let configuration = context.webViewConfiguration else { return nil }
+                            let web = WKWebView(frame: NSRect(x: 0, y: 0, width: 320, height: 240), configuration: configuration)
+                            observeExtensionView("lifecycle-\(name)-page#\(observedExtensionViews.count)", web)
+                            web.load(URLRequest(url: context.baseURL.appendingPathComponent("page.html")))
+                            let deadline = ProcessInfo.processInfo.systemUptime + 5
+                            while web.title != title && ProcessInfo.processInfo.systemUptime < deadline { try await Task.sleep(nanoseconds: 40_000_000) }
+                            return web.title == title ? web : nil
+                        }
+                        /// Fetches from a fresh raw page, then releases it and reports whether it deallocated.
+                        func readOnFreshPage() async throws -> String {
+                            var page = try await rawPage()
+                            let read = page == nil ? "did-not-load" : await discriminatorFetch(page!)
+                            weak let released = page
+                            page?.stopLoading(); page = nil
+                            let deadline = ProcessInfo.processInfo.systemUptime + 5
+                            while released != nil && ProcessInfo.processInfo.systemUptime < deadline { try await Task.sleep(nanoseconds: 40_000_000) }
+                            return "\(read)(released=\(released == nil))"
+                        }
+                        func bamRenderers() async -> [String] {
+                            guard let installHost = host.context(for: id)?.baseURL.host else { return [] }
+                            var reads: [String] = []
+                            for (tabID, web) in controller.browsers where web.url?.scheme == "webkit-extension" && web.url?.host == installHost {
+                                reads.append("\(tabID.uuidString.prefix(8))=\(await discriminatorFetch(web))")
+                            }
+                            return reads
+                        }
+                        guard let base = host.context(for: id)?.baseURL,
+                              let opened = controller.openProfileTab(base.appendingPathComponent("page.html"), profileID: profile, active: false) else {
+                            throw ExtensionSmokeTest.Failure(description: "\(name): no Bam tab for the lifecycle comparison")
+                        }
+                        tab = opened
+                        let tabDeadline = ProcessInfo.processInfo.systemUptime + 5
+                        while !(controller.browsers[opened]?.title == title && controller.browsers[opened]?.isLoading == false) && ProcessInfo.processInfo.systemUptime < tabDeadline {
+                            try await Task.sleep(nanoseconds: 40_000_000)
+                        }
+                        let tabLoaded = controller.browsers[opened]?.title == title
+                        let grantedBefore = try await readOnFreshPage(), bamBefore = await bamRenderers()
+                        let lifecycleResult = try await lifecycle(id)
+                        let grantedAfter = try await readOnFreshPage(), bamAfter = await bamRenderers()
+                        let before = host.restartGeneration[id] ?? 0
+                        guard let snapshot = host.siteAccess(id: id), let declarations = snapshot.declarations else {
+                            throw ExtensionSmokeTest.Failure(description: "\(name): no Site Access snapshot after \(step)")
+                        }
+                        _ = try host.performSiteAccess(id: id, profileID: profile, revision: snapshot.revision, displayed: declarations, change: .choose(.withheld))
+                        let started = host.restartGeneration[id] ?? 0
+                        let restart = started == before ? "no-restart" : await host.restartCompletion(id: id, generation: started).map { "\($0)" } ?? "no-result"
+                        let withheldRead = try await readOnFreshPage(), bamWithheld = await bamRenderers()
+                        print("CONSENT_LIFECYCLE_CONTROL name=\(name) step=\(step) bamTabLoaded=\(tabLoaded) grantedBeforeStep=\(grantedBefore) bamBeforeStep=\(bamBefore) " +
+                              "stepResult=\(lifecycleResult) grantedAfterStep=\(grantedAfter) bamAfterStep=\(bamAfter) restart=\(restart) generations=\(started - before) " +
+                              "afterWithholdFreshPage=\(withheldRead) bamAfterWithhold=\(bamWithheld)"); fflush(stdout)
+                    } catch {
+                        print("CONSENT_LIFECYCLE_CONTROL name=\(name) step=\(step) aborted=\(error)"); fflush(stdout)
+                    }
+                    if let tab { _ = host.closeTab?(tab) }
+                    if let control { try? await host.remove(id: control) }
+                }
+                await lifecycleControl("U", step: "package-update") { id in
+                    let folder = FileManager.default.temporaryDirectory.appendingPathComponent("bam-consent-lifecycle-U-update-\(UUID().uuidString)")
+                    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+                    defer { try? FileManager.default.removeItem(at: folder) }
+                    try JSONSerialization.data(withJSONObject: [
+                        "manifest_version": 3, "name": "Bam consent lifecycle comparison U", "version": "1.1",
+                        "description": "Original Bam fixture comparing a withdrawal after one lifecycle step.",
+                        "host_permissions": ["http://127.0.0.1/*"]
+                    ]).write(to: folder.appendingPathComponent("manifest.json"))
+                    try Data("<!doctype html><meta charset='utf-8'><title>lifecycle control U</title>".utf8).write(to: folder.appendingPathComponent("page.html"))
+                    weak let oldContext = host.context(for: id)
+                    let record = ExtensionCatalogRecord(source: .local, upstreamID: nil, listingURL: nil, downloadURL: nil,
+                        publisher: "Bam test fixture", version: "1.1", sha256: "", provenance: "Original local fixture", installedAt: Date())
+                    try await host.replacePackage(id: id, with: folder, catalog: record)
+                    let version = host.items(profileID: profile).first { $0.id == id }?.version ?? "missing"
+                    return "version=\(version) newContext=\(host.context(for: id).map { $0 !== oldContext } ?? false) loaded=\(host.context(for: id)?.isLoaded == true)"
+                }
+                await lifecycleControl("R", step: "disable-enable-x2") { id in
+                    weak let firstContext = host.context(for: id)
+                    try await host.setEnabled(false, id: id); try await host.setEnabled(true, id: id)
+                    try await host.setEnabled(false, id: id); try await host.setEnabled(true, id: id)
+                    return "newContext=\(host.context(for: id).map { $0 !== firstContext } ?? false) loaded=\(host.context(for: id)?.isLoaded == true)"
+                }
             }
             try check(failedWithheld.isEmpty,
                 "Using a withheld requested site prompted, granted, denied or changed Site Access: failed=\(failedWithheld) shownAtProbe=\(reviewsShownAtProbe) shownIncludingDiagnostics=\(reviewsShown), \(withheldUse); " +
