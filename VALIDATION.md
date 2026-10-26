@@ -1,6 +1,6 @@
-## Local 0.24.0 build 48 — visual and interaction candidate (all eleven native suites passed across an original run and continuations, with two targeted retries; repaired visual acceptance and release pending)
+## 0.24.0 build 48 — visual and interaction release (all eleven native suites passed across runs with two targeted retries; app-only rebuild at `67b9a57` passed a focused visual retest)
 
-Nothing here claims Arc or Yab parity or readiness to ship.
+Nothing here claims Arc or Yab parity.
 
 **Build (not one clean uninterrupted full build).**
 - At `009b80e` (log `build-024.log`), `bash build.sh` compiled, signed and packaged the optimized app.
@@ -40,7 +40,7 @@ They cover:
 - **Extensions:** the Chrome-first, Firefox-second build order. `a81efcf` adds cross-listing ranking: at equal relevance an installable Chrome Web Store listing leads, then Firefox, then Safari (the native Dark Reader finding).
 - **Onboarding:** steps, and that both follow-ups run in order.
 
-**Native suites** (canonical Bam Preview, candidate before the visual repairs; logs `runtime-024.log`, `runtime-remaining-024.log`, `runtime-last-two-024.log`, `interaction-retry-024.log`):
+**Native suites** (canonical Bam Preview, build before the visual repairs; logs `runtime-024.log`, `runtime-remaining-024.log`, `runtime-last-two-024.log`, `interaction-retry-024.log`):
 - All eleven suites eventually passed: WebKit, PiP (positioning 70), Interactions **173**, Auto PiP **85**, Features **371**, Resources **37**, Profiles **98**, Extensions **818**, Favicons **85**, Profile Activation **45** and Arc import **155**.
 - **Not one uninterrupted green run:**
   - two suites failed once and passed on a single targeted retry: Interactions (an initial Space-0 liveness failure) and Profile Activation (an initial focus failure);
@@ -55,15 +55,32 @@ They cover:
 - site settings zoom 100% → 110% and Reset;
 - the quit dialog: Escape cancels and Quit exits.
 
-**Found and repaired, not yet re-verified:**
-- the Downloads panel partly off screen;
-- site settings content clipped, with heavy edges;
-- the quit keycaps overlapping their labels (`67b9a57`);
-- Chrome-second search results (`a81efcf`).
+**Repairs after the native gates.** Native acceptance found four problems:
+- the Downloads panel was partly off screen;
+- site settings content was clipped, with heavy edges;
+- the quit keycaps overlapped their labels;
+- Dark Reader's Chrome listing came second.
 
-**Still pending:** an app rebuild at `67b9a57`, then a focused visual retest of those repairs, the onboarding tour, the folder and drag visuals, and the Chrome-first vendor workflow. Release is pending too.
+They were fixed in `67b9a57` (popover layout and keycaps) and `a81efcf` (store ordering).
 
-**Physical-input limits:** automation can't perform a physical pinch or feel haptics, and the held-key check delivered a single event. So trackpad pinch, two-finger PiP movement, haptic feel and physical held-key repeat are covered by model and event tests only.
+**Rebuild and retest** (02:30, log `visual-acceptance-final.md`):
+- **Rebuild:** an app-only optimized compile, sign and package at `67b9a57`. These fixes changed only popover layout, keycaps and store ordering, so the unaffected eleven suites weren't rerun. The repair's component tests passed (above), and an independent source review was clean.
+- **Session:** a fresh, disposable `--fresh-preview --onboarding` session. It exited 0 and the personal profile was unchanged.
+- **Passed:**
+  - Downloads stays within the screen edge, has no gray frame, and a second click on its button closes it;
+  - site settings padding and frame, hostname/HTTPS, and zoom 100% → 110% and Reset;
+  - the quit labels and keycaps are separate; Cancel restores the browser and Return quits;
+  - searching Dark Reader selects the official darkreader.org Chrome result first, with Firefox second;
+  - setup: the tour, color and name steps, and the Arc choice ("Start fresh" was taken, to avoid personal data);
+  - choosing Bitwarden led to the summary, then Add Extensions searching for Bitwarden after setup;
+  - the system default browser was unchanged;
+  - a folder created from the Space menu collapses to its closed glyph.
+- **What the search check is:** live catalog evidence, not a new vendor install or vault certification.
+
+**Limits:**
+- **Physical input:** automation can't perform a physical pinch or feel haptics, and the held-key check delivered a single event. So trackpad pinch, two-finger PiP movement, haptic feel and held-arrow repeat are covered by model and event tests only.
+- **Smoothness:** folder animation and drag smoothness are not perceptually certified.
+- **Not manually checked:** a non-empty Downloads thumbnail gallery (covered by component and native feature tests), and popover placement at the right screen edge or across multiple monitors.
 
 **Limits:**
 - Gesture code is covered by model and event tests, which don't prove physical trackpad feel.

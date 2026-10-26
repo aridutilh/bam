@@ -1,14 +1,14 @@
-**0.24.0 build 48 — local candidate, native acceptance pending:**
+**0.24.0 build 48:**
 - search palette size, tint, held-key stability, clipping and real actions;
 - sidebar edge, Space context menu, folder lid animation, drag gaps and drop into Favorites at a slot;
 - compact downloads list and thumbnail library;
 - Bam quit dialog with a restorable "don't ask again";
 - page pinch-zoom and pinch-resized floating video;
 - address-field site controls;
-- Chrome-first build choice in Add Extensions;
+- Chrome-first extension search and build choice;
 - setup tour, optional previewed Arc import and optional password-manager search.
 
-Component tests only so far. Not included: physical trackpad acceptance, an emoji or gradient picker, extension tab/window compatibility changes, password-vault sign-in, and other-browser or password import.
+Native suites and focused visual checks passed (VALIDATION.md). Not included: physical gesture or haptic certification, an emoji or gradient picker, extension tab/window compatibility changes, password-vault sign-in, and other-browser or password import.
 
 **0.23.0 build 47:** verified Chrome Web Store installs use their CRX-verified Chrome ID (resource URLs stay private per installation; existing installs keep their identity and storage; duplicate verified IDs are refused within a profile); per-extension Site Access with restart on withdrawal (native fixtures pass at `52fdfae`; the full build, all eleven native suites and final vendor checks passed at `4ed2f83`); Chrome-style explicit consent (no prompts during extension calls); tab addresses and titles for `tabs`-permission extensions without site access. Session Buddy restores ordinary and kept tabs with titles without site access. Multiwindow restoration and full Chrome compatibility remain incomplete; pending native gates are listed in VALIDATION.md.
 
