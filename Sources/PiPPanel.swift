@@ -21,6 +21,7 @@ import QuartzCore
         // Intercept before controls/WebKit dispatch so hovering a button or the
         // volume slider moves the panel too, without clicking or taking focus.
         if handleScrollMotion(event) { return }
+        if handleMagnify(event) { return }
         if event.type == .keyDown {
             overlay?.revealControls()
             if event.keyCode == 53 { onEscape?(); return }
@@ -78,7 +79,36 @@ import QuartzCore
         return true
     }
 
+    /// Trackpad pinch resizes the floating video about the fingers, aspect preserved, between its
+    /// minimum and the screen. Applied per step from the current frame, so a two-finger move in the
+    /// same gesture still moves it. Release fits and snaps it like a move. WebKit never sees it.
+    @discardableResult func handleMagnify(_ event: NSEvent) -> Bool {
+        guard event.type == .magnify, event.window === self else { return false }
+        let phase = event.phase
+        if phase.contains(.began) || !isPinching { stopPositionSnap(); isPinching = true }
+        if !phase.contains(.cancelled), event.magnification.isFinite, event.magnification != 0 {
+            overlay?.revealControls()
+            let ratio = contentAspectRatio.height > 0 && contentAspectRatio.width > 0
+                ? contentAspectRatio.width / contentAspectRatio.height : frame.width / max(1, frame.height)
+            setFrame(PiPPositioning.pinchFrame(frame, scale: max(0.5, 1 + event.magnification), anchor: NSEvent.mouseLocation,
+                                               aspect: ratio, minimumWidth: contentMinSize.width, screens: positionScreenFrames()),
+                     display: true)
+        }
+        if phase.isEmpty || phase.contains(.ended) || phase.contains(.cancelled) {
+            isPinching = false
+            if !isScrollDragging { finishPositioning(velocity: .zero, animated: !phase.contains(.cancelled)) }
+        }
+        return true
+    }
+    private(set) var isPinching = false
+    private func stopPositionSnap() {
+        positionGeneration &+= 1
+        isPositionSnapRunning = false
+        positionAnimator.stop()
+    }
+
     func cancelPositioning() {
+        isPinching = false
         scrollEndWork?.cancel(); scrollEndWork = nil
         isScrollDragging = false
         physicalVelocity.reset()
@@ -164,7 +194,7 @@ import QuartzCore
         time.font = .monospacedDigitSystemFont(ofSize: 11, weight: .medium)
         time.textColor = .white; time.alignment = .right
         time.setAccessibilityElement(false)
-        setAccessibilityLabel("Floating video. Drag or scroll with two fingers to move; flick to glide, or release near a corner to snap. Tab to navigate controls.")
+        setAccessibilityLabel("Floating video. Drag or scroll with two fingers to move; flick to glide, or release near a corner to snap. Pinch to resize. Tab to navigate controls.")
         returnButton.nextKeyView = closeButton; closeButton.nextKeyView = backward
         backward.nextKeyView = play; play.nextKeyView = forward; forward.nextKeyView = mute
         mute.nextKeyView = volume; volume.nextKeyView = resizeGrip; resizeGrip.nextKeyView = returnButton
@@ -271,7 +301,8 @@ import QuartzCore
 @MainActor private final class PiPControlsSurface: NSView {
     override func draw(_ dirtyRect: NSRect) {
         // Subtle gradients keep controls legible without a permanent toolbar.
-        NSGradient(colors: [.black.withAlphaComponent(0.56), .clear, .black.withAlphaComponent(0.50)])?
+        // A light scrim across the middle keeps the central play/pause readable on bright video.
+        NSGradient(colors: [.black.withAlphaComponent(0.56), .black.withAlphaComponent(0.22), .black.withAlphaComponent(0.50)])?
             .draw(in: bounds, angle: 90)
     }
 }

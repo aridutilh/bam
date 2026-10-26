@@ -36,6 +36,8 @@ import QuartzCore
     private var loadingObservation: NSKeyValueObservation?
     private var requestID = UUID()
     private var originalAutoresizing: NSView.AutoresizingMask = []
+    /// A pinch-zoomed page floats at 1× (the video fills the panel) and gets its zoom back on return.
+    private var originalMagnification: CGFloat = 1
     private let world = WKContentWorld.world(name: "OrbitPictureInPicture")
 
     /// Includes the short paint/cover handoff after synchronous ownership release.
@@ -208,6 +210,8 @@ import QuartzCore
         web.removeFromSuperview()
         web.autoresizingMask = originalAutoresizing
         web.alphaValue = originalAlpha
+        if originalMagnification != 1, originalMagnification.isFinite { web.magnification = originalMagnification }
+        originalMagnification = 1
         web.addSubview(transfer.cover)
         callback?(web)
         onChange?()
@@ -369,6 +373,8 @@ import QuartzCore
         videoPanel.overlay = controls
         originalAutoresizing = web.autoresizingMask
         originalAlpha = web.alphaValue
+        originalMagnification = web.magnification
+        if web.magnification != 1 { web.magnification = 1 }
         webView = web
         activeTabID = tabID
         restoreView = restore
