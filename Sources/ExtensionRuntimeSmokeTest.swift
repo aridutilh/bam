@@ -114,7 +114,7 @@ import WebKit
                 }
                 if CommandLine.arguments.contains("--extension-renderer-only") {
                     // Product tabs across every withdrawal path (panel, failed restart then Enable, permissions.remove,
-                    // expiry). Not yet in the default full run: root decides once the UI and engine candidates are integrated.
+                    // expiry). The default full run includes the same suite; this selector runs it alone.
                     let checks = try await Self.withFreshHost { controller, host in
                         try await ExtensionRendererRestartAcceptance.run(controller: controller, host: host, pageURL: page)
                     }
@@ -142,7 +142,11 @@ import WebKit
                 let dnrChecks = try await ExtensionDeclarativeNetRequestSmokeTest.run(pageURL: page)
                 let safariChecks = try await SafariExtensionSmokeTest.run(pageURL: page)
                 let bridgeChecks = try await ExtensionBridgeCapabilityProbe.run()
-                let checks = isolatedChecks + frameChecks + integratedChecks + workerChecks + dnrChecks + safariChecks + bridgeChecks
+                // Required: withdrawn website access must leave an extension's own Bam tabs (fresh host, own fixtures).
+                let rendererChecks = try await Self.withFreshHost { controller, host in
+                    try await ExtensionRendererRestartAcceptance.run(controller: controller, host: host, pageURL: page)
+                }
+                let checks = isolatedChecks + frameChecks + integratedChecks + workerChecks + dnrChecks + safariChecks + bridgeChecks + rendererChecks
                 self.finish(true, "\(checks)")
             } catch { self.finish(false, String(describing: error)) }
         }
