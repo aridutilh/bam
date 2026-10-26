@@ -1600,11 +1600,14 @@ struct BrowserExtensionPermissionReview {
                     "again after Bam reopens. Quit and reopen Bam, then set its site access in Manage Extensions.",
                     "Site access was saved, but \(name) couldn’t be stopped to apply it. WebKit may still run it with its earlier website access " +
                     "until you quit Bam; Bam turned it off. Quit and reopen Bam, then enable it in Manage Extensions.")
-        case .releaseTimedOut(let failure):
-            // Fail closed: old pages stayed alive past the deadline, so it was left off rather than loaded with residual access.
-            return ("\(lead) and stays off: Bam couldn’t finish restarting it while its old pages were still in use. Bam also couldn’t save " +
-                    "that change (\(saveError)), so it may have that access again the next time Bam opens. Quit and reopen Bam, then set its " +
-                    "site access in Manage Extensions.", failure)
+        case .releaseTimedOut:
+            // Fail closed: old pages stayed alive past the deadline, so the fresh context never loaded. Still unsaved here
+            // means no registry save has succeeded since, so turning it off wasn't saved either: "off for now", not "stays
+            // off". Once a save succeeds, both are durable: the plain fail-closed message, without any save-failure clause.
+            return ("\(lead) and is off for now: Bam couldn’t finish restarting it while its earlier pages were still open. Bam couldn’t save " +
+                    "that change or that it’s off (\(saveError)), so it may load again with that access the next time Bam opens. Quit and reopen " +
+                    "Bam, then set its site access in Manage Extensions.",
+                    Self.releaseTimeoutMessage(name: name, disableSaveError: nil, accessSaved: true))
         case .pending, .superseded:
             // Not a terminal restart result (handled by the caller); nothing about a restart can be claimed.
             return ("\(lead), but Bam couldn’t save that change (\(saveError)). Until it’s saved, it may have that access again the next time " +

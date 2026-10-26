@@ -287,11 +287,18 @@ import WebKit
         let unsavedTimedOut = await host.restartCompletion(id: id, generation: unsavedTimeoutGeneration + 1)
         let unsavedText = host.errors[id] ?? ""
         guard case .releaseTimedOut(let savedWording)? = unsavedTimedOut else { throw Failure(message: "Expected releaseTimedOut, got \(String(describing: unsavedTimedOut))") }
-        try check(unsavedText.contains("stays off") && unsavedText.contains("couldn’t save") && !unsavedText.contains("was saved") && host.context(for: id) == nil,
-                  "An unsaved fail-closed restart must say it stays off and wasn't saved: \(unsavedText)")
+        try check(unsavedText.contains("off for now") && !unsavedText.contains("stays off") && unsavedText.contains("couldn’t save") &&
+                  !unsavedText.contains("was saved") && host.context(for: id) == nil,
+                  "An unsaved fail-closed restart must say it's off for now and wasn't saved, never that it stays off: \(unsavedText)")
+        try check(savedWording.contains("couldn’t save that it’s off"), "Fixture: the helper's own message must carry its failed disable save: \(savedWording)")
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: registry.path)
         host.persistPermissions(other)
-        try check(host.errors[id] == savedWording, "Once saved, the warning must become the helper's fail-closed message: \(host.errors[id] ?? "-")")
+        let durable = host.errors[id] ?? ""
+        try check(durable == BrowserExtensions.releaseTimeoutMessage(name: "Withdrawal fixture", disableSaveError: nil, accessSaved: true),
+                  "Once saved, the warning must be the durable fail-closed message: \(durable)")
+        try check(durable.contains("stays off") && !durable.contains("couldn’t save") && !durable.contains("may load again") &&
+                  !durable.contains("broader") && !durable.contains("last saved"),
+                  "The durable message must not keep the obsolete save-failure or relaunch-risk language: \(durable)")
         held = nil; host.onExtensionRenderers = nil
         try await host.setEnabled(true, id: id)
         await settle()
