@@ -1580,20 +1580,32 @@ enum ArkTabRowChevron {
 /// no system or third-party artwork.
 @MainActor enum ArkFolderGlyph {
     static let side: CGFloat = 16
-    static func image(open: Bool, tint: NSColor) -> NSImage {
+    /// How long the front panel takes to tilt open or settle closed.
+    static let toggleDuration: TimeInterval = 0.16
+    /// The front panel's corners (bottom-left, bottom-right, top-right, top-left) at `openness` 0 (closed: a flat
+    /// face) through 1 (open: tilted forward, a parallelogram). Bam's own glyph, interpolated corner by corner.
+    static func frontCorners(openness raw: CGFloat) -> [NSPoint] {
+        let t = min(1, max(0, raw))
+        let closed = [NSPoint(x: 1, y: 2.5), NSPoint(x: 15, y: 2.5), NSPoint(x: 15, y: 11.1), NSPoint(x: 1, y: 11.1)]
+        let open = [NSPoint(x: 1.2, y: 2.5), NSPoint(x: 13.4, y: 2.5), NSPoint(x: 15.6, y: 9.4), NSPoint(x: 3.6, y: 9.4)]
+        return zip(closed, open).map { NSPoint(x: $0.x + ($1.x - $0.x) * t, y: $0.y + ($1.y - $0.y) * t) }
+    }
+    static func image(open: Bool, tint: NSColor) -> NSImage { image(openness: open ? 1 : 0, tint: tint) }
+    static func image(openness raw: CGFloat, tint: NSColor) -> NSImage {
+        let openness = min(1, max(0, raw))
         let image = NSImage(size: NSSize(width: side, height: side), flipped: false) { _ in
             // Back panel with its tab (top-left), lighter than the front.
             let back = NSBezierPath(roundedRect: NSRect(x: 1, y: 2.5, width: 14, height: 10.5), xRadius: 2.2, yRadius: 2.2)
             back.append(NSBezierPath(roundedRect: NSRect(x: 1, y: 10.5, width: 6.2, height: 3.6), xRadius: 1.6, yRadius: 1.6))
             tint.withAlphaComponent(0.55).setFill(); back.fill()
-            // Front: a flat face when closed; tilted forward (a parallelogram) when open.
+            // Front: a flat face when closed; tilted forward (a parallelogram) when open; in between while toggling.
             let front = NSBezierPath()
-            if open {
-                front.move(to: NSPoint(x: 1.2, y: 2.5)); front.line(to: NSPoint(x: 13.4, y: 2.5))
-                front.line(to: NSPoint(x: 15.6, y: 9.4)); front.line(to: NSPoint(x: 3.6, y: 9.4)); front.close()
-                front.lineJoinStyle = .round
-            } else {
+            if openness == 0 {
                 front.append(NSBezierPath(roundedRect: NSRect(x: 1, y: 2.5, width: 14, height: 8.6), xRadius: 2.2, yRadius: 2.2))
+            } else {
+                let corners = frontCorners(openness: openness)
+                front.move(to: corners[0]); for corner in corners.dropFirst() { front.line(to: corner) }; front.close()
+                front.lineJoinStyle = .round
             }
             tint.setFill(); front.fill()
             // A hairline edge keeps a pale tint readable on a pale sidebar.
@@ -1603,7 +1615,7 @@ enum ArkTabRowChevron {
             return true
         }
         image.isTemplate = false
-        image.accessibilityDescription = open ? "Open folder" : "Folder"
+        image.accessibilityDescription = openness >= 0.5 ? "Open folder" : "Folder"
         return image
     }
 }
@@ -1807,7 +1819,11 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted, Ar
         }
         if first || old.subtitle != item.subtitle { subtitleLabel.stringValue = item.subtitle }
         if item.isFolder {
-            if first || !old.isFolder || old.isExpanded != item.isExpanded { favicon = nil; showFolderGlyph() }
+            if first || !old.isFolder || old.isExpanded != item.isExpanded {
+                favicon = nil
+                // Only the same folder toggling animates; a reused row shows its new folder at once.
+                showFolderGlyph(animated: !first && old.isFolder && old.id == item.id && old.isExpanded != item.isExpanded)
+            }
         } else if favicon == nil, first || old.symbol != item.symbol || old.monogram != item.monogram || old.isFolder { showFallbackIcon() }
         if first || old.isActive != item.isActive || old.isFolder != item.isFolder { applyIconTint() }
         if first || old.isSplit != item.isSplit || old.isPinned != item.isPinned || old.isFolder != item.isFolder {
@@ -1856,11 +1872,35 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted, Ar
         }
         applyIconTint()
     }
-    /// Folders: Bam's open/closed folder in the Space's tint.
-    private func showFolderGlyph() {
+    /// Folders: Bam's open/closed folder in the Space's tint. A toggle tilts the front panel open or settles it closed
+    /// over `ArkFolderGlyph.toggleDuration` (instant with Reduce Motion or offscreen); the last frame is the exact
+    /// open or closed glyph.
+    private var folderToggle: Timer?
+    private(set) var folderOpenness: CGFloat = 0
+    private func showFolderGlyph(animated: Bool = false) {
         iconView.symbolConfiguration = nil
-        iconView.image = ArkFolderGlyph.image(open: item.isExpanded, tint: spaceTint)
         iconView.identifier = NSUserInterfaceItemIdentifier(item.isExpanded ? "folder-glyph-open" : "folder-glyph")
+        folderToggle?.invalidate(); folderToggle = nil
+        let target: CGFloat = item.isExpanded ? 1 : 0
+        guard animated, window != nil, folderOpenness != target,
+              !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
+            folderOpenness = target
+            iconView.image = ArkFolderGlyph.image(openness: target, tint: spaceTint)
+            return
+        }
+        let start = folderOpenness, began = ProcessInfo.processInfo.systemUptime
+        let timer = Timer(timeInterval: 1.0 / 60, repeats: true) { [weak self] timer in
+            MainActor.assumeIsolated {
+                guard let self else { timer.invalidate(); return }
+                let progress = min(1, (ProcessInfo.processInfo.systemUptime - began) / ArkFolderGlyph.toggleDuration)
+                let eased = 1 - pow(1 - progress, 3)   // ease out: quick start, gentle landing
+                self.folderOpenness = progress >= 1 ? target : start + (target - start) * CGFloat(eased)
+                self.iconView.image = ArkFolderGlyph.image(openness: self.folderOpenness, tint: self.spaceTint)
+                if progress >= 1 { timer.invalidate(); self.folderToggle = nil }
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        folderToggle = timer
     }
     /// Without a favicon: the page's monogram (Space-tinted disc) or its symbol.
     private func showFallbackIcon() {

@@ -259,6 +259,11 @@ import AppKit
         let afterKeyboardReload = pixels(folderRow())
         focusWindow.makeFirstResponder(nil)
         require(focusWindow.firstResponder !== folderRow() && afterKeyboardReload != pixels(folderRow()), "Keyboard-mode focus keeps its ring through a reload")
+        // The folder just opened by keyboard settles on the exact open glyph once its short lid animation ends.
+        RunLoop.main.run(until: Date().addingTimeInterval(ArkFolderGlyph.toggleDuration + 0.2))
+        let settledGlyph = descendants(folderRow()).first { $0.identifier?.rawValue.hasPrefix("folder-glyph") == true } as? NSImageView
+        require(settledGlyph?.identifier?.rawValue == "folder-glyph-open" && settledGlyph?.image?.accessibilityDescription == "Open folder",
+                "An opened folder ends on the open glyph (\(settledGlyph?.identifier?.rawValue ?? "none"))")
         withExtendedLifetime(focusWindow) {}
 
         // MARK: Folder glyph: Bam's own vector folder, tinted, distinct open and closed.
@@ -280,6 +285,13 @@ import AppKit
         } }
         require(covered > 32 * 32 / 3 && tinted > covered / 2, "The folder is a filled shape in the Space's tint, not a thin outline (\(tinted)/\(covered))")
         require(glyphPixels(false, scale: 3).pixelsWide == 48, "Vector glyph renders at any scale")
+        // Toggling tilts the front panel through Bam's own in-between shapes, ending exactly on the closed or open face.
+        let closedFront = ArkFolderGlyph.frontCorners(openness: 0), openFront = ArkFolderGlyph.frontCorners(openness: 1)
+        let halfway = ArkFolderGlyph.frontCorners(openness: 0.5)
+        require(closedFront[2] == NSPoint(x: 15, y: 11.1) && openFront[2] == NSPoint(x: 15.6, y: 9.4)
+                    && halfway[2].x > closedFront[2].x && halfway[2].x < openFront[2].x && halfway[2].y < closedFront[2].y && halfway[2].y > openFront[2].y,
+                "The front panel's top edge moves between the closed and open faces (\(halfway[2]))")
+        require(ArkFolderGlyph.frontCorners(openness: -1) == closedFront && ArkFolderGlyph.frontCorners(openness: 2) == openFront, "Openness is clamped")
 
         // MARK: Footer, as in Arc: Downloads left, Spaces centered, + right.
         let footer = ArkFooterLayout(width: 240, spaceCount: 3, selectedIndex: 1)
