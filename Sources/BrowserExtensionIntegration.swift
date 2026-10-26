@@ -8,6 +8,12 @@ struct ExtensionHostOverride {
     let controllerIdentifier: UUID
 }
 
+/// A weak observation of a renderer retired for an extension restart (whether it actually deallocated).
+final class RetiredRendererProbe {
+    weak var web: WKWebView?
+    init(_ web: WKWebView?) { self.web = web }
+}
+
 @MainActor extension BrowserController {
     @available(macOS 15.4, *)
     var browserExtensions: BrowserExtensions {
@@ -335,13 +341,20 @@ struct ExtensionHostOverride {
         }
         func retire(_ ids: [UUID]) {
             guard !ids.isEmpty else { return }
-            if let window = view.window, let focused = focusedView(in: window),
-               let id = ids.first(where: { id in browsers[id].map { focused === $0 || focused.isDescendant(of: $0) } ?? false }) {
-                retiredExtensionFocus = id
+            // Everything AppKit autoreleases while detaching (the view hierarchy, the responder) is released when this
+            // pool ends, before the caller unloads the old context. A focused page resigns first, so the window's
+            // responder chain doesn't keep it.
+            autoreleasepool {
+                if let window = view.window, let focused = focusedView(in: window),
+                   let id = ids.first(where: { id in browsers[id].map { focused === $0 || focused.isDescendant(of: $0) } ?? false }) {
+                    retiredExtensionFocus = id
+                    window.makeFirstResponder(nil)
+                }
+                for id in ids { retiredRendererProbes.append(RetiredRendererProbe(browsers[id])) }
+                isApplyingProfileChange = true
+                for id in ids { retireProfilePage(id) }
+                isApplyingProfileChange = false
             }
-            isApplyingProfileChange = true
-            for id in ids { retireProfilePage(id) }
-            isApplyingProfileChange = false
         }
         func showIfVisible(_ ids: Set<UUID>) {
             guard !ids.isDisjoint(with: visibleMemberIDs) else { return }
@@ -370,6 +383,11 @@ struct ExtensionHostOverride {
             showIfVisible(retiredExtensionRenderers[origin] ?? [])
             refresh()
         }
+    }
+    /// How many renderers retired for an extension restart are still alive (weakly observed): evidence only.
+    func retiredRenderersAlive() -> Int {
+        retiredRendererProbes.removeAll { $0.web == nil }
+        return retiredRendererProbes.count
     }
     func offerExtensionReload(profileID: UUID) {
         guard !isShuttingDown else { return }

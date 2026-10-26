@@ -461,7 +461,8 @@ extension ExtensionSiteAccessSmokeTest {
             var watched = WeakView(nil)
             BrowserExtensions.siteAccessRestartWillLoad = { id in
                 guard id == subject else { return }
-                handoffs.append(["old_renderer_released": watched.web == nil, "raw_pages_alive": rawPagesAlive()])
+                handoffs.append(["old_renderer_released": watched.web == nil, "raw_pages_alive": rawPagesAlive(),
+                                 "bam_retired_alive": controller.retiredRenderersAlive()])
             }
 
             // MARK: 1. Both allowed: tabs T (site), E (A's page), F (B's page); storage, runs, fetch positive control.
@@ -495,7 +496,15 @@ extension ExtensionSiteAccessSmokeTest {
 
             // MARK: 2. Withhold A with E visible: fresh context, E's renderer retired before the load and recreated.
             watched = WeakView(controller.browsers[extensionTab])
+            let wasFirstResponder = controller.browsers[extensionTab].map { web in window.firstResponder.map { ($0 as? NSView)?.isDescendant(of: web) ?? false } ?? false } ?? false
             try withhold(subject)
+            // Where is a still-alive old renderer held? Evidence only (the assertions below are unchanged): alive right
+            // after the call returns, then main run-loop turns until it deallocates (a deferred WebKit/AppKit reference).
+            var release: [String: Any] = ["was_first_responder": wasFirstResponder, "alive_on_return": watched.web != nil]
+            var turns = 0
+            while watched.web != nil, turns < 100 { try? await Task.sleep(nanoseconds: 10_000_000); turns += 1 }
+            release["turns_until_released"] = watched.web == nil ? turns : -1
+            diagnostic["first_restart_release"] = release
             let notice = host.takeSiteAccessNotice(id: subject)
             expect(notice?.contains("Restarted") == true, "withholding didn't report a restart \(state(subject))")
             let secondContext = host.context(for: subject)
