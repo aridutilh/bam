@@ -81,6 +81,11 @@ import WebKit
             try check(splitWeb === cookieWeb, "Split promotion recreated the page")
             try check(!PreviewURLPolicy.allows(URL(string:"javascript:alert(1)")!), "JavaScript URL allowed")
             try check(!PreviewURLPolicy.allows(URL(string:"file:///tmp/private")!), "File URL allowed")
+            // Extension pop-out pages are a separate, explicit allowance; ordinary loads still refuse them.
+            try check(!PreviewURLPolicy.allows(URL(string:"webkit-extension://4f2a/ui/editor.html")!)
+                      && PreviewURLPolicy.allowsExtensionWindowPage(URL(string:"webkit-extension://4f2a/ui/editor.html")!)
+                      && !PreviewURLPolicy.allowsExtensionWindowPage(URL(string:"https://example.com/")!)
+                      && !PreviewURLPolicy.allowsExtensionWindowPage(URL(string:"webkit-extension:///nohost")!), "Extension pop-out page policy was wrong")
             try check(!PreviewURLPolicy.allows(URL(string:"https://user:pass@example.com")!), "Credential URL allowed")
             try check(PreviewURLPolicy.resolveAddress("javascript:alert(1)") == nil, "Address field accepted external scheme")
             try check(PreviewURLPolicy.resolveAddress("example.com:8080/path")?.absoluteString == "https://example.com:8080/path", "Bare host and port were rejected")

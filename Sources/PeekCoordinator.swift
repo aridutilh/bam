@@ -243,6 +243,11 @@ typealias PreviewNavigationReadiness = @MainActor (@escaping @MainActor () -> Vo
 
 /// Shared by Peek and Little Bam; no external URL is handed to NSWorkspace.
 enum PreviewURLPolicy {
+    /// An extension's own page in a pop-out window Bam opened for that extension (`windows.create`). The runtime has
+    /// already checked the page belongs to the requesting extension; the address field never uses this.
+    static func allowsExtensionWindowPage(_ url: URL) -> Bool {
+        url.scheme?.lowercased() == "webkit-extension" && url.host?.isEmpty == false && url.user == nil && url.password == nil
+    }
     static func allows(_ url: URL) -> Bool {
         guard let scheme = url.scheme?.lowercased(), ["http", "https"].contains(scheme),
               let host = url.host, !host.isEmpty, url.user == nil, url.password == nil else { return false }
@@ -295,8 +300,8 @@ enum PreviewURLPolicy {
         ]
     }
 
-    @discardableResult func load(url: URL) -> Bool {
-        guard PreviewURLPolicy.allows(url) else { status = "Only HTTP and HTTPS pages can open here"; onChange?(); return false }
+    @discardableResult func load(url: URL, extensionPage: Bool = false) -> Bool {
+        guard PreviewURLPolicy.allows(url) || (extensionPage && PreviewURLPolicy.allowsExtensionWindowPage(url)) else { status = "Only HTTP and HTTPS pages can open here"; onChange?(); return false }
         guard let web = webView else { return false }
         status = nil
         let token = UUID(); loadGeneration = token

@@ -101,7 +101,8 @@ struct ExtensionHostOverride {
             let isExtensionPage = url?.scheme == "webkit-extension"
             self.openLittleOrbit(url: isExtensionPage ? nil : url, profileID: profile)
             guard let id = self.littleWindows.keys.first(where: { !before.contains($0) }), let little = self.littleWindows[id], let window = little.window else { return nil }
-            if isExtensionPage, let url, !little.open(url: url) { little.close(); return nil }
+            // The runtime already checked this is the requesting extension's own page.
+            if isExtensionPage, let url, !little.open(url: url, extensionPage: true) { little.close(); return nil }
             opened.ids.insert(ObjectIdentifier(window))
             if !focused { self.view.window?.makeKeyAndOrderFront(nil) }
             return window

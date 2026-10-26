@@ -77,9 +77,10 @@ struct LittleBamDestination: Equatable {
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
 
-    @discardableResult func open(url: URL) -> Bool {
+    /// `extensionPage`: only for an extension's own page in the pop-out window Bam opened for it.
+    @discardableResult func open(url: URL, extensionPage: Bool = false) -> Bool {
         guard !didClose else { return false }
-        return content?.load(url: url) ?? false
+        return content?.load(url: url, extensionPage: extensionPage) ?? false
     }
 
     /// Moves an existing Peek web view into this window without reloading it.
