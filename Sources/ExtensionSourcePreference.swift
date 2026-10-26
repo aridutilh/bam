@@ -12,15 +12,7 @@ enum ExtensionSourcePreference {
         let version: String
     }
 
-    static func order(_ source: ExtensionCatalogSourceKind) -> Int {
-        switch source {
-        case .chromeWebStore: return 0
-        case .amo: return 1
-        case .directPackage: return 2
-        case .local: return 3
-        case .safariAppStore: return 4
-        }
-    }
+    static func order(_ source: ExtensionCatalogSourceKind) -> Int { source.preferenceOrder }
 
     static func prefers(_ a: Facts, over b: Facts) -> Bool {
         if a.canInstallInBam != b.canInstallInBam { return a.canInstallInBam }

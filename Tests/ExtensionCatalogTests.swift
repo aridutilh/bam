@@ -352,6 +352,17 @@ import Security
         try check(ExtensionCatalogSearch.ranked(relevance, for: "  BITWARDEN ").compactMap(\.upstreamID) == ["exact", "chrome", "firefox", "phrase", "unrelated"],
                   "Unified results rank normalized exact, prefix and phrase matches across stores while preserving equal-rank API order")
         try check(ExtensionCatalogSearch.ranked(relevance, for: "!!!") == relevance, "An empty normalized query preserves source order")
+        // Native acceptance: searching "Dark Reader" listed Firefox's (another publisher) first because the
+        // stores' results are combined Firefox-first. At equal relevance an installable build leads, Chrome Web
+        // Store before Firefox; relevance still wins over source.
+        var firefoxBuild = named("Dark Reader", source: .amo, id: "firefox")
+        firefoxBuild.downloadURL = URL(string: "https://addons.mozilla.org/firefox/downloads/file/1/dark_reader-1.xpi")
+        let safariApp = named("Dark Reader", source: .safariAppStore, id: "safari")   // no installed app: not installable in Bam
+        let darkReader = [safariApp, firefoxBuild, named("Dark Reader", source: .chromeWebStore, id: "chrome"),
+                          named("Night Eye", source: .chromeWebStore, id: "other"), named("Dark Reader for Safari", source: .amo, id: "prefix")]
+        try check(firefoxBuild.canInstallInBam && !safariApp.canInstallInBam, "Fixture premise: Firefox installable, Safari app not")
+        try check(ExtensionCatalogSearch.ranked(darkReader, for: "dark reader").compactMap(\.upstreamID) == ["chrome", "firefox", "safari", "prefix", "other"],
+                  "Equal-relevance listings did not lead with Chrome, then Firefox, ahead of an uninstallable Safari app, behind relevance")
         var urlPublisherRow = chromeSearchRow; urlPublisherRow[7] = "https://www.bitwarden.com/download/"
         let urlPublisher = try ChromeWebStoreSource.searchCandidates(fromHTML: chromePage([urlPublisherRow]))[0]
         try check(urlPublisher.publisher == "bitwarden.com" && ChromeWebStoreSource.publisherLabel("  Vendor Inc.  ") == "Vendor Inc.",
