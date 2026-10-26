@@ -112,6 +112,9 @@ struct SidebarExtensionItem {
     @discardableResult func focusTabList() -> Bool { page.focusInitialRow() }
     /// A row dropped on a footer Space icon moves there (profile-aware in the controller).
     var onDropOnSpace: ((UUID, Int) -> Bool)?
+    /// A dragged tab dropped on the Favorites grid becomes a Favorite (at the end).
+    var canDropOnFavorites: ((UUID) -> Bool)? { didSet { favoritesHost.canAccept = canDropOnFavorites } }
+    var onDropOnFavorites: ((UUID) -> Bool)? { didSet { favoritesHost.accept = onDropOnFavorites } }
     var onToggleFolder: ((UUID) -> Void)?
     var onRenameFolder: ((UUID) -> Void)?
     /// Creates a folder; the item is a tab to put inside it or a parent folder.
@@ -133,7 +136,7 @@ struct SidebarExtensionItem {
     private let spaceOverflow = ArkIconButton(symbol: "ellipsis", label: "Choose Space")
     private var spaceDefinitions: [BrowserSpace] = []
     private var spaces: [ArkSpaceButton] = []
-    private let favoritesHost = ArkFlippedView()
+    private let favoritesHost = ArkFavoritesDropHost()
     private var favorites: [ArkFavoriteButton] = []
     private var favoriteItems: [SidebarTabItem] = []
     private let clip = ArkFlippedView()
@@ -503,6 +506,9 @@ struct SidebarExtensionItem {
             button.frame = NSRect(x: leading + CGFloat(index % columns) * (tileWidth + gap),
                                   y: CGFloat(index / columns) * (tileHeight + gap), width: tileWidth, height: tileHeight)
         }
+        let next = favorites.count
+        favoritesHost.nextSlot = next >= 12 ? nil : NSRect(x: leading + CGFloat(next % columns) * (tileWidth + gap),
+                                                           y: CGFloat(next / columns) * (tileHeight + gap), width: tileWidth, height: tileHeight)
         let pageTop: CGFloat = gridTop + favoriteHeight + (favorites.isEmpty ? 0 : 10)
         clip.frame = NSRect(x: 0, y: pageTop, width: w, height: max(0, bounds.height - pageTop - 45))
         setPagingOffset(offset)
@@ -533,6 +539,8 @@ struct SidebarExtensionItem {
     var manageSpaces: (() -> Void)?
     /// The context menu for this page's Space (by Space ID).
     var spaceMenu: ((Int) -> NSMenu?)?
+    /// One gentle tap per change of accepted drop position during a drag.
+    private var dropFeedback = ArkDropFeedbackGate()
     var move: ((UUID, Int) -> Void)?
     var favorite: ((UUID) -> Void)?
     var editSaved: ((UUID) -> Void)?
@@ -576,7 +584,8 @@ struct SidebarExtensionItem {
         table.usesAutomaticRowHeights = false; table.selectionHighlightStyle = .none
         table.focusRingType = .none; table.allowsEmptySelection = true
         table.registerForDraggedTypes([.bamSidebarRow])
-        table.draggingDestinationFeedbackStyle = .regular
+        // Rows part to show where a dragged row lands (Reduce Motion: the plain insertion line).
+        table.draggingDestinationFeedbackStyle = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? .regular : .gap
         table.allowsMultipleSelection = false; table.allowsColumnSelection = false
         table.allowsColumnReordering = false; table.allowsColumnResizing = false
         table.dataSource = self; table.delegate = self
@@ -874,8 +883,13 @@ struct SidebarExtensionItem {
         let proposal = dropTarget(row: row, operation: operation)
         // Only show an indicator where the model would accept the row: no cycles,
         // no over-deep nesting, no folders in Today.
-        guard canDrop?(id, proposal.target, space) == true else { return [] }
+        guard canDrop?(id, proposal.target, space) == true else {
+            _ = dropFeedback.shouldTap(sequence: info.draggingSequenceNumber, target: nil); return []
+        }
         tableView.setDropRow(proposal.row, dropOperation: proposal.operation)
+        if dropFeedback.shouldTap(sequence: info.draggingSequenceNumber, target: "\(proposal.row):\(proposal.operation.rawValue)") {
+            ArkDropFeedback.perform()
+        }
         return .move
     }
     func tableView(_ tableView: NSTableView, acceptDrop info: NSDraggingInfo, row: Int, dropOperation: NSTableView.DropOperation) -> Bool {
@@ -1250,6 +1264,82 @@ private func arkLabel(_ text: String, size: CGFloat, weight: NSFont.Weight) -> N
 
 @MainActor
 private class ArkFlippedView: NSView { override var isFlipped: Bool { true } }
+
+/// Decides when a drag earns a haptic tap: only when the accepted drop target changes within one drag (a new drag
+/// starts fresh), never on every mouse move over the same target, and never for a refused position.
+struct ArkDropFeedbackGate {
+    private var sequence: Int?
+    private var target: String?
+    /// `target` nil means the current position is refused. Returns whether to tap now.
+    mutating func shouldTap(sequence: Int, target: String?) -> Bool {
+        if sequence != self.sequence { self.sequence = sequence; self.target = nil }
+        guard let target else { self.target = nil; return false }
+        guard target != self.target else { return false }
+        self.target = target
+        return true
+    }
+}
+@MainActor enum ArkDropFeedback {
+    /// The tap itself; tests replace it to count taps.
+    static var perform: () -> Void = { NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now) }
+}
+
+/// The Favorites grid as a drop target: a dragged tab becomes a Favorite at the next slot (the model appends), shown
+/// by a placeholder tile there, or a ring around the grid when that slot would start a new row.
+@MainActor private final class ArkFavoritesDropHost: ArkFlippedView {
+    var canAccept: ((UUID) -> Bool)?
+    var accept: ((UUID) -> Bool)?
+    /// The next Favorite's slot in this view's coordinates; nil when the grid is full.
+    var nextSlot: NSRect?
+    private let placeholder = CAShapeLayer()
+    private var gate = ArkDropFeedbackGate()
+    private var dropActive = false { didSet { if oldValue != dropActive { showDropPreview() } } }
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        registerForDraggedTypes([.bamSidebarRow])
+        placeholder.fillColor = nil; placeholder.lineWidth = 1.5; placeholder.lineDashPattern = [4, 3]; placeholder.opacity = 0
+        layer?.addSublayer(placeholder)
+    }
+    required init?(coder: NSCoder) { fatalError() }
+    private func draggedID(_ info: NSDraggingInfo) -> UUID? {
+        info.draggingPasteboard.string(forType: .bamSidebarRow).flatMap(UUID.init(uuidString:))
+    }
+    private func evaluate(_ info: NSDraggingInfo) -> NSDragOperation {
+        let accepted = draggedID(info).map { canAccept?($0) == true } ?? false
+        dropActive = accepted
+        if gate.shouldTap(sequence: info.draggingSequenceNumber, target: accepted ? "favorites" : nil) { ArkDropFeedback.perform() }
+        return accepted ? .move : []
+    }
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation { evaluate(sender) }
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation { evaluate(sender) }
+    override func draggingExited(_ sender: NSDraggingInfo?) {
+        dropActive = false
+        if let sender { _ = gate.shouldTap(sequence: sender.draggingSequenceNumber, target: nil) }
+    }
+    override func draggingEnded(_ sender: NSDraggingInfo) { dropActive = false }
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        defer { dropActive = false }
+        guard let id = draggedID(sender), canAccept?(id) == true else { return false }
+        return accept?(id) ?? false
+    }
+    private func showDropPreview() {
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            placeholder.strokeColor = ArkPalette.ink.withAlphaComponent(0.45).cgColor
+        }
+        let shape: NSRect
+        if let slot = nextSlot, bounds.contains(slot) { shape = slot.insetBy(dx: 1, dy: 1) } else { shape = bounds.insetBy(dx: 1, dy: 1) }
+        placeholder.frame = bounds
+        placeholder.path = CGPath(roundedRect: shape, cornerWidth: 9, cornerHeight: 9, transform: nil)
+        let target: Float = dropActive ? 1 : 0
+        if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            CATransaction.begin(); CATransaction.setDisableActions(true); placeholder.opacity = target; CATransaction.commit()
+        } else {
+            CATransaction.begin(); CATransaction.setAnimationDuration(0.14); placeholder.opacity = target; CATransaction.commit()
+        }
+        setAccessibilityHelp(dropActive ? "Drop to add to Favorites" : nil)
+    }
+}
 
 /// Hover from where the pointer actually is. Enter/exit events alone go stale: a view taken out of the window
 /// (a cached Space page during a switch), a reused table cell, a scroll under a still pointer, or the window

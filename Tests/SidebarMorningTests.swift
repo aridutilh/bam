@@ -37,6 +37,15 @@ import AppKit
         require(ArkMetrics.favoriteIconRect(in: tileBounds, imageSize: NSSize(width: 64, height: 32)).size == NSSize(width: 16, height: 8),
                 "A non-square icon keeps its aspect")
 
+        // MARK: Drag feedback: one tap per change of accepted target in a drag, none for moves over the same target.
+        var gate = ArkDropFeedbackGate()
+        require(gate.shouldTap(sequence: 1, target: "3:1"), "Entering an accepted target taps")
+        require(!gate.shouldTap(sequence: 1, target: "3:1") && !gate.shouldTap(sequence: 1, target: "3:1"), "Moving over the same target doesn't tap again")
+        require(gate.shouldTap(sequence: 1, target: "4:1"), "A new target taps once")
+        require(!gate.shouldTap(sequence: 1, target: nil), "A refused position never taps")
+        require(gate.shouldTap(sequence: 1, target: "4:1"), "Coming back to an accepted target after a refused one taps")
+        require(gate.shouldTap(sequence: 2, target: "4:1"), "A new drag starts fresh")
+
         // MARK: Space sheet fields: editable text sits on the field's vertical center, inset from the edge.
         let fieldCell = ArkCenteredFieldCell.editable(); fieldCell.font = .systemFont(ofSize: 13)
         let fieldBounds = NSRect(x: 0, y: 0, width: 200, height: 26)

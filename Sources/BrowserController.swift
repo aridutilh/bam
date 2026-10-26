@@ -402,6 +402,8 @@ import QuartzCore
         sidebar.onSpaceChange = { [weak self] space in self?.changeSpace(space) }
         sidebar.onManageSpaces = { [weak self] in self?.manageSpaces(nil) }
         sidebar.spaceContextMenu = { [weak self] in self?.spaceContextMenu(for: $0) }
+        sidebar.canDropOnFavorites = { [weak self] in self?.canMakeFavorite(byDropping: $0) ?? false }
+        sidebar.onDropOnFavorites = { [weak self] in self?.makeFavorite(byDropping: $0) ?? false }
         sidebar.onMoveTab = { [weak self] id, space in self?.moveTab(id, toSpace: space) }
         // Footer Downloads button and its menu: the existing windows (View > Downloads ⌘J, History ⌘Y, Recently Closed).
         // Picture in Picture left the footer; it stays in View > Picture in Picture (⌥⌘P) and the command palette.
@@ -1170,6 +1172,17 @@ import QuartzCore
     @objc func useDarkAppearance(_ sender: Any?) { BrowserAppearance.apply(.dark) }
     @objc func useLightAppearance(_ sender: Any?) { BrowserAppearance.apply(.light) }
     @objc func useSystemAppearance(_ sender: Any?) { BrowserAppearance.apply(.system) }
+    /// A tab dragged onto the Favorites grid: an ordinary or kept tab (not a folder or Split, not already a Favorite)
+    /// while there's room. It becomes a Favorite through the same path as Add to Favorites (appended at the end).
+    func canMakeFavorite(byDropping id: UUID) -> Bool {
+        guard let tab = session.tabs.first(where: { $0.id == id }) else { return false }
+        return !tab.isFavorite && session.folder(id) == nil && session.favoriteTabs.count < 12
+    }
+    func makeFavorite(byDropping id: UUID) -> Bool {
+        guard canMakeFavorite(byDropping: id) else { return false }
+        favoriteTab(id)
+        return session.tabs.first(where: { $0.id == id })?.isFavorite == true
+    }
     /// The Space-creation panel (it refuses, with a beep, past the Space cap).
     @objc func newSpace(_ sender: Any?) { openSpaceCreation() }
     @objc func newTab(_ sender: Any?) { cancelPaging(); openAddress(newTab: true, empty: true) }
