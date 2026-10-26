@@ -1952,11 +1952,16 @@ struct BrowserExtensionPermissionReview {
     private func clearPopupPresentation() { activePopup = nil; activePopupPopover = nil; activePopupTabID = nil }
     var nativeSessions: [UUID: BrowserExtensionNativeSession] = [:]
     func shutdown() { boundsGenerations.removeAll(); disconnectAllNative(); compatibility.shutdown(); ExtensionNotificationCenter.shared.unregister(compatibility) }
-    /// The extension's own views outside Bam's tabs: its popup and its offscreen document.
+    /// The extension's own views outside Bam's tabs that already exist: the popup Bam is presenting (found in its
+    /// popover's view hierarchy) and its offscreen document. Never `WKWebExtension.Action.popupWebView`: that getter
+    /// preloads the popup page on access, so reading it during a restart would create and load a page of the old
+    /// context right before it unloads.
     func extensionPageViews(of context: WKWebExtensionContext) -> [WKWebView] {
+        func webViews(in view: NSView) -> [WKWebView] { (view as? WKWebView).map { [$0] } ?? view.subviews.flatMap(webViews) }
         var views: [WKWebView] = []
-        if let action = activePopup, action.webExtensionContext === context, let popup = action.popupWebView { views.append(popup) }
-        if let popup = context.action(for: nil)?.popupWebView, !views.contains(where: { $0 === popup }) { views.append(popup) }
+        if let action = activePopup, action.webExtensionContext === context, let root = activePopupPopover?.contentViewController?.view {
+            views += webViews(in: root)
+        }
         if let document = compatibility.offscreen?.currentDocument(for: context.uniqueIdentifier) { views.append(document) }
         return views
     }
