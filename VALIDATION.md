@@ -1,3 +1,26 @@
+## Local 0.23.0 — Site Access, explicit consent and tab metadata (integration `3770465`; native results pending)
+
+Evidence is separated by kind. Nothing here claims full Chrome compatibility or readiness to ship.
+
+**Source and component (in `build.sh`; counts from the reviewed candidates, root confirms on the integrated build):** site-access model, engine (44), panel, style and Manage Extensions site access; explicit consent (21); native host withdrawal (37); tab metadata model (87) and facade (44); extension compatibility (77). They cover saved, revision-bound Site Access changes, stale-answer refusal including same-context change-back, implicit URL requests answered without review or record change, WebKit-side removal and expiry restarting once with exact expiry dates, failed-save and failed-restart wording that never claims a save, and the metadata facade's deadlines, ordering and error preservation against a fake redacting engine.
+
+**Native, observed in canonical Bam Preview:**
+- Content-script withdrawal across the broad and specific grant variants (`b1ed61f`, `297f6eb`).
+- Implicit reads with zero reviews and scripting refused on a withheld site (`6456eb0`).
+- Extension-page network reads of a withdrawn site retained by the running process; refused only once every old extension page was released and a fresh context ran (`297f6eb`).
+- Tab metadata fixture: 58 checks passed (`d15a5be`).
+
+**Vendor:** real Session Buddy 4.1.2 showed tab titles, saved and restored (including indexed paste) without any site grant (`ba6b007`).
+
+**Pending gates (each must pass, or remain listed as a limitation):**
+1. Bam restart with an extension page open in a Bam tab: old renderer released, same tab ID and address, fetch refused, storage preserved in a persistent store, other extensions untouched, load-failure and quarantine recovery through Enable.
+2. A real JavaScript `permissions.remove` and a lapsed time-limited grant: restart, then fetch refused.
+3. `permissions.request` routed to Bam's review on the installed engine (approve, decline, stale).
+4. activeTab still works with the site withheld.
+5. Post-integration vendor recheck: Session Buddy and one site-access-heavy extension.
+
+**Limits regardless:** WebKit doesn't enforce Chrome's user-gesture rule for `permissions.request`; Safari-imported extensions no longer prompt per site; a restart in a private window resets the extension's in-memory storage; tabs in several Little Bam windows stay blank for `tabs`-only extensions; `favIconUrl`/`pendingUrl` aren't provided; favicon routing (`_favicon/`) remains unsupported.
+
 ## Local 0.23.0 build 47 — Chrome identity and kept-tab restoration; broader compatibility incomplete
 
 The integrated `e4ae8eb` full build and all eleven canonical Bam Preview native suites passed: WebKit, PiP, Interactions **173**, Auto PiP **85**, Features **371**, Resources **37**, Profiles **98**, Extensions **435**, Favicons **85**, Profile Activation **45**, and Arc Import **155**. Identity component checks include verified-ID **15**, enumeration **91**, startup **16**, management disclosure **11**, and compatibility **77**. This covers the verified-ID product implementation and notification reinstall correction; later diagnostic-only cleanup changes compiled separately.
