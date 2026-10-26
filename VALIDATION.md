@@ -1,4 +1,4 @@
-## Local 0.23.0 — Site Access, explicit consent and tab metadata (integration `3770465`; native results pending)
+## Local 0.23.0 — Site Access, explicit consent and tab metadata (integration `3770465`; restart path FAILED natively, held)
 
 Evidence is separated by kind. Nothing here claims full Chrome compatibility or readiness to ship.
 
@@ -9,17 +9,18 @@ Evidence is separated by kind. Nothing here claims full Chrome compatibility or 
 - Implicit reads with zero reviews and scripting refused on a withheld site (`6456eb0`).
 - Extension-page network reads of a withdrawn site retained by the running process; refused only once every old extension page was released and a fresh context ran (`297f6eb`).
 - Tab metadata fixture: 58 checks passed (`d15a5be`).
+- Integrated `3770465` (renderer and site-access fixtures): **failed.** At the first panel withhold the old extension renderer was still alive at the handoff and the reopened extension tab read the withdrawn site (200); later handoffs released it first and Revoke's fetch was refused. All four marker forms passed (6 documents, 0 findings); storage survived the restart in an owned persistent store (subject starts 1→2, other extension unchanged); store cleanup verified; a quarantined extension's tab and window mutations were refused. Source analysis: a fresh context that loads while any old extension page of the install is still alive is related to the old web content process, which keeps the withdrawn host (work/extension-restart-process-reuse-analysis.md). The real `permissions.remove` and expiry cases were not reached.
 
 **Vendor:** real Session Buddy 4.1.2 showed tab titles, saved and restored (including indexed paste) without any site grant (`ba6b007`).
 
 **Pending gates (each must pass, or remain listed as a limitation):**
-1. Bam restart with an extension page open in a Bam tab: old renderer released, same tab ID and address, fetch refused, storage preserved in a persistent store, other extensions untouched, load-failure and quarantine recovery through Enable.
+1. Bam restart with an extension page open in a Bam tab: every old extension page released **before** the fresh context loads, same tab ID and address, fetch refused, storage preserved in a persistent store (non-persistent stores reset), other extensions untouched, load-failure recovery through Enable, quarantine recovery after quitting Bam.
 2. A real JavaScript `permissions.remove` and a lapsed time-limited grant: restart, then fetch refused.
 3. `permissions.request` routed to Bam's review on the installed engine (approve, decline, stale).
 4. activeTab still works with the site withheld.
 5. Post-integration vendor recheck: Session Buddy and one site-access-heavy extension.
 
-**Limits regardless:** WebKit doesn't enforce Chrome's user-gesture rule for `permissions.request`; Safari-imported extensions no longer prompt per site; a restart in a private window resets the extension's in-memory storage; tabs in several Little Bam windows stay blank for `tabs`-only extensions; `favIconUrl`/`pendingUrl` aren't provided; favicon routing (`_favicon/`) remains unsupported.
+**Limits regardless:** the expiry check runs about a second after a grant expires, not at the exact deadline; WebKit doesn't enforce Chrome's user-gesture rule for `permissions.request`; Safari-imported extensions no longer prompt per site; a restart in a private window resets the extension's in-memory storage; tabs in several Little Bam windows stay blank for `tabs`-only extensions; `favIconUrl`/`pendingUrl` aren't provided; favicon routing (`_favicon/`) remains unsupported.
 
 ## Local 0.23.0 build 47 — Chrome identity and kept-tab restoration; broader compatibility incomplete
 
