@@ -23,7 +23,7 @@ import AppKit
         for count in 1...12 {
             for width in stride(from: CGFloat(164), through: 420, by: 7.25) {
                 let columns = ArkMetrics.favoriteColumns(count: count, width: width)
-                let tile = (width - 16 - CGFloat(columns - 1) * ArkMetrics.favoriteGap) / CGFloat(columns)
+                let tile = (ArkMetrics.sidebarContentWidth(width) - CGFloat(columns - 1) * ArkMetrics.favoriteGap) / CGFloat(columns)
                 let rows = (count + columns - 1) / columns
                 require(columns >= 1 && tile >= ArkMetrics.favoriteMinimumWidth - 0.001, "Tiles never go below the minimum (\(count) at \(width))")
                 require(rows * columns - count < columns, "No empty row (\(count) at \(width))")
@@ -38,7 +38,8 @@ import AppKit
                 "A non-square icon keeps its aspect")
 
         // MARK: In a real sidebar: 8 Favorites lay out 4×2 and a 32px icon is copied 1:1 at 2x.
-        let sidebar = SidebarView(frame: NSRect(x: 0, y: 0, width: 229, height: 720))
+        // 230pt gives a fractional tile (49.25pt) with the sidebar's content edges, so alignment is exercised.
+        let sidebar = SidebarView(frame: NSRect(x: 0, y: 0, width: 230, height: 720))
         let window = NSWindow(contentRect: sidebar.frame, styleMask: [.borderless], backing: .buffered, defer: false)
         window.contentView = sidebar
         let favoriteIDs = (0..<8).map { _ in UUID() }
@@ -57,9 +58,20 @@ import AppKit
         sidebar.layoutSubtreeIfNeeded()
         let tiles = favoriteIDs.compactMap { id in descendants(sidebar).first { $0.identifier?.rawValue == "favorite-\(id.uuidString)" } }
         require(tiles.count == 8 && Set(tiles.map { $0.frame.minY }).count == 2 && Set(tiles.map { $0.frame.minX }).count == 4,
-                "Eight Favorites at 229pt show as four columns, two rows")
+                "Eight Favorites at 230pt show as four columns, two rows")
         let tile = tiles[1]
         require(tile.frame.width.truncatingRemainder(dividingBy: 0.5) != 0, "The fixture tile has a fractional width (alignment matters)")
+        // Arc's edges: content starts 8pt in and runs to within 1pt of the sidebar's trailing edge (the page card's gap is
+        // the only margin there): no doubled trailing inset, no reserved scroller gutter.
+        let tileEdges = tiles.map { $0.convert($0.bounds, to: sidebar) }
+        require(abs((tileEdges.map(\.maxX).max() ?? 0) - (sidebar.bounds.width - 1)) < 0.01 && abs((tileEdges.map(\.minX).min() ?? 0) - 8) < 0.01,
+                "Favorites span the sidebar's content edges: \(tileEdges.map(\.minX).min() ?? 0)–\(tileEdges.map(\.maxX).max() ?? 0) of \(sidebar.bounds.width)")
+        if let list = descendants(sidebar).compactMap({ $0 as? NSTableView }).first(where: { $0.identifier?.rawValue == "sidebar-tab-list" }),
+           let listScroll = list.enclosingScrollView {
+            let edge = listScroll.convert(listScroll.bounds, to: sidebar)
+            require(abs(edge.maxX - (sidebar.bounds.width - 1)) < 0.01 && listScroll.scrollerStyle == .overlay,
+                    "The tab list reaches the trailing content edge with an overlay scroller: \(edge.maxX) of \(sidebar.bounds.width)")
+        } else { require(false, "The sidebar has a tab list") }
         @MainActor func render(_ view: NSView) -> NSBitmapImageRep {
             let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(ceil(view.bounds.width * 2)), pixelsHigh: Int(ceil(view.bounds.height * 2)),
                                        bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB,

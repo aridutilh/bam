@@ -470,11 +470,12 @@ struct SidebarExtensionItem {
         // controls, Favorites as a balanced grid of 46-point tiles, then the
         // Space's rows. Extension actions take a row only when installed.
         let fieldTop = ArkMetrics.addressTop, fieldHeight = ArkMetrics.addressHeight
-        search.frame = NSRect(x: 8, y: fieldTop, width: max(0, w - 16), height: fieldHeight)
+        let leading = ArkMetrics.sidebarLeading, contentWidth = ArkMetrics.sidebarContentWidth(w)
+        search.frame = NSRect(x: leading, y: fieldTop, width: contentWidth, height: fieldHeight)
         let hasActions = !extensionButtons.isEmpty
         search.trailingInset = hasActions ? 10 : 34
         extensionLibrary.isHidden = hasActions
-        extensionLibrary.frame = NSRect(x: w - 8 - 32, y: fieldTop + (fieldHeight - 28) / 2, width: 28, height: 28)
+        extensionLibrary.frame = NSRect(x: search.frame.maxX - 32, y: fieldTop + (fieldHeight - 28) / 2, width: 28, height: 28)
         extensionMenu.isHidden = !hasActions
         let actionTop = fieldTop + fieldHeight + 6
         extensionMenu.frame = NSRect(x: 8, y: actionTop, width: 30, height: 30)
@@ -493,9 +494,9 @@ struct SidebarExtensionItem {
         let favoriteHeight = favoriteRows == 0 ? CGFloat.zero : CGFloat(favoriteRows) * tileHeight + CGFloat(favoriteRows - 1) * gap
         favoritesHost.isHidden = favorites.isEmpty
         favoritesHost.frame = NSRect(x: 0, y: gridTop, width: w, height: favoriteHeight)
-        let tileWidth = max(0, (w - 16 - CGFloat(columns - 1) * gap) / CGFloat(columns))
+        let tileWidth = max(0, (contentWidth - CGFloat(columns - 1) * gap) / CGFloat(columns))
         for (index, button) in favorites.enumerated() {
-            button.frame = NSRect(x: 8 + CGFloat(index % columns) * (tileWidth + gap),
+            button.frame = NSRect(x: leading + CGFloat(index % columns) * (tileWidth + gap),
                                   y: CGFloat(index / columns) * (tileHeight + gap), width: tileWidth, height: tileHeight)
         }
         let pageTop: CGFloat = gridTop + favoriteHeight + (favorites.isEmpty ? 0 : 10)
@@ -875,8 +876,9 @@ struct SidebarExtensionItem {
 
     override func layout() {
         super.layout(); let w = bounds.width
-        heading.frame = NSRect(x: 12, y: 0, width: max(0, w-24), height: 32)
-        scroll.frame = NSRect(x: 8, y: 39, width: max(0,w-16), height: max(0,bounds.height-39))
+        heading.frame = NSRect(x: 12, y: 0, width: max(0, w - 12 - ArkMetrics.sidebarTrailing - 4), height: 32)
+        // Rows span to the trailing edge; the overlay scroller floats over their last points only while scrolling.
+        scroll.frame = NSRect(x: ArkMetrics.sidebarLeading, y: 39, width: ArkMetrics.sidebarContentWidth(w), height: max(0, bounds.height - 39))
         let width = scroll.contentSize.width
         if table.frame.width != width { table.setFrameSize(NSSize(width: width, height: table.frame.height)) }
         if column.width != width { column.width = width }
@@ -1014,6 +1016,12 @@ enum ArkPalette {
     /// At the 164pt minimum sidebar a row has 76pt for its title, so the floor
     /// stays below that; deep rows still indent a little to show hierarchy.
     static let minimumTitleWidth: CGFloat = 64
+    /// The sidebar's content edges. As in Arc, the content runs to within a point of the sidebar's trailing edge: the
+    /// page card's own gap is the only margin on that side (no doubled inset, no reserved scroller gutter; the list's
+    /// scroller is an overlay at that edge).
+    static let sidebarLeading: CGFloat = 8
+    static let sidebarTrailing: CGFloat = 1
+    static func sidebarContentWidth(_ width: CGFloat) -> CGFloat { max(0, width - sidebarLeading - sidebarTrailing) }
     static let addressTop: CGFloat = 44
     static let addressHeight: CGFloat = 34
     static let favoriteHeight: CGFloat = 46

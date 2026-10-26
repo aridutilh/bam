@@ -497,7 +497,9 @@ import QuartzCore
         for child in webHost.subviews where !(child is WKWebView) { child.frame = webHost.bounds }
         progress.isHidden = !(activeWebView?.isLoading ?? false)
         progress.frame = NSRect(x: 0, y: 0, width: card.bounds.width * CGFloat(activeWebView?.estimatedProgress ?? 0), height: 2)
-        handle.frame = NSRect(x: max(0, width - 5), y: 44, width: 10, height: max(0, h - 60))
+        // The resize handle lives in the gap between the sidebar and the card, so it never covers the sidebar's
+        // content edge (Favorites, rows, the list's overlay scroller) or the page.
+        handle.frame = NSRect(x: max(0, width - ArkMetrics.sidebarTrailing), y: 44, width: max(6, inset + ArkMetrics.sidebarTrailing), height: max(0, h - 60))
         handle.currentWidth = targetWidth; handle.isHidden = !session.sidebarVisible || width < 100
         if addressOverlay != nil { layoutPalette(width: w, height: h) }
         layoutSpaceCreation()
