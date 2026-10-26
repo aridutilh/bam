@@ -42,16 +42,36 @@ import Foundation
                   "A missing, popup or other-profile target was not refused")
 
         // windows.create: only a single-page popup, normal or minimized, without requested bounds.
-        try check(T.windowCreation(type: .popup, state: .normal, urlCount: 1, hasTabs: false, requestsBounds: false) == nil &&
-                  T.windowCreation(type: .popup, state: .minimized, urlCount: 0, hasTabs: false, requestsBounds: false) == nil, "A supported popup request was refused")
-        try check(T.windowCreation(type: .normal, state: .normal, urlCount: 1, hasTabs: false, requestsBounds: false) == T.normalWindowRefusal &&
-                  T.windowCreation(type: .other, state: .normal, urlCount: 1, hasTabs: false, requestsBounds: false) == T.normalWindowRefusal, "A non-popup window was not refused")
-        try check(T.windowCreation(type: .popup, state: .normal, urlCount: 1, hasTabs: false, requestsBounds: true) == T.boundsRefusal, "Requested bounds were not refused")
-        try check(T.windowCreation(type: .popup, state: .maximized, urlCount: 1, hasTabs: false, requestsBounds: false) == T.stateRefusal &&
-                  T.windowCreation(type: .popup, state: .fullscreen, urlCount: 1, hasTabs: false, requestsBounds: false) == T.stateRefusal, "Maximized or full-screen popups were not refused")
-        try check(T.windowCreation(type: .popup, state: .normal, urlCount: 2, hasTabs: false, requestsBounds: false) == T.multiplePagesRefusal &&
-                  T.windowCreation(type: .popup, state: .normal, urlCount: 0, hasTabs: true, requestsBounds: false) == T.multiplePagesRefusal, "A multi-page popup was not refused")
+        try check(T.windowCreation(type: .popup, state: .normal, urlCount: 1, hasTabs: false) == nil &&
+                  T.windowCreation(type: .popup, state: .minimized, urlCount: 0, hasTabs: false) == nil, "A supported popup request was refused")
+        try check(T.windowCreation(type: .normal, state: .normal, urlCount: 1, hasTabs: false) == T.normalWindowRefusal &&
+                  T.windowCreation(type: .other, state: .normal, urlCount: 1, hasTabs: false) == T.normalWindowRefusal, "A non-popup window was not refused")
+        try check(T.windowCreation(type: .popup, state: .normal, urlCount: 1, hasTabs: false) == nil, "A popup with bounds is no longer refused; popupFrame places it")
+        try check(T.windowCreation(type: .popup, state: .maximized, urlCount: 1, hasTabs: false) == T.stateRefusal &&
+                  T.windowCreation(type: .popup, state: .fullscreen, urlCount: 1, hasTabs: false) == T.stateRefusal, "Maximized or full-screen popups were not refused")
+        try check(T.windowCreation(type: .popup, state: .normal, urlCount: 2, hasTabs: false) == T.multiplePagesRefusal &&
+                  T.windowCreation(type: .popup, state: .normal, urlCount: 0, hasTabs: true) == T.multiplePagesRefusal, "A multi-page popup was not refused")
         let nan = CGFloat.nan
+        // popupFrame: WebKit's macOS frame (bottom-left origin), NaN where not requested.
+        let screen = CGRect(x: 0, y: 0, width: 1440, height: 875), side = CGRect(x: 1440, y: 0, width: 1920, height: 1055)
+        let current = CGRect(x: 600, y: 400, width: 360, height: 240), minimum = CGSize(width: 320, height: 180)
+        try check(T.popupFrame(requested: CGRect(x: 220, y: 375, width: 420, height: 300), current: current, minimum: minimum, screens: [screen])
+                  == CGRect(x: 220, y: 375, width: 420, height: 300), "A popup that fits did not get exactly its requested frame")
+        try check(T.popupFrame(requested: CGRect(x: nan, y: nan, width: 500, height: nan), current: current, minimum: minimum, screens: [screen])
+                  == CGRect(x: 600, y: 400, width: 500, height: 240), "A width-only request did not keep the other values")
+        try check(T.popupFrame(requested: CGRect(x: nan, y: nan, width: nan, height: 300), current: current, minimum: minimum, screens: [screen])
+                  == CGRect(x: 600, y: 340, width: 360, height: 300), "A height-only request did not keep the window's top edge")
+        try check(T.popupFrame(requested: CGRect(x: 10, y: 10, width: 100, height: 50), current: current, minimum: minimum, screens: [screen])
+                  == CGRect(x: 10, y: 10, width: 320, height: 180), "A request below Little Bam's minimum size was not raised to it")
+        try check(T.popupFrame(requested: CGRect(x: 1300, y: 800, width: 400, height: 300), current: current, minimum: minimum, screens: [screen])
+                  == CGRect(x: 1040, y: 575, width: 400, height: 300), "A popup reaching past the screen edge was not kept on screen")
+        try check(T.popupFrame(requested: CGRect(x: 0, y: 0, width: 5000, height: 4000), current: current, minimum: minimum, screens: [screen])
+                  == screen, "An oversized popup was not limited to the screen")
+        try check(T.popupFrame(requested: CGRect(x: 2000, y: 300, width: 600, height: 400), current: current, minimum: minimum, screens: [screen, side])
+                  == CGRect(x: 2000, y: 300, width: 600, height: 400), "A popup requested on a second screen was moved off it")
+        try check(T.popupFrame(requested: .null, current: current, minimum: minimum, screens: [screen]) == current
+                  && T.popupFrame(requested: CGRect(x: nan, y: nan, width: -5, height: 0), current: current, minimum: minimum, screens: [screen]) == current,
+                  "A null or non-positive request changed the window")
         try check(!T.requestsBounds(CGRect(x: nan, y: nan, width: nan, height: nan)) && !T.requestsBounds(.null) &&
                   T.requestsBounds(CGRect(x: nan, y: nan, width: 420, height: nan)) && T.requestsBounds(CGRect(x: 10, y: nan, width: nan, height: nan)),
                   "Requested bounds were misdetected")

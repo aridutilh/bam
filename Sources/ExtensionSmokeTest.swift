@@ -304,7 +304,16 @@ import WebKit
             const attempt = async (work) => { try { await work(); return 'ok'; } catch (error) { return String(error && error.message || error); } };
             out.normal = await attempt(() => browser.windows.create({url: page}));
             out.maximized = await attempt(() => browser.windows.create({type: 'popup', url: page, state: 'maximized'}));
-            out.bounds = await attempt(() => browser.windows.create({type: 'popup', url: page, left: 140, top: 160, width: 420, height: 300}));
+            // A bounded popup opens where it asked; windows.update moves and resizes it (keeping its top);
+            // Bam's browser window can't be resized by an extension.
+            out.bounds = await attempt(async () => {
+              const sized = await browser.windows.create({type: 'popup', url: page, left: 220, top: 200, width: 420, height: 300});
+              out.sized = {left: sized.left, top: sized.top, width: sized.width, height: sized.height, type: sized.type};
+              const moved = await browser.windows.update(sized.id, {left: 260, width: 460});
+              out.moved = {left: moved.left, top: moved.top, width: moved.width, height: moved.height};
+              const browserWindow = (await browser.windows.getAll({windowTypes: ['normal']}))[0];
+              out.browserResize = await attempt(() => browser.windows.update(browserWindow.id, {width: 500}));
+            });
             const created = await browser.windows.create({type: 'popup', url: page});
             out.popupType = (await browser.windows.get(created.id)).type;
             const normal = await browser.windows.getAll({windowTypes: ['normal'], populate: true});
@@ -319,9 +328,17 @@ import WebKit
             return out;
             """, arguments: [:], in: nil, contentWorld: .page) as? [String: Any]
         try check((targeting?["normal"] as? String)?.contains(ExtensionWindowTargeting.normalWindowRefusal) == true &&
-                  (targeting?["maximized"] as? String)?.contains(ExtensionWindowTargeting.stateRefusal) == true &&
-                  (targeting?["bounds"] as? String)?.contains(ExtensionWindowTargeting.boundsRefusal) == true && createWindowCalls == 1,
-                  "A normal, maximized or bounded windows.create was not refused before a window was created: \(targeting ?? [:]) createWindow=\(createWindowCalls)")
+                  (targeting?["maximized"] as? String)?.contains(ExtensionWindowTargeting.stateRefusal) == true && createWindowCalls == 2,
+                  "A normal or maximized windows.create was not refused before a window was created: \(targeting ?? [:]) createWindow=\(createWindowCalls)")
+        func near(_ value: Any?, _ expected: Double) -> Bool { (value as? NSNumber).map { abs($0.doubleValue - expected) <= 1 } ?? false }
+        let sized = targeting?["sized"] as? [String: Any], moved = targeting?["moved"] as? [String: Any]
+        try check(targeting?["bounds"] as? String == "ok" && sized?["type"] as? String == "popup" &&
+                  near(sized?["left"], 220) && near(sized?["top"], 200) && near(sized?["width"], 420) && near(sized?["height"], 300),
+                  "A bounded popup did not open at its requested left/top/width/height: \(targeting ?? [:])")
+        try check(near(moved?["left"], 260) && near(moved?["top"], 200) && near(moved?["width"], 460) && near(moved?["height"], 300),
+                  "windows.update did not move and resize the popup while keeping its top: \(targeting ?? [:])")
+        try check((targeting?["browserResize"] as? String)?.contains(ExtensionWindowTargeting.browserWindowFrameRefusal) == true,
+                  "An extension resized Bam's browser window: \(targeting ?? [:])")
         try check(targeting?["popupType"] as? String == "popup" && targeting?["popupListedAsNormal"] as? Bool == false,
                   "A single-page window was not reported as a popup: \(targeting ?? [:])")
         let landing = (targeting?["mainTabs"] as? Int ?? 0) - 1

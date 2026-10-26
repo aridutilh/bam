@@ -23,7 +23,7 @@ enum ExtensionWindowTargeting {
     /// Only for hosts that cannot place a tab before another (fixture hosts); Bam's browser can.
     static let indexRefusal = "Bam can only add a tab at the end of a window's tabs."
     static let noWindowRefusal = "There is no window to open this tab in."
-    static let boundsRefusal = "Bam cannot place extension popups at requested bounds yet; omit left, top, width and height."
+    static let browserWindowFrameRefusal = "Bam doesn't let extensions move or resize its browser window; popup windows can be moved and resized."
     /// A Peek is shown after the window's tabs; a new tab lands before it, at `landing`.
     static func peekRefusal(landing: Int) -> String {
         "This window shows a Peek after its tabs, so a new tab is added before it, at index \(landing). Pass that index or close the Peek."
@@ -53,11 +53,10 @@ enum ExtensionWindowTargeting {
         "Bam could not place the new tab at index \(index), so it was not opened."
     }
 
-    /// `windows.create`: nil when Bam can open it as a Little Bam popup. Requested bounds are refused until a real
-    /// Little Bam round trip is proven (its minimum content size and placement may differ from the request).
-    static func windowCreation(type: RequestedType, state: RequestedState, urlCount: Int, hasTabs: Bool, requestsBounds: Bool) -> String? {
+    /// `windows.create`: nil when Bam can open it as a Little Bam popup. Requested bounds are honoured through
+    /// `popupFrame` once the window exists.
+    static func windowCreation(type: RequestedType, state: RequestedState, urlCount: Int, hasTabs: Bool) -> String? {
         if type != .popup { return normalWindowRefusal }
-        if requestsBounds { return boundsRefusal }
         if state == .maximized || state == .fullscreen { return stateRefusal }
         if urlCount > 1 || hasTabs { return multiplePagesRefusal }
         return nil
@@ -69,4 +68,34 @@ enum ExtensionWindowTargeting {
     static func requestsBounds(_ frame: CGRect) -> Bool {
         !frame.isNull && [frame.origin.x, frame.origin.y, frame.size.width, frame.size.height].contains { $0.isFinite }
     }
+
+    /// The frame a Little Bam popup takes for `windows.create` or `windows.update` bounds. `requested` is WebKit's
+    /// frame in macOS global coordinates (bottom-left origin); a NaN or non-positive component was not requested and
+    /// comes from `current`, and without a requested top the window keeps its top edge. The size is at least `minimum`
+    /// and at most the visible frame of the screen the window lands on, and the window stays on that screen.
+    static func popupFrame(requested: CGRect, current: CGRect, minimum: CGSize, screens: [CGRect]) -> CGRect {
+        func given(_ value: CGFloat) -> CGFloat? { value.isFinite ? value : nil }
+        func size(_ value: CGFloat) -> CGFloat? { given(value).flatMap { $0 > 0 ? $0 : nil } }
+        let none = requested.isNull
+        var width = (none ? nil : size(requested.size.width)) ?? current.width
+        var height = (none ? nil : size(requested.size.height)) ?? current.height
+        var x = (none ? nil : given(requested.origin.x)) ?? current.minX
+        var y = (none ? nil : given(requested.origin.y)) ?? current.maxY - height
+        let floorWidth = max(1, minimum.width.isFinite ? minimum.width : 1), floorHeight = max(1, minimum.height.isFinite ? minimum.height : 1)
+        width = max(width, floorWidth); height = max(height, floorHeight)
+        let usable = screens.filter { $0.width > 0 && $0.height > 0 && [$0.minX, $0.minY, $0.width, $0.height].allSatisfy(\.isFinite) }
+        let proposed = CGRect(x: x, y: y, width: width, height: height)
+        let center = CGPoint(x: proposed.midX, y: proposed.midY)
+        guard let screen = usable.first(where: { $0.contains(center) })
+                ?? usable.max(by: { $0.intersection(proposed).area < $1.intersection(proposed).area })
+                ?? usable.first else { return proposed }
+        width = max(floorWidth, min(width, screen.width)); height = max(floorHeight, min(height, screen.height))
+        x = min(max(x, screen.minX), max(screen.minX, screen.maxX - width))
+        y = min(max(y, screen.minY), max(screen.minY, screen.maxY - height))
+        return CGRect(x: x, y: y, width: width, height: height)
+    }
+}
+
+private extension CGRect {
+    var area: CGFloat { isNull ? 0 : width * height }
 }
