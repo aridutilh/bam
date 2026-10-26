@@ -8,6 +8,9 @@ enum SpaceScrollSource: String {
 /// AppKit can deliver tracked scroll events without going through a local monitor.
 @MainActor private final class SidebarScrollView: NSScrollView {
     var onSpaceScroll: ((NSEvent) -> Bool)?
+    /// Every scroll, programmatic or not, ends here: the sidebar's thumb (in the gap beside the card) follows it.
+    var onScroll: (() -> Void)?
+    override func reflectScrolledClipView(_ cView: NSClipView) { super.reflectScrolledClipView(cView); onScroll?() }
 
     override func scrollWheel(with event: NSEvent) {
         if onSpaceScroll?(event) == true { return }
@@ -164,7 +167,13 @@ struct SidebarExtensionItem {
     private var favorites: [ArkFavoriteButton] = []
     private var favoriteItems: [SidebarTabItem] = []
     private let clip = ArkFlippedView()
-    private var page = SidebarPage()
+    private var page = SidebarPage() { didSet { onTabListChange?() } }
+    /// Called when the visible tab list scrolls, re-lays out or changes page, so the scroll thumb can follow.
+    var onTabListChange: (() -> Void)?
+    /// The visible tab list's scroll view (its thumb is drawn outside the sidebar, in the gap beside the card).
+    var tabListScrollView: NSScrollView { page.scroll }
+    /// True while a Space switch is sliding pages; the thumb hides then.
+    var isPagingSpaces: Bool { next != nil || departing != nil }
     private var departing: SidebarPage?
     private var departingSpace: Int?
     private var next: SidebarPage?
@@ -328,6 +337,10 @@ struct SidebarExtensionItem {
     private func connect(_ page: SidebarPage) {
         page.faviconProvider = { [weak self] in self?.faviconProvider?($0) }
         page.scroll.onSpaceScroll = { [weak self] in self?.onSpaceScroll?($0, .tabList) ?? false }
+        page.scroll.onScroll = { [weak self, weak page] in
+            guard let self, let page, page === self.page else { return }
+            self.onTabListChange?()
+        }
         page.select = { [weak self] in self?.onSelectTab?($0) }
         page.close = { [weak self] in self?.onCloseTab?($0) }
         page.pin = { [weak self] in self?.onPinTab?($0) }
@@ -470,6 +483,7 @@ struct SidebarExtensionItem {
         offset = value
         // Frames are driven by the gesture/spring. Backing layers must not add a
         // second implicit animation, and origin-only moves need no row relayout.
+        onTabListChange?()
         CATransaction.begin(); CATransaction.setDisableActions(true)
         position(page, at: value)
         if let departing { position(departing, at: value - clip.bounds.width * pageDirection) }
@@ -641,8 +655,10 @@ struct SidebarExtensionItem {
     override init(frame: NSRect) {
         super.init(frame: frame); wantsLayer = true
         addSubview(heading); addSubview(scroll)
-        scroll.drawsBackground = false; scroll.hasVerticalScroller = true
-        scroll.autohidesScrollers = true; scroll.scrollerStyle = .overlay
+        // No system scroller: an overlay one can only sit inside the list, over the rows' last points and close buttons
+        // (and turns into a 15-point track over them when macOS shows scroll bars always). The thumb is drawn in the
+        // gap beside the card instead (SidebarScrollIndicator), as in Arc.
+        scroll.drawsBackground = false; scroll.hasVerticalScroller = false
         scroll.hasHorizontalScroller = false; scroll.horizontalScrollElasticity = .none
         column.resizingMask = .autoresizingMask
         table.addTableColumn(column)
@@ -969,11 +985,13 @@ struct SidebarExtensionItem {
     override func layout() {
         super.layout(); let w = bounds.width
         heading.frame = NSRect(x: 12, y: 0, width: max(0, w - 12 - ArkMetrics.sidebarTrailing - 4), height: 32)
-        // Rows span to the trailing edge; the overlay scroller floats over their last points only while scrolling.
+        // Rows span to the trailing content edge; the scroll thumb lives outside them, in the gap beside the card.
         scroll.frame = NSRect(x: ArkMetrics.sidebarLeading, y: 39, width: ArkMetrics.sidebarContentWidth(w), height: max(0, bounds.height - 39))
         let width = scroll.contentSize.width
         if table.frame.width != width { table.setFrameSize(NSSize(width: width, height: table.frame.height)) }
         if column.width != width { column.width = width }
+        // The list's frame is final now: let the thumb beside the card re-read it.
+        scroll.onScroll?()
     }
 }
 
@@ -1140,6 +1158,14 @@ final class ArkCenteredFieldCell: NSTextFieldCell {
     /// scroller is an overlay at that edge).
     static let sidebarLeading: CGFloat = 8
     static let sidebarTrailing: CGFloat = 1
+    /// The tab list's scroll thumb, in the gap between the rows' edge and the page card (Arc: rows end, a 1.5-point
+    /// space, a 4-point thumb, then about 3 points to the card). It widens while hovered or dragged.
+    static let scrollThumbLead: CGFloat = 1.5
+    static let scrollThumbWidth: CGFloat = 4
+    static let scrollThumbHoverWidth: CGFloat = 6
+    /// Space kept above and below the thumb within the list, and its shortest length.
+    static let scrollThumbInset: CGFloat = 3
+    static let scrollThumbMinLength: CGFloat = 24
     static func sidebarContentWidth(_ width: CGFloat) -> CGFloat { max(0, width - sidebarLeading - sidebarTrailing) }
     static let addressTop: CGFloat = 44
     static let addressHeight: CGFloat = 34

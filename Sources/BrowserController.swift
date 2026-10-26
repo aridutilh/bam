@@ -209,6 +209,9 @@ import QuartzCore
     let root = CanvasView()
     let sidebar = SidebarView(frame: .zero)
     let handle = ResizeHandleView(frame: .zero)
+    /// The tab list's scroll thumb, in the gap between the sidebar and the card (above the resize handle, which it
+    /// yields to everywhere but the visible thumb).
+    let listScrollThumb = SidebarScrollIndicator(frame: .zero)
     let card = FlippedContainer()
     let webHost = FlippedContainer()
     let progress = NSView()
@@ -382,7 +385,9 @@ import QuartzCore
         root.onLayout = { [weak self] in self?.layoutBrowser() }
         root.onTranslucencyChange = { [weak self] clear in self?.windowTranslucent = clear }
         root.onAppearanceChange = { [weak self] in self?.applyChromeColors() }
-        [sidebar, card, handle].forEach(root.addSubview)
+        [sidebar, card, handle, listScrollThumb].forEach(root.addSubview)
+        sidebar.onTabListChange = { [weak self] in self?.refreshListScrollThumb() }
+        listScrollThumb.onInteractionChange = { [weak self] active in self?.handle.isIndicatorSuppressed = active }
         card.wantsLayer = true
         card.layer?.cornerRadius = 10; card.layer?.masksToBounds = true
         card.layer?.borderWidth = 1
@@ -482,6 +487,12 @@ import QuartzCore
         if let little = littleWindows.values.first(where: { $0.window?.isKeyWindow == true }) { return little.webView }
         return peeks[session.activeID]?.webView ?? activeWebView
     }
+    /// Points the thumb at the visible tab list; hidden while the sidebar is away, collapsing or paging Spaces.
+    func refreshListScrollThumb() {
+        listScrollThumb.isSuppressed = handle.isHidden || sidebar.isHidden || sidebar.isPagingSpaces || listScrollThumb.frame.width < 8
+        listScrollThumb.scrollView = sidebar.tabListScrollView
+        listScrollThumb.refresh()
+    }
     func layoutBrowser() {
         let w = root.bounds.width, h = root.bounds.height
         guard w > 0 && h > 0 else { return }
@@ -510,6 +521,10 @@ import QuartzCore
         // content edge (Favorites, rows, the list's overlay scroller) or the page.
         handle.frame = NSRect(x: max(0, width - ArkMetrics.sidebarTrailing), y: 44, width: max(6, inset + ArkMetrics.sidebarTrailing), height: max(0, h - 60))
         handle.currentWidth = targetWidth; handle.isHidden = !session.sidebarVisible || width < 100
+        // The thumb's column: from the rows' trailing edge across the gap to the card.
+        listScrollThumb.frame = NSRect(x: width - ArkMetrics.sidebarTrailing, y: listScrollThumb.frame.minY,
+                                       width: inset + ArkMetrics.sidebarTrailing, height: listScrollThumb.frame.height)
+        refreshListScrollThumb()
         if addressOverlay != nil { layoutPalette(width: w, height: h) }
         layoutSpaceCreation()
     }

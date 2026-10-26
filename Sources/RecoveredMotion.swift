@@ -468,8 +468,12 @@ final class ResizeHandleView: NSView {
         NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
     }
 
+    /// True while the sidebar's scroll thumb, which shares this gap, is under the pointer or being dragged: the two
+    /// bars would otherwise draw on top of each other.
+    var isIndicatorSuppressed = false { didSet { if oldValue != isIndicatorSuppressed { refreshIndicator() } } }
+
     private func refreshIndicator() {
-        let opacity: Float = (isHovered || isDragging || isSnapped) ? 0.5 : 0
+        let opacity: Float = !isIndicatorSuppressed && (isHovered || isDragging || isSnapped) ? 0.5 : 0
         guard indicator.opacity != opacity else { return }
         let previous = indicator.presentation()?.opacity ?? indicator.opacity
         CATransaction.begin()
