@@ -39,14 +39,35 @@ import WebKit
         let configuration = WKWebViewConfiguration(); configuration.websiteDataStore = .nonPersistent()
         host.configure(configuration, profileID: profile); await host.ready(profileID: profile)
         let id = try await host.importPackage(at: package, profileID: profile)
-        guard let context = host.context(for: id), let controller = context.webExtensionController,
-              let runtime = controller.delegate as? BrowserExtensionRuntime else { throw Failure(message: "Fixture did not load: \(host.errors)") }
+        // A withdrawal of a live grant restarts the extension into a fresh context (two-phase): every handle is re-read
+        // after awaiting that restart's completion, never kept across it.
+        guard let firstContext = host.context(for: id), let firstController = firstContext.webExtensionController,
+              let firstRuntime = firstController.delegate as? BrowserExtensionRuntime else { throw Failure(message: "Fixture did not load: \(host.errors)") }
+        var context = firstContext, controller = firstController, runtime = firstRuntime
+        func refresh() throws {
+            guard let live = host.context(for: id), let liveController = live.webExtensionController,
+                  let liveRuntime = liveController.delegate as? BrowserExtensionRuntime else { throw Failure(message: "No live context: \(host.errors)") }
+            context = live; controller = liveController; runtime = liveRuntime
+        }
+        /// Awaits the restart a withdrawal since `generation` started (if any), requires it to finish `.restarted`, re-reads.
+        func settleRestart(since generation: UInt64, _ what: String) async throws {
+            let now = host.restartGeneration[id, default: 0]
+            if now > generation {
+                let result = await host.restartCompletion(id: id, generation: now)
+                try check(result == .restarted, "\(what): the restart must finish with a fresh context: \(String(describing: result))")
+            }
+            try refresh()
+        }
         let site = try WKWebExtension.MatchPattern(string: "http://127.0.0.1/*"), optionalSite = try WKWebExtension.MatchPattern(string: "http://localhost/*")
         let page = URL(string: "http://127.0.0.1/page")!, optionalPage = URL(string: "http://localhost/page")!, undeclared = URL(string: "https://undeclared.invalid/")!
 
         // The user withholds the requested site.
         guard let installed = host.siteAccess(id: id), let declarations = installed.declarations else { throw Failure(message: "No site access snapshot") }
-        let withheld = try host.performSiteAccess(id: id, profileID: profile, revision: installed.revision, displayed: declarations, change: .choose(.withheld))
+        let beforeWithhold = host.restartGeneration[id, default: 0]
+        _ = try host.performSiteAccess(id: id, profileID: profile, revision: installed.revision, displayed: declarations, change: .choose(.withheld))
+        try check(host.restartGeneration[id, default: 0] == beforeWithhold + 1, "Withholding a granted site must restart the extension")
+        try await settleRestart(since: beforeWithhold, "Withhold")
+        guard let withheld = host.siteAccess(id: id) else { throw Failure(message: "No snapshot after withhold") }
         reviews.removeAll()
         let recordBefore = host.records.first { $0.id == id }
         func status(_ url: URL) -> WKWebExtensionContext.PermissionStatus { context.permissionStatus(for: url) }
@@ -85,10 +106,13 @@ import WebKit
         // MARK: Stale explicit answer: a panel change during the review grants and denies nothing.
         answer = true
         guard let current = host.siteAccess(id: id) else { throw Failure(message: "No snapshot before the stale review") }
+        let beforeStale = host.restartGeneration[id, default: 0]
         duringReview = { _ = try? host.performSiteAccess(id: id, profileID: profile, revision: current.revision, displayed: declarations, change: .choose(.withheld)) }
         granted = nil
         runtime.webExtensionController(controller, promptForPermissionMatchPatterns: [optionalSite], in: nil, for: context) { value, _ in granted = value }
-        try check(reviews.count == 3 && granted == [] && status(optionalPage) != .grantedExplicitly && status(optionalPage) != .deniedExplicitly &&
+        try check(reviews.count == 3 && granted == [], "A stale explicit answer must grant nothing")
+        try await settleRestart(since: beforeStale, "Withhold during the review")      // it withdrew 127.0.0.1
+        try check(status(optionalPage) != .grantedExplicitly && status(optionalPage) != .deniedExplicitly &&
                   host.siteAccess(id: id)?.state.mode == .withheld, "A stale explicit answer must neither grant nor deny")
 
         // MARK: Named permissions (permissions.request({permissions})): reviewed, bound to the state shown.
@@ -112,7 +136,9 @@ import WebKit
         // A Revoke while the review is open: the stale approval must not undo it, and nothing is denied.
         answer = true
         duringReview = { try? host.revokePermissions(id: id) }
+        let beforeRevoke = host.restartGeneration[id, default: 0]
         try check(named([.cookies]) == [] && reviews.count == 3, "A named answer made stale by Revoke must grant nothing")
+        try await settleRestart(since: beforeRevoke, "Revoke during the review")
         try check(namedStatus(.cookies) != .grantedExplicitly && namedStatus(.cookies) != .deniedExplicitly && namedStatus(.alarms) != .grantedExplicitly &&
                   host.records.first { $0.id == id }?.permissions.isEmpty == true && host.records.first { $0.id == id }?.deniedPermissions["cookies"] == nil,
                   "Revoke during a named review must stand: no grant restored, no denial added")
@@ -126,30 +152,35 @@ import WebKit
         try check(named([.alarms]) == [] && reviews.count == 5 && namedStatus(.alarms) != .deniedExplicitly,
                   "A stale named decline must deny nothing")
 
-        // MARK: Same-context ABA: All requested → Withheld → All requested during an explicit pattern review restores every
-        // site-access value on the same live context; the permission epoch still makes the answer stale.
+        // MARK: Same-context ABA: Specific([127]) → All requested → Specific([127]) during an explicit pattern review. Neither
+        // step withdraws a live grant, so no restart happens: every site-access value is restored on the same live context,
+        // and only the permission epoch shows the change; the answer must still be stale.
         duringReview = nil
-        guard let beforeAll = host.siteAccess(id: id) else { throw Failure(message: "No snapshot before ABA") }
-        let all = try host.performSiteAccess(id: id, profileID: profile, revision: beforeAll.revision, displayed: declarations, change: .choose(.allRequested))
-        let abaRecord = host.records.first { $0.id == id }
+        guard let beforeList = host.siteAccess(id: id) else { throw Failure(message: "No snapshot before ABA") }
+        let listed = try host.performSiteAccess(id: id, profileID: profile, revision: beforeList.revision, displayed: declarations,
+                                                change: .addSite(input: "127.0.0.1", includeSubdomains: false))
+        try check(listed.state.mode == .specific([site.string]) && status(page) == .grantedExplicitly, "Fixture: the ABA starts from a listed, granted site")
+        let abaRecord = host.records.first { $0.id == id }, abaGeneration = host.restartGeneration[id, default: 0]
         answer = true
         var restored: BrowserExtensionRecord?, restoredSnapshot: BrowserExtensionSiteAccessSnapshot?
         duringReview = {
-            guard let w = try? host.performSiteAccess(id: id, profileID: profile, revision: all.revision, displayed: declarations, change: .choose(.withheld)) else { return }
-            restoredSnapshot = try? host.performSiteAccess(id: id, profileID: profile, revision: w.revision, displayed: declarations, change: .choose(.allRequested))
+            guard let all = try? host.performSiteAccess(id: id, profileID: profile, revision: listed.revision, displayed: declarations, change: .choose(.allRequested)) else { return }
+            restoredSnapshot = try? host.performSiteAccess(id: id, profileID: profile, revision: all.revision, displayed: declarations,
+                                                           change: .addSite(input: "127.0.0.1", includeSubdomains: false))
             restored = host.records.first { $0.id == id }
         }
         let reviewsBeforeABA = reviews.count
         granted = nil
         runtime.webExtensionController(controller, promptForPermissionMatchPatterns: [optionalSite], in: nil, for: context) { value, _ in granted = value }
         // Captured inside the review, before its answer applies: a real ABA on the same live context.
-        try check(reviews.count == reviewsBeforeABA + 1 && host.context(for: id) === context && restored?.siteAccess == abaRecord?.siteAccess &&
-                  restored?.patterns == abaRecord?.patterns && restored?.timedSiteGrants == abaRecord?.timedSiteGrants && restoredSnapshot?.state == all.state,
-                  "Fixture: the review must span a real ABA on the same context, with every site-access value restored")
+        try check(reviews.count == reviewsBeforeABA + 1 && host.restartGeneration[id, default: 0] == abaGeneration && host.context(for: id) === context &&
+                  restored?.siteAccess == abaRecord?.siteAccess && restored?.patterns == abaRecord?.patterns &&
+                  restored?.timedSiteGrants == abaRecord?.timedSiteGrants && restoredSnapshot?.state == listed.state,
+                  "Fixture: the review must span a real ABA on the same context (no restart), with every site-access value restored")
         try check(granted == [] && status(optionalPage) != .grantedExplicitly && status(optionalPage) != .deniedExplicitly &&
-                  host.siteAccess(id: id)?.state == all.state,
+                  host.siteAccess(id: id)?.state == listed.state,
                   "An explicit answer made stale by a same-context ABA must neither grant nor deny")
-        try check(restoredSnapshot.map { $0.revision != all.revision && $0.revision.permissionEpoch > all.revision.permissionEpoch } == true,
+        try check(restoredSnapshot.map { $0.revision != listed.revision && $0.revision.permissionEpoch > listed.revision.permissionEpoch } == true,
                   "The permission epoch must advance across the ABA")
         return checks
     }
