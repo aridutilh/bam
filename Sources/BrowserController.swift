@@ -756,6 +756,10 @@ import QuartzCore
             session.tabs[i].address = "orbit://newtab"; session.tabs[i].title = "New tab"
         }
         guard session.tabs[i] != previous else { return }
+        // Extensions hear every tab's URL and title changes (tabs.onUpdated), including same-document navigations and
+        // tabs outside the shown Space, which reach here only through KVO and get no chrome refresh below. Coalesced;
+        // reconcile publishes only real differences.
+        scheduleExtensionRefresh()
         scheduleFaviconDiscovery(in: web)
         let tab = session.tabs[i]
         if tab.isFavorite || tab.space == session.space || tab.space == pagingTarget { scheduleChromeRefresh() }
