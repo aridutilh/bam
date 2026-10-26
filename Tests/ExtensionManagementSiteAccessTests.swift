@@ -202,6 +202,14 @@ import Foundation
                   "An unsaved reduction is reported honestly: \(accessUnsaved)")
         let bothUnsaved = BrowserExtensions.stoppedMessage(name: "Docs Helper", reason: Reason(), disableSaveError: SaveFailure(), accessSaved: false)
         try check(bothUnsaved.contains("which may be broader") && !bothUnsaved.contains("saved, reduced"), "No saved-reduction claim after two failed saves: \(bothUnsaved)")
+        // Fail-closed release timeout: "stays off" only when that was saved.
+        let timeout = BrowserExtensions.releaseTimeoutMessage(name: "Docs Helper", disableSaveError: nil, accessSaved: true)
+        try check(timeout.contains("couldn’t finish restarting") && timeout.contains("stays off"), "Timeout message: \(timeout)")
+        let timeoutUnsaved = BrowserExtensions.releaseTimeoutMessage(name: "Docs Helper", disableSaveError: SaveFailure(), accessSaved: true)
+        try check(!timeoutUnsaved.contains("stays off") && timeoutUnsaved.contains("couldn’t save that it’s off (disk full)") && timeoutUnsaved.contains("may load again")
+                  && timeoutUnsaved.contains("saved, reduced"), "A timeout whose disable wasn't saved must not claim it stays off: \(timeoutUnsaved)")
+        let timeoutBoth = BrowserExtensions.releaseTimeoutMessage(name: "Docs Helper", disableSaveError: SaveFailure(), accessSaved: false)
+        try check(timeoutBoth.contains("which may be broader") && !timeoutBoth.contains("saved, reduced"), "Timeout after an unsaved reduction: \(timeoutBoth)")
 
         // MARK: The engine source is weak (the host owns the manager).
         do {

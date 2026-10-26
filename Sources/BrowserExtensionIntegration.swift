@@ -8,12 +8,6 @@ struct ExtensionHostOverride {
     let controllerIdentifier: UUID
 }
 
-/// A weak observation of a renderer retired for an extension restart (whether it actually deallocated).
-final class RetiredRendererProbe {
-    weak var web: WKWebView?
-    init(_ web: WKWebView?) { self.web = web }
-}
-
 @MainActor extension BrowserController {
     @available(macOS 15.4, *)
     var browserExtensions: BrowserExtensions {
@@ -123,7 +117,8 @@ final class RetiredRendererProbe {
         }
         value.onChange = { [weak self] in self?.scheduleExtensionRefresh() }
         value.onReloadNeeded = { [weak self] profile in self?.offerExtensionReload(profileID: profile) }
-        value.onExtensionRenderers = { [weak self] phase, profile, baseURL in self?.handleExtensionRenderers(phase, profileID: profile, baseURL: baseURL) }
+        value.onExtensionRenderers = { [weak self] phase, profile, baseURL in self?.handleExtensionRenderers(phase, profileID: profile, baseURL: baseURL) ?? [] }
+        value.onSiteAccessRestartFinished = { [weak self] _, _ in self?.scheduleExtensionRefresh() }
         return value
     }
     func configureExtensions(_ configuration: WKWebViewConfiguration, profileID: UUID) {
@@ -325,8 +320,10 @@ final class RetiredRendererProbe {
     /// If the extension is stopped, retired tabs stay restorable: selecting one shows the unavailable error, and a later
     /// Enable (a `.restore` from `load`) recreates them.
     @available(macOS 15.4, *)
-    func handleExtensionRenderers(_ phase: BrowserExtensions.ExtensionRendererPhase, profileID: UUID, baseURL: URL) {
-        guard !isShuttingDown, baseURL.scheme == "webkit-extension", let origin = baseURL.host?.lowercased() else { return }
+    @discardableResult
+    func handleExtensionRenderers(_ phase: BrowserExtensions.ExtensionRendererPhase, profileID: UUID, baseURL: URL) -> [RetiredRendererProbe] {
+        guard !isShuttingDown, baseURL.scheme == "webkit-extension", let origin = baseURL.host?.lowercased() else { return [] }
+        var released: [RetiredRendererProbe] = []
         let extensionController = browserExtensions.extensionController(profileID: profileID)
         /// A preview of this exact install in this profile's runtime: its profile and its configuration's extension
         /// controller must match, and its current, requested or pending URL is on the install's origin (an in-flight
@@ -351,7 +348,10 @@ final class RetiredRendererProbe {
                     window.makeFirstResponder(nil)
                 }
                 retiredRendererProbes.removeAll { $0.web == nil }   // released ones carry no evidence; don't accumulate
-                for id in ids { retiredRendererProbes.append(RetiredRendererProbe(browsers[id])) }
+                for id in ids {
+                    let probe = RetiredRendererProbe(browsers[id])
+                    retiredRendererProbes.append(probe); released.append(probe)
+                }
                 isApplyingProfileChange = true
                 for id in ids { retireProfilePage(id) }
                 isApplyingProfileChange = false
@@ -366,13 +366,16 @@ final class RetiredRendererProbe {
         }
         switch phase {
         case .retire:
-            for (owner, peek) in peeks where showsThisExtension(peek.webView) { peek.dismiss(); peeks.removeValue(forKey: owner); peekExtensionIDs.removeValue(forKey: owner) }
-            for little in littleWindows.values where showsThisExtension(little.webView) { little.close() }
+            for (owner, peek) in peeks where showsThisExtension(peek.webView) {
+                released.append(RetiredRendererProbe(peek.webView))
+                peek.dismiss(); peeks.removeValue(forKey: owner); peekExtensionIDs.removeValue(forKey: owner)
+            }
+            for little in littleWindows.values where showsThisExtension(little.webView) { released.append(RetiredRendererProbe(little.webView)); little.close() }
             let ids = session.tabs.filter { session.profileID(for: $0) == profileID && browsers[$0.id] != nil && browserExtensionOrigins[$0.id] == origin }.map(\.id)
             retiredExtensionRenderers[origin, default: []].formUnion(ids)
             retire(ids)
         case .restore:
-            guard let retired = retiredExtensionRenderers.removeValue(forKey: origin) else { return }
+            guard let retired = retiredExtensionRenderers.removeValue(forKey: origin) else { return [] }
             let live = Set(session.tabs.filter { session.profileID(for: $0) == profileID }.map(\.id))
             let ids = retired.intersection(live)
             // A renderer made while the extension was stopped (showing the unavailable error) is replaced too.
@@ -384,6 +387,14 @@ final class RetiredRendererProbe {
             showIfVisible(retiredExtensionRenderers[origin] ?? [])
             refresh()
         }
+        return released
+    }
+    /// The message a tab shows for an extension page Bam won't open right now.
+    func extensionPageUnavailableMessage(_ url: URL, profileID: UUID) -> String {
+        if #available(macOS 15.4, *), browserExtensions.isRestarting(extensionURL: url, profileID: profileID) {
+            return "This extension is restarting to apply a website access change — its page reopens when it’s back"
+        }
+        return "This extension is unavailable in this profile — open Manage Extensions to enable it"
     }
     /// How many renderers retired for an extension restart are still alive (weakly observed): evidence only.
     func retiredRenderersAlive() -> Int {

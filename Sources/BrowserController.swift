@@ -558,7 +558,7 @@ import QuartzCore
         let extensionURL = URLInput.extensionURL(address)
         if let extensionURL, !allowsExtensionPage(extensionURL, profileID: profileID) {
             pendingLoads.remove(id); pendingHome.remove(id)
-            tabErrors[id] = "This extension is unavailable in this profile — open Manage Extensions to enable it"
+            tabErrors[id] = extensionPageUnavailableMessage(extensionURL, profileID: profileID)
             refresh(); return
         }
         let origin = extensionURL?.host?.lowercased()

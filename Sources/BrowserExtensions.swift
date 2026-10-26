@@ -2,6 +2,13 @@ import Foundation
 import AppKit
 import WebKit
 
+/// A weak observation of a view let go for an extension restart (whether it actually deallocated). Phase B loads
+/// the fresh context only once every probe of the old context is empty.
+final class RetiredRendererProbe {
+    weak var web: WKWebView?
+    init(_ web: WKWebView?) { self.web = web }
+}
+
 /// A borrowed page surface. Enumerating extensions must not instantiate sleeping pages.
 @MainActor struct BrowserExtensionSurface {
     let id: UUID
@@ -490,6 +497,11 @@ struct BrowserExtensionPermissionReview {
         guard let before = records.first(where: { $0.id == id }), let runtime = runtimes[before.profileID],
               !loading.contains(id), !updating.contains(id) else { throw Self.failure("This extension is not ready to update.") }
         guard (before.safariBundle == nil) == (safariBundle == nil) else { throw Self.failure("An update must use the installed extension's original package type.") }
+        // A pending restart keeps its release barrier: an update can't load a same-identity context before the old
+        // views are gone, and must not cancel the restart before its own checks pass.
+        guard handoffs[id] == nil else { throw Self.failure("\(before.name) is restarting to apply a website access change. Try the update again in a moment.") }
+        try await awaitReleaseBarrier(id: id, name: before.name)
+        guard handoffs[id] == nil, !loading.contains(id), !updating.contains(id) else { throw Self.failure("This extension is not ready to update.") }
         updating.insert(id); defer { updating.remove(id); armExpiryTimer(id); resumeWithdrawalRestart(id) }
         let initialRevision = mutationRevisions[id, default: 0]
         let initialPermissionRevision = permissionRevisions[id, default: 0]
@@ -683,11 +695,16 @@ struct BrowserExtensionPermissionReview {
     }
 
     func setEnabled(_ enabled: Bool, id: UUID) async throws {
+        guard records.contains(where: { $0.id == id }) else { return }
+        if enabled { noteMutation(id); try await load(id, review: true) } else { try disable(id: id) }
+    }
+    /// Disable, synchronously: cancels a pending restart, stops a quarantined context, unloads the loaded one.
+    func disable(id: UUID) throws {
         guard let i = records.firstIndex(where: { $0.id == id }) else { return }
         noteMutation(id)
-        if enabled { try await load(id, review: true) }
-        else {
-            loadGeneration.removeValue(forKey: id)
+        loadGeneration.removeValue(forKey: id)
+        cancelRestartHandoff(id: id, retiredTabs: .unavailable)
+        do {
             try stopQuarantined(id: id, name: records[i].name)   // Remove calls this first: nothing is deleted on failure
             if let runtime = runtimes[records[i].profileID], let context = runtime.contexts[id] {
                 runtime.closePopup(for: context)
@@ -726,7 +743,7 @@ struct BrowserExtensionPermissionReview {
     /// The extension's current site access; declarations are nil while it isn't loaded.
     func siteAccess(id: UUID) -> BrowserExtensionSiteAccessSnapshot? {
         guard let record = records.first(where: { $0.id == id }), let state = try? ExtensionSiteAccessEngine.decode(record.siteAccess) ?? .withheld() else { return nil }
-        let context = context(for: id)
+        let context = siteAccessContext(for: id)
         let declarations = context.map { ExtensionSiteAccess.Declarations($0.webExtension) }
         let timed = declarations.map { ExtensionSiteAccessEngine.live(Self.timed(record), declarations: $0) } ?? Self.timed(record)
         let granted = Set((context?.grantedPermissions.keys.map(\.rawValue)) ?? record.permissions.filter { $0.value > Date() }.map(\.key))
@@ -752,7 +769,7 @@ struct BrowserExtensionPermissionReview {
                                               change: BrowserExtensionSiteAccessChange) throws -> BrowserExtensionSiteAccessSnapshot {
         guard !stopped, let index = records.firstIndex(where: { $0.id == id }), records[index].profileID == profileID else { throw BrowserExtensionSiteAccessFailure.failed("This extension is no longer installed in this profile.") }
         guard !loading.contains(id), !updating.contains(id) else { throw BrowserExtensionSiteAccessFailure.stale }
-        guard let context = context(for: id) else { throw BrowserExtensionSiteAccessFailure.failed("Enable the extension to change its site access.") }
+        guard let context = siteAccessContext(for: id) else { throw BrowserExtensionSiteAccessFailure.failed("Enable the extension to change its site access.") }
         let declarations = ExtensionSiteAccess.Declarations(context.webExtension)
         guard siteAccessRevision(records[index], context: context) == revision, declarations == displayed else { throw BrowserExtensionSiteAccessFailure.stale }
         let state: ExtensionSiteAccess.State
@@ -882,19 +899,26 @@ struct BrowserExtensionPermissionReview {
         return !withdrawn.isEmpty
     }
 
-    /// What a site-access restart did, for honest reporting.
+    /// What a site-access restart did, for honest reporting (work/site-access-two-phase-final-contract.md).
     enum SiteAccessRestart: Equatable {
+        /// Phase B loaded the fresh context.
         case restarted
+        /// The helper's immediate return: phase A done (old context unloaded, renderers retired), phase B scheduled.
+        case pending
         /// `unload` threw. `stillLoaded`: WebKit still lists the context, so its earlier website access may still
-        /// apply (injected content, extension-page network reads).
+        /// apply (injected content, extension-page network reads). Synchronous, from phase A.
         case unloadFailed(String, stillLoaded: Bool)
         /// Unloaded, then `load` threw: the extension is stopped (no content), its saved choice intact; Enable recovers.
         case loadFailed(String)
+        /// Fail closed: a view of the old context was still alive at the deadline, so the fresh context never loaded.
+        case releaseTimedOut(String)
+        /// Cancelled (Disable, Remove, Update, shutdown) or there was nothing current to restart.
+        case superseded
         var leavesStaleContent: Bool { if case .unloadFailed(_, true) = self { return true }; return false }
         var failure: String? {
             switch self {
-            case .restarted: return nil
-            case .unloadFailed(let message, _), .loadFailed(let message): return message
+            case .restarted, .pending, .superseded: return nil
+            case .unloadFailed(let message, _), .loadFailed(let message), .releaseTimedOut(let message): return message
             }
         }
     }
@@ -903,6 +927,8 @@ struct BrowserExtensionPermissionReview {
     /// Test seam: called after the old context is unloaded and Bam's renderers retired, just before the fresh
     /// context loads (the handoff boundary). nil in production.
     static var siteAccessRestartWillLoad: ((UUID) -> Void)?
+    /// Test seam: called right after the fresh context's `load` returns, before it is revalidated and published.
+    static var siteAccessRestartDidLoad: ((UUID) -> Void)?
     /// Test seam: a non-nil error makes the restart's `unload` fail for that extension. nil in production.
     static var siteAccessRestartUnloadFault: ((UUID) -> Error?)?
     /// Contexts WebKit still runs after a failed unload. Bam no longer owns them (no authority, no new renderer, no
@@ -939,11 +965,92 @@ struct BrowserExtensionPermissionReview {
         /// The extension is stopped: keep retired tabs restorable; selecting one shows the unavailable error.
         case unavailable
     }
-    var onExtensionRenderers: ((_ phase: ExtensionRendererPhase, _ profileID: UUID, _ baseURL: URL) -> Void)?
+    /// Returns weak probes of the views it let go in `.retire` (empty for the other phases).
+    var onExtensionRenderers: ((_ phase: ExtensionRendererPhase, _ profileID: UUID, _ baseURL: URL) -> [RetiredRendererProbe])?
     /// Advanced once by every restart attempt (`restartForSiteAccess`), so a deferred native-withdrawal restart can see
     /// that another restart already happened since it was scheduled. Declared here with the helper that advances it;
     /// the engine's native path only reads it.
     private(set) var restartGeneration: [UUID: UInt64] = [:]
+
+    /// A restart between phase A (old context unloaded, views let go) and phase B (fresh context loaded).
+    private struct RestartHandoff {
+        let token = UUID()
+        let fresh: WKWebExtensionContext
+        let generation: UInt64
+        let profileID: UUID
+        let name: String
+        let reducedAccessSaved: Bool
+        /// Weak: every view of the old context Bam let go (tab renderers, Peek/Little Bam, popup, offscreen document).
+        let probes: [RetiredRendererProbe]
+        let deadline: TimeInterval
+        var task: Task<Void, Never>?
+    }
+    private var handoffs: [UUID: RestartHandoff] = [:]
+    /// Per install: weak probes of every view of a context Bam let go in a restart that hasn't deallocated yet. It
+    /// outlives the handoff (timeout, cancellation): no context of that install loads (restart, Enable, Update) while
+    /// any of them is alive, so a same-identity context can't inherit the old process's network access.
+    private var releaseBarriers: [UUID: [RetiredRendererProbe]] = [:]
+    /// Whether views of an earlier context of `id` are still alive (prunes released ones).
+    private func releaseBarrierHeld(id: UUID) -> Bool {
+        let live = (releaseBarriers[id] ?? []).filter { $0.web != nil }
+        if live.isEmpty { releaseBarriers.removeValue(forKey: id) } else { releaseBarriers[id] = live }
+        return !live.isEmpty
+    }
+    /// Every load of an install waits, bounded, for its release barrier; refuses if earlier views are still alive.
+    private func awaitReleaseBarrier(id: UUID, name: String) async throws {
+        let deadline = ProcessInfo.processInfo.systemUptime + Self.siteAccessRestartReleaseDeadline
+        while releaseBarrierHeld(id: id) {
+            guard ProcessInfo.processInfo.systemUptime < deadline else {
+                throw Self.failure("\(name)’s earlier pages haven’t closed yet, so it can’t start without keeping its earlier website access. Try again in a moment, or quit and reopen Bam.")
+            }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+    }
+    private var restartWaiters: [UUID: [(generation: UInt64, waiter: CheckedContinuation<SiteAccessRestart?, Never>)]] = [:]
+    /// The latest terminal result per extension, by generation, so a waiter that arrives after phase B still gets it.
+    private var restartResults: [UUID: (generation: UInt64, result: SiteAccessRestart)] = [:]
+    /// Phase B finished (any terminal result). Set by the owning BrowserController only; engine and fixtures use
+    /// `restartCompletion(id:)`.
+    var onSiteAccessRestartFinished: ((_ id: UUID, _ result: SiteAccessRestart) -> Void)?
+    /// Test seam: seconds phase B waits for the old views to deallocate before failing closed.
+    static var siteAccessRestartReleaseDeadline: TimeInterval = 2
+    /// A handoff is in progress: `context(for:)` is nil; site-access reads and edits target the pending fresh context.
+    func isRestarting(id: UUID) -> Bool { handoffs[id] != nil }
+    /// Whether `url` is a page of an extension that is restarting in that profile (its tabs say so instead of
+    /// "unavailable").
+    func isRestarting(extensionURL url: URL, profileID: UUID) -> Bool {
+        handoffs.values.contains { $0.profileID == profileID && Self.isExtensionURL(url, ownedBy: $0.fresh) }
+    }
+    /// The terminal result of the restart identified by `generation` (read `restartGeneration[id]` synchronously right
+    /// after the call that started it). Waits while that restart is pending; returns its retained result if it already
+    /// finished; nil if `generation` is unknown or a newer restart replaced its retained result. Every waiter is settled
+    /// exactly once; it holds no context or view.
+    func restartCompletion(id: UUID, generation: UInt64) async -> SiteAccessRestart? {
+        if let handoff = handoffs[id], handoff.generation == generation {
+            return await withCheckedContinuation { waiter in restartWaiters[id, default: []].append((generation, waiter)) }
+        }
+        if let finished = restartResults[id], finished.generation == generation { return finished.result }
+        return nil
+    }
+    private func settleRestart(id: UUID, generation: UInt64, _ result: SiteAccessRestart) {
+        restartResults[id] = (generation, result)
+        let all = restartWaiters.removeValue(forKey: id) ?? []
+        let mine = all.filter { $0.generation == generation }, others = all.filter { $0.generation != generation }
+        if !others.isEmpty { restartWaiters[id] = others }
+        for entry in mine { entry.waiter.resume(returning: result) }
+        onSiteAccessRestartFinished?(id, result)
+    }
+    /// Cancels a pending handoff (the fresh context was never loaded and is discarded) and settles its waiters with
+    /// `.superseded`. `retiredTabs`: what the owner should do with the tabs it retired, if anything.
+    private func cancelRestartHandoff(id: UUID, retiredTabs: ExtensionRendererPhase?) {
+        guard let handoff = handoffs.removeValue(forKey: id) else { return }
+        handoff.task?.cancel()
+        if let retiredTabs { _ = onExtensionRenderers?(retiredTabs, handoff.profileID, handoff.fresh.baseURL) }
+        settleRestart(id: id, generation: handoff.generation, .superseded)
+    }
+    /// The context site-access reads and edits apply to: the loaded one, or during a handoff the pending fresh one
+    /// (not loaded: changes land exactly in the policy phase B will load).
+    private func siteAccessContext(for id: UUID) -> WKWebExtensionContext? { context(for: id) ?? handoffs[id]?.fresh }
 
     /// Withdrawn website access doesn't fully leave a running extension on the installed WebKit:
     /// - content scripts and style sheets registered for all-host access keep reaching new documents (native lifecycle
@@ -974,28 +1081,89 @@ struct BrowserExtensionPermissionReview {
     /// the caller composes its own warning from the returned outcome.
     private func restartForSiteAccess(id: UUID, context: WKWebExtensionContext, reducedAccessSaved: Bool = true) -> SiteAccessRestart {
         guard let index = records.firstIndex(where: { $0.id == id }), let runtime = runtimes[records[index].profileID],
-              runtime.contexts[id] === context else { return .restarted }
+              runtime.contexts[id] === context, handoffs[id] == nil else { return .superseded }
         restartGeneration[id, default: 0] &+= 1
         let name = records[index].name, profileID = records[index].profileID, baseURL = context.baseURL
         // Snapshot the policy before anything is unloaded.
         let fresh = Self.freshContext(replacing: context)
+        // Every view of the old context being let go is weakly probed: phase B loads only once all have deallocated.
+        var probes = runtime.extensionPageViews(of: context).map { RetiredRendererProbe($0) }
         runtime.closePopup(for: context)
-        onExtensionRenderers?(.retire, profileID, baseURL)
+        probes += onExtensionRenderers?(.retire, profileID, baseURL) ?? []
         runtime.releaseRetiredSurfaceViews()
         do {
             if let fault = Self.siteAccessRestartUnloadFault?(id) { throw fault }
             try runtime.controller.unload(context)
         } catch {
+            let generation = restartGeneration[id, default: 0]
             if runtime.controller.extensionContexts.contains(context) {
-                return quarantine(index: index, name: name, context: context, runtime: runtime, reason: error, saved: reducedAccessSaved)
+                let result = quarantine(index: index, name: name, context: context, runtime: runtime, reason: error, saved: reducedAccessSaved)
+                settleRestart(id: id, generation: generation, result)
+                return result
             }
             // WebKit no longer lists it: treat as stopped, like a failed load.
             runtime.disconnectNative(context); runtime.compatibility.remove(context); runtime.contexts.removeValue(forKey: id)
             let result = stopped(index: index, name: name, reason: error, saved: reducedAccessSaved)
-            onExtensionRenderers?(.unavailable, profileID, baseURL)
+            _ = onExtensionRenderers?(.unavailable, profileID, baseURL)
+            settleRestart(id: id, generation: generation, result)
             return result
         }
         runtime.disconnectNative(context); runtime.compatibility.remove(context); runtime.contexts.removeValue(forKey: id)
+        // Phase B waits (native dd395c2: a visible renderer is released one run-loop turn after it leaves the window).
+        var handoff = RestartHandoff(fresh: fresh, generation: restartGeneration[id, default: 0], profileID: profileID, name: name,
+                                     reducedAccessSaved: reducedAccessSaved, probes: probes,
+                                     deadline: ProcessInfo.processInfo.systemUptime + Self.siteAccessRestartReleaseDeadline)
+        let token = handoff.token
+        releaseBarriers[id, default: []] += probes
+        handoff.task = Task { @MainActor [weak self] in await self?.completeRestart(id: id, token: token) }
+        handoffs[id] = handoff
+        siteAccessNotices[id] = reducedAccessSaved
+            ? "Restarting \(name) so its website access change takes effect. Its own pages reopen when it’s back."
+            : "Restarting \(name) so the withdrawn website access ends now. Its own pages reopen when it’s back."
+        return .pending
+    }
+    /// Phase B: once every probed view of the old context has deallocated (at least one run-loop turn), and the
+    /// handoff is still current and valid, load the fresh context. Fails closed at the deadline. The handoff stays
+    /// registered until a terminal result, so Disable/Remove/Update/shutdown can cancel it even during `load` (a host
+    /// delegate WebKit calls synchronously); it is revalidated after `load`, and a cancelled fresh context is unloaded,
+    /// never published.
+    private func completeRestart(id: UUID, token: UUID) async {
+        while true {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+            guard let handoff = handoffs[id], handoff.token == token else { return }   // cancelled; already settled
+            if !releaseBarrierHeld(id: id) || ProcessInfo.processInfo.systemUptime >= handoff.deadline { break }
+        }
+        guard let handoff = handoffs[id], handoff.token == token else { return }
+        let baseURL = handoff.fresh.baseURL
+        func current() -> Bool { handoffs[id]?.token == token }
+        /// Ends the handoff before any terminal UI is built (so tabs show the real state, not "restarting"). False if
+        /// a canceller already ended and settled it.
+        func conclude() -> Bool {
+            guard current() else { return false }
+            handoffs.removeValue(forKey: id); return true
+        }
+        func settle(_ result: SiteAccessRestart) { settleRestart(id: id, generation: handoff.generation, result); changed() }
+        func finish(_ result: SiteAccessRestart) { if conclude() { settle(result) } }
+        func valid(_ runtime: BrowserExtensionRuntime?, index: Int?) -> Bool {
+            guard current(), let index, records[index].enabled, !stopped, !updating.contains(id),
+                  restartGeneration[id, default: 0] == handoff.generation, let runtime, runtime.contexts[id] == nil else { return false }
+            return true
+        }
+        guard let index = records.firstIndex(where: { $0.id == id }) else { finish(.superseded); return }
+        if releaseBarrierHeld(id: id) {
+            // Fail closed: loading now could inherit the old process's network access. The barrier stays.
+            guard conclude() else { return }
+            records[index].enabled = false
+            var disableSaveError: Error?
+            do { try persist() } catch { disableSaveError = error }
+            let message = Self.releaseTimeoutMessage(name: handoff.name, disableSaveError: disableSaveError, accessSaved: handoff.reducedAccessSaved)
+            setError(Self.failure(message), for: id)
+            _ = onExtensionRenderers?(.unavailable, handoff.profileID, baseURL)
+            settle(.releaseTimedOut(message)); return
+        }
+        let runtime = runtimes[records[index].profileID]
+        guard valid(runtime, index: index), let runtime else { finish(.superseded); return }
+        let fresh = handoff.fresh
         runtime.compatibility.install(ExtensionCompatibility.plan(manifest: fresh.webExtension.manifest), for: fresh)
         Self.siteAccessRestartWillLoad?(id)
         do {
@@ -1003,17 +1171,43 @@ struct BrowserExtensionPermissionReview {
             try runtime.controller.load(fresh)
         } catch {
             runtime.disconnectNative(fresh); runtime.compatibility.remove(fresh)
-            let result = stopped(index: index, name: name, reason: error, saved: reducedAccessSaved)
-            onExtensionRenderers?(.unavailable, profileID, baseURL)
-            return result
+            guard let failedIndex = records.firstIndex(where: { $0.id == id }), conclude() else { finish(.superseded); return }
+            let result = stopped(index: failedIndex, name: handoff.name, reason: error, saved: handoff.reducedAccessSaved)
+            _ = onExtensionRenderers?(.unavailable, handoff.profileID, baseURL)
+            settle(result); return
+        }
+        Self.siteAccessRestartDidLoad?(id)
+        // Revalidate after load: anything that ran meanwhile may have disabled, removed, updated or cancelled it.
+        guard valid(runtime, index: records.firstIndex(where: { $0.id == id })) else {
+            // Never published. If it can't be unloaded, WebKit still runs it: quarantine it (no Bam authority).
+            do {
+                if let fault = Self.siteAccessRestartUnloadFault?(id) { throw fault }
+                try runtime.controller.unload(fresh)
+            } catch {
+                if runtime.controller.extensionContexts.contains(fresh) {
+                    quarantinedContexts[id] = fresh
+                    let message = "\(handoff.name)’s restart was cancelled, but its new instance couldn’t be stopped (\(error.localizedDescription)). WebKit may still run it until you quit Bam. Quit and reopen Bam."
+                    setError(Self.failure(message), for: id)
+                }
+            }
+            runtime.disconnectNative(fresh); runtime.compatibility.remove(fresh)
+            finish(.superseded); return
         }
         runtime.contexts[id] = fresh
         runtime.reconcile()
-        onExtensionRenderers?(.restore, profileID, baseURL)
-        siteAccessNotices[id] = reducedAccessSaved
-            ? "Restarted \(name) so its website access change takes effect. Its own open pages were reopened."
-            : "Restarted \(name) so the withdrawn website access ends now. Its own open pages were reopened."
-        return .restarted
+        _ = onExtensionRenderers?(.restore, handoff.profileID, baseURL)
+        finish(.restarted)
+    }
+    /// The fail-closed message. With `disableSaveError`, the record on disk may still say enabled, so Bam may load it
+    /// again at next launch: never claim it stays off.
+    static func releaseTimeoutMessage(name: String, disableSaveError: Error?, accessSaved: Bool) -> String {
+        let lead = "Bam couldn’t finish restarting \(name): its earlier pages hadn’t closed in time"
+        guard let disableSaveError else {
+            return lead + ", so it stays off to keep its earlier website access from continuing. Quit and reopen Bam, then enable it in Manage Extensions."
+        }
+        let access = accessSaved ? "with its saved, reduced site access" : "with the site access last saved, which may be broader"
+        return lead + ", so it’s off for now. Bam also couldn’t save that it’s off (\(disableSaveError.localizedDescription)), so it may load again"
+            + " the next time Bam opens, \(access). Enable or disable it in Manage Extensions to settle it."
     }
     /// A not-yet-loaded context for the same parsed extension carrying exactly the old context's identity and
     /// validated public policy (what `load(id:)` set, plus later grant changes): identifier, base URL, unsupported
@@ -1046,7 +1240,7 @@ struct BrowserExtensionPermissionReview {
                          : "\(name)’s reduced site access couldn’t be saved, and \(name) couldn’t be stopped to apply it"
         let message = "\(lead) (\(reason.localizedDescription)). WebKit may still run it with its earlier website access until you quit Bam. Bam turned it off and closed its pages.\(saveNote) Quit and reopen Bam, then enable it in Manage Extensions."
         setError(Self.failure(message), for: id)
-        onExtensionRenderers?(.unavailable, profileID, context.baseURL)
+        _ = onExtensionRenderers?(.unavailable, profileID, context.baseURL)
         return .unloadFailed(message, stillLoaded: true)
     }
     /// The extension is unloaded after a restart failure: recorded as disabled with an actionable error; Enable recovers.
@@ -1088,7 +1282,7 @@ struct BrowserExtensionPermissionReview {
         noteMutation(id, permissions: true); loadGeneration.removeValue(forKey: id)
         if let runtime = runtimes[records[i].profileID], let context = runtime.contexts[id] { runtime.disconnectNative(context); runtime.compatibility.revoke(context) }
         var withdrewGrant = false
-        let context = context(for: id)
+        let context = siteAccessContext(for: id)
         if let context {
             withdrewGrant = Self.withdraw(from: context, keeping: [])
             context.grantedPermissions = [:]; context.grantedPermissionMatchPatterns = [:]
@@ -1104,9 +1298,14 @@ struct BrowserExtensionPermissionReview {
         try Task.checkCancellation()
         guard !loading.contains(id), let stored = records.first(where: { $0.id == id }), let runtime = runtimes[stored.profileID] else { return }
         var record = stored
-        if runtime.contexts[id] != nil { return }
+        if runtime.contexts[id] != nil || handoffs[id] != nil { return }   // a pending restart loads it itself
         // A context WebKit still runs after a failed restart must stop before a new one can load.
         try stopQuarantined(id: id, name: stored.name)
+        // Views of an earlier context still alive (a timed-out or cancelled restart) keep its network access: wait.
+        if releaseBarrierHeld(id: id) {
+            try await awaitReleaseBarrier(id: id, name: stored.name)
+            guard runtime.contexts[id] == nil, handoffs[id] == nil, !loading.contains(id) else { return }
+        }
         let token = UUID(); loadGeneration[id] = token
         loading.insert(id); defer { loading.remove(id); if loadGeneration[id] == token { loadGeneration.removeValue(forKey: id) }; armExpiryTimer(id); resumeWithdrawalRestart(id) }
         // Older disabled worker installs gain the adapter only when explicitly
@@ -1255,7 +1454,7 @@ struct BrowserExtensionPermissionReview {
             runtime.contexts.removeValue(forKey: id); runtime.disconnectNative(context); runtime.compatibility.remove(context); try? runtime.controller.unload(context); records[index].enabled = false; throw error
         }
         runtime.reconcile()
-        onExtensionRenderers?(.restore, record.profileID, context.baseURL)
+        _ = onExtensionRenderers?(.restore, record.profileID, context.baseURL)
         if review { onReloadNeeded?(record.profileID) }
         changed()
     }
@@ -1490,6 +1689,7 @@ struct BrowserExtensionPermissionReview {
         stopped = true; manager?.close(); manager = nil; library?.close(); library = nil
         expiryChecks.removeAll(); pendingWithdrawals.removeAll()
         for task in preparation.values { task.cancel() }; preparation.removeAll()
+        for id in Array(handoffs.keys) { cancelRestartHandoff(id: id, retiredTabs: nil) }
         for (_, quarantined) in quarantinedContexts {
             for runtime in runtimes.values where runtime.controller.extensionContexts.contains(quarantined) { try? runtime.controller.unload(quarantined) }
         }
@@ -1691,6 +1891,14 @@ struct BrowserExtensionPermissionReview {
     private func clearPopupPresentation() { activePopup = nil; activePopupPopover = nil; activePopupTabID = nil }
     var nativeSessions: [UUID: BrowserExtensionNativeSession] = [:]
     func shutdown() { boundsGenerations.removeAll(); disconnectAllNative(); compatibility.shutdown(); ExtensionNotificationCenter.shared.unregister(compatibility) }
+    /// The extension's own views outside Bam's tabs: its popup and its offscreen document.
+    func extensionPageViews(of context: WKWebExtensionContext) -> [WKWebView] {
+        var views: [WKWebView] = []
+        if let action = activePopup, action.webExtensionContext === context, let popup = action.popupWebView { views.append(popup) }
+        if let popup = context.action(for: nil)?.popupWebView, !views.contains(where: { $0 === popup }) { views.append(popup) }
+        if let document = compatibility.offscreen?.currentDocument(for: context.uniqueIdentifier) { views.append(document) }
+        return views
+    }
     func closePopup(for context: WKWebExtensionContext) {
         if popupContextID == context.uniqueIdentifier { popupAnchor = nil; popupTabID = nil; popupContextID = nil }
         if let action = activePopup, action.webExtensionContext === context { clearPopupPresentation(); action.closePopup() }
