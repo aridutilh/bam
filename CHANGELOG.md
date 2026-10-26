@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.25.1 build 50 — Quit dialog polish (candidate, visual acceptance pending)
+
+- The quit dialog is lighter and tidier: a cleaner heading, flat buttons, clearer Esc and Return keys, and everything lined up on one edge.
+
 ## 0.25.0 build 49 — Extension pop-out windows
 
 - Extensions can open their own pop-out window at the size and position they ask for, and move or resize it later. It stays on screen and never gets smaller than Bam's small-window minimum.
