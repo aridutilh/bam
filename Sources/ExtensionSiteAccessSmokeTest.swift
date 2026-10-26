@@ -833,7 +833,7 @@ extension ExtensionSiteAccessSmokeTest {
             }
             declinedHeld = nil
             expect(declined, "premise: Bam's delegate didn't decline exactly once (outcomes \(outcomes)), so the declined path wasn't exercised \(state(subject))")
-            expect(!declined || declinedHeld != nil, "Bam declined the popup but didn't remember its view \(state(subject))")
+            expect(!declined || declinedRecorded, "Bam declined the popup but didn't remember its view \(state(subject))")
             if declinedRecorded {
                 var declinedTimedOut = false
                 if case .releaseTimedOut = declinedResult { declinedTimedOut = true }
@@ -843,7 +843,7 @@ extension ExtensionSiteAccessSmokeTest {
                 try await host.setEnabled(true, id: subject)
                 expect(host.context(for: subject)?.isLoaded == true, "Enable didn't recover once the declined popup was released \(state(subject))")
             }
-            diagnostic["declined_popup_barrier"] = ["outcomes": outcomes, "recorded": declinedHeld != nil || declinedRecorded,
+            diagnostic["declined_popup_barrier"] = ["outcomes": outcomes, "recorded": declinedRecorded,
                                                     "popover_visible": popoverVisible, "result": String(describing: declinedResult)]
 
             // MARK: 8. Post-load reentrancy: a Disable while the fresh context loads (seam right after load) cancels it;
