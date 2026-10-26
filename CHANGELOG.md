@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.25.1 build 51 — Quit dialog and sidebar scroll bar polish (candidate, visual acceptance pending)
+## 0.25.1 build 51 — Quit dialog and sidebar scroll bar polish
 
 - The quit dialog is lighter and tidier: a cleaner heading, flat buttons, clearer Esc and Return keys, and everything lined up on one edge.
 - The sidebar's scroll bar is thinner and sits in the gap beside the page, as in Arc, so it no longer covers tab titles or close buttons. It shows while you scroll and fades away, and pointing at the sidebar's edge to resize it no longer brings it up.

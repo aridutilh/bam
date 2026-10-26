@@ -1,15 +1,29 @@
-## 0.25.1 build 51 — quit dialog and sidebar scroll bar (candidate; visual acceptance pending)
+## 0.25.1 build 51 — quit dialog and sidebar scroll bar (full build, all eleven native suites and installed visual review passed at `0c2d6cf`)
 
-Nothing here claims visual acceptance yet: that needs real after-screenshots of the installed build, inspected by Claude and root.
+**Gates (worktree `bam-scrollbar`, tested source `0c2d6cf`):**
+- `bash build.sh` passed with no failures (`build-0251c.log`): quit confirmation 13, sidebar morning 1682.
+- `bash scripts/test-runtime.sh` passed **all eleven native suites in one run** (`runtime-0251c.log`): WebKit, PiP positioning 70, PiP, Interactions 176, Automatic PiP 85, Features 371, Resources 37, Profiles 98, Extensions 826, Favicons 85, Profile activation 45 and Arc import 155.
+- An earlier run (`runtime-0251b.log`, at 20f8411) stopped at Interactions on a stale check that still required a system scroller on the tab list. The check now states the new design (no system scroller over the rows, vertical scrolling allowed, the gap thumb attached and active), test code only (`0c2d6cf`).
+- The personal Preview profile was unchanged before and after every build, install and run.
 
-**Quit dialog:** the source change and its review are recorded in the 0.25.1 build 50 notes (Bam's own font, flat panel buttons, filled keycaps, one 24-point edge). The installed after-captures are pending.
+**Quit dialog:**
+- **Installed after-capture** (`visual-feedback/quit-0251b51-dark-rest-after.png`, against `quit-025-before.png`): Bam's own sans for the heading (the display font's Q tail read as an underline), flat 32-point buttons, filled ESC and Return keycaps, and one 24-point edge for the icon, heading and buttons.
+- **Keyboard:** Esc cancels and Return quits (checked live).
 
 **Sidebar scroll bar:**
-- **Before** (installed 0.25.1 build 50, fresh fixture with 45 tabs; `visual-feedback/scrollbar/scrollbar-before-*`): AppKit's overlay thumb, 7 points wide, sat inside the rows, 10 to 3 points short of the sidebar's edge, at 164, 228 and about 323 points. Hovering it added a 15-point track and an 11-point thumb over the rows' trailing edge, beside the close buttons. At the end of the list, the thumb ran into the selected row.
-- **Change:** the list has no system scroller. A 4-point thumb (6 when hovered) is drawn in the 9-point gap between the rows and the page card, 1.5 points after the rows and 3.5 before the card. It appears only from scrolling or dragging, a visible thumb stays while pointed at, and it fades after about a second. Pointing at the gap at rest leaves it to the resize handle, whose own bar hides while the thumb is under the pointer.
-- **Component evidence:** SidebarMorningTests covers the thumb's geometry, the list span, hidden at rest, hover at rest revealing nothing, hover holding a visible thumb and suppressing the handle's bar, fading after the pointer leaves, drag scrolling with clamping, and suppression. Two mutants fail it: putting the overlay scroller back, and putting the thumb on the rows.
-- **Limitation (small follow-up):** the tab list no longer exposes an accessibility scroll bar. VoiceOver still scrolls the list and reaches every row.
-- **Not assessable from stills:** the fade timing, and how a trackpad drag of the thumb feels.
+- **Before** (installed 0.25.1 build 50, 45-tab fixture; `visual-feedback/scrollbar/scrollbar-before-*`): AppKit's 7-point thumb sat inside the rows at 164, 228 and about 323 points. Hovering it added a 15-point track over the rows' trailing edge, beside the close buttons.
+- **After** (installed build 51; `scrollbar-after-*`, measured):
+  - a 4-point thumb in the gap, 1.5 points after the rows and 3.5 points before the page card, at every width; 6 points while hovered, with no track;
+  - no thumb at rest, including with the pointer in the gap, which stays the resize handle's;
+  - fades after scrolling;
+  - dragging the thumb scrolls the list without resizing the sidebar;
+  - scroll position is kept across resizes.
+- **Acceptance:** Ari reviewed the installed build live and approved it.
+
+**Limits:**
+- The tab list no longer exposes an accessibility scroll bar. VoiceOver still scrolls the list and reaches every row (small follow-up).
+- Not assessed from stills: thumb contrast in a light-themed Space, the fade timing, trackpad momentum and drag feel.
+- The resize handle's hover bar can linger mid-height after a drag-resize. This predates the change.
 
 ## 0.25.0 build 49 — extension pop-out windows
 
