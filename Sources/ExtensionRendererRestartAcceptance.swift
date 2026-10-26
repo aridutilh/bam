@@ -73,11 +73,20 @@ import WebKit
             try await wait("\(label): an old extension tab renderer was not deallocated after the restart", timeout: 5) { views.allSatisfy { $0() == nil } }
         }
         /// The shared post-restart contract for one restart of `id`.
-        func checkRestarted(_ label: String, _ id: UUID, from before: UInt64, identity: (String, URL), visible: UUID, oldVisible: @escaping () -> WKWebView?,
+        /// `oldContext` is the context captured (weakly) just before the withdrawal. The fresh context must be a different
+        /// object: either the old one is still alive and is not the fresh one (then it must be unloaded and no longer
+        /// owned), or it has deallocated while the fresh one is alive, which proves the same.
+        func checkRestarted(_ label: String, _ id: UUID, from before: UInt64, identity: (String, URL), oldContext: () -> WKWebExtensionContext?,
+                            visible: UUID, oldVisible: @escaping () -> WKWebView?,
                             background: UUID? = nil, oldBackground: (() -> WKWebView?)? = nil, addresses: [UUID: String?]) async throws {
             try check(generation(id) == before + 1, "\(label): the restart generation is \(generation(id)) after \(before), not exactly one restart")
             guard let fresh = host.context(for: id) else { throw Failure(description: "Renderer restart: \(label): no context after the restart") }
             try check(fresh.isLoaded && fresh.uniqueIdentifier == identity.0 && fresh.baseURL == identity.1, "\(label): the fresh context lost the extension's identity or base URL")
+            if let old = oldContext() {
+                try check(old !== fresh, "\(label): the restart kept the same context object instead of loading a new one")
+                try check(!old.isLoaded && fresh.webExtensionController?.extensionContexts.contains(old) != true,
+                          "\(label): the replaced context is still loaded or still in the extension controller")
+            }
             try check(host.takeSiteAccessNotice(id: id)?.contains("Restarted") == true, "\(label): no restart notice was recorded")
             if let background { try check(controller.browsers[background] == nil, "\(label): a background extension tab kept a renderer through the restart") }
             try await wait("\(label): the visible extension tab was not recreated") {
@@ -93,19 +102,22 @@ import WebKit
 
         // 1. Site Access panel: Withhold the requested host.
         let requested = try await install("requested", ["host_permissions": ["http://127.0.0.1/*"]])
-        guard let requestedContext = host.context(for: requested) else { throw Failure(description: "Renderer restart: no context for the requested fixture") }
-        let requestedIdentity = (requestedContext.uniqueIdentifier, requestedContext.baseURL)
+        // Identity only: the fixture never holds a context strongly, so a replaced one can deallocate.
+        guard let requestedIdentity = host.context(for: requested).map({ ($0.uniqueIdentifier, $0.baseURL) }) else {
+            throw Failure(description: "Renderer restart: no context for the requested fixture")
+        }
         let visible = try await openTab(requested, active: true)
         let background = try await openTab(requested, active: false)
         try check(try await fetch(from: visible) == "read:200", "a granted requested host was not readable from the extension tab (positive control)")
         do {
             weak let oldVisible = controller.browsers[visible]
             weak let oldBackground = controller.browsers[background]
+            weak let oldContext = host.context(for: requested)
             let addresses = [visible: address(visible), background: address(background)]
             let before = generation(requested)
             guard let snapshot = host.siteAccess(id: requested), let declarations = snapshot.declarations else { throw Failure(description: "Renderer restart: no Site Access snapshot") }
             _ = try host.performSiteAccess(id: requested, profileID: profile, revision: snapshot.revision, displayed: declarations, change: .choose(.withheld))
-            try await checkRestarted("panel withhold", requested, from: before, identity: requestedIdentity, visible: visible, oldVisible: { oldVisible },
+            try await checkRestarted("panel withhold", requested, from: before, identity: requestedIdentity, oldContext: { oldContext }, visible: visible, oldVisible: { oldVisible },
                                      background: background, oldBackground: { oldBackground }, addresses: addresses)
         }
         // The background tab gets a fresh renderer when selected, also refused.
@@ -145,8 +157,9 @@ import WebKit
 
         // 3 and 4. Native withdrawals of an optional host: the extension's own permissions.remove, and expiry.
         let optional = try await install("optional", ["optional_host_permissions": ["http://127.0.0.1/*"]])
-        guard let optionalContext = host.context(for: optional) else { throw Failure(description: "Renderer restart: no context for the optional fixture") }
-        let optionalIdentity = (optionalContext.uniqueIdentifier, optionalContext.baseURL)
+        guard let optionalIdentity = host.context(for: optional).map({ ($0.uniqueIdentifier, $0.baseURL) }) else {
+            throw Failure(description: "Renderer restart: no context for the optional fixture")
+        }
         let optionalTab = try await openTab(optional, active: true)
         func request() async throws -> Bool {
             guard let web = controller.browsers[optionalTab] else { return false }
@@ -157,32 +170,39 @@ import WebKit
         try check(approved && approvedRead == "read:200", "an approved optional host was not readable (positive control): approved=\(approved) fetch=\(approvedRead)")
         do {
             weak let oldVisible = controller.browsers[optionalTab]
+            weak let oldContext = host.context(for: optional)
             let addresses = [optionalTab: address(optionalTab)]
             let before = generation(optional)
             let removed = try await controller.browsers[optionalTab]?.callAsyncJavaScript(
                 "return await browser.permissions.remove({origins: ['http://127.0.0.1/*']});", arguments: [:], contentWorld: .page) as? Bool
             try check(removed == true, "permissions.remove did not report success")
             try await wait("the extension's own permissions.remove did not restart it") { generation(optional) > before }
-            try await checkRestarted("permissions.remove", optional, from: before, identity: optionalIdentity, visible: optionalTab, oldVisible: { oldVisible }, addresses: addresses)
+            try await checkRestarted("permissions.remove", optional, from: before, identity: optionalIdentity, oldContext: { oldContext },
+                                     visible: optionalTab, oldVisible: { oldVisible }, addresses: addresses)
             try check(host.records.first { $0.id == optional }?.patterns.keys.contains(loopback.string) != true, "the removed optional host stayed in the record")
         }
         do {
             let reapproved = try await request(), reapprovedRead = try await fetch(from: optionalTab)
             try check(reapproved && reapprovedRead == "read:200", "a re-approved optional host was not readable: approved=\(reapproved) fetch=\(reapprovedRead)")
-            guard let context = host.context(for: optional) else { throw Failure(description: "Renderer restart: no context before the expiry case") }
             weak let oldVisible = controller.browsers[optionalTab]
+            weak let oldContext = host.context(for: optional)
             let addresses = [optionalTab: address(optionalTab)]
             let before = generation(optional)
             // A short time limit on the existing grant through the exact public dictionary (the per-pattern setter
-            // keeps an existing permanent expiry); shortening is not a withdrawal, the lapse is.
-            var grants = context.grantedPermissionMatchPatterns
-            try check(grants[loopback] != nil, "the re-approved grant is missing before the expiry case")
-            grants[loopback] = Date(timeIntervalSinceNow: 2)
-            context.grantedPermissionMatchPatterns = grants
-            host.persistPermissions(context)
+            // keeps an existing permanent expiry); shortening is not a withdrawal, the lapse is. Scoped, so the test
+            // holds no strong reference to the context while it waits for the restart.
+            do {
+                guard let context = host.context(for: optional) else { throw Failure(description: "Renderer restart: no context before the expiry case") }
+                var grants = context.grantedPermissionMatchPatterns
+                try check(grants[loopback] != nil, "the re-approved grant is missing before the expiry case")
+                grants[loopback] = Date(timeIntervalSinceNow: 2)
+                context.grantedPermissionMatchPatterns = grants
+                host.persistPermissions(context)
+            }
             try check(generation(optional) == before, "shortening a grant restarted the extension before it lapsed")
             try await wait("a lapsed time-limited grant did not restart the extension", timeout: 15) { generation(optional) > before }
-            try await checkRestarted("expiry", optional, from: before, identity: optionalIdentity, visible: optionalTab, oldVisible: { oldVisible }, addresses: addresses)
+            try await checkRestarted("expiry", optional, from: before, identity: optionalIdentity, oldContext: { oldContext },
+                                     visible: optionalTab, oldVisible: { oldVisible }, addresses: addresses)
             try check(host.records.first { $0.id == optional }?.patterns.keys.contains(loopback.string) != true, "the lapsed grant stayed in the record")
         }
 
