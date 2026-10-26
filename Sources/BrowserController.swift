@@ -1164,6 +1164,13 @@ import QuartzCore
     @objc func resetSidebar(_ sender: Any?) {
         session.sidebarWidth = 228; setSidebar(true)
     }
+    /// Palette and menu entry points with no menu item of their own (View ▸ Appearance needs a menu item's value).
+    /// App's View menu checkmarks follow through BrowserAppearance.didChange.
+    @objc func useDarkAppearance(_ sender: Any?) { BrowserAppearance.apply(.dark) }
+    @objc func useLightAppearance(_ sender: Any?) { BrowserAppearance.apply(.light) }
+    @objc func useSystemAppearance(_ sender: Any?) { BrowserAppearance.apply(.system) }
+    /// The Space-creation panel (it refuses, with a beep, past the Space cap).
+    @objc func newSpace(_ sender: Any?) { openSpaceCreation() }
     @objc func newTab(_ sender: Any?) { cancelPaging(); openAddress(newTab: true, empty: true) }
     @objc func closeTab(_ sender: Any?) {
         if let little = littleWindows.values.first(where: { $0.window?.isKeyWindow == true }) { little.close(); return }

@@ -221,6 +221,24 @@ import AppKit
         require(results.activateSelection() && submitted == "page" && ran == nil, "A trailing command leaves Open or Search first")
         results.moveSelection(delta: 1)
         require(results.activateSelection() && ran?.id == page.first?.command.id, "A trailing command follows the query row when no tab matches")
+        // Every palette command runs a real handler: its selector is declared as an @objc action in the app's sources
+        // (no decorative entries), and the browser actions people search for are all findable by name.
+        let sourcesURL = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Sources")
+        let appSources = ((try? FileManager.default.contentsOfDirectory(at: sourcesURL, includingPropertiesForKeys: nil)) ?? [])
+            .filter { $0.pathExtension == "swift" && !$0.lastPathComponent.contains("Test") && !$0.lastPathComponent.contains("Probe") }
+            .compactMap { try? String(contentsOf: $0, encoding: .utf8) }.joined(separator: "\n")
+        require(!appSources.isEmpty, "The app sources are readable from the test")
+        for command in PaletteCommandCatalog.commands {
+            let name = String(command.action.dropLast())
+            require(command.action.hasSuffix(":") && (appSources.contains("@objc func \(name)(_") || appSources.contains("@objc private func \(name)(_")),
+                    "Palette command \(command.id) runs a real @objc handler (\(command.action))")
+        }
+        for (query, id) in [("manage extensions", "extensions"), ("add extension", "add-extension"), ("settings", "settings"),
+                            ("downloads", "downloads"), ("history", "history"), ("new space", "new-space"), ("import from arc", "import-arc"),
+                            ("dark appearance", "appearance-dark"), ("theme", "appearance-dark"), ("reopen closed", "reopen-tab")] {
+            require(PaletteCommandCatalog.matches(query).contains { $0.command.id == id }, "\(query) finds \(id)")
+        }
+        require(Set(PaletteCommandCatalog.commands.map(\.id)).count == PaletteCommandCatalog.commands.count, "Command IDs are unique")
         // Held arrow keys (auto-repeat) step and stop at the ends; a discrete press still wraps.
         let held = (0..<4).map { BrowserTab(title: "Held \($0)", address: "https://example.com/held/\($0)", space: 0) }
         results.update(tabs: held, query: "held", activeID: UUID(), canCreate: false)

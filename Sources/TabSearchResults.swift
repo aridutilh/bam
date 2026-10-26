@@ -211,7 +211,7 @@ enum TabSearchMatcher {
             case .command(let command):
                 let live = ShortcutCommand(paletteID: command.id).map { ShortcutStore.shared.combo(for: $0).compact }
                 row.configure(title: command.title, detail: command.detail,
-                              badge: live ?? command.shortcut ?? "Command", symbol: command.symbol)
+                              badge: live ?? command.shortcut ?? "", symbol: command.symbol)
             }
             row.setFavicon(favicon(for: entry))
             row.isSelected = index == selectedIndex
