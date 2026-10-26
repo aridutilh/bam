@@ -487,6 +487,20 @@ import AppKit
                 "The thumb's column spans exactly the visible list: \(thumb.frame) vs \(listRect)")
         require(thumb.hitTest(NSPoint(x: thumb.frame.midX, y: thumb.frame.midY)) == nil,
                 "At rest the thumb is hidden and the gap belongs to the resize handle")
+        // Pointing at the gap at rest (someone reaching for the resize handle) must not reveal the thumb.
+        @MainActor func pointerEvent(_ type: NSEvent.EventType, _ local: NSPoint) -> NSEvent {
+            NSEvent.mouseEvent(with: type, location: thumb.convert(local, to: nil), modifierFlags: [], timestamp: 0,
+                               windowNumber: thumbWindow.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
+        }
+        var handleBarSuppressed: [Bool] = []
+        thumb.onInteractionChange = { handleBarSuppressed.append($0) }
+        thumb.mouseEntered(with: pointerEvent(.mouseMoved, NSPoint(x: thumb.bounds.midX, y: 4)))
+        for y in stride(from: CGFloat(2), to: thumb.bounds.height, by: 6) { thumb.mouseMoved(with: pointerEvent(.mouseMoved, NSPoint(x: thumb.bounds.midX, y: y))) }
+        spin()
+        require((0..<Int(thumb.frame.height)).allSatisfy { thumb.hitTest(NSPoint(x: thumb.frame.midX, y: thumb.frame.minY + CGFloat($0) + 0.5)) == nil } &&
+                !thumb.isInteracting && handleBarSuppressed.isEmpty,
+                "Hovering the gap at rest reveals no thumb and leaves the gap (and its bar) to the resize handle")
+        thumb.mouseExited(with: pointerEvent(.mouseMoved, NSPoint(x: thumb.bounds.midX, y: 4)))
         let thumbClip = thumbList.contentView
         thumbClip.scroll(to: NSPoint(x: 0, y: 200)); thumbList.reflectScrolledClipView(thumbClip); spin()
         // The knob, in root coordinates.
@@ -495,6 +509,19 @@ import AppKit
         let knobProbe = (0..<Int(thumb.frame.height)).map { CGFloat($0) + thumb.frame.minY + 0.5 }
             .first { thumb.hitTest(NSPoint(x: thumb.frame.midX, y: $0)) != nil }
         require(knobProbe != nil, "Scrolling shows the thumb, and it takes the pointer")
+        // Resting the pointer on a visible thumb holds it past the fade and widens it; the handle's bar hides meanwhile.
+        let onKnob = thumb.convert(NSPoint(x: thumb.frame.midX, y: knobProbe! + 2), from: thumbRoot)
+        thumb.mouseEntered(with: pointerEvent(.mouseMoved, onKnob)); thumb.mouseMoved(with: pointerEvent(.mouseMoved, onKnob))
+        RunLoop.main.run(until: Date().addingTimeInterval(1.2))
+        require(thumb.isInteracting && handleBarSuppressed == [true] && thumb.hitTest(NSPoint(x: thumb.frame.midX, y: knobProbe! + 2)) != nil,
+                "A hovered visible thumb stays past the fade, and the resize handle's bar is suppressed: \(handleBarSuppressed)")
+        thumb.mouseExited(with: pointerEvent(.mouseMoved, onKnob))
+        RunLoop.main.run(until: Date().addingTimeInterval(1.2))
+        require(!thumb.isInteracting && handleBarSuppressed == [true, false] &&
+                thumb.hitTest(NSPoint(x: thumb.frame.midX, y: knobProbe! + 2)) == nil,
+                "Once the pointer leaves, the thumb fades and the gap returns to the resize handle")
+        thumbClip.scroll(to: NSPoint(x: 0, y: 200)); thumbList.reflectScrolledClipView(thumbClip)
+        thumbClip.scroll(to: NSPoint(x: 0, y: 210)); thumbList.reflectScrolledClipView(thumbClip); spin()
         let knobMinX = thumb.frame.minX + ArkMetrics.scrollThumbLead, knobMaxX = knobMinX + ArkMetrics.scrollThumbWidth
         require(!rows.isEmpty && rowsMaxX <= thumbSidebarWidth - ArkMetrics.sidebarTrailing + 0.01 && knobMinX >= rowsMaxX + 1,
                 "The thumb starts past the rows' trailing edge: rows end \(rowsMaxX), thumb \(knobMinX)")
@@ -503,10 +530,7 @@ import AppKit
                 "Beside the thumb (not on it) the gap still belongs to the resize handle")
         // Dragging the thumb scrolls the list, clamped to its ends.
         let grab = thumb.convert(NSPoint(x: thumb.frame.midX, y: knobProbe! + 2), from: thumbRoot)
-        @MainActor func drag(_ type: NSEvent.EventType, _ local: NSPoint) -> NSEvent {
-            NSEvent.mouseEvent(with: type, location: thumb.convert(local, to: nil), modifierFlags: [], timestamp: 0,
-                               windowNumber: thumbWindow.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
-        }
+        @MainActor func drag(_ type: NSEvent.EventType, _ local: NSPoint) -> NSEvent { pointerEvent(type, local) }
         let before = thumbClip.bounds.minY
         thumb.mouseDown(with: drag(.leftMouseDown, grab))
         thumb.mouseDragged(with: drag(.leftMouseDragged, NSPoint(x: grab.x, y: grab.y + 40)))

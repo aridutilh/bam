@@ -387,6 +387,7 @@ import QuartzCore
         root.onAppearanceChange = { [weak self] in self?.applyChromeColors() }
         [sidebar, card, handle, listScrollThumb].forEach(root.addSubview)
         sidebar.onTabListChange = { [weak self] in self?.refreshListScrollThumb() }
+        listScrollThumb.onInteractionChange = { [weak self] active in self?.handle.isIndicatorSuppressed = active }
         card.wantsLayer = true
         card.layer?.cornerRadius = 10; card.layer?.masksToBounds = true
         card.layer?.borderWidth = 1

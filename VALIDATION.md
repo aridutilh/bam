@@ -1,3 +1,16 @@
+## 0.25.1 build 51 — quit dialog and sidebar scroll bar (candidate; visual acceptance pending)
+
+Nothing here claims visual acceptance yet: that needs real after-screenshots of the installed build, inspected by Claude and root.
+
+**Quit dialog:** the source change and its review are recorded in the 0.25.1 build 50 notes (Bam's own font, flat panel buttons, filled keycaps, one 24-point edge). The installed after-captures are pending.
+
+**Sidebar scroll bar:**
+- **Before** (installed 0.25.1 build 50, fresh fixture with 45 tabs; `visual-feedback/scrollbar/scrollbar-before-*`): AppKit's overlay thumb, 7 points wide, sat inside the rows, 10 to 3 points short of the sidebar's edge, at 164, 228 and about 323 points. Hovering it added a 15-point track and an 11-point thumb over the rows' trailing edge, beside the close buttons. At the end of the list, the thumb ran into the selected row.
+- **Change:** the list has no system scroller. A 4-point thumb (6 when hovered) is drawn in the 9-point gap between the rows and the page card, 1.5 points after the rows and 3.5 before the card. It appears only from scrolling or dragging, a visible thumb stays while pointed at, and it fades after about a second. Pointing at the gap at rest leaves it to the resize handle, whose own bar hides while the thumb is under the pointer.
+- **Component evidence:** SidebarMorningTests covers the thumb's geometry, the list span, hidden at rest, hover at rest revealing nothing, hover holding a visible thumb and suppressing the handle's bar, fading after the pointer leaves, drag scrolling with clamping, and suppression. Two mutants fail it: putting the overlay scroller back, and putting the thumb on the rows.
+- **Limitation (small follow-up):** the tab list no longer exposes an accessibility scroll bar. VoiceOver still scrolls the list and reaches every row.
+- **Not assessable from stills:** the fade timing, and how a trackpad drag of the thumb feels.
+
 ## 0.25.0 build 49 — extension pop-out windows
 
 Nothing here claims full Chrome compatibility or tabbed extension windows.

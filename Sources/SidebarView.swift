@@ -989,7 +989,8 @@ struct SidebarExtensionItem {
         scroll.frame = NSRect(x: ArkMetrics.sidebarLeading, y: 39, width: ArkMetrics.sidebarContentWidth(w), height: max(0, bounds.height - 39))
         let width = scroll.contentSize.width
         if table.frame.width != width { table.setFrameSize(NSSize(width: width, height: table.frame.height)) }
-        if column.width != width { column.width = width }        // The list's frame is final now: let the thumb beside the card re-read it.
+        if column.width != width { column.width = width }
+        // The list's frame is final now: let the thumb beside the card re-read it.
         scroll.onScroll?()
     }
 }

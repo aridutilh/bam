@@ -6,8 +6,9 @@ import QuartzCore
 ///
 /// - The list itself has no system scroller (an overlay scroller can only sit inside the list, over the rows'
 ///   trailing points, and becomes a 15-point track over them when macOS shows scroll bars always).
-/// - This view spans that gap column for the list's height. It draws a thin rounded thumb only while the list
-///   scrolls, while the pointer is over the column, or while the thumb is dragged, then fades out.
+/// - This view spans that gap column for the list's height. As AppKit's overlay thumb does, it appears only when the
+///   list scrolls (or while dragged), stays while the pointer rests on it (and widens), then fades out. Pointing at
+///   the gap at rest never reveals it: that gap is where the sidebar is resized.
 /// - It claims mouse events only on the visible thumb. Everywhere else in the gap, the sidebar resize handle beneath
 ///   it keeps working.
 @MainActor final class SidebarScrollIndicator: NSView {
@@ -15,11 +16,14 @@ import QuartzCore
     weak var scrollView: NSScrollView? { didSet { if oldValue !== scrollView { lastOffset = nil; refresh() } } }
     /// Off while the sidebar is hidden, collapsing or paging between Spaces.
     var isSuppressed = false { didSet { if oldValue != isSuppressed { refresh() } } }
+    /// True while the pointer is on the visible thumb or dragging it (the resize handle's own bar hides meanwhile).
+    var onInteractionChange: ((Bool) -> Void)?
+    private(set) var isInteracting = false { didSet { if oldValue != isInteracting { onInteractionChange?(isInteracting) } } }
 
     private let thumb = CALayer()
     private var knob: NSRect?
     private var lastOffset: CGFloat?
-    private var hovering = false, overThumb = false, dragging = false, flashing = false
+    private var overThumb = false, dragging = false, flashing = false
     private var dragStart: (pointerY: CGFloat, offset: CGFloat)?
     private var hideWork: DispatchWorkItem?
 
@@ -68,7 +72,9 @@ import QuartzCore
         let offset = clip.bounds.minY
         if let lastOffset, abs(lastOffset - offset) > 0.25 { flash() }
         lastOffset = offset
-        setThumb(visible: knob != nil && (flashing || hovering || dragging), animated: true)
+        // Hover only holds a thumb that is already showing; it never reveals one.
+        setThumb(visible: knob != nil && (flashing || dragging || overThumb), animated: true)
+        isInteracting = knob != nil && (overThumb || dragging)
         window?.invalidateCursorRects(for: self)
     }
 
@@ -116,14 +122,20 @@ import QuartzCore
         addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .mouseMoved, .activeInKeyWindow, .inVisibleRect],
                                        owner: self))
     }
-    override func mouseEntered(with event: NSEvent) { hovering = true; pointerMoved(event) }
-    override func mouseExited(with event: NSEvent) { hovering = false; overThumb = false; updateColor(); refresh() }
+    override func mouseEntered(with event: NSEvent) { pointerMoved(event) }
+    override func mouseExited(with event: NSEvent) { setOverThumb(false) }
     override func mouseMoved(with event: NSEvent) { pointerMoved(event) }
     private func pointerMoved(_ event: NSEvent) {
         let y = convert(event.locationInWindow, from: nil).y
-        let over = knob.map { y >= $0.minY && y <= $0.maxY } ?? false
-        if over != overThumb { overThumb = over; updateColor() }
-        refresh()
+        // Only a thumb already on screen can be pointed at; at rest the column is the resize handle's.
+        let showing = thumb.opacity > 0
+        setOverThumb(showing && (knob.map { y >= $0.minY && y <= $0.maxY } ?? false))
+    }
+    private func setOverThumb(_ over: Bool) {
+        guard over != overThumb else { return }
+        overThumb = over
+        if over { hideWork?.cancel(); flashing = false } else if !dragging { flash() }
+        updateColor(); refresh()
     }
     override func resetCursorRects() { if let knob { addCursorRect(NSRect(x: 0, y: knob.minY, width: bounds.width, height: knob.height), cursor: .arrow) } }
 
