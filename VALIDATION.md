@@ -23,6 +23,7 @@ This is one run of one suite on a diagnostic build, not the eleven-suite result.
 
 **Vendor (bounded workflows, isolated profiles, observed by root):**
 - **Session Buddy 4.1.2** (`8501db3`): titles, save 2, close 2, restore 2 with correct titles, addresses and content, the collection kept across an extension-page reload, and copy/paste 2, all without site access. Not multiwindow or a relaunch.
+- **Dark Reader 4.9.133** on the final candidate `4ed2f83`: after "No requested sites" and reloading the pages, the original page returned, and Dark Reader stayed enabled with no release timeout. Cleanup confirmation is pending.
 - **Dark Reader 4.9.133** (`3ab4043`): after "On all sites" was changed to "No requested sites" and the page reloaded, the original styling returned. It stayed enabled and the choice persisted. This shows injected styling withdrawn; it doesn't show network-read refusal.
 
 **Pending (each must pass, or remain a listed limitation):**
