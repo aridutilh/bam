@@ -192,6 +192,12 @@ enum ExtensionSiteAccessSmokeTest {
         guard let before = host.siteAccess(id: extensionID), let shown = before.declarations else { throw fail("no editable snapshot " + diagnostics(tabID, nil)) }
         preWithholdGranted = liveContext()?.grantedPermissionMatchPatterns.keys.map(\.string).sorted() ?? []
         let withheld = try host.performSiteAccess(id: extensionID, profileID: profile, revision: before.revision, displayed: shown, change: .choose(.withheld))
+        // Two-phase restart (work/site-access-two-phase-final-contract.md): wait for this generation's result.
+        let restartGeneration = host.restartGeneration[extensionID] ?? 0
+        if host.isRestarting(id: extensionID) {
+            let result = await host.restartCompletion(id: extensionID, generation: restartGeneration)
+            guard result == .restarted else { throw fail("the withhold's restart ended \(String(describing: result)) " + diagnostics(nil, nil)) }
+        }
         guard withheld.state.mode == .withheld else { throw fail("the engine did not withhold " + diagnostics(tabID, nil)) }
         checks += 1
 
@@ -424,6 +430,10 @@ extension ExtensionSiteAccessSmokeTest {
                 guard let snapshot = host.siteAccess(id: id), let shown = snapshot.declarations else { throw fail("no editable snapshot to allow \(state(id))") }
                 _ = try host.performSiteAccess(id: id, profileID: profile, revision: snapshot.revision, displayed: shown, change: .choose(.allRequested))
             }
+            /// The restart the previous (synchronous) call started, by its generation; nil if it started none.
+            func awaitRestart(_ id: UUID) async -> BrowserExtensions.SiteAccessRestart? {
+                await host.restartCompletion(id: id, generation: host.restartGeneration[id] ?? 0)
+            }
             func address(_ id: UUID) -> String? { controller.session.tabs.first(where: { $0.id == id })?.address }
             func renderer(_ id: UUID) -> ObjectIdentifier? { controller.browsers[id].map(ObjectIdentifier.init) }
             /// Selects an extension tab and waits for its page (in its current renderer) to load.
@@ -498,15 +508,16 @@ extension ExtensionSiteAccessSmokeTest {
             watched = WeakView(controller.browsers[extensionTab])
             let wasFirstResponder = controller.browsers[extensionTab].map { web in window.firstResponder.map { ($0 as? NSView)?.isDescendant(of: web) ?? false } ?? false } ?? false
             try withhold(subject)
-            // Where is a still-alive old renderer held? Evidence only (the assertions below are unchanged): alive right
-            // after the call returns, then main run-loop turns until it deallocates (a deferred WebKit/AppKit reference).
-            var release: [String: Any] = ["was_first_responder": wasFirstResponder, "alive_on_return": watched.web != nil]
-            var turns = 0
-            while watched.web != nil, turns < 100 { try? await Task.sleep(nanoseconds: 10_000_000); turns += 1 }
-            release["turns_until_released"] = watched.web == nil ? turns : -1
-            diagnostic["first_restart_release"] = release
+            // Phase A returned (old context unloaded, E retired); phase B loads once E's old renderer is gone.
+            var release: [String: Any] = ["was_first_responder": wasFirstResponder, "alive_on_return": watched.web != nil,
+                                          "pending_on_return": host.isRestarting(id: subject)]
             let notice = host.takeSiteAccessNotice(id: subject)
-            expect(notice?.contains("Restarted") == true, "withholding didn't report a restart \(state(subject))")
+            expect(notice?.contains("Restarting") == true && host.isRestarting(id: subject) && host.context(for: subject) == nil,
+                   "withholding didn't start a pending restart: notice \(notice ?? "none") \(state(subject))")
+            let firstResult = await awaitRestart(subject)
+            release["result"] = String(describing: firstResult)
+            diagnostic["first_restart_release"] = release
+            expect(firstResult == .restarted, "the withhold's restart ended \(String(describing: firstResult)) \(state(subject))")
             let secondContext = host.context(for: subject)
             expect(secondContext != nil && secondContext !== firstContext && secondContext?.isLoaded == true,
                    "the restart didn't produce a fresh loaded context \(state(subject))")
@@ -542,7 +553,7 @@ extension ExtensionSiteAccessSmokeTest {
 
             // MARK: 3. Allow again: A marks again; no restart, same context.
             try allow(subject)
-            expect(host.takeSiteAccessNotice(id: subject) == nil && host.context(for: subject) === secondContext, "re-allowing restarted A")
+            expect(host.takeSiteAccessNotice(id: subject) == nil && !host.isRestarting(id: subject) && host.context(for: subject) === secondContext, "re-allowing restarted A")
             let reallowed = try await reload(siteTab, after: withheld["document"])
             expect(reallowed["js"] == "js" && reallowed["css"] == "injected", "after re-allowing, A doesn't mark the new document: \(reallowed) \(state(subject))")
             let afterAllow = try await storage(subject)
@@ -553,7 +564,9 @@ extension ExtensionSiteAccessSmokeTest {
             expect(renderer(extensionTab) != nil, "E lost its renderer before Revoke")
             watched = WeakView(controller.browsers[extensionTab])
             try host.revokePermissions(id: subject)
-            expect(host.takeSiteAccessNotice(id: subject)?.contains("Restarted") == true, "Revoke Permissions didn't restart A \(state(subject))")
+            expect(host.takeSiteAccessNotice(id: subject)?.contains("Restarting") == true, "Revoke Permissions didn't restart A \(state(subject))")
+            let revokeResult = await awaitRestart(subject)
+            expect(revokeResult == .restarted, "Revoke's restart ended \(String(describing: revokeResult)) \(state(subject))")
             expect(host.context(for: subject) !== secondContext, "Revoke Permissions didn't make a fresh context")
             expect(renderer(extensionTab) == nil && address(extensionTab) == extensionAddress, "background E wasn't retired with its tab kept (renderer \(renderer(extensionTab) != nil), address \(address(extensionTab) ?? "missing"))")
             expect(handoffs.last?["old_renderer_released"] as? Bool == true && watched.web == nil, "background E's old renderer stayed alive: \(handoffs.last ?? [:])")
@@ -571,8 +584,10 @@ extension ExtensionSiteAccessSmokeTest {
             controller.select(extensionTab); controller.view.layoutSubtreeIfNeeded()
             struct InjectedFailure: LocalizedError { let text: String; var errorDescription: String? { text } }
             BrowserExtensions.siteAccessRestartLoadFault = { $0 == subject ? InjectedFailure(text: "injected restart load failure (test)") : nil }
+            try withhold(subject)
+            let loadFailure = await awaitRestart(subject)
             var failedMessage: String?
-            do { try withhold(subject) } catch BrowserExtensionSiteAccessFailure.failed(let message) { failedMessage = message }
+            if case .loadFailed(let message) = loadFailure { failedMessage = message }
             BrowserExtensions.siteAccessRestartLoadFault = nil
             expect(failedMessage?.contains("Enable it again") == true, "a failed restart didn't report an actionable failure: \(failedMessage ?? "no error")")
             expect(host.context(for: subject) == nil && host.records.first { $0.id == subject }?.enabled == false && (host.errors[subject] ?? "").contains("Enable"),
@@ -672,6 +687,102 @@ extension ExtensionSiteAccessSmokeTest {
             expect((quarantineRecovered["js"] ?? "").isEmpty && (quarantineRecovered["css"] ?? "").isEmpty,
                    "after the quarantine recovery (withheld), A marks a new document: \(quarantineRecovered) \(state(subject))")
 
+            // MARK: 7. Fail closed: an old view still alive at the deadline (the fixture holds E's renderer) and the
+            // disable can't be saved (this run's own host directory made read-only): no fresh load, honest message.
+            try allow(subject)
+            try await showExtensionTab(extensionTab)
+            let hostDirectory = root.appendingPathComponent("host", isDirectory: true)
+            BrowserExtensions.siteAccessRestartReleaseDeadline = 0.3
+            var heldRenderer: WKWebView? = controller.browsers[extensionTab]
+            try withhold(subject)
+            let timeoutGeneration = host.restartGeneration[subject] ?? 0
+            try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: hostDirectory.path)
+            let timeoutResult = await host.restartCompletion(id: subject, generation: timeoutGeneration)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: hostDirectory.path)
+            // Enable WHILE the old renderer is still held: the release barrier must refuse it (nothing loads).
+            host.permissionPrompt = { _ in true }
+            var heldEnableError: String?
+            do { try await host.setEnabled(true, id: subject) } catch { heldEnableError = error.localizedDescription }
+            withExtendedLifetime(heldRenderer) {}   // the strong hold provably spans the timeout and the Enable attempt
+            expect(heldEnableError?.contains("haven’t closed yet") == true && host.context(for: subject) == nil,
+                   "Enable loaded while the timed-out restart's old renderer was still alive: \(heldEnableError ?? "no error") \(state(subject))")
+            BrowserExtensions.siteAccessRestartReleaseDeadline = 2
+            heldRenderer = nil
+            var timeoutMessage = ""
+            if case .releaseTimedOut(let message) = timeoutResult { timeoutMessage = message }
+            expect(timeoutMessage.contains("couldn’t finish restarting") && timeoutMessage.contains("couldn’t save that it’s off")
+                   && timeoutMessage.contains("may load again") && !timeoutMessage.contains("stays off"),
+                   "the fail-closed timeout with a failed save wasn't reported honestly: \(String(describing: timeoutResult))")
+            expect(host.context(for: subject) == nil && !host.isRestarting(id: subject) && host.records.first { $0.id == subject }?.enabled == false,
+                   "the timeout loaded or kept a context \(state(subject))")
+            let timeoutTabError = await waitUntil({ (controller.tabErrors[extensionTab] ?? "").contains("unavailable") })
+            expect(timeoutTabError, "after the timeout, E doesn't show the unavailable error (not 'restarting'): \(controller.tabErrors[extensionTab] ?? "none")")
+            let lateResult = await host.restartCompletion(id: subject, generation: timeoutGeneration)
+            expect(lateResult == timeoutResult, "a late waiter didn't get the retained result: \(String(describing: lateResult))")
+            host.permissionPrompt = { _ in true }
+            try await host.setEnabled(true, id: subject)
+            expect(host.context(for: subject)?.isLoaded == true && host.siteAccess(id: subject)?.state.mode == .withheld,
+                   "Enable didn't recover A after the timeout \(state(subject))")
+
+            // MARK: 7b. Disable cancels a pending restart while the old renderer is held: Enable still waits for it.
+            try allow(subject)
+            try await showExtensionTab(extensionTab)
+            BrowserExtensions.siteAccessRestartReleaseDeadline = 0.3
+            var cancelHeld: WKWebView? = controller.browsers[extensionTab]
+            try withhold(subject)
+            let cancelGeneration = host.restartGeneration[subject] ?? 0
+            try host.disable(id: subject)
+            let cancelResult = await host.restartCompletion(id: subject, generation: cancelGeneration)
+            var cancelEnableError: String?
+            do { try await host.setEnabled(true, id: subject) } catch { cancelEnableError = error.localizedDescription }
+            withExtendedLifetime(cancelHeld) {}
+            expect(cancelResult == .superseded && cancelEnableError?.contains("haven’t closed yet") == true && host.context(for: subject) == nil,
+                   "after a cancelled restart, Enable loaded while the old renderer was held: \(String(describing: cancelResult)), \(cancelEnableError ?? "no error") \(state(subject))")
+            BrowserExtensions.siteAccessRestartReleaseDeadline = 2
+            cancelHeld = nil
+            try await host.setEnabled(true, id: subject)
+            expect(host.context(for: subject)?.isLoaded == true, "Enable didn't load once the cancelled restart's renderer was released \(state(subject))")
+
+            // MARK: 8. Post-load reentrancy: a Disable while the fresh context loads (seam right after load) cancels it;
+            // the loaded fresh context is unloaded, never published.
+            try allow(subject)
+            var reentrantContext: WKWebExtensionContext?
+            BrowserExtensions.siteAccessRestartDidLoad = { id in
+                guard id == subject else { return }
+                reentrantContext = host.context(for: subject)   // nil: not yet published
+                try? host.disable(id: subject)
+            }
+            try withhold(subject)
+            let reentrantResult = await awaitRestart(subject)
+            BrowserExtensions.siteAccessRestartDidLoad = nil
+            expect(reentrantResult == .superseded && reentrantContext == nil && host.context(for: subject) == nil
+                   && host.records.first { $0.id == subject }?.enabled == false && !host.isRestarting(id: subject),
+                   "a Disable during the fresh load didn't cancel it cleanly: \(String(describing: reentrantResult)) \(state(subject))")
+            try await host.setEnabled(true, id: subject)
+            expect(host.context(for: subject)?.isLoaded == true, "Enable didn't recover A after the cancelled load \(state(subject))")
+
+            // MARK: 8b. Cancelled during load AND the fresh context can't be unloaded: quarantined, not dropped.
+            try allow(subject)
+            var cancelledFresh: WKWebExtensionContext?
+            BrowserExtensions.siteAccessRestartDidLoad = { id in
+                guard id == subject else { return }
+                cancelledFresh = runtime?.controller.extensionContexts.first { $0.baseURL == identity.1 }
+                try? host.disable(id: subject)
+                BrowserExtensions.siteAccessRestartUnloadFault = { $0 == subject ? InjectedFailure(text: "injected cancelled-load unload failure (test)") : nil }
+            }
+            try withhold(subject)
+            let cancelledResult = await awaitRestart(subject)
+            BrowserExtensions.siteAccessRestartDidLoad = nil; BrowserExtensions.siteAccessRestartUnloadFault = nil
+            expect(cancelledResult == .superseded && cancelledFresh.map { host.isQuarantined($0) && runtime?.owns($0) == false } == true
+                   && (host.errors[subject] ?? "").contains("couldn’t be stopped") && host.context(for: subject) == nil,
+                   "an unstoppable cancelled fresh context wasn't quarantined: \(String(describing: cancelledResult)), error \(host.errors[subject] ?? "none")")
+            try await host.setEnabled(false, id: subject)   // stops it for real
+            expect(cancelledFresh?.isLoaded == false, "Disable didn't stop the quarantined cancelled context")
+            cancelledFresh = nil
+            try await host.setEnabled(true, id: subject)
+            expect(host.context(for: subject)?.isLoaded == true, "Enable didn't recover A after the quarantined cancelled load \(state(subject))")
+            diagnostic["fail_closed"] = ["timeout": String(describing: timeoutResult), "reentrant": String(describing: reentrantResult)]
+
             diagnostic["findings"] = findings.count
             diagnostic["tab_ids"] = ["before": tabsBefore, "after": tabsAfter]
             diagnostic["subject_before"] = record(subjectBefore); diagnostic["subject_after"] = record(subjectAfter)
@@ -684,7 +795,9 @@ extension ExtensionSiteAccessSmokeTest {
 
         // MARK: Cleanup: the owned persistent store (data, then its directory), verified.
         BrowserExtensions.siteAccessRestartLoadFault = nil; BrowserExtensions.siteAccessRestartUnloadFault = nil
-        BrowserExtensions.siteAccessRestartWillLoad = nil
+        BrowserExtensions.siteAccessRestartWillLoad = nil; BrowserExtensions.siteAccessRestartDidLoad = nil
+        BrowserExtensions.siteAccessRestartReleaseDeadline = 2
+        try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: root.appendingPathComponent("host", isDirectory: true).path)
         var cleanup: [String: Any] = [:]
         var dataBytesBefore: Int?, dataBytesAfter: Int?
         var dataErrors: [String] = []
