@@ -57,6 +57,22 @@ import Foundation
                   "Compact ordering or overflow was wrong: \(compact.shown.map(\.filename)) more=\(compact.more)")
         try check(compact.shown.dropFirst().map(\.filename) == ["f0", "f1", "f2", "f3"], "Finished items lost their newest-first order")
         try check(DownloadPresentation.compact([]).shown.isEmpty && DownloadPresentation.compact([]).more == 0, "An empty list was not empty")
+        // A file's identity: stable while unchanged, gone when moved, different for a new file at the same path
+        // (the reviewer's repro: delete or move A, then download B to the freed path).
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("bam-download-identity-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let path = folder.appendingPathComponent("photo.png")
+        try Data("first file".utf8).write(to: path)
+        let first = DownloadFileIdentity.of(path)
+        try check(first != nil && DownloadFileIdentity.of(path) == first, "An unchanged file's identity was unstable")
+        try FileManager.default.moveItem(at: path, to: folder.appendingPathComponent("moved.png"))
+        try check(DownloadFileIdentity.of(path) == nil, "A moved file still had an identity at its old path")
+        try Data("first file".utf8).write(to: path)
+        try check(DownloadFileIdentity.of(path) != first, "A different file at the freed path matched the old identity")
+        try FileManager.default.removeItem(at: path)
+        try check(DownloadFileIdentity.of(path) == nil, "A deleted file still had an identity")
+
         try check(DownloadPresentation.showAllTitle(more: 2) == "Show All (2 more)" && DownloadPresentation.showAllTitle(more: 0) == "Show All", "Show All title was wrong")
     }
 }

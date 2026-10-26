@@ -10,31 +10,38 @@ struct DownloadActions {
     var showAll: () -> Void = {}
 }
 
-/// File icons immediately, then real Quick Look thumbnails of finished files.
+/// File icons immediately, then real Quick Look thumbnails of finished files. A thumbnail
+/// belongs to one download's own file: it is keyed by the download and the file identity
+/// recorded when Bam saved it, and is shown only while the file at that path still has that
+/// identity. A file deleted, moved or replaced (even by another download at the same path)
+/// falls back to its type icon; a late thumbnail of an old file is stored only under the old key.
 @MainActor final class DownloadThumbnails {
     var onUpdate: (() -> Void)?
-    private var cache: [URL: NSImage] = [:]
-    private var requested: Set<URL> = []
+    private var cache: [String: NSImage] = [:]
+    private var requested: Set<String> = []
 
     func image(for item: DownloadSnapshot) -> NSImage {
-        if item.status == .finished, let url = item.destinationURL {
-            if let thumbnail = cache[url] { return thumbnail }
-            request(url)
-            return NSWorkspace.shared.icon(forFile: url.path)
-        }
-        let type = UTType(filenameExtension: (item.filename as NSString).pathExtension) ?? .data
-        return NSWorkspace.shared.icon(for: type)
+        let typeIcon = NSWorkspace.shared.icon(for: UTType(filenameExtension: (item.filename as NSString).pathExtension) ?? .data)
+        guard item.status == .finished, let url = item.destinationURL, let saved = item.fileIdentity,
+              DownloadFileIdentity.of(url) == saved else { return typeIcon }
+        let key = Self.key(item.id, saved)
+        if let thumbnail = cache[key] { return thumbnail }
+        request(url, key: key, identity: saved)
+        return typeIcon
     }
 
-    private func request(_ url: URL) {
-        guard requested.insert(url).inserted, FileManager.default.fileExists(atPath: url.path) else { return }
+    static func key(_ id: UUID, _ identity: String) -> String { "\(id.uuidString)|\(identity)" }
+
+    private func request(_ url: URL, key: String, identity: String) {
+        guard requested.insert(key).inserted else { return }
         let request = QLThumbnailGenerator.Request(fileAt: url, size: CGSize(width: 240, height: 180), scale: 2,
                                                    representationTypes: .thumbnail)
         QLThumbnailGenerator.shared.generateBestRepresentation(for: request) { [weak self] representation, _ in
             guard let cgImage = representation?.cgImage else { return }
             DispatchQueue.main.async {
-                guard let self else { return }
-                self.cache[url] = NSImage(cgImage: cgImage, size: .zero)
+                // The file may have changed while Quick Look worked; keep the image only if it is still that file.
+                guard let self, DownloadFileIdentity.of(url) == identity else { return }
+                self.cache[key] = NSImage(cgImage: cgImage, size: .zero)
                 self.onUpdate?()
             }
         }

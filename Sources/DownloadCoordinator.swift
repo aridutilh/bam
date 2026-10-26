@@ -164,6 +164,7 @@ import Darwin
             // Exclusive atomic rename: an intervening file can never be overwritten.
             try Self.finishFile(staging: staging, destination: destination)
             record.stagingURL = nil
+            record.fileIdentity = DownloadFileIdentity.of(destination)
             record.status = .finished
             record.detail = "Finished"
             record.fraction = 1
@@ -377,6 +378,7 @@ import Darwin
     var totalBytes: Int64 = -1
     let startedAt = Date()
     var endedAt: Date?
+    var fileIdentity: String?
     var status = DownloadCoordinator.Status.choosingDestination {
         didSet { if !isActive, endedAt == nil { endedAt = Date() } }
     }
@@ -385,7 +387,7 @@ import Darwin
     var snapshot: DownloadCoordinator.Snapshot {
         .init(id: id, filename: filename, sourceURL: sourceURL, destinationURL: destinationURL,
               status: status, detail: detail, fractionCompleted: fraction, completedBytes: completedBytes, totalBytes: totalBytes,
-              startedAt: startedAt, endedAt: endedAt)
+              startedAt: startedAt, endedAt: endedAt, fileIdentity: fileIdentity)
     }
 }
 

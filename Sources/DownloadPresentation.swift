@@ -15,7 +15,22 @@ struct DownloadSnapshot {
     let totalBytes: Int64
     var startedAt = Date()
     var endedAt: Date? = nil
+    /// The finished file's identity when Bam saved it (`DownloadFileIdentity`), so a later file at the same path is not mistaken for it.
+    var fileIdentity: String? = nil
     var isActive: Bool { status == .choosingDestination || status == .downloading }
+}
+
+/// Identifies one file on disk: inode, creation and modification times, and size. A file
+/// deleted or moved and another saved at the same path gets a different identity.
+enum DownloadFileIdentity {
+    static func of(_ url: URL) -> String? {
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path) else { return nil }
+        let inode = (attributes[.systemFileNumber] as? NSNumber)?.uint64Value ?? 0
+        let created = (attributes[.creationDate] as? Date)?.timeIntervalSinceReferenceDate ?? 0
+        let modified = (attributes[.modificationDate] as? Date)?.timeIntervalSinceReferenceDate ?? 0
+        let size = (attributes[.size] as? NSNumber)?.int64Value ?? -1
+        return "\(inode):\(created):\(modified):\(size)"
+    }
 }
 
 /// What a download row or tile shows and which actions it offers.
