@@ -292,6 +292,8 @@ extension ExtensionSiteAccessSmokeTest {
         controller.layoutBrowser(); controller.view.layoutSubtreeIfNeeded()
         let host = controller.browserExtensions
         var diagnostic: [String: Any] = ["store": "owned-persistent"]
+        /// The persistent extension data an owned store holds (session storage is in memory and not part of it).
+        let persistentDataTypes: Set<WKWebExtension.DataType> = [.local, .synchronized]
         var bodyError: Error?
 
         do {
@@ -641,11 +643,13 @@ extension ExtensionSiteAccessSmokeTest {
             var removeFailure: String?
             do { try await host.remove(id: subject) } catch { removeFailure = error.localizedDescription }
             BrowserExtensions.siteAccessRestartUnloadFault = nil
-            let keptRecords = await host.extensionController(profileID: profile)?.dataRecords(ofTypes: WKWebExtensionController.allExtensionDataTypes) ?? []
-            let keptData = keptRecords.filter { $0.uniqueIdentifier == identity.0 }.map(\.totalSizeInBytes).reduce(0, +)
+            let keptRecords = (await host.extensionController(profileID: profile)?.dataRecords(ofTypes: persistentDataTypes) ?? [])
+                .filter { $0.uniqueIdentifier == identity.0 }
+            let keptData = keptRecords.map(\.totalSizeInBytes).reduce(0, +)
+            let keptErrors = keptRecords.flatMap(\.errors).map(\.localizedDescription)
             let recordKept = host.records.contains(where: { $0.id == subject })
-            expect(removeFailure?.contains("couldn’t be stopped") == true && recordKept && keptData > 0,
-                   "a Remove that couldn't stop the quarantined context didn't fail safely: \(removeFailure ?? "no error"), record kept \(recordKept), data \(keptData) bytes")
+            expect(removeFailure?.contains("couldn’t be stopped") == true && recordKept && keptData > 0 && keptErrors.isEmpty,
+                   "a Remove that couldn't stop the quarantined context didn't fail safely: \(removeFailure ?? "no error"), record kept \(recordKept), data \(keptData) bytes, query errors \(keptErrors)")
             // Disable stops it for real.
             try await host.setEnabled(false, id: subject)
             expect(beforeQuarantine?.isLoaded == false && host.context(for: subject) == nil, "Disable didn't stop the quarantined context \(state(subject))")
@@ -673,12 +677,21 @@ extension ExtensionSiteAccessSmokeTest {
         BrowserExtensions.siteAccessRestartLoadFault = nil; BrowserExtensions.siteAccessRestartUnloadFault = nil
         BrowserExtensions.siteAccessRestartWillLoad = nil
         var cleanup: [String: Any] = [:]
+        var dataBytesBefore: Int?, dataBytesAfter: Int?
+        var dataErrors: [String] = []
         if let extensionController = host.extensionController(profileID: profile) {
-            let records = await extensionController.dataRecords(ofTypes: WKWebExtensionController.allExtensionDataTypes)
-            await extensionController.removeData(ofTypes: WKWebExtensionController.allExtensionDataTypes, from: records)
-            let after = await extensionController.dataRecords(ofTypes: WKWebExtensionController.allExtensionDataTypes)
-            cleanup["data_bytes"] = [records.map(\.totalSizeInBytes).reduce(0, +), after.map(\.totalSizeInBytes).reduce(0, +)]
-        }
+            let records = await extensionController.dataRecords(ofTypes: persistentDataTypes)
+            dataErrors += records.flatMap { record in record.errors.map { "query \(record.uniqueIdentifier): \($0.localizedDescription)" } }
+            await extensionController.removeData(ofTypes: persistentDataTypes, from: records)
+            let after = await extensionController.dataRecords(ofTypes: persistentDataTypes)
+            dataErrors += after.flatMap { record in record.errors.map { "after removal \(record.uniqueIdentifier): \($0.localizedDescription)" } }
+            dataBytesBefore = records.map(\.totalSizeInBytes).reduce(0, +)
+            dataBytesAfter = after.map(\.totalSizeInBytes).reduce(0, +)
+            cleanup["data_records"] = [records.count, after.count]
+        } else { dataErrors.append("no extension controller to remove the owned store's data") }
+        cleanup["data_bytes_before"] = dataBytesBefore.map { NSNumber(value: $0) } ?? NSNull()
+        cleanup["data_bytes_after"] = dataBytesAfter.map { NSNumber(value: $0) } ?? NSNull()
+        cleanup["data_errors"] = dataErrors
         controller.prepareToClose(persistSession: false); window.orderOut(nil); window.close()
         try? await Task.sleep(nanoseconds: 500_000_000)   // WebKit writes context state on unload
         // WebKit's persistent store for Configuration(identifier:): Library/WebKit/<bundle or process>/WebExtensions/<UUID>
@@ -688,17 +701,21 @@ extension ExtensionSiteAccessSmokeTest {
         let app = Bundle.main.bundleIdentifier ?? ProcessInfo.processInfo.processName
         let candidates = [library.appendingPathComponent(app).appendingPathComponent("WebExtensions").appendingPathComponent(name),
                           library.appendingPathComponent("WebExtensions").appendingPathComponent(name)]
-        var removed: [String] = []
+        var removed: [String] = [], removalErrors: [String] = []
         for directory in candidates where directory.lastPathComponent == name && directory.deletingLastPathComponent().lastPathComponent == "WebExtensions"
             && FileManager.default.fileExists(atPath: directory.path) {
-            if (try? FileManager.default.removeItem(at: directory)) != nil { removed.append(directory.path) }
+            do { try FileManager.default.removeItem(at: directory); removed.append(directory.path) }
+            catch { removalErrors.append("\(directory.path): \(error.localizedDescription)") }
         }
+        cleanup["store_directory_errors"] = removalErrors
         try? await Task.sleep(nanoseconds: 300_000_000)
         let remaining = candidates.filter { FileManager.default.fileExists(atPath: $0.path) }.map(\.path)
         cleanup["store_directories_removed"] = removed; cleanup["store_directories_remaining"] = remaining
         diagnostic["cleanup"] = cleanup
         if !remaining.isEmpty { findings.append("the owned extension store wasn't removed: \(remaining)") }
-        if let bytes = cleanup["data_bytes"] as? [Int64], bytes.count == 2, bytes[1] != 0 { findings.append("the owned extension store still has \(bytes[1]) bytes after removal") }
+        if dataBytesAfter != 0 { findings.append("the owned extension store's data wasn't verifiably removed: \(dataBytesAfter.map(String.init) ?? "unknown") bytes after removal") }
+        if !dataErrors.isEmpty { findings.append("the owned extension store's data reported errors: \(dataErrors)") }
+        if !removalErrors.isEmpty { findings.append("the owned extension store's directory couldn't be removed: \(removalErrors)") }
         if let data = try? JSONSerialization.data(withJSONObject: diagnostic, options: .sortedKeys) {
             print("BAM_SITE_ACCESS_RESTART " + String(decoding: data, as: UTF8.self)); fflush(stdout)
         }
