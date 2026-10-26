@@ -1,6 +1,6 @@
 ## Local 0.23.0 — Site Access, explicit consent and tab metadata (full build, all eleven native suites, the repository runtime script and final vendor checks passed at `4ed2f83`; ready for Ari's publication approval; local, not published)
 
-Nothing here claims full Chrome compatibility or readiness to ship.
+Nothing here claims full Chrome compatibility, and nothing has been published.
 
 **Final candidate `4ed2f83`** (logs `chrome-4ed2f83-integration-*.log`, `chrome-4ed2f83-full-native-driver.log`): the full integrated `bash build.sh` passed, including every component suite, and **all eleven native suites passed** in canonical Bam Preview: WebKit, PiP, Interactions **173**, Auto PiP **85**, Features **371**, Resources **37**, Profiles **98**, Extensions **818**, Favicons **85**, Profile Activation **45** and Arc import **155**. The repository-mandated `bash scripts/test-runtime.sh` then passed all eleven suites again on the same candidate (`chrome-4ed2f83-repository-runtime.log`).
 
@@ -14,7 +14,7 @@ Every required app gate has passed. The candidate stays local until Ari approves
 **What made it pass:**
 - **Product:** the restart's release barrier now also waits for a popup WebKit prepared and asked Bam to present, even when Bam declined (`1da37b3`).
 - **Product:** a worker without Bam's native transport (as after Revoke Permissions, which withdraws it) keeps its top-level event listeners instead of failing to load (`4ed2f83`). Before this, the worker never loaded, and WebKit never answered messages sent to it.
-- **Tests:** the consent fixture opens its popup through Bam's toolbar button rather than WebKit's preloading getter, and strictly requires no observed test view to be alive at the fresh load. The worker fixture checks the live context after Revoke's restart. Every await is bounded and named.
+- **Tests:** the consent fixture opens its popup through Bam's toolbar button rather than WebKit's preloading getter, and strictly requires no observed test view to be alive at the fresh load. The worker fixture checks the live context after Revoke's restart. Its instrumented stages are named, and their requests and single awaits are time-bounded (diagnostics only: page timers don't bound every WebKit call or cleanup).
 
 **Source and component (in `build.sh`; counts as measured on the named or reviewed candidates; root confirms them in the full build):** site-access model, engine (44), panel, style and Manage Extensions site access; explicit consent (26, at `a2d1e53`); native host withdrawal (55, at `3c3d9ee`); tab metadata model (87) and facade (44); extension compatibility (81 at `3ea78b5`, including a worker with no native transport). They cover saved, revision-bound Site Access changes, stale-answer refusal including same-context change-back, implicit URL requests answered without review or record change, WebKit-side removal and expiry restarting once with exact expiry dates, failed-save and failed-restart wording that never claims a save, and the metadata facade's deadlines, ordering and error preservation against a fake redacting engine.
 
@@ -32,7 +32,7 @@ Every required app gate has passed. The candidate stays local until Ari approves
 - **Dark Reader 4.9.133** on the final candidate `4ed2f83`: Manage Extensions › Site Access was changed from "On all sites" to "No requested sites" and the Reload Pages prompt accepted. The original page styling returned, and Dark Reader stayed enabled with no release timeout; its only attention item was the fixture's `tabs.create` onboarding restriction. Afterwards it had no site access, and cleanup released every owned page, controller and runtime, with the store confirmed gone. This is visible-injection withdrawal after a reload, not a network-read test.
 - **Dark Reader 4.9.133** (`3ab4043`): after "On all sites" was changed to "No requested sites" and the page reloaded, the original styling returned. It stayed enabled and the choice persisted. This shows injected styling withdrawn; it doesn't show network-read refusal.
 
-**Not covered by this candidate's gates (listed as limitations until tested):**
+**Declared coverage limits (not outstanding release gates; these behaviours are not claimed as tested):**
 1. `permissions.request` routed to Bam's review on the installed engine (approve, decline, stale).
 2. activeTab with the site withheld.
 
