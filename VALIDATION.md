@@ -1,4 +1,4 @@
-## Local 0.23.0 — Site Access, explicit consent and tab metadata (integration `3770465`; restart path FAILED natively, held)
+## Local 0.23.0 — Site Access, explicit consent and tab metadata (native fixtures pass at `52fdfae`; full suite and vendor pending, held)
 
 Evidence is separated by kind. Nothing here claims full Chrome compatibility or readiness to ship.
 
@@ -8,14 +8,14 @@ Evidence is separated by kind. Nothing here claims full Chrome compatibility or 
 - Content-script withdrawal across the broad and specific grant variants (`b1ed61f`, `297f6eb`).
 - Implicit reads with zero reviews and scripting refused on a withheld site (`6456eb0`).
 - Extension-page network reads of a withdrawn site retained by the running process; refused only once every old extension page was released and a fresh context ran (`297f6eb`).
-- Tab metadata fixture: 58 checks passed (`d15a5be`).
+- Tab metadata fixture: 58 checks passed (`d15a5be`, again at `52fdfae`).
+- Integrated `52fdfae`, two-phase restart (the fresh context loads only after every old extension view it retired has deallocated; otherwise it fails closed): renderer fixture **75 passed**, site fixture **133 passed**, tab metadata **58 passed**. A real JavaScript `permissions.remove` and an expired time-limited grant each restarted the extension, and the fetch from the reopened page was refused; storage survived in an owned persistent store. Not yet: the full eleven-suite run and the vendor recheck.
 - Integrated `3770465` (renderer and site-access fixtures): **failed.** At the first panel withhold the old extension renderer was still alive at the handoff and the reopened extension tab read the withdrawn site (200); later handoffs released it first and Revoke's fetch was refused. All four marker forms passed (6 documents, 0 findings); storage survived the restart in an owned persistent store (subject starts 1→2, other extension unchanged); store cleanup verified; a quarantined extension's tab and window mutations were refused. Source analysis: a fresh context that loads while any old extension page of the install is still alive is related to the old web content process, which keeps the withdrawn host (work/extension-restart-process-reuse-analysis.md). The real `permissions.remove` and expiry cases were not reached.
 
 **Vendor:** real Session Buddy 4.1.2 showed tab titles, saved and restored (including indexed paste) without any site grant (`ba6b007`).
 
 **Pending gates (each must pass, or remain listed as a limitation):**
-1. Bam restart with an extension page open in a Bam tab: every old extension page released **before** the fresh context loads, same tab ID and address, fetch refused, storage preserved in a persistent store (non-persistent stores reset), other extensions untouched, load-failure recovery through Enable, quarantine recovery after quitting Bam.
-2. A real JavaScript `permissions.remove` and a lapsed time-limited grant: restart, then fetch refused.
+1. ~~Bam restart with an extension page open in a Bam tab~~ and 2. ~~a real `permissions.remove` and a lapsed grant~~: passed in native fixtures at `52fdfae` (above); to be confirmed in the full eleven-suite run.
 3. `permissions.request` routed to Bam's review on the installed engine (approve, decline, stale).
 4. activeTab still works with the site withheld.
 5. Post-integration vendor recheck: Session Buddy and one site-access-heavy extension.
