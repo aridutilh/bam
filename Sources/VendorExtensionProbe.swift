@@ -69,7 +69,12 @@ import WebKit
     private var modeRounds: [[[String: Any]]] = []
     private var controllerConfigurationPersistent: Bool?
     /// A weak handle on an owned page; nil once WebKit has released it.
-    private final class WeakView { weak var view: WKWebView?; init(_ view: WKWebView) { self.view = view } }
+    private final class WeakView {
+        weak var view: WKWebView?
+        let role: String
+        init(_ view: WKWebView, role: String = "page") { self.view = view; self.role = role }
+    }
+    private final class WeakObject { weak var object: AnyObject?; init(_ object: AnyObject?) { self.object = object } }
     /// Every action popup page seen during the run, so each one's release can be confirmed before the
     /// owned store is removed.
     private var observedPopups: [WeakView] = []
@@ -769,16 +774,32 @@ import WebKit
         // Peek pages, and the action popup. All must be released before the owned store is removed.
         var ownedViews: [WeakView] = []
         if let browser = controller {
-            ownedViews += browser.browsers.values.map(WeakView.init)
-            ownedViews += browser.littleWindows.values.compactMap(\.webView).map(WeakView.init)
-            ownedViews += browser.peeks.values.compactMap(\.webView).map(WeakView.init)
+            for (id, web) in browser.browsers {
+                let scheme = web.url?.scheme ?? "none"
+                let role = scheme == "webkit-extension" ? "extension-tab" : (["http", "https"].contains(scheme) ? "web-tab" : "other-tab(\(scheme))")
+                ownedViews.append(WeakView(web, role: role + (browser.session.activeID == id ? "(selected)" : "")))
+            }
+            ownedViews += browser.littleWindows.values.compactMap(\.webView).map { WeakView($0, role: "little-bam") }
+            ownedViews += browser.peeks.values.compactMap(\.webView).map { WeakView($0, role: "peek") }
         }
+        // Which owner survives, each tracked on its own (evidence only): the extension host and its profile runtime
+        // hold cached surfaces with strong page references; a page's configuration holds the WKWebExtensionController.
+        var hostProbe = WeakObject(nil), runtimeProbe = WeakObject(nil)
+        // The UI state at the moment the run ends: something still on the stack (a menu being tracked, a modal or a
+        // sheet) keeps its owner alive until it unwinds.
+        observations["teardown_ui_state"] = [
+            "run_loop_mode": RunLoop.current.currentMode?.rawValue ?? "none",
+            "modal_window": NSApp.modalWindow.map { String(describing: type(of: $0)) } ?? "none",
+            "attached_sheets": NSApp.windows.filter { $0.attachedSheet != nil }.count,
+            "visible_windows": NSApp.windows.filter(\.isVisible).map { String(describing: type(of: $0)) }
+        ]
         var temporaryStorage: URL?
         // The WebKit extension controller itself (public object), captured before host shutdown: its release
         // is the evidence for the background page, which is WebKit-internal and not observed directly.
         weak var extensionController: AnyObject?
         if #available(macOS 15.4, *), let browser = controller {
             let host = browser.browserExtensions
+            hostProbe = WeakObject(host)
             temporaryStorage = host.storageURL
             if let id = extensionID {
                 if let context = host.context(for: id) {
@@ -787,8 +808,9 @@ import WebKit
                     // and not reachable; its release is covered only by the controller's.
                     extensionController = context.webExtensionController
                     let runtime = context.webExtensionController?.delegate as? BrowserExtensionRuntime
+                    runtimeProbe = WeakObject(runtime)
                     if let offscreen = runtime?.compatibility.offscreen?.currentDocument(for: context.uniqueIdentifier) {
-                        ownedViews.append(WeakView(offscreen))
+                        ownedViews.append(WeakView(offscreen, role: "offscreen"))
                     }
                     // Quiet: not read at all (the getter would create and load a popup during teardown). Quiet makes no
                     // claim that no popup exists (a person may open one); any popup is not inspected and, like the
@@ -843,7 +865,16 @@ import WebKit
             let cleanup = await self.cleanUpNormalRun(run, controllerReleased: { releasedController == nil && extensionController == nil },
                                                       extensionControllerReleased: { extensionController == nil },
                                                       livePages: { ownedViews.filter { $0.view != nil }.count })
-            self.observations["normal_cleanup"] = cleanup.report
+            var report = cleanup.report
+            // Evidence after the gate (released or timed out): which of the owners and pages are still alive.
+            report["release_evidence"] = [
+                "browser_controller_released": releasedController == nil,
+                "extension_host_released": hostProbe.object == nil,
+                "profile_runtime_released": runtimeProbe.object == nil,
+                "extension_controller_released": extensionController == nil,
+                "pages": ownedViews.map { ["role": $0.role, "alive": $0.view != nil] }
+            ]
+            self.observations["normal_cleanup"] = report
             var text = reasonText
             if !modeValid { text += "; normal-profile mode not established (\(self.observations["normal_mode_verdict"] ?? "unknown"))" }
             if !cleanup.clean { text += "; the run's own website store or directory could not be confirmed removed" }
