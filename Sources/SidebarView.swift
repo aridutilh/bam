@@ -89,6 +89,8 @@ struct SidebarExtensionItem {
     var onToggleSidebar: (() -> Void)?
     var onSpaceChange: ((Int) -> Void)?
     var onManageSpaces: (() -> Void)?
+    /// Builds a Space's context menu from the browser's real Space actions (nil: Manage Spaces only).
+    var spaceContextMenu: ((Int) -> NSMenu?)?
     var onMoveTab: ((UUID, Int) -> Void)?
     /// The footer's Downloads button and its menu: Bam's existing Downloads, History and Recently Closed windows.
     var onShowDownloads: (() -> Void)?
@@ -217,6 +219,7 @@ struct SidebarExtensionItem {
                 guard let button else { return }; self?.onSpaceChange?(button.index)
             }
             button.manage = { [weak self] in self?.onManageSpaces?() }
+            button.contextMenu = { [weak self, weak button] in button.flatMap { self?.spaceContextMenu?($0.index) } }
             button.acceptDrop = { [weak self, weak button] id in
                 guard let self, let button, button.index != self.selectedSpace else { return false }
                 return self.onDropOnSpace?(id, button.index) ?? false
@@ -277,6 +280,7 @@ struct SidebarExtensionItem {
         page.reorderSaved = { [weak self] in self?.onReorderSavedTab?($0, $1) }
         page.newTab = { [weak self] in self?.onNewTab?() }
         page.manageSpaces = { [weak self] in self?.onManageSpaces?() }
+        page.spaceMenu = { [weak self] in self?.spaceContextMenu?($0) }
         page.move = { [weak self] in self?.onMoveTab?($0, $1) }
         page.toggleFolder = { [weak self] in self?.onToggleFolder?($0) }
         page.renameFolder = { [weak self] in self?.onRenameFolder?($0) }
@@ -527,6 +531,8 @@ struct SidebarExtensionItem {
     var faviconProvider: ((UUID) -> NSImage?)?
     var select: ((UUID)->Void)?; var close: ((UUID)->Void)?; var pin: ((UUID)->Void)?; var newTab: (()->Void)?
     var manageSpaces: (() -> Void)?
+    /// The context menu for this page's Space (by Space ID).
+    var spaceMenu: ((Int) -> NSMenu?)?
     var move: ((UUID, Int) -> Void)?
     var favorite: ((UUID) -> Void)?
     var editSaved: ((UUID) -> Void)?
@@ -577,6 +583,10 @@ struct SidebarExtensionItem {
         table.identifier = NSUserInterfaceItemIdentifier("sidebar-tab-list")
         scroll.documentView = table
         heading.handler = { [weak self] in self?.manageSpaces?() }
+        heading.contextMenu = { [weak self] in
+            guard let self, let id = self.spaceAppearance?.id else { return nil }
+            return self.spaceMenu?(id)
+        }
         // Rows move under a still pointer while scrolling; hover follows the row actually under it.
         scroll.contentView.postsBoundsChangedNotifications = true
         scrollObserver = NotificationCenter.default.addObserver(forName: NSView.boundsDidChangeNotification, object: scroll.contentView, queue: nil) { [weak self] _ in
@@ -1010,6 +1020,33 @@ enum ArkPalette {
     }
 }
 /// Sidebar geometry in points, matched to Arc/Yab at a ~230-point sidebar.
+/// A single-line editable field cell whose text (drawn and while editing) sits on the field's vertical center with
+/// an 8pt side inset. Sheets restyled without a bezel otherwise draw editable text hard against the top-left edge.
+final class ArkCenteredFieldCell: NSTextFieldCell {
+    static let sideInset: CGFloat = 8
+    static func editable() -> ArkCenteredFieldCell {
+        let cell = ArkCenteredFieldCell(textCell: "")
+        cell.isEditable = true; cell.isSelectable = true; cell.isScrollable = true
+        cell.usesSingleLineMode = true; cell.lineBreakMode = .byClipping; cell.wraps = false
+        return cell
+    }
+    /// The text's line box, centered vertically within `rect` after the side inset.
+    func centeredRect(_ rect: NSRect) -> NSRect {
+        let inner = rect.insetBy(dx: Self.sideInset, dy: 0)
+        let font = self.font ?? .systemFont(ofSize: NSFont.systemFontSize)
+        let lineHeight = min(inner.height, ceil(NSLayoutManager().defaultLineHeight(for: font)))
+        return NSRect(x: inner.minX, y: inner.minY + ((inner.height - lineHeight) / 2).rounded(), width: inner.width, height: lineHeight)
+    }
+    override func drawingRect(forBounds rect: NSRect) -> NSRect { centeredRect(rect) }
+    override func titleRect(forBounds rect: NSRect) -> NSRect { centeredRect(rect) }
+    override func edit(withFrame rect: NSRect, in controlView: NSView, editor textObj: NSText, delegate: Any?, event: NSEvent?) {
+        super.edit(withFrame: centeredRect(rect), in: controlView, editor: textObj, delegate: delegate, event: event)
+    }
+    override func select(withFrame rect: NSRect, in controlView: NSView, editor textObj: NSText, delegate: Any?, start selStart: Int, length selLength: Int) {
+        super.select(withFrame: centeredRect(rect), in: controlView, editor: textObj, delegate: delegate, start: selStart, length: selLength)
+    }
+}
+
 @MainActor enum ArkMetrics {
     static let folderIndent: CGFloat = 14
     /// Indentation shrinks for deep trees so titles keep this much room.
@@ -1583,6 +1620,8 @@ private final class ArkSpaceButton: ArkHoverButton, SpaceTinted {
     private var emoji: String?
     private var tint = ArkPalette.ink
     var manage: (() -> Void)?
+    /// The Space's context menu (rename, icon, color, profile, folder, order); nil falls back to Manage Spaces.
+    var contextMenu: (() -> NSMenu?)?
     /// A dragged tab or folder dropped here moves to this Space.
     var acceptDrop: ((UUID) -> Bool)?
     private var dropHovered = false { didSet { if oldValue != dropHovered { needsDisplay = true } } }
@@ -1624,6 +1663,7 @@ private final class ArkSpaceButton: ArkHoverButton, SpaceTinted {
                           opacity: selected || hovered || dropHovered ? 1 : 0.62)
     }
     override func menu(for event: NSEvent) -> NSMenu? {
+        if let menu = contextMenu?() { return menu }
         let menu = NSMenu()
         let item = NSMenuItem(title: "Manage Spaces…", action: #selector(manageFromMenu), keyEquivalent: "")
         item.target = self; menu.addItem(item); return menu
@@ -1638,6 +1678,9 @@ private final class ArkSpaceHeading: ArkHoverButton, SpaceTinted {
     private var symbolName = "sparkles"
     private var emoji: String?
     private var tint = ArkPalette.ink
+    /// The Space's context menu, as on its footer button.
+    var contextMenu: (() -> NSMenu?)?
+    override func menu(for event: NSEvent) -> NSMenu? { contextMenu?() }
     init() { super.init(frame: .zero); toolTip = "Manage Spaces" }
     required init?(coder: NSCoder) { fatalError() }
     func configure(_ space: BrowserSpace) {

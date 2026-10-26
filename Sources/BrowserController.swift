@@ -401,6 +401,7 @@ import QuartzCore
         sidebar.onToggleSidebar = { [weak self] in self?.toggleSidebar(nil) }
         sidebar.onSpaceChange = { [weak self] space in self?.changeSpace(space) }
         sidebar.onManageSpaces = { [weak self] in self?.manageSpaces(nil) }
+        sidebar.spaceContextMenu = { [weak self] in self?.spaceContextMenu(for: $0) }
         sidebar.onMoveTab = { [weak self] id, space in self?.moveTab(id, toSpace: space) }
         // Footer Downloads button and its menu: the existing windows (View > Downloads ⌘J, History ⌘Y, Recently Closed).
         // Picture in Picture left the footer; it stays in View > Picture in Picture (⌥⌘P) and the command palette.

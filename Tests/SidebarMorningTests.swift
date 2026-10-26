@@ -37,6 +37,15 @@ import AppKit
         require(ArkMetrics.favoriteIconRect(in: tileBounds, imageSize: NSSize(width: 64, height: 32)).size == NSSize(width: 16, height: 8),
                 "A non-square icon keeps its aspect")
 
+        // MARK: Space sheet fields: editable text sits on the field's vertical center, inset from the edge.
+        let fieldCell = ArkCenteredFieldCell.editable(); fieldCell.font = .systemFont(ofSize: 13)
+        let fieldBounds = NSRect(x: 0, y: 0, width: 200, height: 26)
+        let textBox = fieldCell.drawingRect(forBounds: fieldBounds)
+        require(abs(textBox.midY - fieldBounds.midY) <= 0.5 && textBox.minX == ArkCenteredFieldCell.sideInset
+                    && textBox.height < fieldBounds.height && fieldCell.titleRect(forBounds: fieldBounds) == textBox,
+                "Space name text is vertically centered and inset (\(textBox) in \(fieldBounds))")
+        require(fieldCell.isEditable && fieldCell.isSelectable && fieldCell.usesSingleLineMode, "The centered field cell stays editable")
+
         // MARK: In a real sidebar: 8 Favorites lay out 4×2 and a 32px icon is copied 1:1 at 2x.
         // 230pt gives a fractional tile (49.25pt) with the sidebar's content edges, so alignment is exercised.
         let sidebar = SidebarView(frame: NSRect(x: 0, y: 0, width: 230, height: 720))
