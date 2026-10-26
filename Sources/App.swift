@@ -146,12 +146,15 @@ import WebKit
     func presentOnboarding() {
         guard onboarding == nil, let controller, let window, window.attachedSheet == nil else { return }
         controller.setOnboardingActive(true)
-        var model = OnboardingModel(bookmarks: ChromeBookmarks.load(from: ChromeBookmarks.defaultStoreURL()))
+        // Only offered when Arc's own layout file is there; the import itself is Bam's previewed sheet.
+        var model = OnboardingModel(bookmarks: ChromeBookmarks.load(from: ChromeBookmarks.defaultStoreURL()),
+                                    arcAvailable: FileManager.default.isReadableFile(atPath: ArcImport.defaultSourceURL().path))
         if let first = controller.session.spaces.first {
             model.colorIndex = first.colorIndex; model.spaceName = first.name; model.spaceSymbol = first.symbol
         }
         let welcome = OnboardingController(model: model)
-        welcome.onApply = { [weak self] result in self?.controller?.applyOnboarding(result) }
+        var followUps: [OnboardingFollowUp] = []
+        welcome.onApply = { [weak self] result in self?.controller?.applyOnboarding(result); followUps = result.followUps }
         // A quit mid-welcome writes a session; the started mark keeps the next
         // launch from mistaking that profile for a pre-onboarding one.
         if controller.privateMode != true { UserDefaults.standard.set(true, forKey: OnboardingGate.startedKey) }
@@ -166,9 +169,34 @@ import WebKit
             }
             self.window?.makeKeyAndOrderFront(nil)
             self.window?.makeFirstResponder(self.controller?.commandWebView)
+            // What the person chose during setup, opened now that the window is theirs again.
+            self.runOnboardingFollowUps(followUps)
         }
         onboarding = welcome
         welcome.present(over: window)
+    }
+    /// Runs setup's choices in order. Arc's import sheet holds the window, so whatever follows waits
+    /// until that sheet ends (imported or cancelled), or runs at once if the sheet couldn't open.
+    private func runOnboardingFollowUps(_ queue: [OnboardingFollowUp]) {
+        guard let controller, let next = queue.first else { return }
+        let rest = Array(queue.dropFirst())
+        switch next {
+        case .importFromArc:
+            if let importer = controller.presentArcImport(initialSourceURL: ArcImport.defaultSourceURL()) {
+                let ended = importer.onDismiss
+                importer.onDismiss = { [weak self] in
+                    ended?()
+                    DispatchQueue.main.async { self?.runOnboardingFollowUps(rest) }
+                }
+            } else { runOnboardingFollowUps(rest) }
+        case .findExtension(let name):
+            if #available(macOS 15.4, *) {
+                controller.browserExtensions.showLibrary(profileID: controller.commandProfileID, relativeTo: window, query: name)
+            }
+            runOnboardingFollowUps(rest)
+        case .none:
+            runOnboardingFollowUps(rest)
+        }
     }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         // Fixtures deliberately minimize, replace, and close their windows.
@@ -180,13 +208,13 @@ import WebKit
         // normal browsing and the fresh private preview use this confirmation.
         guard let controller else { return .terminateNow }
         quitCoordinator.request(confirmation: {
-            let alert = NSAlert()
-            alert.messageText = "Are you sure you want to quit Bam?"
-            alert.informativeText = "All Bam windows will close. Playing audio and video will stop."
-            alert.addButton(withTitle: "Cancel")
-            alert.addButton(withTitle: "Quit Bam").keyEquivalent = ""
+            // Asked unless the person chose "don't ask again" (Settings › General restores it).
+            let preference = QuitConfirmationPreference()
+            guard preference.asksBeforeQuitting else { return true }
             sender.activate(ignoringOtherApps: true)
-            return self.runQuitAlert(alert) == .alertSecondButtonReturn
+            let choice = QuitConfirmationPanel.run(over: self.window, appName: QuitConfirmationModel.appName(info: Bundle.main.infoDictionary),
+                                                   icon: NSApp.applicationIconImage)
+            return QuitConfirmationModel.resolve(choice, preference: preference, persist: controller.privateMode != true)
         }, save: {
             await controller.flushSessionForTermination()
         }, saveFailure: {

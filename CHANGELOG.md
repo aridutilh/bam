@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.24.0 build 48 — Search, sidebar and everyday surfaces
+
+- A wider, steadier search box that also finds browser actions, like Add Extensions, New Space or Import from Arc.
+- A tidier sidebar that runs to its edge, with richer Space menus, folders that animate open and closed, and smoother tab dragging, including into Favorites.
+- Downloads open as a compact list from the sidebar (⌘J), with progress, Open, Show in Finder and Cancel. Show All opens a thumbnail library.
+- A redesigned quit dialog, with "Quit, and don't ask again" (Settings turns asking back on).
+- Pinch to zoom webpages (⌘0 resets), and pinch to resize floating video.
+- Site controls in the address field: connection, zoom, Keep This Site Awake, and which extensions can use the site.
+- Extension search shows the Chrome Web Store build first, then Firefox. Safari extensions stay available.
+- A guided setup: a short tour, an optional Arc import you preview first, and an optional password manager to find in Add Extensions.
+- Not included: physical-gesture certification, emoji or gradient themes, new extension tab or window support, password-vault sign-in, or importing passwords or other browsers. See VALIDATION.md.
+
 ## 0.23.0 build 47 — Chrome compatibility
 
 - Assign the verified Chrome Web Store ID to new store installs through the public native runtime API. Keep legacy installs, folder imports, unverified packages and Safari bundles on their existing installation IDs. Resource origins remain per-installation UUIDs.

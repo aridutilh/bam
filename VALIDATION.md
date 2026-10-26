@@ -1,3 +1,94 @@
+## 0.24.0 build 48 — visual and interaction release (all eleven native suites passed across runs with two targeted retries; app-only rebuild at `67b9a57` passed a focused visual retest)
+
+Nothing here claims Arc or Yab parity.
+
+**Build (not one clean uninterrupted full build).**
+- At `009b80e` (log `build-024.log`), `bash build.sh` compiled, signed and packaged the optimized app.
+- It then ran the component suites through the penultimate one and failed compiling the Settings appearance test: its command lacked the new `QuitConfirmationModel.swift`.
+- `72b4dab` fixed that command only.
+- The two remaining suites were then rerun and passed (`build-final-components.log`): Settings appearance focus **16** and the shortcut tests.
+
+**Component suites for this work** (from those logs):
+
+| Suite | Checks |
+|---|---|
+| sidebar morning | **1667** |
+| sidebar performance | **316** |
+| folders | **126** |
+| tab search | **126** |
+| model | **301** |
+| session writer | **39** |
+| quit coordinator | **36** |
+| quit confirmation | **13** (also after `67b9a57`) |
+| download presentation | **22**, then **26** after the layout repair (`67b9a57`) |
+| PiP pinch | **8** |
+| site settings | **18** (also after `67b9a57`) |
+| extension source preference | **7** (also after `a81efcf`) |
+| extension catalog, including cross-store ranking | **115** (`a81efcf`) |
+| onboarding | **73** |
+| extension compatibility | **81** |
+| extension enumeration | **91** |
+| offscreen | **29** |
+
+They cover:
+- **Palette:** geometry, non-clipping and selection.
+- **Sidebar:** the edge, centered fields, the folder lid animation's endpoints, and drag and drop order into Favorites.
+- **Quit:** preference, keys and the private-window guard.
+- **Downloads:** status text, actions, toggling, and thumbnails tied to file identity.
+- **Pinch:** aspect, anchor and limits.
+- **Site settings:** connection text, zoom limits, and the bounded extension list.
+- **Extensions:** the Chrome-first, Firefox-second build order. `a81efcf` adds cross-listing ranking: at equal relevance an installable Chrome Web Store listing leads, then Firefox, then Safari (the native Dark Reader finding).
+- **Onboarding:** steps, and that both follow-ups run in order.
+
+**Native suites** (canonical Bam Preview, build before the visual repairs; logs `runtime-024.log`, `runtime-remaining-024.log`, `runtime-last-two-024.log`, `interaction-retry-024.log`):
+- All eleven suites eventually passed: WebKit, PiP (positioning 70), Interactions **173**, Auto PiP **85**, Features **371**, Resources **37**, Profiles **98**, Extensions **818**, Favicons **85**, Profile Activation **45** and Arc import **155**.
+- **Not one uninterrupted green run:**
+  - two suites failed once and passed on a single targeted retry: Interactions (an initial Space-0 liveness failure) and Profile Activation (an initial focus failure);
+  - the rest ran in the original run plus bounded continuations.
+- The personal profile's files were unchanged against the post-save backup.
+
+**Manual native checks (fresh Preview, before the repairs), passed:**
+- the centered, wider, subdued search;
+- Manage Extensions from search opens the manager;
+- the Space context menu, whose theme action focuses the color field;
+- the Spaces layout;
+- site settings zoom 100% → 110% and Reset;
+- the quit dialog: Escape cancels and Quit exits.
+
+**Repairs after the native gates.** Native acceptance found four problems:
+- the Downloads panel was partly off screen;
+- site settings content was clipped, with heavy edges;
+- the quit keycaps overlapped their labels;
+- Dark Reader's Chrome listing came second.
+
+They were fixed in `67b9a57` (popover layout and keycaps) and `a81efcf` (store ordering).
+
+**Rebuild and retest** (02:30, log `visual-acceptance-final.md`):
+- **Rebuild:** an app-only optimized compile, sign and package at `67b9a57`. These fixes changed only popover layout, keycaps and store ordering, so the unaffected eleven suites weren't rerun. The repair's component tests passed (above), and an independent source review was clean.
+- **Session:** a fresh, disposable `--fresh-preview --onboarding` session. It exited 0 and the personal profile was unchanged.
+- **Passed:**
+  - Downloads stays within the screen edge, has no gray frame, and a second click on its button closes it;
+  - site settings padding and frame, hostname/HTTPS, and zoom 100% → 110% and Reset;
+  - the quit labels and keycaps are separate; Cancel restores the browser and Return quits;
+  - searching Dark Reader selects the official darkreader.org Chrome result first, with Firefox second;
+  - setup: the tour, color and name steps, and the Arc choice ("Start fresh" was taken, to avoid personal data);
+  - choosing Bitwarden led to the summary, then Add Extensions searching for Bitwarden after setup;
+  - the system default browser was unchanged;
+  - a folder created from the Space menu collapses to its closed glyph.
+- **What the search check is:** live catalog evidence, not a new vendor install or vault certification.
+
+**Limits:**
+- **Physical input:** automation can't perform a physical pinch or feel haptics, and the held-key check delivered a single event. So trackpad pinch, two-finger PiP movement, haptic feel and held-arrow repeat are covered by model and event tests only.
+- **Smoothness:** folder animation and drag smoothness are not perceptually certified.
+- **Not manually checked:** a non-empty Downloads thumbnail gallery (covered by component and native feature tests), and popover placement at the right screen edge or across multiple monitors.
+
+**Limits:**
+- Gesture code is covered by model and event tests, which don't prove physical trackpad feel.
+- There's no emoji or gradient picker (Change Space Icon uses the SF Symbol picker).
+- Extension tab and window compatibility is unchanged.
+- Safari import is retained.
+- Setup offers Bam's previewed Arc import and a password-manager search in Add Extensions. It doesn't sign in to a vault or import passwords or other browsers.
+
 ## 0.23.0 — Site Access, explicit consent and tab metadata (full build, all eleven native suites, the repository runtime script and final vendor checks passed at `4ed2f83`)
 
 Nothing here claims full Chrome compatibility.

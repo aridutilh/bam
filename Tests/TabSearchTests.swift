@@ -221,6 +221,81 @@ import AppKit
         require(results.activateSelection() && submitted == "page" && ran == nil, "A trailing command leaves Open or Search first")
         results.moveSelection(delta: 1)
         require(results.activateSelection() && ran?.id == page.first?.command.id, "A trailing command follows the query row when no tab matches")
+        // Every palette command runs a real handler: its selector is declared as an @objc action in the app's sources
+        // (no decorative entries), and the browser actions people search for are all findable by name.
+        let sourcesURL = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Sources")
+        let appSources = ((try? FileManager.default.contentsOfDirectory(at: sourcesURL, includingPropertiesForKeys: nil)) ?? [])
+            .filter { $0.pathExtension == "swift" && !$0.lastPathComponent.contains("Test") && !$0.lastPathComponent.contains("Probe") }
+            .compactMap { try? String(contentsOf: $0, encoding: .utf8) }.joined(separator: "\n")
+        require(!appSources.isEmpty, "The app sources are readable from the test")
+        for command in PaletteCommandCatalog.commands {
+            let name = String(command.action.dropLast())
+            require(command.action.hasSuffix(":") && (appSources.contains("@objc func \(name)(_") || appSources.contains("@objc private func \(name)(_")),
+                    "Palette command \(command.id) runs a real @objc handler (\(command.action))")
+        }
+        for (query, id) in [("manage extensions", "extensions"), ("add extension", "add-extension"), ("settings", "settings"),
+                            ("downloads", "downloads"), ("history", "history"), ("new space", "new-space"), ("import from arc", "import-arc"),
+                            ("dark appearance", "appearance-dark"), ("theme", "appearance-dark"), ("reopen closed", "reopen-tab")] {
+            require(PaletteCommandCatalog.matches(query).contains { $0.command.id == id }, "\(query) finds \(id)")
+        }
+        require(Set(PaletteCommandCatalog.commands.map(\.id)).count == PaletteCommandCatalog.commands.count, "Command IDs are unique")
+        // The palette never extends past the window: ten rows (three commands, the query and six tabs) at the 540pt
+        // minimum window rise and scroll; a short list keeps the stable centered top.
+        for (height, rows) in [(CGFloat(540), 10), (540, 3), (900, 10), (300, 10)] {
+            let resultsHeight = CGFloat(rows) * PaletteGeometry.rowHeight + 8
+            let fit = PaletteGeometry.fit(windowHeight: height, resultsHeight: resultsHeight)
+            let bottom = fit.top + PaletteGeometry.chromeHeight + fit.visibleResultsHeight
+            require(fit.top >= 0 && bottom <= height - PaletteGeometry.margin + 0.001 || height < 2 * PaletteGeometry.margin + PaletteGeometry.chromeHeight,
+                    "The palette fits a \(height)pt window with \(rows) rows (top \(fit.top), bottom \(bottom))")
+            if bottom <= height - PaletteGeometry.margin, fit.visibleResultsHeight == resultsHeight {
+                require(fit.top == PaletteGeometry.top(forWindowHeight: height) || fit.top < PaletteGeometry.top(forWindowHeight: height),
+                        "A fitting card keeps or rises from the centered top")
+            }
+        }
+        let tenRows = 10 * PaletteGeometry.rowHeight + 8
+        let atMinimum = PaletteGeometry.fit(windowHeight: 540, resultsHeight: tenRows)
+        require(atMinimum.visibleResultsHeight == tenRows && atMinimum.top < PaletteGeometry.top(forWindowHeight: 540)
+                    && atMinimum.top + PaletteGeometry.chromeHeight + tenRows <= 540 - PaletteGeometry.margin,
+                "Ten rows at the 540pt minimum: the card rises from the centered top and shows every row unclipped")
+        let short = PaletteGeometry.fit(windowHeight: 400, resultsHeight: tenRows)
+        require(short.visibleResultsHeight < tenRows && short.top == PaletteGeometry.margin,
+                "Ten rows in a 400pt window: the card rises to the margin and its results scroll")
+        require(PaletteGeometry.fit(windowHeight: 900, resultsHeight: 3 * PaletteGeometry.rowHeight + 8).top == PaletteGeometry.top(forWindowHeight: 900),
+                "A short list keeps the stable centered top")
+        // Scrolling results keep the keyboard selection in view.
+        let scroller = NSScrollView(frame: NSRect(x: 0, y: 0, width: 540, height: 120))
+        let scrolled = TabSearchResultsView(frame: NSRect(x: 0, y: 0, width: 540, height: 400))
+        scroller.documentView = scrolled
+        let scrollRows = (0..<8).map { BrowserTab(title: "Row \($0)", address: "https://example.com/row/\($0)", space: 0) }
+        scrolled.update(tabs: scrollRows, query: "row", activeID: UUID(), canCreate: false)
+        scrolled.frame.size.height = scrolled.preferredHeight
+        for _ in 0..<7 { scrolled.moveSelection(delta: 1, repeating: true) }
+        let shown = scroller.contentView.documentVisibleRect
+        let selectedTop = CGFloat(scrolled.selectedIndex) * PaletteGeometry.rowHeight
+        require(selectedTop >= shown.minY - 0.5 && selectedTop + PaletteGeometry.rowHeight - 2 <= shown.maxY + 0.5,
+                "The selected row scrolls into view (row \(scrolled.selectedIndex), visible \(shown.minY)–\(shown.maxY))")
+        // Rebindable commands show their live chord in the palette, mapped to the same command the menu binds.
+        for (id, shortcut) in [("new-tab", ShortcutCommand.newTab), ("next-space", .nextSpace), ("previous-space", .previousSpace),
+                               ("settings", .settings), ("toggle-sidebar", .toggleSidebar)] {
+            require(ShortcutCommand(paletteID: id) == shortcut && PaletteCommandCatalog.commands.contains { $0.id == id },
+                    "Palette command \(id) shows the live \(shortcut) chord")
+        }
+        // Held arrow keys (auto-repeat) step and stop at the ends; a discrete press still wraps.
+        let held = (0..<4).map { BrowserTab(title: "Held \($0)", address: "https://example.com/held/\($0)", space: 0) }
+        results.update(tabs: held, query: "held", activeID: UUID(), canCreate: false)
+        let lastRow = results.selectedIndex + 3
+        for _ in 0..<10 { results.moveSelection(delta: 1, repeating: true) }
+        require(results.selectedIndex == lastRow, "A held Down arrow stops at the last row instead of wrapping (\(results.selectedIndex))")
+        for _ in 0..<10 { results.moveSelection(delta: -1, repeating: true) }
+        require(results.selectedIndex == 0, "A held Up arrow stops at the first row")
+        results.moveSelection(delta: -1)
+        require(results.selectedIndex == lastRow, "A discrete Up press at the top still wraps to the last row")
+        // Trailing actions: other tabs say what Return does; the current tab keeps its Space context only.
+        let current = held[0], other = held[1]
+        results.update(tabs: [current, other], query: "held", activeID: current.id, canCreate: false)
+        let actionLabels = labels(in: results)
+        require(actionLabels.filter { $0 == "Switch to Tab" }.count == 1 && actionLabels.contains("Studio · Current"),
+                "Only the non-current tab offers Switch to Tab; the current one keeps its context: \(actionLabels)")
         print("PASS: \(checks) tab search ranking, command, favicon and selection checks")
     }
 }

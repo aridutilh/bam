@@ -267,6 +267,41 @@ import Foundation
         _ = emoji.updateSpace(id: 0, name: "Renamed", symbol: "book", colorIndex: 1)
         expect(emoji.spaceDefinition(0)?.emoji == "🚀", "Editing a Space keeps its emoji")
 
+        // Dropping a tab into Favorites: the drop's acceptance matches setRetention, and the chosen slot is honored
+        // without losing, duplicating or reordering any other tab.
+        func plain(_ title: String) -> BrowserTab { BrowserTab(title: title, address: "https://\(title.lowercased()).example", space: 0) }
+        var favs = BrowserSession(tabs: [plain("F1"), plain("F2"), plain("F3"), plain("Drop"), plain("Other")], activeID: UUID()); favs.sanitize()
+        let ids = favs.tabs.map(\.id)
+        for id in ids.prefix(3) { expect(favs.setRetention(id: id, kind: .favorite), "Seed Favorite") }
+        let dropped = ids[3]
+        expect(favs.canBecomeFavorite(id: dropped) && !favs.canBecomeFavorite(id: ids[0]), "An ordinary tab can become a Favorite; a Favorite can't again")
+        expect(favs.makeFavorite(id: dropped, before: ids[1]), "Drop before the second Favorite")
+        expect(favs.favoriteTabs.map(\.id) == [ids[0], dropped, ids[1], ids[2]], "The drop lands at the chosen slot")
+        expect(favs.tabs.count == ids.count && Set(favs.tabs.map(\.id)) == Set(ids), "No tab lost or duplicated")
+        expect(favs.tabs.filter { !$0.isFavorite }.map(\.id) == [ids[4]], "Other tabs keep their order and retention")
+        // No anchor appends after the last Favorite, even for a tab listed before the Favorites.
+        var appended = BrowserSession(tabs: [plain("Early"), plain("A1"), plain("A2"), plain("Late")], activeID: UUID()); appended.sanitize()
+        let early = appended.tabs[0].id, a1 = appended.tabs[1].id, a2 = appended.tabs[2].id, late = appended.tabs[3].id
+        _ = appended.setRetention(id: a1, kind: .favorite); _ = appended.setRetention(id: a2, kind: .favorite)
+        expect(appended.makeFavorite(id: early, before: nil) && appended.favoriteTabs.map(\.id) == [a1, a2, early],
+               "No anchor appends an earlier tab at the end")
+        expect(appended.tabs.count == 4 && appended.tabs.filter { !$0.isFavorite }.map(\.id) == [late], "Nothing else moves or is lost")
+        var first = BrowserSession(tabs: [plain("Solo"), plain("Rest")], activeID: UUID()); first.sanitize()
+        expect(first.makeFavorite(id: first.tabs[1].id, before: nil) && first.favoriteTabs.map(\.title) == ["Rest"] && first.tabs.count == 2,
+               "The first Favorite needs no anchor")
+        var refusing = BrowserSession(tabs: [plain("SplitL"), plain("SplitR"), BrowserTab(title: "Ext", address: "webkit-extension://\(UUID().uuidString)/page.html", space: 0)],
+                                      activeID: UUID()); refusing.sanitize()
+        let splitL = refusing.tabs[0].id, splitR = refusing.tabs[1].id, ext = refusing.tabs[2].id
+        expect(refusing.makeSplit(primary: splitL, secondary: splitR), "Split for the refusal check")
+        for id in [splitL, splitR, ext] {
+            expect(!refusing.canBecomeFavorite(id: id) && !refusing.makeFavorite(id: id, before: nil) && !refusing.setRetention(id: id, kind: .favorite),
+                   "Split members and extension pages are refused by both the drop and setRetention")
+        }
+        var full = BrowserSession(tabs: (0...BrowserSession.maximumFavorites).map { plain("Full\($0)") }, activeID: UUID()); full.sanitize()
+        for tab in full.tabs.prefix(BrowserSession.maximumFavorites) { _ = full.setRetention(id: tab.id, kind: .favorite) }
+        let extra = full.tabs.last!.id
+        expect(!full.canBecomeFavorite(id: extra) && !full.setRetention(id: extra, kind: .favorite), "A full Favorites grid refuses both ways")
+
         print("PASS: \(count) folder checks")
     }
 }

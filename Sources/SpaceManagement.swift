@@ -101,11 +101,85 @@ struct SpaceEditPlan {
     }
 }
 
+/// What a Space context-menu item acts on.
+@MainActor final class SpaceMenuChoice: NSObject {
+    let spaceID: Int
+    let field: SpaceManagementController.Field
+    let profileID: UUID?
+    let offset: Int
+    init(spaceID: Int, field: SpaceManagementController.Field = .name, profileID: UUID? = nil, offset: Int = 0) {
+        self.spaceID = spaceID; self.field = field; self.profileID = profileID; self.offset = offset
+    }
+}
+
 @MainActor extension BrowserController {
-    @objc func manageSpaces(_ sender: Any?) {
+    /// Arc's Space context menu, built only from Bam's real Space actions: icon, name and color open Manage Spaces on
+    /// that Space and field; profile and order apply at once through the same profile-aware edit Save uses. Arc's
+    /// Share, Live Folders and Export have no Bam equivalent and are not shown.
+    func spaceContextMenu(for id: Int) -> NSMenu? {
+        guard let index = session.spaces.firstIndex(where: { $0.id == id }) else { return nil }
+        let space = session.spaces[index]
+        let menu = NSMenu(); menu.autoenablesItems = false
+        @discardableResult func add(_ title: String, _ action: Selector, _ choice: SpaceMenuChoice?, enabled: Bool = true, to target: NSMenu? = nil) -> NSMenuItem {
+            let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+            item.target = self; item.representedObject = choice; item.isEnabled = enabled
+            (target ?? menu).addItem(item); return item
+        }
+        let editable = spaceManager == nil && view.window?.attachedSheet == nil
+        add("Change Space Icon…", #selector(editSpaceFromMenu(_:)), SpaceMenuChoice(spaceID: id, field: .icon), enabled: editable)
+        add("Rename Space…", #selector(editSpaceFromMenu(_:)), SpaceMenuChoice(spaceID: id, field: .name), enabled: editable)
+        add("Edit Theme Color…", #selector(editSpaceFromMenu(_:)), SpaceMenuChoice(spaceID: id, field: .color), enabled: editable)
+        let profiles = NSMenu(); profiles.autoenablesItems = false
+        for profile in session.profiles {
+            let item = add(profile.name.isEmpty ? "Unnamed profile" : profile.name, #selector(setSpaceProfileFromMenu(_:)),
+                           SpaceMenuChoice(spaceID: id, profileID: profile.id), enabled: editable, to: profiles)
+            item.state = profile.id == space.profileID ? .on : .off
+        }
+        let profileItem = NSMenuItem(title: "Set Profile", action: nil, keyEquivalent: "")
+        profileItem.submenu = profiles; profileItem.isEnabled = editable && !session.profiles.isEmpty
+        menu.addItem(profileItem)
+        menu.addItem(.separator())
+        add("New Folder", #selector(newFolderInSpaceFromMenu(_:)), SpaceMenuChoice(spaceID: id), enabled: editable)
+        menu.addItem(.separator())
+        add("Move Space Left", #selector(moveSpaceFromMenu(_:)), SpaceMenuChoice(spaceID: id, offset: -1), enabled: editable && index > 0)
+        add("Move Space Right", #selector(moveSpaceFromMenu(_:)), SpaceMenuChoice(spaceID: id, offset: 1), enabled: editable && index + 1 < session.spaces.count)
+        menu.addItem(.separator())
+        add("Manage Spaces…", #selector(editSpaceFromMenu(_:)), SpaceMenuChoice(spaceID: id, field: .name), enabled: editable)
+        return menu
+    }
+    @objc private func editSpaceFromMenu(_ sender: NSMenuItem) {
+        guard let choice = sender.representedObject as? SpaceMenuChoice else { return }
+        manageSpaces(selecting: choice.spaceID, focus: choice.field)
+    }
+    @objc private func setSpaceProfileFromMenu(_ sender: NSMenuItem) {
+        guard let choice = sender.representedObject as? SpaceMenuChoice, let profile = choice.profileID,
+              let index = session.spaces.firstIndex(where: { $0.id == choice.spaceID }),
+              session.spaces[index].profileID != profile, session.profiles.contains(where: { $0.id == profile }) else { return }
+        var spaces = session.spaces; spaces[index].profileID = profile
+        applySpaceEdits(SpaceEditPlan(originalIDs: Set(session.spaceIDs), spaces: spaces))
+    }
+    @objc private func moveSpaceFromMenu(_ sender: NSMenuItem) {
+        guard let choice = sender.representedObject as? SpaceMenuChoice,
+              let index = session.spaces.firstIndex(where: { $0.id == choice.spaceID }) else { return }
+        let target = index + choice.offset
+        guard session.spaces.indices.contains(target) else { return }
+        var spaces = session.spaces; spaces.insert(spaces.remove(at: index), at: target)
+        applySpaceEdits(SpaceEditPlan(originalIDs: Set(session.spaceIDs), spaces: spaces))
+    }
+    @objc private func newFolderInSpaceFromMenu(_ sender: NSMenuItem) {
+        guard let choice = sender.representedObject as? SpaceMenuChoice,
+              let index = session.spaces.firstIndex(where: { $0.id == choice.spaceID }) else { return }
+        if choice.spaceID != session.space { selectSpace(at: index) }
+        guard session.space == choice.spaceID else { return }
+        newFolder(nil)
+    }
+
+    @objc func manageSpaces(_ sender: Any?) { manageSpaces(selecting: session.space, focus: .name) }
+    func manageSpaces(selecting spaceID: Int, focus: SpaceManagementController.Field) {
         guard !isShuttingDown, spaceManager == nil, let window = view.window, window.attachedSheet == nil else { return }
         cancelPaging(); dismissAddress(); findBar.hide(); pageFeedback.hide()
-        let manager = SpaceManagementController(spaces: session.spaces, selectedID: session.space, profiles: session.profiles)
+        let selected = session.spaces.contains(where: { $0.id == spaceID }) ? spaceID : session.space
+        let manager = SpaceManagementController(spaces: session.spaces, selectedID: selected, profiles: session.profiles)
         spaceManager = manager
         manager.onSave = { [weak self] plan in self?.applySpaceEdits(plan) ?? false }
         manager.onDismiss = { [weak self] in
@@ -113,7 +187,7 @@ struct SpaceEditPlan {
             self.spaceManager = nil
             self.view.window?.makeFirstResponder(self.commandWebView)
         }
-        manager.present(on: window)
+        manager.present(on: window, focus: focus)
     }
     @discardableResult func applySpaceEdits(_ plan: SpaceEditPlan) -> Bool {
         guard let updated = plan.applying(to: session) else { return false }
@@ -159,6 +233,8 @@ struct SpaceEditPlan {
     private var draftID = -1
     private var updating = false
     private static let pasteboardType = NSPasteboard.PasteboardType("com.ari.bam.space-order")
+    /// The control the sheet opens on (a Space context-menu item names it).
+    enum Field { case name, icon, color }
 
     init(spaces: [BrowserSpace], selectedID: Int, profiles: [BrowserProfile] = BrowserProfile.defaults) {
         plan = SpaceEditPlan(originalIDs: Set(spaces.map(\.id)), spaces: spaces, profiles: profiles)
@@ -187,6 +263,8 @@ struct SpaceEditPlan {
         table.registerForDraggedTypes([Self.pasteboardType]); table.setDraggingSourceOperationMask(.move, forLocal: true)
         scroll.documentView = table; root.addSubview(scroll)
         label("Name", NSRect(x: 278, y: 85, width: 336, height: 19), weight: .medium)
+        // Vertically centered, inset text: the sheet style removes the bezel, which otherwise leaves it top-left.
+        for field in [nameField, profileNameField] { field.cell = ArkCenteredFieldCell.editable(); field.font = .systemFont(ofSize: 13) }
         nameField.frame = NSRect(x: 278, y: 109, width: 344, height: 26); nameField.delegate = self
         nameField.setAccessibilityLabel("Space name"); root.addSubview(nameField)
         label("Icon", NSRect(x: 278, y: 148, width: 160, height: 19), weight: .medium)
@@ -228,12 +306,16 @@ struct SpaceEditPlan {
         for button in [saveButton, addButton, removeButton, upButton, downButton, newProfileButton, cancel] { button.bezelStyle = .rounded }
         BamSheetStyle.dress(window: window, root: root)
     }
-    func present(on parent: NSWindow) {
+    func present(on parent: NSWindow, focus: Field = .name) {
         guard let window else { return }
         // The sheet wears the site's paper and follows the system appearance,
         // not the always-dark browser window beneath it.
         parent.beginSheet(window)
-        window.makeFirstResponder(nameField); nameField.selectText(nil)
+        switch focus {
+        case .name: window.makeFirstResponder(nameField); nameField.selectText(nil)
+        case .icon: window.makeFirstResponder(iconPicker)
+        case .color: window.makeFirstResponder(colorPicker)
+        }
     }
     @objc func cancel(_ sender: Any?) { dismiss() }
     private func dismiss() {

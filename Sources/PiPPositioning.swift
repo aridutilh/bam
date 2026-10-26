@@ -80,6 +80,27 @@ enum PiPPositioning {
         return fit(moved, inside: desktop, resizeToFit: false)
     }
 
+    /// One pinch step: scales `frame` by `scale` about `anchor` (where the fingers are), keeping
+    /// `aspect` (width ÷ height). Width stays between `minimumWidth` and the largest size that fits
+    /// the screen the panel is on; the result stays on the display arrangement.
+    static func pinchFrame(_ frame: CGRect, scale: CGFloat, anchor: CGPoint, aspect: CGFloat,
+                           minimumWidth: CGFloat, screens: [CGRect]) -> CGRect {
+        guard valid(frame), scale.isFinite, scale > 0, aspect.isFinite, aspect > 0 else { return frame }
+        let screen = destinationScreen(for: frame, screens: screens) ?? frame
+        let floor = max(1, minimumWidth.isFinite ? minimumWidth : 1)
+        let ceiling = max(floor, min(screen.width, screen.height * aspect))
+        let width = min(max(frame.width * scale, floor), ceiling)
+        let height = width / aspect
+        // The point under the fingers stays under them; an anchor outside the panel uses its edge.
+        let ax = anchor.x.isFinite ? min(max(anchor.x, frame.minX), frame.maxX) : frame.midX
+        let ay = anchor.y.isFinite ? min(max(anchor.y, frame.minY), frame.maxY) : frame.midY
+        let scaled = CGRect(x: ax - (ax - frame.minX) / frame.width * width,
+                            y: ay - (ay - frame.minY) / frame.height * height, width: width, height: height)
+        let usable = screens.filter(valid)
+        guard let first = usable.first else { return scaled }
+        return fit(scaled, inside: usable.dropFirst().reduce(first) { $0.union($1) }, resizeToFit: false)
+    }
+
     static func releaseFrame(_ frame: CGRect, screens: [CGRect], magnet: Bool = true) -> CGRect {
         guard valid(frame), let screen = destinationScreen(for: frame, screens: screens) else { return frame }
         let fitted = fit(frame, inside: screen)

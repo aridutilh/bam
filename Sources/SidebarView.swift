@@ -89,6 +89,8 @@ struct SidebarExtensionItem {
     var onToggleSidebar: (() -> Void)?
     var onSpaceChange: ((Int) -> Void)?
     var onManageSpaces: (() -> Void)?
+    /// Builds a Space's context menu from the browser's real Space actions (nil: Manage Spaces only).
+    var spaceContextMenu: ((Int) -> NSMenu?)?
     var onMoveTab: ((UUID, Int) -> Void)?
     /// The footer's Downloads button and its menu: Bam's existing Downloads, History and Recently Closed windows.
     var onShowDownloads: (() -> Void)?
@@ -97,6 +99,8 @@ struct SidebarExtensionItem {
     var onExtensionAction: ((UUID, NSView) -> Void)?
     var onExtensionsMenu: ((NSView) -> Void)?
     var onExtensionLibrary: (() -> Void)?
+    /// The address field's site settings button was clicked (its view anchors the popover).
+    var onSiteSettings: ((NSView) -> Void)?
     var onSpaceScroll: ((NSEvent, SpaceScrollSource) -> Bool)?
     /// Drag and drop of sidebar rows within the shown Space (target, Space ID).
     var onDrop: ((UUID, BrowserSession.SidebarDropTarget, Int) -> Bool)?
@@ -110,6 +114,28 @@ struct SidebarExtensionItem {
     @discardableResult func focusTabList() -> Bool { page.focusInitialRow() }
     /// A row dropped on a footer Space icon moves there (profile-aware in the controller).
     var onDropOnSpace: ((UUID, Int) -> Bool)?
+    /// A dragged tab dropped on the Favorites grid becomes a Favorite (at the end).
+    var canDropOnFavorites: ((UUID) -> Bool)? { didSet { favoritesHost.canAccept = canDropOnFavorites } }
+    /// The dragged tab and the Favorite it goes before (nil: at the end).
+    var onDropOnFavorites: ((UUID, UUID?) -> Bool)?
+    /// The insertion slot a drag holds open in the Favorites grid (tiles at or after it move on one).
+    private var favoriteGap: Int? {
+        didSet { if oldValue != favoriteGap { relayoutFavorites() } }
+    }
+    /// A sidebar row is being dragged: an empty Favorites grid shows a one-row drop zone.
+    private var sidebarDragActive = false {
+        didSet { if oldValue != sidebarDragActive { relayoutFavorites() } }
+    }
+    /// The grid's last laid-out geometry, for the drop host's slot lookup.
+    private var favoriteGrid = (leading: CGFloat(0), tileWidth: CGFloat(0), columns: 1)
+    private var dragObservers: [NSObjectProtocol] = []
+    private func relayoutFavorites() {
+        guard window != nil, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { needsLayout = true; return }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.15; context.allowsImplicitAnimation = true
+            needsLayout = true; layoutSubtreeIfNeeded()
+        }
+    }
     var onToggleFolder: ((UUID) -> Void)?
     var onRenameFolder: ((UUID) -> Void)?
     /// Creates a folder; the item is a tab to put inside it or a parent folder.
@@ -125,13 +151,16 @@ struct SidebarExtensionItem {
     private let search = ArkSearchButton()
     private let extensionMenu = ArkIconButton(symbol: "puzzlepiece.extension", label: "Extensions")
     private let extensionLibrary = ArkExtensionLibraryButton()
+    /// Site settings for the page in the field; shown only for a page with an address (not Bam's own pages).
+    private let siteSettingsButton = ArkIconButton(symbol: "slider.horizontal.3", label: "Site Settings", glyphSize: 14)
+    private var showsSiteSettings = false { didSet { if oldValue != showsSiteSettings { needsLayout = true } } }
     private var extensionButtons: [ArkExtensionButton] = []
     private let downloads = ArkDownloadsButton()
     private let plus = ArkIconButton(symbol: "plus", label: "New tab")
     private let spaceOverflow = ArkIconButton(symbol: "ellipsis", label: "Choose Space")
     private var spaceDefinitions: [BrowserSpace] = []
     private var spaces: [ArkSpaceButton] = []
-    private let favoritesHost = ArkFlippedView()
+    private let favoritesHost = ArkFavoritesDropHost()
     private var favorites: [ArkFavoriteButton] = []
     private var favoriteItems: [SidebarTabItem] = []
     private let clip = ArkFlippedView()
@@ -155,7 +184,30 @@ struct SidebarExtensionItem {
         clip.wantsLayer = true; clip.layer?.masksToBounds = true
         favoritesHost.setAccessibilityLabel("Favorites")
         favoritesHost.setAccessibilityRole(.group)
-        [toggle, back, forward, reload, search, extensionMenu, extensionLibrary, favoritesHost, clip, downloads, plus, spaceOverflow].forEach(addSubview)
+        favoritesHost.slotAt = { [weak self] point in
+            guard let self else { return 0 }
+            return ArkMetrics.favoriteInsertionSlot(at: point, count: self.favorites.count, columns: self.favoriteGrid.columns,
+                                                    leading: self.favoriteGrid.leading, tileWidth: self.favoriteGrid.tileWidth)
+        }
+        favoritesHost.onGapChange = { [weak self] in self?.favoriteGap = $0 }
+        favoritesHost.accept = { [weak self] id, slot in
+            guard let self else { return false }
+            let anchor = self.favorites.indices.contains(slot) ? self.favorites[slot].item.id : nil
+            return self.onDropOnFavorites?(id, anchor) ?? false
+        }
+        // Any sidebar row drag in this window opens the empty grid's drop zone until the drag ends.
+        for (name, active) in [(Notification.Name.arkSidebarDragDidBegin, true), (.arkSidebarDragDidEnd, false)] {
+            dragObservers.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] note in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    // A drag begins in this window; any drag's end closes the zone (its row may be gone by then).
+                    if active { guard let row = note.object as? NSView, row.window != nil, row.window === self.window else { return } }
+                    self.sidebarDragActive = active
+                    if !active { self.favoriteGap = nil }
+                }
+            })
+        }
+        [toggle, back, forward, reload, search, extensionMenu, extensionLibrary, siteSettingsButton, favoritesHost, clip, downloads, plus, spaceOverflow].forEach(addSubview)
         clip.addSubview(page); connect(page); cachedPages[0] = page
         back.handler = { [weak self] in self?.onBack?() }
         forward.handler = { [weak self] in self?.onForward?() }
@@ -174,12 +226,19 @@ struct SidebarExtensionItem {
             guard let self else { return }; self.onExtensionsMenu?(self.extensionMenu)
         }
         extensionLibrary.handler = { [weak self] in self?.onExtensionLibrary?() }
+        siteSettingsButton.identifier = NSUserInterfaceItemIdentifier("site-settings")
+        siteSettingsButton.setAccessibilityHelp("Connection, zoom, keep awake and extension access for this site")
+        siteSettingsButton.isHidden = true
+        siteSettingsButton.handler = { [weak self] in
+            guard let self else { return }; self.onSiteSettings?(self.siteSettingsButton)
+        }
         configureSpaces([
             BrowserSpace(id: 0, name: "Studio", symbol: "sparkles", colorIndex: 0),
             BrowserSpace(id: 1, name: "Life", symbol: "sun.max", colorIndex: 1),
             BrowserSpace(id: 2, name: "Explore", symbol: "globe", colorIndex: 2)
         ])
     }
+    deinit { dragObservers.forEach(NotificationCenter.default.removeObserver) }
     required init?(coder: NSCoder) { fatalError() }
 
     /// Space IDs identify cached pages; their order is supplied separately by the session.
@@ -217,6 +276,7 @@ struct SidebarExtensionItem {
                 guard let button else { return }; self?.onSpaceChange?(button.index)
             }
             button.manage = { [weak self] in self?.onManageSpaces?() }
+            button.contextMenu = { [weak self, weak button] in button.flatMap { self?.spaceContextMenu?($0.index) } }
             button.acceptDrop = { [weak self, weak button] id in
                 guard let self, let button, button.index != self.selectedSpace else { return false }
                 return self.onDropOnSpace?(id, button.index) ?? false
@@ -277,6 +337,7 @@ struct SidebarExtensionItem {
         page.reorderSaved = { [weak self] in self?.onReorderSavedTab?($0, $1) }
         page.newTab = { [weak self] in self?.onNewTab?() }
         page.manageSpaces = { [weak self] in self?.onManageSpaces?() }
+        page.spaceMenu = { [weak self] in self?.spaceContextMenu?($0) }
         page.move = { [weak self] in self?.onMoveTab?($0, $1) }
         page.toggleFolder = { [weak self] in self?.onToggleFolder?($0) }
         page.renameFolder = { [weak self] in self?.onRenameFolder?($0) }
@@ -383,6 +444,7 @@ struct SidebarExtensionItem {
         let visible = SidebarDisplayPolicy.visibleAddress(address)
         // Bam's own pages keep the field's shortcut hint instead of an internal address.
         if visible.isEmpty { search.restoreHint() } else { search.toolTip = visible }
+        showsSiteSettings = !visible.isEmpty
     }
     func beginPaging(tabs: [SidebarTabItem], space: Int, direction: CGFloat) {
         guard space != selectedSpace, let definition = definition(for: space) else { return }
@@ -470,11 +532,18 @@ struct SidebarExtensionItem {
         // controls, Favorites as a balanced grid of 46-point tiles, then the
         // Space's rows. Extension actions take a row only when installed.
         let fieldTop = ArkMetrics.addressTop, fieldHeight = ArkMetrics.addressHeight
-        search.frame = NSRect(x: 8, y: fieldTop, width: max(0, w - 16), height: fieldHeight)
+        let leading = ArkMetrics.sidebarLeading, contentWidth = ArkMetrics.sidebarContentWidth(w)
+        search.frame = NSRect(x: leading, y: fieldTop, width: contentWidth, height: fieldHeight)
         let hasActions = !extensionButtons.isEmpty
-        search.trailingInset = hasActions ? 10 : 34
+        // Trailing controls inside the field, right to left: site settings (for a page), then the extension library
+        // (while no extension actions have a row of their own).
+        let trailing = [showsSiteSettings ? siteSettingsButton : nil, hasActions ? nil : extensionLibrary].compactMap { $0 }
+        search.trailingInset = trailing.isEmpty ? 10 : 6 + 28 * CGFloat(trailing.count)
+        siteSettingsButton.isHidden = !showsSiteSettings
         extensionLibrary.isHidden = hasActions
-        extensionLibrary.frame = NSRect(x: w - 8 - 32, y: fieldTop + (fieldHeight - 28) / 2, width: 28, height: 28)
+        for (index, button) in trailing.enumerated() {
+            button.frame = NSRect(x: search.frame.maxX - 32 - 28 * CGFloat(index), y: fieldTop + (fieldHeight - 28) / 2, width: 28, height: 28)
+        }
         extensionMenu.isHidden = !hasActions
         let actionTop = fieldTop + fieldHeight + 6
         extensionMenu.frame = NSRect(x: 8, y: actionTop, width: 30, height: 30)
@@ -487,18 +556,28 @@ struct SidebarExtensionItem {
         extensionMenu.setSymbol(hiddenCount > 0 ? "ellipsis.circle" : "puzzlepiece.extension",
             label: hiddenCount > 0 ? "All extensions, including \(hiddenCount) more" : "Extensions")
         let gridTop = hasActions ? actionTop + 38 : fieldTop + fieldHeight + 10
-        let columns = max(1, ArkMetrics.favoriteColumns(count: favorites.count, width: w))
+        // A drag over Favorites holds a gap open (one more slot); a sidebar drag over an empty grid opens a drop zone.
+        let gapSlot = favoriteGap.map { min($0, favorites.count) }
+        let dropZone = favorites.isEmpty && sidebarDragActive
+        let slotCount = favorites.count + (gapSlot == nil ? 0 : 1)
+        let laidOutCount = max(slotCount, dropZone ? 1 : 0)
+        let columns = max(1, ArkMetrics.favoriteColumns(count: laidOutCount, width: w))
         let gap = ArkMetrics.favoriteGap, tileHeight = ArkMetrics.favoriteHeight
-        let favoriteRows = (favorites.count + columns - 1) / columns
+        let favoriteRows = (laidOutCount + columns - 1) / columns
         let favoriteHeight = favoriteRows == 0 ? CGFloat.zero : CGFloat(favoriteRows) * tileHeight + CGFloat(favoriteRows - 1) * gap
-        favoritesHost.isHidden = favorites.isEmpty
+        favoritesHost.isHidden = favoriteRows == 0
         favoritesHost.frame = NSRect(x: 0, y: gridTop, width: w, height: favoriteHeight)
-        let tileWidth = max(0, (w - 16 - CGFloat(columns - 1) * gap) / CGFloat(columns))
-        for (index, button) in favorites.enumerated() {
-            button.frame = NSRect(x: 8 + CGFloat(index % columns) * (tileWidth + gap),
-                                  y: CGFloat(index / columns) * (tileHeight + gap), width: tileWidth, height: tileHeight)
+        let tileWidth = max(0, (contentWidth - CGFloat(columns - 1) * gap) / CGFloat(columns))
+        func slotFrame(_ slot: Int) -> NSRect {
+            NSRect(x: leading + CGFloat(slot % columns) * (tileWidth + gap), y: CGFloat(slot / columns) * (tileHeight + gap),
+                   width: tileWidth, height: tileHeight)
         }
-        let pageTop: CGFloat = gridTop + favoriteHeight + (favorites.isEmpty ? 0 : 10)
+        for (index, button) in favorites.enumerated() {
+            button.frame = slotFrame(ArkMetrics.favoriteSlot(forTile: index, gap: gapSlot))
+        }
+        favoriteGrid = (leading, tileWidth, columns)
+        favoritesHost.showPlaceholder(gapSlot.map(slotFrame) ?? (dropZone ? slotFrame(0) : nil), strong: gapSlot != nil)
+        let pageTop: CGFloat = gridTop + favoriteHeight + (favoriteRows == 0 ? 0 : 10)
         clip.frame = NSRect(x: 0, y: pageTop, width: w, height: max(0, bounds.height - pageTop - 45))
         setPagingOffset(offset)
         let y = bounds.height-36
@@ -526,6 +605,10 @@ struct SidebarExtensionItem {
     var faviconProvider: ((UUID) -> NSImage?)?
     var select: ((UUID)->Void)?; var close: ((UUID)->Void)?; var pin: ((UUID)->Void)?; var newTab: (()->Void)?
     var manageSpaces: (() -> Void)?
+    /// The context menu for this page's Space (by Space ID).
+    var spaceMenu: ((Int) -> NSMenu?)?
+    /// One gentle tap per change of accepted drop position during a drag.
+    private var dropFeedback = ArkDropFeedbackGate()
     var move: ((UUID, Int) -> Void)?
     var favorite: ((UUID) -> Void)?
     var editSaved: ((UUID) -> Void)?
@@ -569,13 +652,18 @@ struct SidebarExtensionItem {
         table.usesAutomaticRowHeights = false; table.selectionHighlightStyle = .none
         table.focusRingType = .none; table.allowsEmptySelection = true
         table.registerForDraggedTypes([.bamSidebarRow])
-        table.draggingDestinationFeedbackStyle = .regular
+        // Rows part to show where a dragged row lands (Reduce Motion: the plain insertion line).
+        table.draggingDestinationFeedbackStyle = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? .regular : .gap
         table.allowsMultipleSelection = false; table.allowsColumnSelection = false
         table.allowsColumnReordering = false; table.allowsColumnResizing = false
         table.dataSource = self; table.delegate = self
         table.identifier = NSUserInterfaceItemIdentifier("sidebar-tab-list")
         scroll.documentView = table
         heading.handler = { [weak self] in self?.manageSpaces?() }
+        heading.contextMenu = { [weak self] in
+            guard let self, let id = self.spaceAppearance?.id else { return nil }
+            return self.spaceMenu?(id)
+        }
         // Rows move under a still pointer while scrolling; hover follows the row actually under it.
         scroll.contentView.postsBoundsChangedNotifications = true
         scrollObserver = NotificationCenter.default.addObserver(forName: NSView.boundsDidChangeNotification, object: scroll.contentView, queue: nil) { [weak self] _ in
@@ -863,8 +951,13 @@ struct SidebarExtensionItem {
         let proposal = dropTarget(row: row, operation: operation)
         // Only show an indicator where the model would accept the row: no cycles,
         // no over-deep nesting, no folders in Today.
-        guard canDrop?(id, proposal.target, space) == true else { return [] }
+        guard canDrop?(id, proposal.target, space) == true else {
+            _ = dropFeedback.shouldTap(sequence: info.draggingSequenceNumber, target: nil); return []
+        }
         tableView.setDropRow(proposal.row, dropOperation: proposal.operation)
+        if dropFeedback.shouldTap(sequence: info.draggingSequenceNumber, target: "\(proposal.row):\(proposal.operation.rawValue)") {
+            ArkDropFeedback.perform()
+        }
         return .move
     }
     func tableView(_ tableView: NSTableView, acceptDrop info: NSDraggingInfo, row: Int, dropOperation: NSTableView.DropOperation) -> Bool {
@@ -875,8 +968,9 @@ struct SidebarExtensionItem {
 
     override func layout() {
         super.layout(); let w = bounds.width
-        heading.frame = NSRect(x: 12, y: 0, width: max(0, w-24), height: 32)
-        scroll.frame = NSRect(x: 8, y: 39, width: max(0,w-16), height: max(0,bounds.height-39))
+        heading.frame = NSRect(x: 12, y: 0, width: max(0, w - 12 - ArkMetrics.sidebarTrailing - 4), height: 32)
+        // Rows span to the trailing edge; the overlay scroller floats over their last points only while scrolling.
+        scroll.frame = NSRect(x: ArkMetrics.sidebarLeading, y: 39, width: ArkMetrics.sidebarContentWidth(w), height: max(0, bounds.height - 39))
         let width = scroll.contentSize.width
         if table.frame.width != width { table.setFrameSize(NSSize(width: width, height: table.frame.height)) }
         if column.width != width { column.width = width }
@@ -1008,12 +1102,45 @@ enum ArkPalette {
     }
 }
 /// Sidebar geometry in points, matched to Arc/Yab at a ~230-point sidebar.
+/// A single-line editable field cell whose text (drawn and while editing) sits on the field's vertical center with
+/// an 8pt side inset. Sheets restyled without a bezel otherwise draw editable text hard against the top-left edge.
+final class ArkCenteredFieldCell: NSTextFieldCell {
+    static let sideInset: CGFloat = 8
+    static func editable() -> ArkCenteredFieldCell {
+        let cell = ArkCenteredFieldCell(textCell: "")
+        cell.isEditable = true; cell.isSelectable = true; cell.isScrollable = true
+        cell.usesSingleLineMode = true; cell.lineBreakMode = .byClipping; cell.wraps = false
+        return cell
+    }
+    /// The text's line box, centered vertically within `rect` after the side inset.
+    func centeredRect(_ rect: NSRect) -> NSRect {
+        let inner = rect.insetBy(dx: Self.sideInset, dy: 0)
+        let font = self.font ?? .systemFont(ofSize: NSFont.systemFontSize)
+        let lineHeight = min(inner.height, ceil(NSLayoutManager().defaultLineHeight(for: font)))
+        return NSRect(x: inner.minX, y: inner.minY + ((inner.height - lineHeight) / 2).rounded(), width: inner.width, height: lineHeight)
+    }
+    override func drawingRect(forBounds rect: NSRect) -> NSRect { centeredRect(rect) }
+    override func titleRect(forBounds rect: NSRect) -> NSRect { centeredRect(rect) }
+    override func edit(withFrame rect: NSRect, in controlView: NSView, editor textObj: NSText, delegate: Any?, event: NSEvent?) {
+        super.edit(withFrame: centeredRect(rect), in: controlView, editor: textObj, delegate: delegate, event: event)
+    }
+    override func select(withFrame rect: NSRect, in controlView: NSView, editor textObj: NSText, delegate: Any?, start selStart: Int, length selLength: Int) {
+        super.select(withFrame: centeredRect(rect), in: controlView, editor: textObj, delegate: delegate, start: selStart, length: selLength)
+    }
+}
+
 @MainActor enum ArkMetrics {
     static let folderIndent: CGFloat = 14
     /// Indentation shrinks for deep trees so titles keep this much room.
     /// At the 164pt minimum sidebar a row has 76pt for its title, so the floor
     /// stays below that; deep rows still indent a little to show hierarchy.
     static let minimumTitleWidth: CGFloat = 64
+    /// The sidebar's content edges. As in Arc, the content runs to within a point of the sidebar's trailing edge: the
+    /// page card's own gap is the only margin on that side (no doubled inset, no reserved scroller gutter; the list's
+    /// scroller is an overlay at that edge).
+    static let sidebarLeading: CGFloat = 8
+    static let sidebarTrailing: CGFloat = 1
+    static func sidebarContentWidth(_ width: CGFloat) -> CGFloat { max(0, width - sidebarLeading - sidebarTrailing) }
     static let addressTop: CGFloat = 44
     static let addressHeight: CGFloat = 34
     static let favoriteHeight: CGFloat = 46
@@ -1031,6 +1158,20 @@ enum ArkPalette {
         let fit = max(1, Int((available + favoriteGap) / (favoriteMinimumWidth + favoriteGap)))
         let rows = (count + fit - 1) / fit
         return (count + rows - 1) / rows
+    }
+    /// The grid slot a Favorite occupies while a drag holds a gap open at `gap` (tiles at or after it move on one).
+    static func favoriteSlot(forTile index: Int, gap: Int?) -> Int {
+        guard let gap, index >= gap else { return index }
+        return index + 1
+    }
+    /// The insertion slot (0...count) under `point` in the grid: before the tile the point is over, or after it past the
+    /// tile's middle; rows top to bottom.
+    static func favoriteInsertionSlot(at point: NSPoint, count: Int, columns: Int, leading: CGFloat, tileWidth: CGFloat) -> Int {
+        guard count > 0, columns > 0, tileWidth > 0 else { return 0 }
+        let step = tileWidth + favoriteGap
+        let row = max(0, Int(floor(point.y / (favoriteHeight + favoriteGap))))
+        let column = min(columns, max(0, Int(((point.x - leading) / step).rounded())))
+        return min(count, row * columns + column)
     }
     /// The artwork's frame in a tile, aspect preserved, never enlarged past `favoriteIconSize`.
     static func favoriteIconRect(in bounds: NSRect, imageSize: NSSize) -> NSRect {
@@ -1205,6 +1346,94 @@ private func arkLabel(_ text: String, size: CGFloat, weight: NSFont.Weight) -> N
 
 @MainActor
 private class ArkFlippedView: NSView { override var isFlipped: Bool { true } }
+
+/// Decides when a drag earns a haptic tap: only when the accepted drop target changes within one drag (a new drag
+/// starts fresh), never on every mouse move over the same target, and never for a refused position.
+struct ArkDropFeedbackGate {
+    private var sequence: Int?
+    private var target: String?
+    /// `target` nil means the current position is refused. Returns whether to tap now.
+    mutating func shouldTap(sequence: Int, target: String?) -> Bool {
+        if sequence != self.sequence { self.sequence = sequence; self.target = nil }
+        guard let target else { self.target = nil; return false }
+        guard target != self.target else { return false }
+        self.target = target
+        return true
+    }
+}
+@MainActor enum ArkDropFeedback {
+    /// The tap itself; tests replace it to count taps.
+    static var perform: () -> Void = { NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now) }
+}
+
+/// The Favorites grid as a drop target. While an acceptable tab is dragged over it, the pointer picks an insertion
+/// slot and the grid opens a gap there (the sidebar lays the tiles out around it); dropping makes the tab a Favorite
+/// at that slot. A sidebar drag over an empty grid gets a one-row drop zone. One haptic tap per slot change.
+@MainActor private final class ArkFavoritesDropHost: ArkFlippedView {
+    var canAccept: ((UUID) -> Bool)?
+    /// The dragged tab and its insertion slot (0 = before the first Favorite, count = at the end).
+    var accept: ((UUID, Int) -> Bool)?
+    /// The insertion slot under a point in this view.
+    var slotAt: ((NSPoint) -> Int)?
+    /// The open gap moved (nil: closed).
+    var onGapChange: ((Int?) -> Void)?
+    private let placeholder = CAShapeLayer()
+    private var gate = ArkDropFeedbackGate()
+    private var gapSlot: Int? { didSet { if oldValue != gapSlot { onGapChange?(gapSlot) } } }
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        registerForDraggedTypes([.bamSidebarRow])
+        placeholder.fillColor = nil; placeholder.lineWidth = 1.5; placeholder.lineDashPattern = [4, 3]; placeholder.opacity = 0
+        layer?.addSublayer(placeholder)
+    }
+    required init?(coder: NSCoder) { fatalError() }
+    private func draggedID(_ info: NSDraggingInfo) -> UUID? {
+        info.draggingPasteboard.string(forType: .bamSidebarRow).flatMap(UUID.init(uuidString:))
+    }
+    private func evaluate(_ info: NSDraggingInfo) -> NSDragOperation {
+        let accepted = draggedID(info).map { canAccept?($0) == true } ?? false
+        let slot = accepted ? slotAt?(convert(info.draggingLocation, from: nil)) : nil
+        gapSlot = slot
+        if gate.shouldTap(sequence: info.draggingSequenceNumber, target: slot.map { "favorites:\($0)" }) { ArkDropFeedback.perform() }
+        setAccessibilityHelp(accepted ? "Drop to add to Favorites" : nil)
+        return accepted ? .move : []
+    }
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation { evaluate(sender) }
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation { evaluate(sender) }
+    override func draggingExited(_ sender: NSDraggingInfo?) {
+        gapSlot = nil
+        if let sender { _ = gate.shouldTap(sequence: sender.draggingSequenceNumber, target: nil) }
+    }
+    override func draggingEnded(_ sender: NSDraggingInfo) { gapSlot = nil }
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        let slot = gapSlot ?? slotAt?(convert(sender.draggingLocation, from: nil)) ?? 0
+        defer { gapSlot = nil }
+        guard let id = draggedID(sender), canAccept?(id) == true else { return false }
+        return accept?(id, slot) ?? false
+    }
+    /// The dashed tile where the dropped tab would land (the open gap or the empty drop zone); nil hides it.
+    func showPlaceholder(_ frame: NSRect?, strong: Bool) {
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            placeholder.strokeColor = ArkPalette.ink.withAlphaComponent(strong ? 0.5 : 0.25).cgColor
+        }
+        if let frame {
+            placeholder.frame = bounds
+            placeholder.path = CGPath(roundedRect: frame.insetBy(dx: 1, dy: 1), cornerWidth: 9, cornerHeight: 9, transform: nil)
+        }
+        let target: Float = frame == nil ? 0 : 1
+        CATransaction.begin()
+        if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion { CATransaction.setDisableActions(true) } else { CATransaction.setAnimationDuration(0.14) }
+        placeholder.opacity = target
+        CATransaction.commit()
+    }
+}
+
+extension Notification.Name {
+    /// A sidebar row drag began or ended (object: the dragged row view); the Favorites grid shows a drop zone meanwhile.
+    static let arkSidebarDragDidBegin = Notification.Name("ArkSidebarDragDidBegin")
+    static let arkSidebarDragDidEnd = Notification.Name("ArkSidebarDragDidEnd")
+}
 
 /// Hover from where the pointer actually is. Enter/exit events alone go stale: a view taken out of the window
 /// (a cached Space page during a switch), a reused table cell, a scroll under a still pointer, or the window
@@ -1535,20 +1764,32 @@ enum ArkTabRowChevron {
 /// no system or third-party artwork.
 @MainActor enum ArkFolderGlyph {
     static let side: CGFloat = 16
-    static func image(open: Bool, tint: NSColor) -> NSImage {
+    /// How long the front panel takes to tilt open or settle closed.
+    static let toggleDuration: TimeInterval = 0.16
+    /// The front panel's corners (bottom-left, bottom-right, top-right, top-left) at `openness` 0 (closed: a flat
+    /// face) through 1 (open: tilted forward, a parallelogram). Bam's own glyph, interpolated corner by corner.
+    static func frontCorners(openness raw: CGFloat) -> [NSPoint] {
+        let t = min(1, max(0, raw))
+        let closed = [NSPoint(x: 1, y: 2.5), NSPoint(x: 15, y: 2.5), NSPoint(x: 15, y: 11.1), NSPoint(x: 1, y: 11.1)]
+        let open = [NSPoint(x: 1.2, y: 2.5), NSPoint(x: 13.4, y: 2.5), NSPoint(x: 15.6, y: 9.4), NSPoint(x: 3.6, y: 9.4)]
+        return zip(closed, open).map { NSPoint(x: $0.x + ($1.x - $0.x) * t, y: $0.y + ($1.y - $0.y) * t) }
+    }
+    static func image(open: Bool, tint: NSColor) -> NSImage { image(openness: open ? 1 : 0, tint: tint) }
+    static func image(openness raw: CGFloat, tint: NSColor) -> NSImage {
+        let openness = min(1, max(0, raw))
         let image = NSImage(size: NSSize(width: side, height: side), flipped: false) { _ in
             // Back panel with its tab (top-left), lighter than the front.
             let back = NSBezierPath(roundedRect: NSRect(x: 1, y: 2.5, width: 14, height: 10.5), xRadius: 2.2, yRadius: 2.2)
             back.append(NSBezierPath(roundedRect: NSRect(x: 1, y: 10.5, width: 6.2, height: 3.6), xRadius: 1.6, yRadius: 1.6))
             tint.withAlphaComponent(0.55).setFill(); back.fill()
-            // Front: a flat face when closed; tilted forward (a parallelogram) when open.
+            // Front: a flat face when closed; tilted forward (a parallelogram) when open; in between while toggling.
             let front = NSBezierPath()
-            if open {
-                front.move(to: NSPoint(x: 1.2, y: 2.5)); front.line(to: NSPoint(x: 13.4, y: 2.5))
-                front.line(to: NSPoint(x: 15.6, y: 9.4)); front.line(to: NSPoint(x: 3.6, y: 9.4)); front.close()
-                front.lineJoinStyle = .round
-            } else {
+            if openness == 0 {
                 front.append(NSBezierPath(roundedRect: NSRect(x: 1, y: 2.5, width: 14, height: 8.6), xRadius: 2.2, yRadius: 2.2))
+            } else {
+                let corners = frontCorners(openness: openness)
+                front.move(to: corners[0]); for corner in corners.dropFirst() { front.line(to: corner) }; front.close()
+                front.lineJoinStyle = .round
             }
             tint.setFill(); front.fill()
             // A hairline edge keeps a pale tint readable on a pale sidebar.
@@ -1558,7 +1799,7 @@ enum ArkTabRowChevron {
             return true
         }
         image.isTemplate = false
-        image.accessibilityDescription = open ? "Open folder" : "Folder"
+        image.accessibilityDescription = openness >= 0.5 ? "Open folder" : "Folder"
         return image
     }
 }
@@ -1575,6 +1816,8 @@ private final class ArkSpaceButton: ArkHoverButton, SpaceTinted {
     private var emoji: String?
     private var tint = ArkPalette.ink
     var manage: (() -> Void)?
+    /// The Space's context menu (rename, icon, color, profile, folder, order); nil falls back to Manage Spaces.
+    var contextMenu: (() -> NSMenu?)?
     /// A dragged tab or folder dropped here moves to this Space.
     var acceptDrop: ((UUID) -> Bool)?
     private var dropHovered = false { didSet { if oldValue != dropHovered { needsDisplay = true } } }
@@ -1616,6 +1859,7 @@ private final class ArkSpaceButton: ArkHoverButton, SpaceTinted {
                           opacity: selected || hovered || dropHovered ? 1 : 0.62)
     }
     override func menu(for event: NSEvent) -> NSMenu? {
+        if let menu = contextMenu?() { return menu }
         let menu = NSMenu()
         let item = NSMenuItem(title: "Manage Spaces…", action: #selector(manageFromMenu), keyEquivalent: "")
         item.target = self; menu.addItem(item); return menu
@@ -1630,6 +1874,9 @@ private final class ArkSpaceHeading: ArkHoverButton, SpaceTinted {
     private var symbolName = "sparkles"
     private var emoji: String?
     private var tint = ArkPalette.ink
+    /// The Space's context menu, as on its footer button.
+    var contextMenu: (() -> NSMenu?)?
+    override func menu(for event: NSEvent) -> NSMenu? { contextMenu?() }
     init() { super.init(frame: .zero); toolTip = "Manage Spaces" }
     required init?(coder: NSCoder) { fatalError() }
     func configure(_ space: BrowserSpace) {
@@ -1755,8 +2002,15 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted, Ar
             iconView.alphaValue = ArkRowInk.iconAlpha(sleeping: item.isSleeping)
         }
         if first || old.subtitle != item.subtitle { subtitleLabel.stringValue = item.subtitle }
+        // A lid animation belongs to one folder: a row reused for another item (or no longer a folder) stops it, so a
+        // late frame can never replace the new row's favicon or glyph.
+        if folderToggle != nil, !item.isFolder || old.id != item.id { cancelFolderToggle(settle: false) }
         if item.isFolder {
-            if first || !old.isFolder || old.isExpanded != item.isExpanded { favicon = nil; showFolderGlyph() }
+            if first || !old.isFolder || old.id != item.id || old.isExpanded != item.isExpanded {
+                favicon = nil
+                // Only the same folder toggling animates; a reused row shows its new folder at once.
+                showFolderGlyph(animated: !first && old.isFolder && old.id == item.id && old.isExpanded != item.isExpanded)
+            }
         } else if favicon == nil, first || old.symbol != item.symbol || old.monogram != item.monogram || old.isFolder { showFallbackIcon() }
         if first || old.isActive != item.isActive || old.isFolder != item.isFolder { applyIconTint() }
         if first || old.isSplit != item.isSplit || old.isPinned != item.isPinned || old.isFolder != item.isFolder {
@@ -1805,11 +2059,41 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted, Ar
         }
         applyIconTint()
     }
-    /// Folders: Bam's open/closed folder in the Space's tint.
-    private func showFolderGlyph() {
+    /// Folders: Bam's open/closed folder in the Space's tint. A toggle tilts the front panel open or settles it closed
+    /// over `ArkFolderGlyph.toggleDuration` (instant with Reduce Motion or offscreen); the last frame is the exact
+    /// open or closed glyph.
+    private var folderToggle: Timer?
+    private(set) var folderOpenness: CGFloat = 0
+    /// Stops a lid animation. `settle` false: a reused row; its new content (favicon, other glyph) owns the icon.
+    private func cancelFolderToggle(settle: Bool) {
+        folderToggle?.invalidate(); folderToggle = nil
+        if !settle { folderOpenness = item.isFolder && item.isExpanded ? 1 : 0 }
+    }
+    private func showFolderGlyph(animated: Bool = false) {
         iconView.symbolConfiguration = nil
-        iconView.image = ArkFolderGlyph.image(open: item.isExpanded, tint: spaceTint)
         iconView.identifier = NSUserInterfaceItemIdentifier(item.isExpanded ? "folder-glyph-open" : "folder-glyph")
+        cancelFolderToggle(settle: true)
+        let target: CGFloat = item.isExpanded ? 1 : 0
+        guard animated, window != nil, folderOpenness != target,
+              !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
+            folderOpenness = target
+            iconView.image = ArkFolderGlyph.image(openness: target, tint: spaceTint)
+            return
+        }
+        let start = folderOpenness, began = ProcessInfo.processInfo.systemUptime, folderID = item.id
+        let timer = Timer(timeInterval: 1.0 / 60, repeats: true) { [weak self] timer in
+            MainActor.assumeIsolated {
+                // Only the folder (and toggle) that started this animation may draw it.
+                guard let self, self.folderToggle === timer, self.item.id == folderID, self.item.isFolder else { timer.invalidate(); return }
+                let progress = min(1, (ProcessInfo.processInfo.systemUptime - began) / ArkFolderGlyph.toggleDuration)
+                let eased = 1 - pow(1 - progress, 3)   // ease out: quick start, gentle landing
+                self.folderOpenness = progress >= 1 ? target : start + (target - start) * CGFloat(eased)
+                self.iconView.image = ArkFolderGlyph.image(openness: self.folderOpenness, tint: self.spaceTint)
+                if progress >= 1 { timer.invalidate(); self.folderToggle = nil }
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        folderToggle = timer
     }
     /// Without a favicon: the page's monogram (Space-tinted disc) or its symbol.
     private func showFallbackIcon() {
@@ -1997,6 +2281,10 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted, Ar
         let session = beginDraggingSession(with: [dragItem], event: event, source: self)
         session.animatesToStartingPositionsOnCancelOrFail = !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         session.draggingFormation = .none
+        NotificationCenter.default.post(name: .arkSidebarDragDidBegin, object: self)
+    }
+    func draggingSession(_ session: NSDraggingSession, endedAt screenPoint: NSPoint, operation: NSDragOperation) {
+        NotificationCenter.default.post(name: .arkSidebarDragDidEnd, object: self)
     }
     override func mouseUp(with event: NSEvent) {
         defer { dragOrigin = nil; pressedID = nil }

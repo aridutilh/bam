@@ -5,6 +5,18 @@ import Foundation
 /// Where a build comes from. One catalog listing may be backed by several of these.
 enum ExtensionCatalogSourceKind: String, Sendable, Codable {
     case amo, chromeWebStore, safariAppStore, directPackage, local
+
+    /// Bam's source preference: Chrome Web Store, then Firefox Add-ons, then direct, local and Safari App Store.
+    /// Used across search listings at equal relevance and between builds of one product.
+    var preferenceOrder: Int {
+        switch self {
+        case .chromeWebStore: return 0
+        case .amo: return 1
+        case .directPackage: return 2
+        case .local: return 3
+        case .safariAppStore: return 4
+        }
+    }
 }
 
 /// A user-pasted store or package URL resolved to a source reference.
@@ -762,8 +774,9 @@ struct ExtensionCatalogSearch: Sendable {
     }
 
     /// Source APIs use different ranking systems. Put direct name matches ahead
-    /// of broad recommendations across the combined results, while keeping the
-    /// original store/API order for equal relevance.
+    /// of broad recommendations across the combined results. At equal name relevance a
+    /// build Bam can install comes first, then the preferred source (Chrome Web Store,
+    /// Firefox Add-ons, …), then each store's own order.
     static func ranked(_ candidates: [ExtensionBuildCandidate], for query: String) -> [ExtensionBuildCandidate] {
         let query = normalizedSearchText(query)
         guard !query.isEmpty else { return candidates }
@@ -779,7 +792,12 @@ struct ExtensionCatalogSearch: Sendable {
             return 5
         }
         return candidates.enumerated().map { (index: $0.offset, candidate: $0.element, rank: rank($0.element)) }
-            .sorted { $0.rank != $1.rank ? $0.rank < $1.rank : $0.index < $1.index }.map(\.candidate)
+            .sorted { a, b in
+                if a.rank != b.rank { return a.rank < b.rank }
+                if a.candidate.canInstallInBam != b.candidate.canInstallInBam { return a.candidate.canInstallInBam }
+                let ao = a.candidate.source.preferenceOrder, bo = b.candidate.source.preferenceOrder
+                return ao != bo ? ao < bo : a.index < b.index
+            }.map(\.candidate)
     }
     func search(_ query: String) async -> ExtensionCatalogSearchResult {
         let query = query.trimmingCharacters(in: .whitespacesAndNewlines)

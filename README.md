@@ -6,7 +6,19 @@ A small, fast, slightly obsessive macOS browser prototype. Native Swift + AppKit
 
 Bam explores the things that make sidebar browsers feel good: a compact sidebar with **Spaces**, a **Peek** overlay for glancing at links, **Split View**, a pocket-sized **Little Bam** window, and a **floating video panel** you can flick into a corner. It's an independent open-source experiment — not affiliated with Arc, The Browser Company, or Yab, and not claiming feature parity with any of them. Think of it as a love letter written in its own handwriting.
 
-**Latest download:** [v0.22.1 prerelease](https://github.com/aridutilh/bam/releases/tag/v0.22.1) · [all releases](https://github.com/aridutilh/bam/releases) · [changelog](CHANGELOG.md)
+**Latest download:** [v0.24.0](https://github.com/aridutilh/bam/releases/tag/v0.24.0) · [all releases](https://github.com/aridutilh/bam/releases) · [changelog](CHANGELOG.md)
+
+**Bam 0.24.0 (build 48)** adds:
+- a wider, steadier search that also finds browser actions;
+- a sidebar that runs to its edge, with Space menus, animated folders and drag into Favorites;
+- a compact downloads list with a thumbnail library;
+- Bam's own quit dialog;
+- trackpad pinch to zoom pages and resize floating video;
+- site controls in the address field;
+- Chrome-first extension search;
+- a guided setup with an optional previewed Arc import.
+
+It is not full Arc or Yab parity; see [validation](VALIDATION.md) for what was tested and the limits.
 
 **Bam 0.23.0 (build 47):** new verified Chrome Web Store installs use their CRX-verified Chrome ID, while resource URLs stay private per installation. Existing installs keep their previous identity and storage; duplicate verified IDs are refused within a profile, and notification responses stay bound to the installation that posted them. Manage Extensions adds per-extension **Site Access** (withheld, specific sites, or all requested sites, never beyond what the extension requests); withdrawing access restarts the extension into a fresh context once its old pages have closed, which ends its content scripts and, in Bam's native tests, its cross-origin reads that needed the withdrawn site. Pages Bam can't track can keep earlier access. The full native Extensions suite passed at `4ed2f83` (818 checks), including those reads being refused (a test page that sends no CORS headers); the full build, all eleven native suites and real Session Buddy and Dark Reader checks passed on the same candidate. Real Dark Reader's styling went away after withdrawal and a page reload. Extensions holding the `tabs` permission see tab addresses and titles without site access, as in Chrome. Bam no longer asks for website access in the middle of an extension's call: an extension regains a site only through its own permission request, a click on its toolbar button, or Site Access. Real Session Buddy saves, closes and restores tabs, including kept pages and tab titles, and copies and pastes tabs through its This window menu, without site access (bounded checks). Its browser-level Paste, which opens a new window, isn't supported. Multiwindow restoration and full Chrome compatibility remain incomplete; see [validation](VALIDATION.md).
 

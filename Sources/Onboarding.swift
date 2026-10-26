@@ -305,6 +305,9 @@ import QuartzCore
     private func buildStep(_ step: OnboardingStep) -> NSView {
         switch step {
         case .hello: return buildHello()
+        case .tour: return buildTour()
+        case .bring: return buildBring()
+        case .extensions: return buildExtensions()
         case .color: return buildColor()
         case .name: return buildName()
         case .favorites: return buildFavorites()
@@ -464,6 +467,70 @@ import QuartzCore
         return column(spacing: 16, [title, subtitle, OnboardingSpacer(height: 2), grid, OnboardingSpacer(height: 6), next])
     }
 
+    /// A short tour of what Bam actually does; each card names a real feature and how to reach it.
+    private func buildTour() -> NSView {
+        let title = OnboardingText.title("The good parts, built in.")
+        let subtitle = OnboardingText.subtitle("A sidebar on the left, and everything else out of the way.")
+        let features: [(String, String, String)] = [
+            ("square.stack.3d.up", "Spaces", "Separate sidebars for work, home or one project. Swipe between them."),
+            ("eye", "Peek", "Open a link over your page, then close it right where you were."),
+            ("rectangle.split.2x1", "Split View", "Two pages side by side with a draggable divider."),
+            ("pip", "Picture in Picture", "Leave a playing video and it floats. Pinch to resize it.")
+        ]
+        let grid = NSStackView(); grid.orientation = .vertical; grid.spacing = 12
+        for pair in stride(from: 0, to: features.count, by: 2) {
+            let row = NSStackView(); row.orientation = .horizontal; row.spacing = 12; row.distribution = .fillEqually
+            for (symbol, name, detail) in features[pair..<min(pair + 2, features.count)] {
+                row.addArrangedSubview(OnboardingFeatureCard(symbol: symbol, title: name, detail: detail))
+            }
+            row.translatesAutoresizingMaskIntoConstraints = false
+            row.widthAnchor.constraint(equalToConstant: 520).isActive = true
+            grid.addArrangedSubview(row)
+        }
+        let next = OnboardingPillButton(title: "Continue", prominent: true)
+        next.target = self; next.action = #selector(advance)
+        return column(spacing: 18, [title, subtitle, OnboardingSpacer(height: 4), grid, OnboardingSpacer(height: 6), next])
+    }
+
+    /// Offered only when Arc's layout file is on this Mac. Choosing it opens Bam's own Import from
+    /// Arc sheet after setup, with its preview; nothing is imported until you confirm there.
+    private func buildBring() -> NSView {
+        let title = OnboardingText.title("Coming from Arc?")
+        let subtitle = OnboardingText.subtitle("Bring your Spaces, folders, pinned tabs and Favorites.\nYou’ll see exactly what comes in before anything changes.")
+        let bring = OnboardingPillButton(title: "Bring from Arc", prominent: true)
+        bring.target = self; bring.action = #selector(bringFromArc)
+        let fresh = OnboardingQuietButton(title: "Start fresh")
+        fresh.target = self; fresh.action = #selector(startFresh)
+        return column(spacing: 18, [title, subtitle, OnboardingSpacer(height: 10), bring, fresh])
+    }
+    @objc private func bringFromArc() { model.bringsFromArc = true; advance() }
+    @objc private func startFresh() { model.bringsFromArc = false; advance() }
+
+    /// Optional: name a password manager and Add Extensions opens searching for it after setup.
+    /// Nothing is installed here; you review it there like any extension.
+    private func buildExtensions() -> NSView {
+        let title = OnboardingText.title("Your password manager?")
+        let subtitle = OnboardingText.subtitle("Pick yours and Bam will open Add Extensions with it after setup.\nYou review its permissions there before it can do anything.")
+        let row = NSStackView(); row.orientation = .horizontal; row.spacing = 10
+        for (index, name) in OnboardingModel.passwordManagers.enumerated() {
+            let button = OnboardingPillButton(title: name, prominent: model.passwordManager == name)
+            button.keyEquivalent = ""
+            button.tag = index
+            button.target = self; button.action = #selector(passwordManagerPicked(_:))
+            button.setAccessibilityLabel("Find \(name) after setup")
+            row.addArrangedSubview(button)
+        }
+        let later = OnboardingQuietButton(title: "Not now")
+        later.target = self; later.action = #selector(noPasswordManager)
+        return column(spacing: 18, [title, subtitle, OnboardingSpacer(height: 8), row, later])
+    }
+    @objc private func passwordManagerPicked(_ sender: NSButton) {
+        let names = OnboardingModel.passwordManagers
+        model.choosePasswordManager(names.indices.contains(sender.tag) ? names[sender.tag] : nil)
+        advance()
+    }
+    @objc private func noPasswordManager() { model.choosePasswordManager(nil); advance() }
+
     @objc private func bookmarkToggled(_ sender: OnboardingBookmarkToggle) {
         model.toggleBookmark(sender.bookmark.address)
     }
@@ -514,7 +581,15 @@ import QuartzCore
         let dress = model.colorIndex == BrowserSpace.prismColorIndex ? "every color at once"
             : model.colorIndex == BrowserSpace.clearColorIndex ? "glass"
             : names[min(names.count - 1, model.colorIndex)].lowercased()
-        let summary = OnboardingText.subtitle("“\(model.result.spaceName)” is dressed in \(dress) and ready to go.")
+        let steps = model.followUps.compactMap { followUp -> String? in
+            switch followUp {
+            case .importFromArc: return "Bam shows what it will bring from Arc"
+            case .findExtension(let name): return "opens Add Extensions with \(name)"
+            case .none: return nil
+            }
+        }
+        let next = steps.isEmpty ? "" : "\nNext, " + (steps.count == 1 && steps[0].hasPrefix("opens") ? "Bam " : "") + steps.joined(separator: ", then ") + "."
+        let summary = OnboardingText.subtitle("“\(model.result.spaceName)” is dressed in \(dress) and ready to go.\(next)")
         let start = OnboardingPillButton(title: "Start browsing", prominent: true)
         start.target = self; start.action = #selector(advance)
         return column(spacing: 20, [title, summary, OnboardingSpacer(height: 10), start])
@@ -1222,4 +1297,40 @@ extension BrowserController {
         OnboardingApplication.apply(result, to: &session)
         showActive(); refreshPaletteResults(); save(); onSpacesChanged?()
     }
+}
+
+/// One feature in the tour: a symbol, its name and one sentence, on a soft card.
+@MainActor final class OnboardingFeatureCard: NSView {
+    init(symbol: String, title: String, detail: String) {
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.cornerRadius = 16
+        layer?.borderWidth = 1.5
+        let icon = NSImageView(image: NSImage(systemSymbolName: symbol, accessibilityDescription: nil) ?? NSImage())
+        icon.symbolConfiguration = .init(pointSize: 18, weight: .semibold)
+        icon.contentTintColor = BamTheme.red
+        let name = NSTextField(labelWithString: title)
+        name.font = BamType.sans(15, weight: .bold); name.textColor = BamTheme.ink
+        let text = NSTextField(wrappingLabelWithString: detail)
+        text.font = BamType.sans(12.5); text.textColor = BamTheme.muted
+        let stack = NSStackView(views: [icon, name, text])
+        stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 6
+        stack.edgeInsets = NSEdgeInsets(top: 14, left: 14, bottom: 14, right: 14)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor), stack.trailingAnchor.constraint(equalTo: trailingAnchor),
+            stack.topAnchor.constraint(equalTo: topAnchor), stack.bottomAnchor.constraint(equalTo: bottomAnchor),
+            heightAnchor.constraint(greaterThanOrEqualToConstant: 112)
+        ])
+        setAccessibilityElement(true); setAccessibilityRole(.group)
+        setAccessibilityLabel("\(title). \(detail)")
+        paint()
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+    private func paint() {
+        layer?.backgroundColor = bamCG(BamTheme.card.withAlphaComponent(0.82))
+        layer?.borderColor = bamCG(BamTheme.line)
+    }
+    override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); paint() }
 }

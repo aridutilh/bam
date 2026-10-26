@@ -316,13 +316,22 @@ struct BrowserExtensionPermissionReview {
         if manager == nil { manager = ExtensionManagement(host: self) }
         manager?.show(profileID: profileID, relativeTo: window)
     }
+    /// The manager with one extension selected and its Site Access editor opened, by the manager's own rules (it
+    /// explains instead when the extension can't be edited, e.g. while disabled).
+    func showSiteAccess(extensionID: UUID, profileID: UUID, relativeTo window: NSWindow?) {
+        showManager(profileID: profileID, relativeTo: window)
+        guard let manager, let row = manager.items(for: extensionID) else { return }
+        manager.table.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        manager.table.scrollRowToVisible(row)
+        manager.openSiteAccess()
+    }
     /// Verified store/link installs and updates; created on first use so the
     /// network stack stays idle for folder-only users.
     private(set) lazy var installer = ExtensionInstaller(host: self)
     private var library: ExtensionLibraryPanel?
-    func showLibrary(profileID: UUID, relativeTo window: NSWindow?) {
+    func showLibrary(profileID: UUID, relativeTo window: NSWindow?, query: String? = nil) {
         if library == nil { library = ExtensionLibraryPanel(host: self, installer: installer) }
-        library?.show(profileID: profileID, relativeTo: window)
+        library?.show(profileID: profileID, relativeTo: window, query: query)
     }
     func actionItems(profileID: UUID, tabID: UUID?) -> [BrowserExtensionActionItem] {
         guard let runtime = runtimes[profileID] else { return [] }

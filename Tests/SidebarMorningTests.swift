@@ -23,7 +23,7 @@ import AppKit
         for count in 1...12 {
             for width in stride(from: CGFloat(164), through: 420, by: 7.25) {
                 let columns = ArkMetrics.favoriteColumns(count: count, width: width)
-                let tile = (width - 16 - CGFloat(columns - 1) * ArkMetrics.favoriteGap) / CGFloat(columns)
+                let tile = (ArkMetrics.sidebarContentWidth(width) - CGFloat(columns - 1) * ArkMetrics.favoriteGap) / CGFloat(columns)
                 let rows = (count + columns - 1) / columns
                 require(columns >= 1 && tile >= ArkMetrics.favoriteMinimumWidth - 0.001, "Tiles never go below the minimum (\(count) at \(width))")
                 require(rows * columns - count < columns, "No empty row (\(count) at \(width))")
@@ -37,8 +37,40 @@ import AppKit
         require(ArkMetrics.favoriteIconRect(in: tileBounds, imageSize: NSSize(width: 64, height: 32)).size == NSSize(width: 16, height: 8),
                 "A non-square icon keeps its aspect")
 
+        // MARK: Drag feedback: one tap per change of accepted target in a drag, none for moves over the same target.
+        var gate = ArkDropFeedbackGate()
+        require(gate.shouldTap(sequence: 1, target: "3:1"), "Entering an accepted target taps")
+        require(!gate.shouldTap(sequence: 1, target: "3:1") && !gate.shouldTap(sequence: 1, target: "3:1"), "Moving over the same target doesn't tap again")
+        require(gate.shouldTap(sequence: 1, target: "4:1"), "A new target taps once")
+        require(!gate.shouldTap(sequence: 1, target: nil), "A refused position never taps")
+        require(gate.shouldTap(sequence: 1, target: "4:1"), "Coming back to an accepted target after a refused one taps")
+        require(gate.shouldTap(sequence: 2, target: "4:1"), "A new drag starts fresh")
+        // Dropping into Favorites: the pointer picks an insertion slot, and the tiles at or after it move on one.
+        let tileW: CGFloat = 50, step = tileW + ArkMetrics.favoriteGap, rowStep = ArkMetrics.favoriteHeight + ArkMetrics.favoriteGap
+        func slot(_ x: CGFloat, _ y: CGFloat, count: Int = 6) -> Int {
+            ArkMetrics.favoriteInsertionSlot(at: NSPoint(x: x, y: y), count: count, columns: 4, leading: 8, tileWidth: tileW)
+        }
+        require(slot(8 + 5, 10) == 0 && slot(8 + tileW - 5, 10) == 1 && slot(8 + step + tileW - 5, 10) == 2,
+                "Left of a tile's middle inserts before it; right of it, after it")
+        require(slot(8 + 5, rowStep + 10) == 4 && slot(8 + 3 * step + tileW - 2, rowStep + 10) == 6 && slot(300, 300) == 6,
+                "The second row continues the count; past the last tile is the end")
+        require(slot(8, 10, count: 0) == 0, "An empty grid's only slot is the first")
+        require((0..<6).map { ArkMetrics.favoriteSlot(forTile: $0, gap: 2) } == [0, 1, 3, 4, 5, 6]
+                    && (0..<3).map { ArkMetrics.favoriteSlot(forTile: $0, gap: nil) } == [0, 1, 2],
+                "Tiles at or after the gap move on one slot; without a gap nothing moves")
+
+        // MARK: Space sheet fields: editable text sits on the field's vertical center, inset from the edge.
+        let fieldCell = ArkCenteredFieldCell.editable(); fieldCell.font = .systemFont(ofSize: 13)
+        let fieldBounds = NSRect(x: 0, y: 0, width: 200, height: 26)
+        let textBox = fieldCell.drawingRect(forBounds: fieldBounds)
+        require(abs(textBox.midY - fieldBounds.midY) <= 0.5 && textBox.minX == ArkCenteredFieldCell.sideInset
+                    && textBox.height < fieldBounds.height && fieldCell.titleRect(forBounds: fieldBounds) == textBox,
+                "Space name text is vertically centered and inset (\(textBox) in \(fieldBounds))")
+        require(fieldCell.isEditable && fieldCell.isSelectable && fieldCell.usesSingleLineMode, "The centered field cell stays editable")
+
         // MARK: In a real sidebar: 8 Favorites lay out 4×2 and a 32px icon is copied 1:1 at 2x.
-        let sidebar = SidebarView(frame: NSRect(x: 0, y: 0, width: 229, height: 720))
+        // 230pt gives a fractional tile (49.25pt) with the sidebar's content edges, so alignment is exercised.
+        let sidebar = SidebarView(frame: NSRect(x: 0, y: 0, width: 230, height: 720))
         let window = NSWindow(contentRect: sidebar.frame, styleMask: [.borderless], backing: .buffered, defer: false)
         window.contentView = sidebar
         let favoriteIDs = (0..<8).map { _ in UUID() }
@@ -57,9 +89,20 @@ import AppKit
         sidebar.layoutSubtreeIfNeeded()
         let tiles = favoriteIDs.compactMap { id in descendants(sidebar).first { $0.identifier?.rawValue == "favorite-\(id.uuidString)" } }
         require(tiles.count == 8 && Set(tiles.map { $0.frame.minY }).count == 2 && Set(tiles.map { $0.frame.minX }).count == 4,
-                "Eight Favorites at 229pt show as four columns, two rows")
+                "Eight Favorites at 230pt show as four columns, two rows")
         let tile = tiles[1]
         require(tile.frame.width.truncatingRemainder(dividingBy: 0.5) != 0, "The fixture tile has a fractional width (alignment matters)")
+        // Arc's edges: content starts 8pt in and runs to within 1pt of the sidebar's trailing edge (the page card's gap is
+        // the only margin there): no doubled trailing inset, no reserved scroller gutter.
+        let tileEdges = tiles.map { $0.convert($0.bounds, to: sidebar) }
+        require(abs((tileEdges.map(\.maxX).max() ?? 0) - (sidebar.bounds.width - 1)) < 0.01 && abs((tileEdges.map(\.minX).min() ?? 0) - 8) < 0.01,
+                "Favorites span the sidebar's content edges: \(tileEdges.map(\.minX).min() ?? 0)–\(tileEdges.map(\.maxX).max() ?? 0) of \(sidebar.bounds.width)")
+        if let list = descendants(sidebar).compactMap({ $0 as? NSTableView }).first(where: { $0.identifier?.rawValue == "sidebar-tab-list" }),
+           let listScroll = list.enclosingScrollView {
+            let edge = listScroll.convert(listScroll.bounds, to: sidebar)
+            require(abs(edge.maxX - (sidebar.bounds.width - 1)) < 0.01 && listScroll.scrollerStyle == .overlay,
+                    "The tab list reaches the trailing content edge with an overlay scroller: \(edge.maxX) of \(sidebar.bounds.width)")
+        } else { require(false, "The sidebar has a tab list") }
         @MainActor func render(_ view: NSView) -> NSBitmapImageRep {
             let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(ceil(view.bounds.width * 2)), pixelsHigh: Int(ceil(view.bounds.height * 2)),
                                        bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB,
@@ -238,6 +281,37 @@ import AppKit
         let afterKeyboardReload = pixels(folderRow())
         focusWindow.makeFirstResponder(nil)
         require(focusWindow.firstResponder !== folderRow() && afterKeyboardReload != pixels(folderRow()), "Keyboard-mode focus keeps its ring through a reload")
+        // The folder just opened by keyboard settles on the exact open glyph once its short lid animation ends.
+        RunLoop.main.run(until: Date().addingTimeInterval(ArkFolderGlyph.toggleDuration + 0.2))
+        let settledGlyph = descendants(folderRow()).first { $0.identifier?.rawValue.hasPrefix("folder-glyph") == true } as? NSImageView
+        require(settledGlyph?.identifier?.rawValue == "folder-glyph-open" && settledGlyph?.image?.accessibilityDescription == "Open folder",
+                "An opened folder ends on the open glyph (\(settledGlyph?.identifier?.rawValue ?? "none"))")
+        // A row reused mid-animation for another folder in the same state shows that folder's settled glyph, not a
+        // frame of the old folder's lid. An empty folder toggles in place (no rows inserted), so its lid animates; then
+        // scrolling it away makes the table recycle its row for a folder further down.
+        @MainActor func glyph(_ row: NSView) -> Data? {
+            (descendants(row).first { $0.identifier?.rawValue.hasPrefix("folder-glyph") == true } as? NSImageView)?.image?.tiffRepresentation
+        }
+        let manyFolders = (0..<80).map { _ in UUID() }
+        tree = manyFolders.enumerated().map { index, id in
+            SidebarTabItem(id: id, title: "Folder \(index)", subtitle: "", symbol: "folder", isPinned: true, isActive: false, isFolder: true, isExpanded: index != 0)
+        }
+        showTree()
+        let folderList = descendants(focusSidebar).compactMap { $0 as? NSTableView }.first { $0.window != nil && $0.numberOfRows >= 80 }!
+        @MainActor func settle() { folderList.layoutSubtreeIfNeeded(); folderList.prepareContent(in: folderList.visibleRect); folderList.layoutSubtreeIfNeeded() }
+        folderList.scrollRowToVisible(0); settle()
+        let animating = descendants(focusSidebar).first { $0.identifier?.rawValue == "tab-row-\(manyFolders[0].uuidString)" }!
+        tree[0].isExpanded = true; showTree()   // its lid starts opening
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        require(glyph(animating) != nil && glyph(animating) != glyph(descendants(focusSidebar).first { $0.identifier?.rawValue == "tab-row-\(manyFolders[1].uuidString)" }!),
+                "The lid is mid-animation")
+        folderList.scrollRowToVisible(79); settle()
+        let reusedAs = manyFolders.first { animating.identifier?.rawValue == "tab-row-\($0.uuidString)" }
+        require(reusedAs != nil && reusedAs != manyFolders[0], "The animating row was recycled for another folder (the case under test)")
+        let shown = descendants(focusSidebar).filter { view in view.window != nil && manyFolders.dropFirst().contains { view.identifier?.rawValue == "tab-row-\($0.uuidString)" } }
+        require(shown.count > 3 && Set(shown.map(glyph)).count == 1, "A row recycled mid-animation shows its new folder's settled glyph")
+        RunLoop.main.run(until: Date().addingTimeInterval(ArkFolderGlyph.toggleDuration + 0.1))
+        require(Set(shown.map(glyph)).count == 1, "No late frame of the old folder lands afterwards")
         withExtendedLifetime(focusWindow) {}
 
         // MARK: Folder glyph: Bam's own vector folder, tinted, distinct open and closed.
@@ -259,6 +333,13 @@ import AppKit
         } }
         require(covered > 32 * 32 / 3 && tinted > covered / 2, "The folder is a filled shape in the Space's tint, not a thin outline (\(tinted)/\(covered))")
         require(glyphPixels(false, scale: 3).pixelsWide == 48, "Vector glyph renders at any scale")
+        // Toggling tilts the front panel through Bam's own in-between shapes, ending exactly on the closed or open face.
+        let closedFront = ArkFolderGlyph.frontCorners(openness: 0), openFront = ArkFolderGlyph.frontCorners(openness: 1)
+        let halfway = ArkFolderGlyph.frontCorners(openness: 0.5)
+        require(closedFront[2] == NSPoint(x: 15, y: 11.1) && openFront[2] == NSPoint(x: 15.6, y: 9.4)
+                    && halfway[2].x > closedFront[2].x && halfway[2].x < openFront[2].x && halfway[2].y < closedFront[2].y && halfway[2].y > openFront[2].y,
+                "The front panel's top edge moves between the closed and open faces (\(halfway[2]))")
+        require(ArkFolderGlyph.frontCorners(openness: -1) == closedFront && ArkFolderGlyph.frontCorners(openness: 2) == openFront, "Openness is clamped")
 
         // MARK: Footer, as in Arc: Downloads left, Spaces centered, + right.
         let footer = ArkFooterLayout(width: 240, spaceCount: 3, selectedIndex: 1)
@@ -359,6 +440,19 @@ import AppKit
                 "The address field's tooltip never shows an internal address")
         policySidebar.setAddress("https://docs.example/a", title: "Docs")
         require(searchField.toolTip == "https://docs.example/a", "A real page's address still shows")
+        // Site settings: a button inside the field for a page (not Bam's own), beside the still-reachable extension library.
+        policySidebar.layoutSubtreeIfNeeded()
+        @MainActor func control(_ id: String) -> NSView { descendants(policySidebar).first { $0.identifier?.rawValue == id }! }
+        let siteButton = control("site-settings"), library = control("extension-library")
+        require(!siteButton.isHidden && !library.isHidden && !siteButton.frame.intersects(library.frame)
+                    && searchField.frame.contains(siteButton.frame) && searchField.frame.contains(library.frame),
+                "A page's field shows site settings and the extension library side by side, inside the field")
+        var anchor: NSView?
+        policySidebar.onSiteSettings = { anchor = $0 }
+        (siteButton as? NSButton)?.performClick(nil)
+        require(anchor === siteButton, "Clicking site settings anchors its popover on the button")
+        policySidebar.setAddress("orbit://newtab", title: "New tab"); policySidebar.layoutSubtreeIfNeeded()
+        require(siteButton.isHidden && !library.isHidden, "Bam's own pages show no site settings; the library stays")
         withExtendedLifetime(footerWindow) {}; withExtendedLifetime(policyWindow) {}
 
         print("PASS: \(checks) sidebar morning checks")
