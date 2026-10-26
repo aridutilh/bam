@@ -100,6 +100,39 @@ import WebKit
             try check(try await fetch(from: visible) == "refused", "\(label): the recreated extension tab could still read the withdrawn host")
         }
 
+        // 0. Ordering discriminator (measured, not asserted; runs first so it reports even if a strict case fails). The
+        // extension's tab is in the background when access is withheld, so the restart creates no renderer for it. The
+        // fixture waits until the old renderer has deallocated, and only then selects the tab: a fresh renderer created
+        // with no old one alive. If this fetch is refused while the visible case (created during the restart) reads,
+        // the old renderer's lifetime at fresh-load time is what keeps the access, and the product needs to retire old
+        // renderers completely before the fresh context's pages are created.
+        do {
+            let ordering = try await install("ordering", ["host_permissions": ["http://127.0.0.1/*"]])
+            let orderingTab = try await openTab(ordering, active: true)
+            let grantedRead = try await fetch(from: orderingTab)
+            var siteURL = URLComponents(url: pageURL, resolvingAgainstBaseURL: false)!
+            siteURL.path = "/index.html"; siteURL.query = "renderer-ordering"
+            guard let siteTab = controller.openProfileTab(siteURL.url!, profileID: profile, active: true) else { throw Failure(description: "Renderer restart: no ordinary tab for the ordering stage") }
+            opened.append(siteTab)
+            try await wait("the ordinary tab did not load") { controller.browsers[siteTab]?.isLoading == false && controller.browsers[siteTab]?.url != nil }
+            weak let oldRenderer = controller.browsers[orderingTab]
+            let rendererBefore = oldRenderer != nil
+            guard let snapshot = host.siteAccess(id: ordering), let declarations = snapshot.declarations else { throw Failure(description: "Renderer restart: no Site Access snapshot") }
+            _ = try host.performSiteAccess(id: ordering, profileID: profile, revision: snapshot.revision, displayed: declarations, change: .choose(.withheld))
+            let allocatedAtReturn = oldRenderer != nil, rendererAtReturn = controller.browsers[orderingTab] != nil
+            let deadline = ProcessInfo.processInfo.systemUptime + 5
+            while oldRenderer != nil && ProcessInfo.processInfo.systemUptime < deadline { try await Task.sleep(nanoseconds: 40_000_000) }
+            let releasedBeforeSelect = oldRenderer == nil
+            controller.select(orderingTab)
+            try await wait("the ordering tab did not load when selected") { controller.browsers[orderingTab]?.title == "renderer page" && controller.browsers[orderingTab]?.isLoading == false }
+            let afterRelease = try await fetch(from: orderingTab)
+            print("RENDERER_ORDER stage=background-withhold grantedRead=\(grantedRead) backgroundRendererBefore=\(rendererBefore) " +
+                  "oldAllocatedAtReturn=\(allocatedAtReturn) rendererAtReturn=\(rendererAtReturn) oldReleasedBeforeSelect=\(releasedBeforeSelect) " +
+                  "fetchFromRendererCreatedAfterRelease=\(afterRelease)"); fflush(stdout)
+            _ = host.takeSiteAccessNotice(id: ordering)
+            try await host.remove(id: ordering)
+        }
+
         // 1. Site Access panel: Withhold the requested host.
         let requested = try await install("requested", ["host_permissions": ["http://127.0.0.1/*"]])
         // Identity only: the fixture never holds a context strongly, so a replaced one can deallocate.
@@ -117,6 +150,17 @@ import WebKit
             let before = generation(requested)
             guard let snapshot = host.siteAccess(id: requested), let declarations = snapshot.declarations else { throw Failure(description: "Renderer restart: no Site Access snapshot") }
             _ = try host.performSiteAccess(id: requested, profileID: profile, revision: snapshot.revision, displayed: declarations, change: .choose(.withheld))
+            // Ordering evidence (measured, not asserted): the restart is synchronous, so if a new renderer already exists
+            // at return while an old one is still allocated, the fresh page was created while the old web content
+            // process could still be reused.
+            func order(_ moment: String) {
+                let newRenderer = controller.browsers[visible].map { oldVisible == nil || $0 !== oldVisible } ?? false
+                print("RENDERER_ORDER stage=visible-withhold moment=\(moment) oldVisibleAllocated=\(oldVisible != nil) " +
+                      "oldBackgroundAllocated=\(oldBackground != nil) newVisibleRenderer=\(newRenderer)"); fflush(stdout)
+            }
+            order("at-return")
+            await Task.yield(); try await Task.sleep(nanoseconds: 1_000_000)
+            order("after-run-loop-turn")
             try await checkRestarted("panel withhold", requested, from: before, identity: requestedIdentity, oldContext: { oldContext }, visible: visible, oldVisible: { oldVisible },
                                      background: background, oldBackground: { oldBackground }, addresses: addresses)
         }
