@@ -1826,6 +1826,15 @@ struct BrowserExtensionPermissionReview {
     private var activePopupTabID: UUID?
     private var activePopup: WKWebExtension.Action?
     private var activePopupPopover: NSPopover?
+    /// Every popup view Bam presented, weakly, with the install it belongs to (`webkit-extension://<install>`). Kept
+    /// across close and replacement (a closed popup may still be retained elsewhere); pruned only when deallocated.
+    private var presentedPopups: [(install: String, probe: RetiredRendererProbe)] = []
+    /// The still-alive popup views Bam presented for this install, any of its contexts (current or earlier).
+    func presentedPopupViews(of context: WKWebExtensionContext) -> [WKWebView] {
+        presentedPopups.removeAll { $0.probe.web == nil }
+        guard let install = context.baseURL.host?.lowercased() else { return [] }
+        return presentedPopups.filter { $0.install == install }.compactMap { $0.probe.web }
+    }
     private var lastFocusedWindow: ObjectIdentifier?
     private var reportedActiveTabs: [ObjectIdentifier: UUID] = [:]
     /// Windows whose surfaces are single-page (Little Bam), reported as `popup`.
@@ -1957,15 +1966,22 @@ struct BrowserExtensionPermissionReview {
     private func clearPopupPresentation() { activePopup = nil; activePopupPopover = nil; activePopupTabID = nil }
     var nativeSessions: [UUID: BrowserExtensionNativeSession] = [:]
     func shutdown() { boundsGenerations.removeAll(); disconnectAllNative(); compatibility.shutdown(); ExtensionNotificationCenter.shared.unregister(compatibility) }
-    /// The extension's own views outside Bam's tabs that already exist: the popup Bam is presenting (found in its
-    /// popover's view hierarchy) and its offscreen document. Never `WKWebExtension.Action.popupWebView`: that getter
-    /// preloads the popup page on access, so reading it during a restart would create and load a page of the old
-    /// context right before it unloads.
+    /// The extension's own views outside Bam's tabs that already exist: the popup Bam is presenting (its popover's
+    /// view hierarchy), every popup view Bam presented earlier for this install that is still alive (closed or
+    /// replaced, weakly remembered), and its offscreen document. Never `WKWebExtension.Action.popupWebView`: that
+    /// getter preloads the popup page on access, so reading it during a restart would create and load a page of the
+    /// old context right before it unloads. Limit: WebKit may preload a popup before asking Bam to present it; a
+    /// preload Bam never saw is not tracked here (native validation covers it).
     func extensionPageViews(of context: WKWebExtensionContext) -> [RetiredRendererProbe] {
         func webViews(in view: NSView) -> [WKWebView] { (view as? WKWebView).map { [$0] } ?? view.subviews.flatMap(webViews) }
         var probes: [RetiredRendererProbe] = []
+        var seen = Set<ObjectIdentifier>()
         if let action = activePopup, action.webExtensionContext === context, let root = activePopupPopover?.contentViewController?.view {
-            probes += webViews(in: root).map { RetiredRendererProbe($0, role: "popup") }
+            for web in webViews(in: root) where seen.insert(ObjectIdentifier(web)).inserted { probes.append(RetiredRendererProbe(web, role: "popup")) }
+        }
+        // Popups presented earlier (closed or replaced) that something still retains.
+        for web in presentedPopupViews(of: context) where seen.insert(ObjectIdentifier(web)).inserted {
+            probes.append(RetiredRendererProbe(web, role: "popup(closed)"))
         }
         if let document = compatibility.offscreen?.currentDocument(for: context.uniqueIdentifier) {
             probes.append(RetiredRendererProbe(document, role: "offscreen"))
@@ -2341,6 +2357,14 @@ struct BrowserExtensionPermissionReview {
         let isButton = anchor is NSButton
         let rect = isButton ? anchor.bounds : NSRect(x: max(0, anchor.bounds.maxX - 28), y: anchor.isFlipped ? 0 : anchor.bounds.maxY - 28, width: 28, height: 28)
         popup.show(relativeTo: rect, of: anchor, preferredEdge: isButton ? .maxX : .minY)
+        // Remember the presented popup's actual views (the popover's hierarchy, no getter) for restart release barriers.
+        if let install = context.baseURL.host?.lowercased(), let root = popup.contentViewController?.view {
+            func webViews(in view: NSView) -> [WKWebView] { (view as? WKWebView).map { [$0] } ?? view.subviews.flatMap(webViews) }
+            presentedPopups.removeAll { $0.probe.web == nil }
+            for web in webViews(in: root) where !presentedPopups.contains(where: { $0.probe.web === web }) {
+                presentedPopups.append((install, RetiredRendererProbe(web, role: "popup")))
+            }
+        }
         completionHandler(nil)
     }
     func webExtensionController(_ controller: WKWebExtensionController, didUpdate action: WKWebExtension.Action, forExtensionContext context: WKWebExtensionContext) { if owns(context) { owner?.changed() } }
