@@ -623,6 +623,7 @@ extension ExtensionSiteAccessSmokeTest {
 
             // MARK: 6. Unload failure (WebKit keeps running it): quarantined, Bam stops owning it; Enable retries the unload.
             let beforeQuarantine = host.context(for: subject)
+            var quarantineHeld: WKWebView? = controller.browsers[extensionTab]   // an old view held across the quarantine
             BrowserExtensions.siteAccessRestartUnloadFault = { $0 == subject ? InjectedFailure(text: "injected restart unload failure (test)") : nil }
             var quarantineMessage: String?
             do { try withhold(subject) } catch BrowserExtensionSiteAccessFailure.failed(let message) { quarantineMessage = message }
@@ -677,6 +678,15 @@ extension ExtensionSiteAccessSmokeTest {
             // Disable stops it for real.
             try await host.setEnabled(false, id: subject)
             expect(beforeQuarantine?.isLoaded == false && host.context(for: subject) == nil, "Disable didn't stop the quarantined context \(state(subject))")
+            // The quarantine's release barrier still holds: Enable while the old view is alive must not load.
+            BrowserExtensions.siteAccessRestartReleaseDeadline = 0.3
+            var quarantineEnableError: String?
+            do { try await host.setEnabled(true, id: subject) } catch { quarantineEnableError = error.localizedDescription }
+            withExtendedLifetime(quarantineHeld) {}
+            expect(quarantineEnableError?.contains("haven’t closed yet") == true && host.context(for: subject) == nil,
+                   "after a quarantine, Enable loaded while an old view was held: \(quarantineEnableError ?? "no error") \(state(subject))")
+            BrowserExtensions.siteAccessRestartReleaseDeadline = 2
+            quarantineHeld = nil
             try await host.setEnabled(true, id: subject)
             let afterQuarantine = host.context(for: subject)
             expect(afterQuarantine?.isLoaded == true && afterQuarantine !== beforeQuarantine,
@@ -703,11 +713,20 @@ extension ExtensionSiteAccessSmokeTest {
             host.permissionPrompt = { _ in true }
             var heldEnableError: String?
             do { try await host.setEnabled(true, id: subject) } catch { heldEnableError = error.localizedDescription }
-            withExtendedLifetime(heldRenderer) {}   // the strong hold provably spans the timeout and the Enable attempt
             expect(heldEnableError?.contains("haven’t closed yet") == true && host.context(for: subject) == nil,
                    "Enable loaded while the timed-out restart's old renderer was still alive: \(heldEnableError ?? "no error") \(state(subject))")
+            // An Enable waiting on the barrier, then a newer Revoke, then the release: the older Enable must not load.
             BrowserExtensions.siteAccessRestartReleaseDeadline = 2
+            let staleEnable = Task { @MainActor in try await host.setEnabled(true, id: subject) }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+            try host.revokePermissions(id: subject)
+            withExtendedLifetime(heldRenderer) {}   // the strong hold provably spans the timeout, both Enables and the Revoke
             heldRenderer = nil
+            var staleEnableError: String?
+            if case .failure(let error) = await staleEnable.result { staleEnableError = error.localizedDescription }
+            expect(staleEnableError?.contains("changed while it waited") == true && host.context(for: subject) == nil
+                   && host.records.first { $0.id == subject }?.patterns.isEmpty == true,
+                   "an Enable waiting on the barrier continued after a newer Revoke: \(staleEnableError ?? "no error") \(state(subject))")
             var timeoutMessage = ""
             if case .releaseTimedOut(let message) = timeoutResult { timeoutMessage = message }
             expect(timeoutMessage.contains("couldn’t finish restarting") && timeoutMessage.contains("couldn’t save that it’s off")
@@ -735,11 +754,19 @@ extension ExtensionSiteAccessSmokeTest {
             let cancelResult = await host.restartCompletion(id: subject, generation: cancelGeneration)
             var cancelEnableError: String?
             do { try await host.setEnabled(true, id: subject) } catch { cancelEnableError = error.localizedDescription }
-            withExtendedLifetime(cancelHeld) {}
             expect(cancelResult == .superseded && cancelEnableError?.contains("haven’t closed yet") == true && host.context(for: subject) == nil,
                    "after a cancelled restart, Enable loaded while the old renderer was held: \(String(describing: cancelResult)), \(cancelEnableError ?? "no error") \(state(subject))")
             BrowserExtensions.siteAccessRestartReleaseDeadline = 2
+            let staleEnableAfterCancel = Task { @MainActor in try await host.setEnabled(true, id: subject) }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+            try host.disable(id: subject)
+            withExtendedLifetime(cancelHeld) {}
             cancelHeld = nil
+            var staleCancelError: String?
+            if case .failure(let error) = await staleEnableAfterCancel.result { staleCancelError = error.localizedDescription }
+            expect(staleCancelError?.contains("changed while it waited") == true && host.context(for: subject) == nil
+                   && host.records.first { $0.id == subject }?.enabled == false,
+                   "an Enable waiting on the barrier continued after a newer Disable: \(staleCancelError ?? "no error") \(state(subject))")
             try await host.setEnabled(true, id: subject)
             expect(host.context(for: subject)?.isLoaded == true, "Enable didn't load once the cancelled restart's renderer was released \(state(subject))")
 
