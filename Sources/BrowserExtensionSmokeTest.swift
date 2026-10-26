@@ -1624,12 +1624,38 @@ import Darwin
         try check(host.items(profileID: profile).first { $0.id == extensionID }?.version == "2.0.0" && host.context(for: extensionID) != nil,
             "Approved update did not activate its final package")
         do {
-            // Scoped, so the test's reference to this popup ends here (see heldPopup above).
-            guard let updatedPopup = host.context(for: extensionID)?.action(for: nil)?.popupWebView else { throw ExtensionSmokeTest.Failure(description: "Updated package has no popup") }
-            observeExtensionView("updated-popup", updatedPopup)
-            try await wait("Updated extension still looked for scripts at the staging URL") { (try? await updatedPopup.evaluateJavaScript("document.title")) as? String == "Bam fixture ready" }
+            // The updated package's popup, opened the way a user opens it: Bam's own sidebar action, so Bam presents it and
+            // its restart release barrier tracks it. (Reading Action.popupWebView here instead would preload a popup outside
+            // Bam's ownership; native 2ed4dff showed that page alive at the next restart's fresh load.) Bam presents a popup
+            // only over its profile's active page, so the subject's space shows for this check and the window is restored.
+            let place = (space: controller.session.space, profile: controller.session.currentProfileID)
+            guard let subjectSpace = controller.session.tabs.first(where: { $0.id == id })?.space else {
+                throw ExtensionSmokeTest.Failure(description: "The browser-adapter tab left the session before the updated popup check")
+            }
+            controller.session.changeSpace(subjectSpace); controller.showActive(); controller.refresh()
+            let previouslyActive = controller.session.activeID
+            controller.select(id)
+            try await wait("The extension's sidebar action did not show for the updated popup check") {
+                controller.session.activeID == id && actionButton()?.isHidden == false
+            }
+            guard let updatedButton = actionButton(), let adapter = liveRuntime.tabs[id],
+                  let updatedAction = host.context(for: extensionID)?.action(for: adapter) else {
+                throw ExtensionSmokeTest.Failure(description: "Updated package has no popup")
+            }
+            updatedButton.performClick(nil)
+            try await wait("Updated extension still looked for scripts at the staging URL") {
+                guard let shown = updatedAction.popupPopover, let web = presentedWeb(shown) else { return false }
+                return (try? await web.evaluateJavaScript("document.title")) as? String == "Bam fixture ready"
+            }
+            if let shown = updatedAction.popupPopover {
+                observeExtensionView("updated-popup", presentedWeb(shown))
+                shown.performClose(nil)
+                try await wait("The updated package's popup did not close") { !shown.isShown }
+            }
+            if previouslyActive != id { controller.select(previouslyActive) }
+            controller.session.changeSpace(place.space); controller.showActive(); controller.refresh()
+            try check(controller.session.currentProfileID == place.profile, "The updated popup check did not restore the window's profile")
         }
-        host.context(for: extensionID)?.action(for: nil)?.closePopup()
         // The raw CORS lifetime diagnostic (ExtensionFetchAccessProbe: deliberately held, Bam-unmanaged extension pages)
         // runs only as --extension-fetch-only. Acceptance here and in ExtensionRendererRestartAcceptance is strict.
         try await checkExplicitConsent()
