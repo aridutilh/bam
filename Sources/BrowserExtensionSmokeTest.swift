@@ -1107,6 +1107,16 @@ import Darwin
                     "denied127=\(context.deniedPermissionMatchPatterns.keys.filter { $0.string.contains("127.0.0.1") }.map(\.string).sorted())"
             }
             let recordBefore = recordState()
+            // The probe's own baseline, taken with recordBefore. Since consentBase, the fixture itself made two recorded
+            // permission changes (the declined explicit request's denial, then its cleanup), and each one advances the
+            // revision's permission epoch by contract (ExtensionSiteAccessEngine.Revision). Premise, strict: nothing else
+            // differs from consentBase, and the epoch advanced at both steps.
+            guard let probeBase = host.siteAccess(id: extensionID)?.revision else { throw ExtensionSmokeTest.Failure(description: "No Site Access snapshot before the withheld-use probe") }
+            let sinceConsentBase = revisionDiff(consentBase.revision, probeBase)
+            try check(sinceConsentBase.allSatisfy { $0 == "permissionEpoch" } && (epochAfterDecline ?? 0) > consentBase.revision.permissionEpoch &&
+                probeBase.permissionEpoch > (epochAfterDecline ?? .max),
+                "Before the withheld-use probe, Site Access differs from the consent baseline beyond the fixture's two recorded permission changes: " +
+                "\(sinceConsentBase), epoch \(consentBase.revision.permissionEpoch)->\(epochAfterDecline.map(String.init) ?? "-")->\(probeBase.permissionEpoch)")
             reviewsShown = 0
             host.permissionPrompt = { _ in reviewsShown += 1; return true }
             let withheldUse = try await consentProbe("""
@@ -1129,11 +1139,12 @@ import Darwin
                 ("injectionRefused", (withheldUse["injected"] as? String)?.hasPrefix("refused:") == true),
                 ("fetchRefused", withheldUse["fetched"] as? String == "refused"), ("notGranted", !granted(ip)), ("notDenied", deniedKeys(ip).isEmpty),
                 ("undecided", (try? undecided(consentTabURL)) == true), ("recordUnchanged", recordState() == recordBefore),
-                ("modeWithheld", afterUse?.state.mode == .withheld), ("revisionIsConsentBase", afterUse?.revision == consentBase.revision),
+                ("modeWithheld", afterUse?.state.mode == .withheld), ("revisionUnchangedByProbe", afterUse?.revision == probeBase),
             ]
             let failedWithheld = withheldPredicates.filter { !$0.1 }.map(\.0)
-            print("CONSENT_PREDICATES stage=withheld-use failed=\(failedWithheld) revisionDiffFromConsentBase=\(revisionDiff(consentBase.revision, afterUse?.revision)) " +
-                  "epoch=\(consentBase.revision.permissionEpoch)->\(afterUse.map { String($0.revision.permissionEpoch) } ?? "-") " +
+            print("CONSENT_PREDICATES stage=withheld-use failed=\(failedWithheld) revisionDiffFromProbeBase=\(revisionDiff(probeBase, afterUse?.revision)) " +
+                  "revisionDiffFromConsentBase=\(revisionDiff(consentBase.revision, afterUse?.revision)) " +
+                  "epoch=\(consentBase.revision.permissionEpoch)->\(probeBase.permissionEpoch)->\(afterUse.map { String($0.revision.permissionEpoch) } ?? "-") " +
                   "record=\(recordBefore == recordState() ? "unchanged" : "\(recordBefore) -> \(recordState())")"); fflush(stdout)
             try check(failedWithheld.isEmpty,
                 "Using a withheld requested site prompted, granted, denied or changed Site Access: failed=\(failedWithheld) shown=\(reviewsShown), \(withheldUse); " +
