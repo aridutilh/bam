@@ -1242,6 +1242,53 @@ import Darwin
                 } catch {
                     print("CONSENT_CAUSAL aborted=\(error)"); fflush(stdout)
                 }
+                // Never-updated comparison (native 8501db3: the subject still read after a second withdrawal with none of
+                // its observed views alive, so the earlier package Update is the next candidate). Same run, same
+                // controller and profile: a fresh fixture that was never updated gets the same shape, a page that reads
+                // while granted (released and checked), then a Withhold, its own restart, and a page of its fresh context.
+                // Refused here while the subject reads points at the subject's history (the Update most of all); read
+                // here too points at something in this run's environment. Evidence only; the subject's check still fails.
+                do {
+                    let folder = FileManager.default.temporaryDirectory.appendingPathComponent("bam-consent-never-updated-\(UUID().uuidString)")
+                    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+                    defer { try? FileManager.default.removeItem(at: folder) }
+                    try JSONSerialization.data(withJSONObject: [
+                        "manifest_version": 3, "name": "Bam consent never-updated comparison", "version": "1.0",
+                        "description": "Original Bam fixture comparing a never-updated extension's withdrawal.",
+                        "host_permissions": ["http://127.0.0.1/*"]
+                    ]).write(to: folder.appendingPathComponent("manifest.json"))
+                    try Data("<!doctype html><meta charset='utf-8'><title>never updated page</title>".utf8).write(to: folder.appendingPathComponent("page.html"))
+                    let control = try await host.importPackage(at: folder, profileID: profile)
+                    func controlPage() async throws -> WKWebView? {
+                        guard let context = host.context(for: control), let configuration = context.webViewConfiguration else { return nil }
+                        let web = WKWebView(frame: NSRect(x: 0, y: 0, width: 320, height: 240), configuration: configuration)
+                        observeExtensionView("never-updated-page#\(observedExtensionViews.count)", web)
+                        web.load(URLRequest(url: context.baseURL.appendingPathComponent("page.html")))
+                        let deadline = ProcessInfo.processInfo.systemUptime + 5
+                        while web.title != "never updated page" && ProcessInfo.processInfo.systemUptime < deadline { try await Task.sleep(nanoseconds: 40_000_000) }
+                        return web.title == "never updated page" ? web : nil
+                    }
+                    var seeded: WKWebView? = try await controlPage()
+                    let grantedRead = seeded == nil ? "did-not-load" : await discriminatorFetch(seeded!)
+                    weak let seededWeak = seeded
+                    seeded?.stopLoading(); seeded = nil
+                    let releaseDeadline = ProcessInfo.processInfo.systemUptime + 5
+                    while seededWeak != nil && ProcessInfo.processInfo.systemUptime < releaseDeadline { try await Task.sleep(nanoseconds: 40_000_000) }
+                    let seededReleased = seededWeak == nil
+                    let beforeControl = host.restartGeneration[control] ?? 0
+                    guard let snapshot = host.siteAccess(id: control), let declarations = snapshot.declarations else { throw ExtensionSmokeTest.Failure(description: "No Site Access snapshot for the never-updated comparison") }
+                    _ = try host.performSiteAccess(id: control, profileID: profile, revision: snapshot.revision, displayed: declarations, change: .choose(.withheld))
+                    let started = host.restartGeneration[control] ?? 0
+                    let result = started == beforeControl ? "no-restart" : await host.restartCompletion(id: control, generation: started).map { "\($0)" } ?? "no-result"
+                    var fresh: WKWebView? = try await controlPage()
+                    let withheldRead = fresh == nil ? "did-not-load" : await discriminatorFetch(fresh!)
+                    fresh?.stopLoading(); fresh = nil
+                    print("CONSENT_NEVER_UPDATED grantedPositiveControl=\(grantedRead) seededPageReleased=\(seededReleased) restart=\(result) " +
+                          "generations=\(started - beforeControl) afterWithholdFreshPage=\(withheldRead)"); fflush(stdout)
+                    try? await host.remove(id: control)
+                } catch {
+                    print("CONSENT_NEVER_UPDATED aborted=\(error)"); fflush(stdout)
+                }
             }
             try check(failedWithheld.isEmpty,
                 "Using a withheld requested site prompted, granted, denied or changed Site Access: failed=\(failedWithheld) shown=\(reviewsShown), \(withheldUse); " +
