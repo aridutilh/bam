@@ -605,23 +605,28 @@ enum ExtensionCompatibility {
       // the answer is [] (as Chrome gives without them). WebKit rejects those values instead, which broke callers that
       // fall back to them: measured with Dark Reader's getActiveTab once its pop-out had focus, leaving its CSS editor
       // blank. Every other query reaches WebKit's own method unchanged, with the original receiver and arguments.
+      // One layer only: with the tab metadata facade, its own tabs.query wrapper answers these first (before WebKit and
+      // before any supplementing); otherwise this guard wraps WebKit's method once. Neither ever wraps the other.
       const absentWindowTypes = ["app", "devtools"];
+      const queriesAbsentWindowType = (info) => provided.has("tabs.query.windowType") && !!info && typeof info === "object"
+        && absentWindowTypes.includes(info.windowType);
+      const answerNoTabs = (callback) => {
+        if (callback) { Promise.resolve().then(() => callback([])); return undefined; }
+        return Promise.resolve([]);
+      };
       const tabsQueryGuardHeld = [];
       const applyTabsQueryGuard = () => {
-        if (!provided.has("tabs.query.windowType")) return;
+        if (!provided.has("tabs.query.windowType") || provided.has("tabs.metadata")) return;
         for (const root of new Set([globalThis.browser, globalThis.chrome])) {
           const holder = root && root.tabs;
           const native = holder && holder.query;
           if (typeof native !== "function" || native.__bamTabsQueryGuard) continue;
           const guarded = function (queryInfo, ...rest) {
-            if (queryInfo && typeof queryInfo === "object" && absentWindowTypes.includes(queryInfo.windowType)) {
-              const callback = typeof rest[rest.length - 1] === "function" ? rest[rest.length - 1] : null;
-              if (callback) { Promise.resolve().then(() => callback([])); return undefined; }
-              return Promise.resolve([]);
-            }
+            if (queriesAbsentWindowType(queryInfo)) return answerNoTabs(typeof rest[rest.length - 1] === "function" ? rest[rest.length - 1] : null);
             return native.apply(this && typeof this === "object" ? this : holder, [queryInfo, ...rest]);
           };
           Object.defineProperty(guarded, "__bamTabsQueryGuard", { value: true });
+          Object.defineProperty(guarded, "__bamTabsQueryNative", { value: native });
           try { Object.defineProperty(holder, "query", { value: guarded, writable: true, configurable: true, enumerable: true }); tabsQueryGuardHeld.push(holder); } catch (error) {}
         }
       };
@@ -778,6 +783,8 @@ enum ExtensionCompatibility {
         const wrapped = function (...args) {
           const receiver = this && typeof this === "object" ? this : holder;
           const callback = typeof args[args.length - 1] === "function" ? args.pop() : null;
+          // Window types Bam never has: no tab matches, answered before WebKit and before any supplementing.
+          if (ns === "tabs" && name === "query" && queriesAbsentWindowType(args[0])) return answerNoTabs(callback);
           const supplement = (value) => {
             let pending;
             try { pending = readers[key](root, args, value); } catch (error) { return Promise.resolve(value); }

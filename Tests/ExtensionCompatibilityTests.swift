@@ -741,14 +741,14 @@ import JavaScriptCore
             return Promise.resolve([{id: 7, windowType: info && info.windowType}]);
           }
         }, storage: {}, action: {}};
-        var results = {};
+        var results = {}; var nativeQuery = browser.tabs.query;
         """)
         js.evaluateScript(ExtensionCompatibility.workerScript(manifest: manifest, browserVersion: "test"))
         js.evaluateScript("""
         browser.tabs.query({active: true, windowType: 'app'}).then(function(tabs) { results.appPromise = JSON.stringify(tabs); }, function(e) { results.appPromise = 'rejected: ' + e.message; });
         results.appCallbackReturn = String(browser.tabs.query({windowType: 'devtools'}, function(tabs) { results.devtoolsCallback = JSON.stringify(tabs); }));
         browser.tabs.query({active: true, windowType: 'normal'}).then(function(tabs) { results.normal = tabs.length + ':' + tabs[0].windowType; });
-        results.marked = browser.tabs.query.__bamTabsQueryGuard === true;
+        results.marked = browser.tabs.query.__bamTabsQueryGuard === true && browser.tabs.query.__bamTabsQueryNative === nativeQuery;
         """)
         try check(errors.isEmpty && js.evaluateScript("results.marked")!.toBool(), "The tabs.query window-type guard was not installed: \(errors)")
         try check(js.evaluateScript("results.appPromise")?.toString() == "[]" && js.evaluateScript("results.devtoolsCallback")?.toString() == "[]"
@@ -757,6 +757,69 @@ import JavaScriptCore
         try check(js.evaluateScript("results.normal")?.toString() == "1:normal"
                   && js.evaluateScript("JSON.stringify(nativeCalls)")?.toString() == "[\"{\\\"active\\\":true,\\\"windowType\\\":\\\"normal\\\"}\"]",
                   "Other queries did not reach WebKit's method exactly once, unchanged: \(js.evaluateScript("JSON.stringify(nativeCalls)")?.toString() ?? "")")
+
+        // A page document re-applies the adapter on a timer for 60 s (5 ms at first). With and without the tabs metadata
+        // facade, tabs.query must be wrapped exactly once and stay the same function across hundreds of ticks; an
+        // absent window type answers [] with no native call and exactly one callback; nothing repopulates that [].
+        for permissions in [["tabs", "storage"], ["storage"]] {
+            let pageManifest: [String: Any] = ["manifest_version": 3, "name": "Original Window Type Page", "version": "1.0", "permissions": permissions]
+            let page = JSContext()!
+            var pageErrors: [String] = []
+            page.exceptionHandler = { _, error in pageErrors.append(error?.toString() ?? "JavaScript error") }
+            page.evaluateScript("""
+            var console = {error: function() {}, warn: function() {}, log: function() {}};
+            var clock = 0, timers = [], nextTimer = 0;
+            var performance = {now: function() { return clock; }};
+            function setTimeout(fn, ms) { var id = ++nextTimer; timers.push({fn: fn, at: clock + (ms || 0), id: id}); return id; }
+            function clearTimeout(id) { timers = timers.filter(function(t) { return t.id !== id; }); }
+            function advance(ms) { clock += ms; var due = timers.filter(function(t) { return t.at <= clock; }); timers = timers.filter(function(t) { return t.at > clock; }); due.forEach(function(t) { t.fn(); }); }
+            var queueMicrotask = function(fn) { Promise.resolve().then(fn); };
+            var document = {readyState: 'loading', addEventListener: function() {}};
+            var location = {origin: 'webkit-extension://fixture', href: 'webkit-extension://fixture/ui/page.html'};
+            var nativeCalls = 0, callbacks = 0;
+            var browser = {runtime: {
+              getURL: function(path) { return 'webkit-extension://fixture' + path; },
+              getManifest: function() { return \(String(data: try! JSONSerialization.data(withJSONObject: pageManifest), encoding: .utf8)!); }
+            }, tabs: {
+              query: function(info, cb) {
+                nativeCalls += 1;
+                if (info && (info.windowType === 'app' || info.windowType === 'devtools')) throw new Error("Invalid call to tabs.query(). The 'windowType' value is invalid");
+                var tabs = [{id: 1, windowId: 10, index: 0, url: '', title: ''}];
+                if (cb) { cb(tabs); return undefined; } return Promise.resolve(tabs);
+              },
+              get: function() { return Promise.resolve(null); }, getCurrent: function() { return Promise.resolve(null); },
+              create: function() { return Promise.resolve(null); }, update: function() { return Promise.resolve(null); },
+              onCreated: {addListener: function() {}, removeListener: function() {}, hasListener: function() { return false; }},
+              onUpdated: {addListener: function() {}, removeListener: function() {}, hasListener: function() { return false; }}
+            }, windows: {get: function() { return Promise.resolve(null); }, getAll: function() { return Promise.resolve([]); },
+              getCurrent: function() { return Promise.resolve(null); }, getLastFocused: function() { return Promise.resolve(null); }, create: function() { return Promise.resolve(null); }},
+            storage: {}, action: {}};
+            var chrome = browser;
+            var nativeQuery = browser.tabs.query;
+            var webkit = {messageHandlers: {}};
+            """)
+            page.evaluateScript(ExtensionCompatibility.script(baseURL: URL(string: "webkit-extension://fixture/")!, bridge: "bridge",
+                                                              plan: ExtensionCompatibility.plan(manifest: pageManifest), browserVersion: "test"))
+            page.evaluateScript("advance(1); var afterFirst = browser.tabs.query; for (var i = 0; i < 400; i++) advance(5); advance(70000);")
+            let metadata = permissions.contains("tabs")
+            let layering = metadata
+                ? "browser.tabs.query.__bamTabMetadataNative === nativeQuery && !browser.tabs.query.__bamTabsQueryGuard"
+                : "browser.tabs.query.__bamTabsQueryGuard === true && browser.tabs.query.__bamTabsQueryNative === nativeQuery"
+            try check(pageErrors.isEmpty && page.evaluateScript("browser.tabs.query === afterFirst && " + layering)!.toBool(),
+                      "tabs.query was rewrapped over repeated adapter ticks (tabs=\(metadata)): \(pageErrors)")
+            page.evaluateScript("""
+            nativeCalls = 0; callbacks = 0; var appResult = null, normalCount = null;
+            browser.tabs.query({active: true, windowType: 'app'}).then(function(v) { appResult = JSON.stringify(v); });
+            browser.tabs.query({windowType: 'devtools'}, function(v) { callbacks += 1; appResult = appResult + '|' + JSON.stringify(v); });
+            """)
+            page.evaluateScript("advance(3000);")
+            try check(page.evaluateScript("nativeCalls === 0 && callbacks === 1 && appResult === '[]|[]'")!.toBool(),
+                      "An absent window type reached WebKit, was supplemented, or called back more than once (tabs=\(metadata)): \(page.evaluateScript("nativeCalls + ' ' + callbacks + ' ' + appResult")?.toString() ?? "")")
+            page.evaluateScript("browser.tabs.query({active: true}, function(v) { callbacks += 1; normalCount = v.length; });")
+            page.evaluateScript("advance(3000);")
+            try check(page.evaluateScript("nativeCalls === 1 && callbacks === 2 && normalCount === 1")!.toBool(),
+                      "A normal query did not reach WebKit exactly once with one callback (tabs=\(metadata)): \(page.evaluateScript("nativeCalls + ' ' + callbacks + ' ' + normalCount")?.toString() ?? "")")
+        }
     }
 
     /// After Revoke Permissions the fresh worker context has no nativeMessaging, so WebKit exposes neither
