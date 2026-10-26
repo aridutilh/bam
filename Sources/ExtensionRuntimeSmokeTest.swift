@@ -12,6 +12,7 @@ import WebKit
         if arguments.contains("--extension-site-access-only") { return "Extension site access diagnostic" }
         if arguments.contains("--extension-fetch-only") { return "Extension fetch diagnostic" }
         if arguments.contains("--extension-metadata-only") { return "Extension metadata diagnostic" }
+        if arguments.contains("--extension-renderer-only") { return "Extension renderer acceptance" }
         return "Extensions"
     }
 
@@ -109,6 +110,15 @@ import WebKit
                         return try await ExtensionFetchAccessProbe.run(controller: controller, host: host, profile: profile, pageURL: page)
                     }
                     self.finish(true, "\(checks) (fetch diagnostic only: premises asserted, withdrawal stages measured; not security acceptance or a full extension run)")
+                    return
+                }
+                if CommandLine.arguments.contains("--extension-renderer-only") {
+                    // Product tabs across every withdrawal path (panel, failed restart then Enable, permissions.remove,
+                    // expiry). Not yet in the default full run: root decides once the UI and engine candidates are integrated.
+                    let checks = try await Self.withFreshHost { controller, host in
+                        try await ExtensionRendererRestartAcceptance.run(controller: controller, host: host, pageURL: page)
+                    }
+                    self.finish(true, "\(checks) (extension tab restart acceptance only; not a full extension run)")
                     return
                 }
                 if CommandLine.arguments.contains("--extension-metadata-only") {
