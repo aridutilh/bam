@@ -9,6 +9,8 @@ import AppKit
         snapshot.sleepsIdlePages = automaticTabSleeping
         snapshot.keepAwakeHost = currentSleepProtectionHost
         snapshot.keepsCurrentSiteAwake = currentSleepProtectionHost.map { keepAwakeHosts.contains($0) } ?? false
+        snapshot.asksBeforeQuitting = QuitConfirmationPreference().asksBeforeQuitting
+        snapshot.canChangeQuitPreference = !privateMode
         snapshot.searchEngine = URLInput.searchEngine
         snapshot.appearance = BrowserAppearance.current
         snapshot.spaces = session.spaces
@@ -34,6 +36,11 @@ import AppKit
             self.toggleAutomaticTabSleeping(nil)
         }
         actions.setKeepsSiteAwake = { [weak self] host, on in self?.setKeepAwake(host: host, on) }
+        // Like the quit dialog's "don't ask again": a private window never changes the normal preference.
+        actions.setAsksBeforeQuitting = { [weak self] on in
+            guard let self, !self.privateMode else { return }
+            QuitConfirmationPreference().asksBeforeQuitting = on
+        }
         actions.setSearchEngine = { [weak self] engine in self?.setDefaultSearchEngine(engine) }
         actions.editSpace = { [weak self] space in self?.editSpace(space) ?? false }
         actions.switchSpace = { [weak self] id in self?.changeSpace(id) }
