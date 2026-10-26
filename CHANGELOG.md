@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.24.0 build 48 — local candidate, native acceptance pending
+
+- Search is wider and centered, with a subtle Space-tinted selection, steady held-arrow movement, no clipping in short windows, and real browser actions to find: Add or Manage Extensions, New Space, Import from Arc, Copy URL, Split View, appearance and zoom.
+- The sidebar runs to its edge, with the resize handle in the gap. Spaces have a context menu (icon, rename, color, profile, new folder, move). Folders animate open and closed, the tab list parts as you drag, and a tab can be dropped into Favorites at the slot you choose.
+- Downloads open as a compact list from the sidebar's Downloads button (⌘J toggles it), with live progress, Open, Show in Finder and Cancel. Show All opens a thumbnail library.
+- Quitting asks with Bam's own dialog, including "Quit, and don't ask again". Settings › General › Quitting turns asking back on.
+- Trackpad pinch zooms webpages (⌘0 resets), and pinch resizes floating video.
+- A site button in the address field shows the connection and certificate, page zoom, Keep This Site Awake, and each extension's access to the site, with a direct way into its Site Access.
+- Add Extensions offers the Chrome Web Store build first and Firefox Add-ons second, unless that build can't run in Bam. Safari App Store extensions stay available.
+- Setup adds a short tour, an optional "Bring from Arc" that opens Bam's previewed Arc import afterwards, and an optional password manager to find in Add Extensions.
+- Limits: gesture checks are model and event tests, not physical trackpad feel; there's no emoji or gradient picker yet; extension tab and window compatibility is unchanged; setup doesn't sign in to a password vault or import passwords or other browsers. See VALIDATION.md.
+
 ## 0.23.0 build 47 — Chrome compatibility
 
 - Assign the verified Chrome Web Store ID to new store installs through the public native runtime API. Keep legacy installs, folder imports, unverified packages and Safari bundles on their existing installation IDs. Resource origins remain per-installation UUIDs.

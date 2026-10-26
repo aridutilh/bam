@@ -1,3 +1,53 @@
+## Local 0.24.0 build 48 — visual and interaction candidate (component evidence; native and visual acceptance pending)
+
+Nothing here claims Arc or Yab parity or readiness to ship.
+
+**Build (not one clean uninterrupted full build).**
+- At `009b80e` (log `build-024.log`), `bash build.sh` compiled, signed and packaged the optimized app.
+- It then ran the component suites through the penultimate one and failed compiling the Settings appearance test: its command lacked the new `QuitConfirmationModel.swift`.
+- `72b4dab` fixed that command only.
+- The two remaining suites were then rerun and passed (`build-final-components.log`): Settings appearance focus **16** and the shortcut tests.
+
+**Component suites for this work** (from those logs):
+
+| Suite | Checks |
+|---|---|
+| sidebar morning | **1667** |
+| sidebar performance | **316** |
+| folders | **126** |
+| tab search | **126** |
+| model | **301** |
+| session writer | **39** |
+| quit coordinator | **36** |
+| quit confirmation | **13** |
+| download presentation | **22** |
+| PiP pinch | **8** |
+| site settings | **18** |
+| extension source preference | **7** |
+| onboarding | **73** |
+| extension compatibility | **81** |
+| extension enumeration | **91** |
+| offscreen | **29** |
+
+They cover:
+- **Palette:** geometry, non-clipping and selection.
+- **Sidebar:** the edge, centered fields, the folder lid animation's endpoints, and drag and drop order into Favorites.
+- **Quit:** preference, keys and the private-window guard.
+- **Downloads:** status text, actions, toggling, and thumbnails tied to file identity.
+- **Pinch:** aspect, anchor and limits.
+- **Site settings:** connection text, zoom limits, and the bounded extension list.
+- **Extensions:** the Chrome-first, Firefox-second build order.
+- **Onboarding:** steps, and that both follow-ups run in order.
+
+**Native and visual acceptance:** pending (root's runtime run). Results will be recorded here, as will the vendor and visual checks.
+
+**Limits:**
+- Gesture code is covered by model and event tests, which don't prove physical trackpad feel.
+- There's no emoji or gradient picker (Change Space Icon uses the SF Symbol picker).
+- Extension tab and window compatibility is unchanged.
+- Safari import is retained.
+- Setup offers Bam's previewed Arc import and a password-manager search in Add Extensions. It doesn't sign in to a vault or import passwords or other browsers.
+
 ## 0.23.0 — Site Access, explicit consent and tab metadata (full build, all eleven native suites, the repository runtime script and final vendor checks passed at `4ed2f83`)
 
 Nothing here claims full Chrome compatibility.
