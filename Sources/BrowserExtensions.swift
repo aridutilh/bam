@@ -610,10 +610,19 @@ struct BrowserExtensionPermissionReview {
             throw BrowserExtensionUpdateCancelled(name: before.name)
         }
         var unloaded = false, movedPackage = false, movedManifest = false, installedManifest = false
-        var movedWorker = false, installedWorker = false
+        var movedWorker = false, installedWorker = false, retired = false
         do {
             if let oldContext {
-                runtime.closePopup(for: oldContext); try runtime.controller.unload(oldContext)
+                // Like a restart's phase A: every view of the old context Bam can see joins the release barrier before
+                // the unload, so the updated same-identity context (`load` waits on the barrier) never shares an old
+                // view's process; on timeout the update fails closed.
+                var probes = runtime.extensionPageViews(of: oldContext)
+                runtime.closePopup(for: oldContext)
+                probes += onExtensionRenderers?(.retire, before.profileID, oldContext.baseURL) ?? []
+                runtime.releaseRetiredSurfaceViews()
+                releaseBarriers[id, default: []] += probes
+                retired = true
+                try runtime.controller.unload(oldContext)
                 runtime.disconnectNative(oldContext); runtime.compatibility.remove(oldContext); runtime.contexts.removeValue(forKey: id); unloaded = true
             }
             try fm.moveItem(at: package, to: previous); movedPackage = true
@@ -668,12 +677,26 @@ struct BrowserExtensionPermissionReview {
             if movedWorker { try? fm.moveItem(at: previousWorker, to: originalWorker) }
             records[currentIndex] = restored
             try? persist()
-            if unloaded && restored.enabled && !interrupted {
-                do { try await load(id, review: false) }
-                catch {
+            let baseURL = oldContext?.baseURL
+            if retired && !unloaded, let oldContext, runtime.contexts[id] === oldContext, let baseURL {
+                // The old context never unloaded: it's still the loaded one, so its retired tabs come back on it.
+                _ = onExtensionRenderers?(.restore, before.profileID, baseURL)
+            } else if unloaded && restored.enabled && !interrupted {
+                if releaseBarrierHeld(id: id) {
+                    // Fail closed: the old views are still alive, so reloading would only wait on the same barrier.
                     if let index = records.firstIndex(where: { $0.id == id }) { records[index].enabled = false; try? persist() }
                     setError(error, for: id)
+                    if let baseURL { _ = onExtensionRenderers?(.unavailable, before.profileID, baseURL) }
+                } else {
+                    do { try await load(id, review: false) }
+                    catch {
+                        if let index = records.firstIndex(where: { $0.id == id }) { records[index].enabled = false; try? persist() }
+                        setError(error, for: id)
+                        if let baseURL { _ = onExtensionRenderers?(.unavailable, before.profileID, baseURL) }
+                    }
                 }
+            } else if unloaded, let baseURL {
+                _ = onExtensionRenderers?(.unavailable, before.profileID, baseURL)
             }
             changed()
             throw error
@@ -1992,6 +2015,8 @@ struct BrowserExtensionPermissionReview {
         if popupContextID == context.uniqueIdentifier { popupAnchor = nil; popupTabID = nil; popupContextID = nil }
         if let action = activePopup, action.webExtensionContext === context { clearPopupPresentation(); action.closePopup() }
         context.action(for: nil)?.closePopup()
+        // Per-tab actions may hold their own (preloaded or closed) popup: close those too.
+        for tab in tabs.values { context.action(for: tab)?.closePopup() }
     }
     /// The shared gate for every delegate and adapter: this runtime's controller, and never a context Bam quarantined
     /// (WebKit still lists it after a failed unload). Contexts still loading pass, so load-time enumeration works.
