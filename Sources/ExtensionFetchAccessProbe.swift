@@ -12,8 +12,11 @@ import WebKit
 /// Every stage prints one `FETCH_ACCESS` line: the fetch outcome (status, type, final URL, Access-Control-Allow-Origin,
 /// body length, or the error) and the native state (permission status, hasAccess, granted and denied 127 keys).
 /// Only the premises are asserted: a never-granted host is refused (the server and engine enforce CORS here) and a
-/// granted host is readable. The stages after a withdrawal are measurements; the strict expectation stays in
-/// BrowserExtensionSmokeTest's explicit-consent check.
+/// granted host is readable. The stages after a withdrawal are measurements; the strict expectations are
+/// BrowserExtensionSmokeTest's explicit-consent check and ExtensionRendererRestartAcceptance.
+/// Scope: a lifetime diagnostic only (`--extension-fetch-only`, not in the full run). Its pages are raw WKWebViews Bam
+/// doesn't manage, deliberately held across withdrawals, so the two-phase restart neither waits for nor retires them;
+/// the probe only awaits each restart's completion (FETCH_ACCESS_RESTART) before building a page on the fresh context.
 @available(macOS 15.4, *)
 @MainActor enum ExtensionFetchAccessProbe {
     struct Failure: Error, CustomStringConvertible { let description: String }
@@ -87,6 +90,16 @@ import WebKit
             print("FETCH_ACCESS stage=\(stage) fetch=\(fetched) native=\(native)"); fflush(stdout)
             return fetched["outcome"] as? String ?? "?"
         }
+        /// A withdrawal restarts the extension in two phases (work/site-access-two-phase-final-contract.md): no context
+        /// until it completes. Waits (bounded) for the restart after `before` to start, since the engine's native path
+        /// starts it later, then for that generation's result, and reports both; the next page needs the fresh context.
+        func settleRestart(_ stage: String, _ id: UUID, from before: UInt64) async throws {
+            let deadline = ProcessInfo.processInfo.systemUptime + 5
+            while (host.restartGeneration[id] ?? 0) == before && ProcessInfo.processInfo.systemUptime < deadline { try await Task.sleep(nanoseconds: 20_000_000) }
+            let started = host.restartGeneration[id] ?? 0
+            let result = started == before ? "no-restart" : await host.restartCompletion(id: id, generation: started).map { "\($0)" } ?? "no-result"
+            print("FETCH_ACCESS_RESTART stage=\(stage) generations=\(started - before) result=\(result)"); fflush(stdout)
+        }
 
         let optionalID = try await install("optional", ["optional_host_permissions": ["http://127.0.0.1/*"]])
         let requestedID = try await install("requested", ["host_permissions": ["http://127.0.0.1/*"]])
@@ -99,18 +112,26 @@ import WebKit
         let requested = try await js(optionalPage!, "return {granted: await browser.permissions.request({origins: ['http://127.0.0.1/*']})};")
         let afterRequest = try await measure("optional-after-request(granted=\(requested["granted"] ?? "?"))", optionalID, optionalPage!)
         try check(requested["granted"] as? Bool == true && afterRequest == "read", "a granted loopback host was not readable by fetch (positive control)")
+        let beforeRemove = host.restartGeneration[optionalID] ?? 0
         let removed = try await js(optionalPage!, "return {removed: await browser.permissions.remove({origins: ['http://127.0.0.1/*']})};")
         _ = try await measure("optional-after-remove(removed=\(removed["removed"] ?? "?"))-same-page", optionalID, optionalPage!)
-        optionalPage?.stopLoading(); optionalPage = try await page(optionalID, "optional")
+        // The old page stays held (unmanaged by Bam, so the restart doesn't wait for it) until its successor exists, as
+        // before two-phase: the lifetime evidence is unchanged; only the successor waits for the fresh context.
+        optionalPage?.stopLoading()
+        try await settleRestart("optional-after-remove", optionalID, from: beforeRemove)
+        optionalPage = try await page(optionalID, "optional")
         _ = try await measure("optional-after-remove-new-page", optionalID, optionalPage!)
         optionalPage?.stopLoading()
 
         var requestedPage: WKWebView? = try await page(requestedID, "requested")
         _ = try await measure("requested-granted", requestedID, requestedPage!)
         guard let snapshot = host.siteAccess(id: requestedID), let declarations = snapshot.declarations else { throw Failure(description: "Fetch access: no Site Access snapshot") }
+        let beforeWithhold = host.restartGeneration[requestedID] ?? 0
         _ = try host.performSiteAccess(id: requestedID, profileID: profile, revision: snapshot.revision, displayed: declarations, change: .choose(.withheld))
         _ = try await measure("requested-withheld-same-page", requestedID, requestedPage!)
-        requestedPage?.stopLoading(); requestedPage = try await page(requestedID, "requested")
+        requestedPage?.stopLoading()
+        try await settleRestart("requested-withheld", requestedID, from: beforeWithhold)
+        requestedPage = try await page(requestedID, "requested")
         _ = try await measure("requested-withheld-new-page", requestedID, requestedPage!)
         requestedPage?.stopLoading()
         try await host.setEnabled(false, id: requestedID); try await host.setEnabled(true, id: requestedID)

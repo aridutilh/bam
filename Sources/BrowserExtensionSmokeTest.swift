@@ -1272,8 +1272,8 @@ import Darwin
             try await wait("Updated extension still looked for scripts at the staging URL") { (try? await updatedPopup.evaluateJavaScript("document.title")) as? String == "Bam fixture ready" }
         }
         host.context(for: extensionID)?.action(for: nil)?.closePopup()
-        // Diagnostic: CORS fetch access across grant, withdrawal, new page and new context (FETCH_ACCESS lines).
-        checks += try await ExtensionFetchAccessProbe.run(controller: controller, host: host, profile: profile, pageURL: pageURL)
+        // The raw CORS lifetime diagnostic (ExtensionFetchAccessProbe: deliberately held, Bam-unmanaged extension pages)
+        // runs only as --extension-fetch-only. Acceptance here and in ExtensionRendererRestartAcceptance is strict.
         try await checkExplicitConsent()
         try await checkSiteAccess()
         try await host.setEnabled(false, id: extensionID)

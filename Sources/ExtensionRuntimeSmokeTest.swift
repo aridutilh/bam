@@ -94,12 +94,14 @@ import WebKit
                     self.finish(true, "\(checks) (site access only; not a full extension run)")
                     return
                 }
-                // Separately labelled diagnostics, each in a fresh ephemeral controller and extension host; the default
-                // full run still includes both fixtures (inside BrowserExtensionSmokeTest).
+                // Separately labelled runs, each in a fresh ephemeral controller and extension host. The full run includes
+                // the metadata and renderer acceptance; the raw fetch diagnostic runs only here.
                 if CommandLine.arguments.contains("--extension-fetch-only") {
                     // A brand-new, otherwise empty profile, so the never-granted control is not confounded by other
                     // extensions. Its premises are asserted and the withdrawal stages are measurements: this is a
-                    // diagnostic, not security acceptance (the strict withheld-fetch assertion stays in the full run).
+                    // diagnostic, not security acceptance (the strict withheld-fetch assertions are the full run's explicit
+                    // consent and renderer acceptance). It deliberately holds pages Bam doesn't manage across withdrawals,
+                    // so it is standalone only.
                     let checks = try await Self.withFreshHost { controller, host in
                         guard let profile = controller.session.createProfile(name: "Fetch diagnostic"),
                               controller.session.createSpace(name: "Fetch diagnostic", symbol: "briefcase", colorIndex: 1, profileID: profile) != nil else {
