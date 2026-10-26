@@ -1280,8 +1280,15 @@ struct BrowserExtensionPermissionReview {
     /// A withdrawal waiting for its restart: the generation at detection, and whether a task is already queued.
     private struct PendingWithdrawal { let generation: UInt64; var queued: Bool }
     private var pendingWithdrawals: [UUID: PendingWithdrawal] = [:]
-    /// A withdrawal whose reduced choice couldn't be saved: its explanation stays shown until a save succeeds.
-    private var unsavedWithdrawals: [UUID: String] = [:]
+    /// A withdrawal whose reduced choice couldn't be saved. `message` is shown (and re-shown on later failed saves)
+    /// until any registry save succeeds; then `afterSave` (the outcome that remains true once saved) replaces it, or the
+    /// warning clears.
+    private struct UnsavedWithdrawal {
+        let name: String, sites: String, saveError: String
+        var message: String
+        var afterSave: String?
+    }
+    private var unsavedWithdrawals: [UUID: UnsavedWithdrawal] = [:]
     /// The armed expiry check per extension; re-arming or cleanup replaces the token, so an older check does nothing.
     private var expiryChecks: [UUID: UUID] = [:]
     /// Test seam: called each time this path restarts an extension for a native withdrawal. nil in production.
@@ -1291,12 +1298,17 @@ struct BrowserExtensionPermissionReview {
     /// its pages and process stop using the withdrawn host (retained CORS access, content). Deferred to its own task,
     /// never inside a WebKit callback or prompt handler, and coalesced per extension.
     private func noteNativeWithdrawal(id: UUID, withdrawn: Set<String>, saveError: Error?) {
-        if pendingWithdrawals[id] == nil { pendingWithdrawals[id] = PendingWithdrawal(generation: restartGeneration[id, default: 0], queued: false) }
+        // Bound to the generation now. An older pending withdrawal was covered by whatever restart advanced the
+        // generation since; this one needs its own restart, so it must never inherit the older, stale generation.
+        // A task already queued is reused: it reads this entry when it runs.
+        pendingWithdrawals[id] = PendingWithdrawal(generation: restartGeneration[id, default: 0], queued: pendingWithdrawals[id]?.queued ?? false)
         if let saveError, let index = records.firstIndex(where: { $0.id == id }) {
             // Fail closed: the restart below still removes the live access now; the stored record may still list it.
-            let message = "\(records[index].name) lost access to \(withdrawn.sorted().joined(separator: ", ")), and Bam restarted it without that access, " +
-                "but couldn’t save the change (\(saveError.localizedDescription)). It may have that access again the next time Bam opens; change its site access in Manage Extensions to save it."
-            unsavedWithdrawals[id] = message
+            // Until the restart has run, say only what is true now; the outcome is composed after it runs.
+            let name = records[index].name, sites = withdrawn.sorted().joined(separator: ", ")
+            let message = "\(name) lost access to \(sites), but Bam couldn’t save that change (\(saveError.localizedDescription)). " +
+                "Bam is restarting it without that access. Until the change is saved, it may have that access again the next time Bam opens."
+            unsavedWithdrawals[id] = UnsavedWithdrawal(name: name, sites: sites, saveError: saveError.localizedDescription, message: message, afterSave: nil)
             setError(Self.failure(message), for: id)
         }
         queueWithdrawalRestart(id)
@@ -1318,7 +1330,28 @@ struct BrowserExtensionPermissionReview {
               let runtime = runtimes[records[index].profileID], let context = runtime.contexts[id] else { return }
         pendingWithdrawals.removeValue(forKey: id)
         Self.nativeWithdrawalRestartHook?(id)
-        _ = restartForSiteAccess(id: id, context: context)
+        let outcome = restartForSiteAccess(id: id, context: context)
+        // Still unsaved: the helper's messages assume a saved choice, so state what actually happened instead.
+        if var unsaved = unsavedWithdrawals[id] {
+            let lead = "\(unsaved.name) lost access to \(unsaved.sites)"
+            switch outcome {
+            case .restarted:
+                unsaved.message = "\(lead), and Bam restarted it without that access, but couldn’t save the change (\(unsaved.saveError)). " +
+                    "It may have that access again the next time Bam opens; change its site access in Manage Extensions to save it."
+                unsaved.afterSave = nil
+            case .unloadFailed(_, stillLoaded: true):
+                unsaved.message = "\(lead), but Bam couldn’t save that change (\(unsaved.saveError)) or restart it, so its earlier website access " +
+                    "may still apply now, and again after Bam reopens. Disable and enable it, or quit and reopen Bam."
+                unsaved.afterSave = "Site access was saved, but \(unsaved.name) couldn’t be restarted, so its earlier website access may still apply " +
+                    "until you disable and enable it, or quit and reopen Bam."
+            case .unloadFailed, .loadFailed:
+                unsaved.message = "\(lead) and stopped because it couldn’t restart. Bam couldn’t save that change (\(unsaved.saveError)), so it may " +
+                    "load again with that access the next time Bam opens. Enable or disable it in Manage Extensions to save the change."
+                unsaved.afterSave = "\(unsaved.name) stopped and couldn’t restart after its site access changed. Enable it again in Manage Extensions."
+            }
+            unsavedWithdrawals[id] = unsaved
+            setError(Self.failure(unsaved.message), for: id)
+        }
     }
     /// Re-queues a withdrawal that waited for a load, update or Enable to finish.
     private func resumeWithdrawalRestart(_ id: UUID) {
@@ -1371,12 +1404,8 @@ struct BrowserExtensionPermissionReview {
         // (apply, revoke, load, the restart's reload) store their target first, so their echoes withdraw nothing here.
         let withdrawn = Set(before.patterns.keys).subtracting(records[i].patterns.keys)
         var saveError: Error?
-        do {
-            try persist()
-            // The reduced choice is saved now: the unsaved-withdrawal warning no longer applies.
-            if let message = unsavedWithdrawals.removeValue(forKey: id), errors[id] == message { errors.removeValue(forKey: id); changed() }
-        }
-        catch { saveError = error; setError(unsavedWithdrawals[id].map { Self.failure($0) } ?? error, for: id) }
+        do { try persist() }   // a successful save settles every unsaved-withdrawal warning (see persist())
+        catch { saveError = error; setError(unsavedWithdrawals[id].map { Self.failure($0.message) } ?? error, for: id) }
         if !withdrawn.isEmpty { noteNativeWithdrawal(id: id, withdrawn: withdrawn, saveError: saveError) }
         armExpiryTimer(id)
     }
@@ -1385,6 +1414,17 @@ struct BrowserExtensionPermissionReview {
         try FileManager.default.createDirectory(at: storageURL, withIntermediateDirectories: true)
         let data = try JSONEncoder().encode(records)
         try data.write(to: storageURL.appendingPathComponent("registry.json"), options: .atomic)
+        settleUnsavedWithdrawals()
+    }
+    /// The whole registry was just saved, so every reduced choice is durable: an unsaved-withdrawal warning still shown
+    /// becomes its after-save outcome (for example, still stopped), or clears. A different error shown since is kept.
+    private func settleUnsavedWithdrawals() {
+        guard !unsavedWithdrawals.isEmpty else { return }
+        let settled = unsavedWithdrawals; unsavedWithdrawals.removeAll()
+        for (id, unsaved) in settled where errors[id] == unsaved.message {
+            if let after = unsaved.afterSave { errors[id] = after } else { errors.removeValue(forKey: id) }
+        }
+        changed()
     }
     static func supportsNativeCompanion(_ record: BrowserExtensionRecord) -> Bool {
         guard record.safariBundle == nil, let catalog = record.catalog else { return false }
