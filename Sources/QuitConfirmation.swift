@@ -34,7 +34,7 @@ import AppKit
     }
 
     private init(appName: String, icon: NSImage?) {
-        super.init(contentRect: NSRect(x: 0, y: 0, width: 452, height: 222),
+        super.init(contentRect: NSRect(x: 0, y: 0, width: 460, height: 220),
                    styleMask: [.borderless], backing: .buffered, defer: false)
         isReleasedWhenClosed = false
         isOpaque = false
@@ -54,7 +54,8 @@ import AppKit
         image.imageScaling = .scaleProportionallyUpOrDown
         image.setAccessibilityElement(false)
         let heading = NSTextField(labelWithString: title)
-        heading.font = BamType.display(22, weight: .heavy)
+        // Bam's sans at semibold: Bricolage's Q carries a long flat tail that reads as an underline in a short heading.
+        heading.font = BamType.sans(19, weight: .semibold)
         heading.textColor = BamTheme.ink
         heading.setAccessibilityRole(.staticText)
 
@@ -67,55 +68,48 @@ import AppKit
 
         let spacer = NSView(); spacer.setContentHuggingPriority(.init(1), for: .horizontal)
         let buttons = NSStackView(views: [neverAsk, spacer, cancel, quit])
-        buttons.orientation = .horizontal; buttons.spacing = 10; buttons.alignment = .centerY
+        buttons.orientation = .horizontal; buttons.spacing = 8; buttons.alignment = .centerY
+        buttons.setCustomSpacing(16, after: neverAsk)
         for view in [image, heading, buttons] { view.translatesAutoresizingMaskIntoConstraints = false; card.addSubview(view) }
+        // One left edge for the icon's artwork, the heading and the buttons. A macOS app icon's artwork sits about
+        // 10% inside its canvas, so the 60-point image starts 6 points further out.
+        let inset: CGFloat = 24, iconArtInset: CGFloat = 6
         NSLayoutConstraint.activate([
-            image.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 28),
-            image.topAnchor.constraint(equalTo: card.topAnchor, constant: 26),
+            image.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: inset - iconArtInset),
+            image.topAnchor.constraint(equalTo: card.topAnchor, constant: inset - iconArtInset),
             image.widthAnchor.constraint(equalToConstant: 60), image.heightAnchor.constraint(equalToConstant: 60),
-            heading.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 28),
-            heading.trailingAnchor.constraint(lessThanOrEqualTo: card.trailingAnchor, constant: -28),
+            heading.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: inset),
+            heading.trailingAnchor.constraint(lessThanOrEqualTo: card.trailingAnchor, constant: -inset),
             heading.topAnchor.constraint(equalTo: image.bottomAnchor, constant: 14),
-            buttons.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 22),
-            buttons.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -22),
-            buttons.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -22)
+            buttons.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: inset),
+            buttons.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -inset),
+            buttons.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -inset)
         ])
         initialFirstResponder = quit
     }
 
     private func button(_ title: String, prominent: Bool, key: String?, action: Selector) -> NSButton {
-        // A keyed pill draws no title of its own: the title and its keycap are laid out side by side inside it, and
-        // the pill widens to hold both (never centred text with spaces left for the cap).
-        let button = BamPillButton(title: key == nil ? title : "", prominent: prominent)
+        // A keyed button draws no title of its own: the title and its keycap are laid out side by side inside it, and
+        // the button widens to hold both (never centred text with spaces left for the cap).
+        let button = QuitDialogButton(title: key == nil ? title : "", prominent: prominent)
         button.target = self; button.action = action
         button.setAccessibilityLabel(title)
         guard let key else { return button }
         let label = NSTextField(labelWithString: title)
-        label.font = BamType.sans(13.5, weight: .bold)
+        label.font = QuitDialogButton.titleFont
         label.textColor = prominent ? BamTheme.white : BamTheme.ink
         label.setAccessibilityElement(false)
-        let cap = NSTextField(labelWithString: key)
-        cap.font = BamType.sans(11, weight: .bold)
-        cap.textColor = prominent ? BamTheme.white : BamTheme.muted
-        cap.alignment = .center
-        cap.wantsLayer = true
-        cap.layer?.cornerRadius = 5
-        cap.layer?.borderWidth = 1
-        cap.layer?.borderColor = cap.bamCG(prominent ? BamTheme.white.withAlphaComponent(0.6) : BamTheme.line)
-        cap.setAccessibilityElement(false)
+        let cap = QuitKeycap(key == "esc" ? "ESC" : key, onProminent: prominent)
         let content = QuitKeyedTitle(views: [label, cap])
         content.orientation = .horizontal; content.spacing = 8; content.alignment = .centerY
         content.translatesAutoresizingMaskIntoConstraints = false
         button.addSubview(content)
         button.setAccessibilityHelp(key == "esc" ? "Escape" : "Return")
         NSLayoutConstraint.activate([
-            // Centred on the pill's face (it rests a point above its lip), with real room on both sides.
             content.centerXAnchor.constraint(equalTo: button.centerXAnchor),
-            content.centerYAnchor.constraint(equalTo: button.centerYAnchor, constant: -1),
-            content.leadingAnchor.constraint(greaterThanOrEqualTo: button.leadingAnchor, constant: 16),
-            content.trailingAnchor.constraint(lessThanOrEqualTo: button.trailingAnchor, constant: -12),
-            cap.widthAnchor.constraint(greaterThanOrEqualToConstant: 26),
-            cap.heightAnchor.constraint(equalToConstant: 18)
+            content.centerYAnchor.constraint(equalTo: button.centerYAnchor),
+            content.leadingAnchor.constraint(greaterThanOrEqualTo: button.leadingAnchor, constant: 14),
+            content.trailingAnchor.constraint(lessThanOrEqualTo: button.trailingAnchor, constant: -8)
         ])
         return button
     }
@@ -136,19 +130,107 @@ import AppKit
     }
 }
 
-/// The card: Bam paper, a hairline border and a soft corner.
-/// A keyed pill's title and keycap. Clicks go to the pill itself.
+/// A keyed button's title and keycap. Clicks go to the button itself.
 @MainActor private final class QuitKeyedTitle: NSStackView {
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }
 
+/// The dialog's buttons: flat and compact, in Bam's colours. Local to this panel, so the shared BamPillButton keeps
+/// its raised look elsewhere. Hover lightens and pressing darkens the face; there is no lip.
+@MainActor private final class QuitDialogButton: NSButton {
+    static let radius: CGFloat = 8
+    static var titleFont: NSFont { BamType.sans(13, weight: .medium) }
+    private let prominent: Bool
+    private var hovering = false { didSet { needsDisplay = true } }
+    init(title: String, prominent: Bool) {
+        self.prominent = prominent
+        super.init(frame: .zero)
+        isBordered = false
+        setButtonType(.momentaryChange)
+        self.title = title
+        translatesAutoresizingMaskIntoConstraints = false
+        heightAnchor.constraint(equalToConstant: 32).isActive = true
+        paint()
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+    private func paint() {
+        let ink = prominent ? BamTheme.white : BamTheme.ink
+        attributedTitle = NSAttributedString(string: title, attributes: [.font: Self.titleFont, .foregroundColor: ink])
+        needsDisplay = true
+    }
+    override func draw(_ dirtyRect: NSRect) {
+        let face = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: Self.radius, yRadius: Self.radius)
+        (prominent ? BamTheme.red : BamTheme.card).setFill(); face.fill()
+        // A wash over the face: ink tints the quiet buttons the right way in light and dark.
+        let wash: NSColor? = isHighlighted ? (prominent ? NSColor.black.withAlphaComponent(0.16) : BamTheme.ink.withAlphaComponent(0.10))
+            : hovering ? (prominent ? NSColor.white.withAlphaComponent(0.12) : BamTheme.ink.withAlphaComponent(0.05)) : nil
+        if let wash { wash.setFill(); face.fill() }
+        (prominent ? BamTheme.redDeep : BamTheme.line).setStroke()
+        face.lineWidth = 1; face.stroke()
+        super.draw(dirtyRect)
+    }
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        for area in trackingAreas { removeTrackingArea(area) }
+        addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self))
+    }
+    override func mouseEntered(with event: NSEvent) { hovering = true }
+    override func mouseExited(with event: NSEvent) { hovering = false }
+    override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); paint() }
+    override var isHighlighted: Bool { didSet { needsDisplay = true } }
+    override var intrinsicContentSize: NSSize { var size = super.intrinsicContentSize; size.width += 28; return size }
+    override var focusRingMaskBounds: NSRect { bounds }
+    override func drawFocusRingMask() { NSBezierPath(roundedRect: bounds, xRadius: Self.radius, yRadius: Self.radius).fill() }
+    override func resetCursorRects() { addCursorRect(bounds, cursor: .pointingHand) }
+}
+
+/// A filled keycap (no outline), as in Little Bam: muted on the quiet buttons, a white tint on the red one.
+@MainActor private final class QuitKeycap: NSView {
+    private let onProminent: Bool
+    init(_ key: String, onProminent: Bool) {
+        self.onProminent = onProminent
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.cornerRadius = 4
+        let ink = onProminent ? BamTheme.white : BamTheme.muted
+        // Return is the SF Symbol: the monospaced font's ↩ falls back to a glyph too small to read.
+        let label: NSView
+        if key == "↩", let symbol = NSImage(systemSymbolName: "return", accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: 10, weight: .semibold)) {
+            let image = NSImageView(image: symbol); image.contentTintColor = ink
+            label = image
+        } else {
+            let text = NSTextField(labelWithString: key)
+            text.font = BamType.mono(10.5, weight: .semibold); text.textColor = ink; text.alignment = .center
+            label = text
+        }
+        label.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(label)
+        setAccessibilityElement(false); label.setAccessibilityElement(false)
+        translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            heightAnchor.constraint(equalToConstant: 18), widthAnchor.constraint(greaterThanOrEqualToConstant: 24),
+            label.centerXAnchor.constraint(equalTo: centerXAnchor), label.centerYAnchor.constraint(equalTo: centerYAnchor),
+            label.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor, constant: 5),
+            label.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -5)
+        ])
+        paint()
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+    private func paint() {
+        layer?.backgroundColor = bamCG(onProminent ? NSColor.white.withAlphaComponent(0.22) : BamTheme.ink.withAlphaComponent(0.10))
+    }
+    override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); paint() }
+}
+
+/// The card: Bam paper, a hairline border and a modest corner.
 @MainActor private final class QuitConfirmationCard: NSView {
     override init(frame: NSRect) {
         super.init(frame: frame)
         wantsLayer = true
-        layer?.cornerRadius = 20
+        layer?.cornerRadius = 14
         layer?.masksToBounds = true
-        layer?.borderWidth = 1.5
+        layer?.borderWidth = 1
         paint()
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
