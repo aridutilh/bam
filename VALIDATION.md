@@ -1,13 +1,15 @@
-## Local 0.23.0 — Site Access, explicit consent and tab metadata (full build, all eleven native suites and final vendor checks passed at `4ed2f83`; repository runtime script pending; held)
+## Local 0.23.0 — Site Access, explicit consent and tab metadata (full build, all eleven native suites, the repository runtime script and final vendor checks passed at `4ed2f83`; ready for Ari's publication approval; local, not published)
 
 Nothing here claims full Chrome compatibility or readiness to ship.
 
-**Final candidate `4ed2f83`** (logs `chrome-4ed2f83-integration-*.log`, `chrome-4ed2f83-full-native-driver.log`): the full integrated `bash build.sh` passed, including every component suite, and **all eleven native suites passed** in canonical Bam Preview: WebKit, PiP, Interactions **173**, Auto PiP **85**, Features **371**, Resources **37**, Profiles **98**, Extensions **818**, Favicons **85**, Profile Activation **45** and Arc import **155**. The Extensions suite It includes:
+**Final candidate `4ed2f83`** (logs `chrome-4ed2f83-integration-*.log`, `chrome-4ed2f83-full-native-driver.log`): the full integrated `bash build.sh` passed, including every component suite, and **all eleven native suites passed** in canonical Bam Preview: WebKit, PiP, Interactions **173**, Auto PiP **85**, Features **371**, Resources **37**, Profiles **98**, Extensions **818**, Favicons **85**, Profile Activation **45** and Arc import **155**. The repository-mandated `bash scripts/test-runtime.sh` then passed all eleven suites again on the same candidate (`chrome-4ed2f83-repository-runtime.log`).
+
+The Extensions suite includes:
 - explicit-consent withdrawal: every check passed with no added delay, including the strict refusal of a read of the withheld site from the extension's own page (a credentialed read of a test page that sends no CORS headers);
 - site access **158** (two-phase restart, Update and Disable/Enable release barriers, the declined-popup barrier), tab metadata **58** and the renderer fixture;
 - the worker fixture after Revoke Permissions: restart into a fresh context, the retired context refused, exact history and bookmarks denials with no data, events or snapshot reads, then Disable/Enable and reload with storage kept.
 
-The repository-mandated `bash scripts/test-runtime.sh` is running separately; readiness waits on it and on Ari's approval.
+Every required app gate has passed. The candidate stays local until Ari approves publication.
 
 **What made it pass:**
 - **Product:** the restart's release barrier now also waits for a popup WebKit prepared and asked Bam to present, even when Bam declined (`1da37b3`).
@@ -30,10 +32,9 @@ The repository-mandated `bash scripts/test-runtime.sh` is running separately; re
 - **Dark Reader 4.9.133** on the final candidate `4ed2f83`: Manage Extensions › Site Access was changed from "On all sites" to "No requested sites" and the Reload Pages prompt accepted. The original page styling returned, and Dark Reader stayed enabled with no release timeout; its only attention item was the fixture's `tabs.create` onboarding restriction. Afterwards it had no site access, and cleanup released every owned page, controller and runtime, with the store confirmed gone. This is visible-injection withdrawal after a reload, not a network-read test.
 - **Dark Reader 4.9.133** (`3ab4043`): after "On all sites" was changed to "No requested sites" and the page reloaded, the original styling returned. It stayed enabled and the choice persisted. This shows injected styling withdrawn; it doesn't show network-read refusal.
 
-**Pending (each must pass, or remain a listed limitation):**
-1. The repository-mandated `bash scripts/test-runtime.sh` on `4ed2f83` (running). The full build, all eleven native suites and the final vendor checks have passed (above).
-2. `permissions.request` routed to Bam's review on the installed engine (approve, decline, stale).
-3. activeTab with the site withheld.
+**Not covered by this candidate's gates (listed as limitations until tested):**
+1. `permissions.request` routed to Bam's review on the installed engine (approve, decline, stale).
+2. activeTab with the site withheld.
 
 **Limits regardless:** the release barrier waits only for views Bam can name — its tabs and previews, popups it presented or was asked to present, offscreen documents (a popup page created some other way, WebKit-internal views and views outside Bam aren't inventoried); the expiry check runs about a second after a grant expires, not at the exact deadline; WebKit doesn't enforce Chrome's user-gesture rule for `permissions.request`; Safari-imported extensions no longer prompt per site; a restart in a private window resets the extension's in-memory storage; tabs in several Little Bam windows stay blank for `tabs`-only extensions; `favIconUrl`/`pendingUrl` aren't provided; favicon routing (`_favicon/`) remains unsupported.
 
