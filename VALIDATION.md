@@ -24,7 +24,7 @@ This is one run of one suite on a diagnostic build, not the eleven-suite result.
 **Vendor (bounded workflows, isolated profiles, observed by root):**
 - **Session Buddy 4.1.2** on the final candidate `4ed2f83`, all without site access:
   - **Save, close and restore:** it saved 2 tabs and closed both through its own confirmation; "Open in this window" restored 2 new tabs with the correct titles, addresses and page content; the saved collection survived reloading the extension page. Cleanup released every owned page and controller, and the store was confirmed gone.
-  - **Copy and paste:** in a second fixture, the **This window** context menu's Copy (2 tabs) then Paste created 2 new tabs with the correct titles, addresses and content, for 4 tabs in all; that fixture's cleanup confirmation is pending.
+  - **Copy and paste:** in a second fixture, the **This window** context menu's Copy (2 tabs) then Paste created 2 new tabs with the correct titles, addresses and content, for 4 tabs in all. No context errors, and cleanup released all 5 owned pages, the runtime and the controllers, with the store confirmed gone.
   - **Not supported:** the browser-level Paste, which opens a new tabbed window through `windows.create`, is refused by Bam's existing new-window limitation, so it is not counted as a pass.
 - **Session Buddy 4.1.2** (`8501db3`): titles, save 2, close 2, restore 2 with correct titles, addresses and content, the collection kept across an extension-page reload, and copy/paste 2, all without site access. Not multiwindow or a relaunch.
 - **Dark Reader 4.9.133** on the final candidate `4ed2f83`: Manage Extensions › Site Access was changed from "On all sites" to "No requested sites" and the Reload Pages prompt accepted. The original page styling returned, and Dark Reader stayed enabled with no release timeout; its only attention item was the fixture's `tabs.create` onboarding restriction. Afterwards it had no site access, and cleanup released every owned page, controller and runtime, with the store confirmed gone. This is visible-injection withdrawal after a reload, not a network-read test.
@@ -32,7 +32,7 @@ This is one run of one suite on a diagnostic build, not the eleven-suite result.
 
 **Pending (each must pass, or remain a listed limitation):**
 1. The full integrated build and all eleven native suites on the final candidate (in progress).
-2. Vendor rechecks on the final candidate: done for Dark Reader and Session Buddy (above). The second Session Buddy fixture's cleanup confirmation is pending.
+2. Vendor rechecks on the final candidate: done for Dark Reader and Session Buddy (above), with cleanup confirmed.
 3. `permissions.request` routed to Bam's review on the installed engine (approve, decline, stale).
 4. activeTab with the site withheld.
 
