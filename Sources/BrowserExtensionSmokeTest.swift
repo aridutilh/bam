@@ -1038,7 +1038,11 @@ import Darwin
                 let alive = observedExtensionViews.filter { $0.view.value != nil }.map(\.label)
                 let bamExtensionRenderers = controller.browsers.filter { $0.value.url?.scheme == "webkit-extension" && $0.value.url?.host == extensionHost }
                     .map { "\($0.key.uuidString.prefix(8)):\($0.value.url?.path ?? "-")" }.sorted()
+                // Scope (incomplete by construction): views this fixture registered, Bam's tab renderers, and the popups Bam
+                // presented earlier that the fixture tracked. Not visible here: background pages, per-tab action popups,
+                // offscreen documents and any other view WebKit holds internally.
                 print("CONSENT_VIEWS stage=\(stage) t=\(String(format: "%.3f", ProcessInfo.processInfo.systemUptime)) observedAlive=\(alive) " +
+                      "presentedPopupViewsAlive=\(retiredWebViews.filter { $0.value != nil }.count) presentedPopoversAlive=\(retiredPopovers.filter { $0.value != nil }.count) " +
                       "bamExtensionRenderers=\(bamExtensionRenderers) retiredRenderersAlive=\(controller.retiredRenderersAlive()) " +
                       "restarting=\(host.isRestarting(id: extensionID)) generation=\(generationNow())"); fflush(stdout)
             }
@@ -1097,12 +1101,13 @@ import Darwin
                 try await wait("The extension page for consent checks did not load") { web.title == "Bam extension page ready" }
             }
             /// Drops the test's reference and reports (not asserts) whether WebKit deallocated it: cleanup, not policy.
-            func releaseConsentPage(_ reason: String) async throws {
+            @discardableResult func releaseConsentPage(_ reason: String) async throws -> Bool {
                 weak let released = consentPage
                 consentPage?.stopLoading(); consentPage = nil
                 let deadline = ProcessInfo.processInfo.systemUptime + 5
                 while released != nil && ProcessInfo.processInfo.systemUptime < deadline { try await Task.sleep(nanoseconds: 40_000_000) }
                 print("CONSENT_PAGE_RELEASE reason=\(reason) deallocated=\(released == nil)"); fflush(stdout)
+                return released == nil
             }
             try await buildConsentPage()
             promptRuntime.reconcile()
@@ -1188,8 +1193,10 @@ import Darwin
                     bamRenderers.append("\(tabID.uuidString.prefix(8))=\(await discriminatorFetch(web))")
                 }
                 var secondPage = "not-built"
+                weak var secondRawPage: WKWebView?
                 if let context = try? live(), let configuration = context.webViewConfiguration {
                     let web = WKWebView(frame: NSRect(x: 0, y: 0, width: 320, height: 240), configuration: configuration)
+                    secondRawPage = web
                     observeExtensionView("discriminator-second-raw-page", web)
                     web.load(URLRequest(url: context.baseURL.appendingPathComponent("page.html")))
                     let deadline = ProcessInfo.processInfo.systemUptime + 5
@@ -1201,17 +1208,23 @@ import Darwin
                 if let page = consentPage { repeated = await discriminatorFetch(page) }
                 print("CONSENT_FETCH_DISCRIMINATOR consentPageRepeat=\(repeated) bamExtensionRenderers=\(bamRenderers) secondRawPage=\(secondPage)"); fflush(stdout)
                 extensionViewInventory("after-discriminator")
-                // Causal discriminator (native 3ab4043: the updated popup, preloaded by this fixture's popupWebView getter and
-                // never presented by Bam, was alive at the fresh load; every fresh page then read). Repeat the withdrawal
-                // once with no test-held page and that popup gone: re-allow, release this check's raw pages, withhold,
-                // and fetch from a page of the next fresh context and from Bam's renderer. Refused there points at the
-                // unseen popup alive at load; read there points at access retained below the views. Still fails below.
+                // Second-withdrawal discriminator (native 3ab4043: the updated popup, preloaded by this fixture's popupWebView
+                // getter and never presented by Bam, was alive at the first fresh load; every fresh page then read). Repeat
+                // the withdrawal once after that popup is gone, re-allowing first, and report whether the test's raw pages
+                // were actually released (logged, not required). Evidence, not proof: a refusal here supports the popup
+                // hypothesis but is confounded by the extra teardown, elapsed time and an additional restart; a read here
+                // does not prove retention below the views, because CONSENT_VIEWS can't see WebKit-internal views.
+                // The strict check below still fails either way.
                 do {
-                    try await releaseConsentPage("causal-discriminator")
+                    let firstPageReleased = try await releaseConsentPage("causal-discriminator")
+                    let secondDeadline = ProcessInfo.processInfo.systemUptime + 5
+                    while secondRawPage != nil && ProcessInfo.processInfo.systemUptime < secondDeadline { try await Task.sleep(nanoseconds: 40_000_000) }
+                    let secondRawReleased = secondRawPage == nil
                     _ = try perform(host.siteAccess(id: extensionID)!, .choose(.allRequested))
                     try await buildConsentPage()
                     let reallowedRead = consentPage == nil ? "no-page" : await discriminatorFetch(consentPage!)
-                    try await releaseConsentPage("causal-discriminator-reallowed")
+                    let controlPageReleased = try await releaseConsentPage("causal-discriminator-reallowed")
+                    print("CONSENT_CAUSAL_RELEASE consentPage=\(firstPageReleased) secondRawPage=\(secondRawReleased) positiveControlPage=\(controlPageReleased)"); fflush(stdout)
                     extensionViewInventory("causal-before-withhold")
                     BrowserExtensions.siteAccessRestartWillLoad = { id in if id == extensionID { extensionViewInventory("causal-will-load-fresh-context") } }
                     let beforeCausal = generationNow()
