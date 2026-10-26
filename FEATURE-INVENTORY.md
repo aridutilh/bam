@@ -1,3 +1,5 @@
+**0.25.0 build 49:** extension pop-out windows: `windows.create({type: 'popup'})` honours the requested size and position (kept on screen, Little Bam minimum), `windows.update` moves and resizes them, and they show the extension's own pages; `tabs.query` answers Chrome's 'app'/'devtools' window types with no tabs. Not included: extension-created tabbed (multi-tab) windows, or moving Bam's main window.
+
 **0.24.0 build 48:**
 - search palette size, tint, held-key stability, clipping and real actions;
 - sidebar edge, Space context menu, folder lid animation, drag gaps and drop into Favorites at a slot;

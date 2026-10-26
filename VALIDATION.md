@@ -1,13 +1,30 @@
-## Local extension popup follow-up — targeted native acceptance
+## 0.25.0 build 49 — extension pop-out windows
 
-On branch `overnight/popup-bounds-1026`, after the 0.24 visual candidate. This follow-up is not published or included in the preserved 0.24 release archive.
+Nothing here claims full Chrome compatibility or tabbed extension windows.
 
-- Independent review closed the height-clamp anchoring and stale popup ownership findings.
-- Targeted frame component checks: 25 pass; all sources typecheck.
-- Optimized app compiled, signed and packaged at `ab101a0`. The Documents copy failed signature verification because File Provider repeatedly attached FinderInfo. The signed staging ZIP was extracted in `/private/tmp`, verified strictly, and installed only into canonical Bam Preview.
-- Canonical Preview Extensions: **822 pass** on the corrected second run. The first run requested the browser's existing width and incorrectly expected a refusal; the corrected test requests an actual change, requires the explicit refusal, and checks both native and reported frames remain unchanged. Popup creation/update and stale ownership checks pass.
-- Fixtures use real WebKit APIs and windows matching Little Bam minimums. Actual third-party popup/vault sign-in, multi-display interaction and full multi-tab window restoration are not certified. Normal/multi-tab extension windows remain unsupported.
-- The other ten native suites were not repeated for this isolated follow-up. Canonical Preview was restored to the separately verified 0.24 visual candidate afterward; personal profile hashes remained unchanged.
+**Build and native gates** (worktree `bam-popup-candidate`, tested source `2de34d5`):
+- The full `bash build.sh` passed (`build-025e.log`), with every component suite. The new or changed suites: window targeting **25**, extension compatibility **90** (including a page-adapter regression across 400+ re-apply ticks), tab-metadata facade **44**.
+- `bash scripts/test-runtime.sh` passed **all eleven native suites in one uninterrupted run** (`runtime-025f.log`): WebKit, PiP positioning 70, PiP, Interactions **173**, Auto PiP **85**, Features **371**, Resources **37**, Profiles **98**, Extensions **826**, Favicons **85**, Profile Activation **45** and Arc import **155**.
+- The run before it (`runtime-025e.log`) stopped at PiP. Playback was correct, but the app lost activation to another app, so this was a single, diagnosed retry.
+- Extensions 826 includes a real `PreviewWebContent` regression. An extension page is refused without the pop-out's authorization; with it, the page loads through both navigation gates and runs (it replies over runtime messaging); after authorization is withdrawn, navigation is cancelled. The fixture also covers requested bounds clamped to Little Bam's minimum, moving and resizing via `windows.update`, refusal for Bam's browser window, and refusal once a popup's surface is gone.
+
+**Real vendor (Dark Reader 4.9.133, official store package, disposable profile; `vendor-darkreader-popout025d.log`):**
+- **Vendor behavior:** Dark Reader's own CSS-editor control called `windows.create({type: 'popup', width: 800, height: 600})`. Bam opened Little Bam pop-outs reported as `popup`, **800×600** at left 200 / top 77.
+- **Editor rendered:** the editor showed its real UI ("CSS EDITOR / ALL WEBSITES / Reset changes / Apply" and its CSS text area), with no extension errors.
+- **Closure:** the fixture's own teardown closed the pop-outs and removed temporary storage. Dark Reader didn't close them itself.
+- **Not tested with a vendor:** move or resize after opening (`windows.update`) is covered by the native fixture only; Dark Reader doesn't call it.
+
+**Found along the way and fixed:**
+- Little Bam refused extension pages, and both of its navigation gates did too.
+- Dark Reader's editor stayed blank because WebKit rejects Chrome's `tabs.query({windowType: 'app'})`, which Dark Reader uses as a fallback.
+
+**Personal profile:** unchanged by these fixtures. One manual Bam Preview session at 09:57 (outside the fixture runs) installed Google Translate in the personal profile. After re-baselining, the profile was unchanged through the final vendor check and native run.
+
+**Limits:**
+- Pop-outs are one-page Little Bam windows, never smaller than its 520×320 content minimum. A `top` without a `height` can't be honoured (WebKit drops it).
+- Inside the page, `window.outerWidth/outerHeight` read 0 in a pop-out, while the extension API reports the true size.
+- There are no extension-created tabbed (multi-tab) windows; Session Buddy's browser-level Paste still needs them.
+- Extensions can't move Bam's main window.
 
 ## 0.24.0 build 48 — visual and interaction release (all eleven native suites passed across runs with two targeted retries; app-only rebuild at `67b9a57` passed a focused visual retest)
 

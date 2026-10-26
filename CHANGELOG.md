@@ -1,8 +1,10 @@
 # Changelog
 
-## 0.25.0 build 49 — Extension pop-out windows (candidate, acceptance pending)
+## 0.25.0 build 49 — Extension pop-out windows
 
 - Extensions can open their own pop-out window at the size and position they ask for, and move or resize it later. It stays on screen and never gets smaller than Bam's small-window minimum.
+- An extension's pop-out can show the extension's own pages. For example, Dark Reader's CSS editor now opens in its own window.
+- Extensions that look for Chrome's app or devtools windows now get an empty answer instead of an error.
 - Extensions still can't move or resize Bam's main browser window, or open new tabbed windows.
 
 ## 0.24.0 build 48 — Search, sidebar and everyday surfaces
