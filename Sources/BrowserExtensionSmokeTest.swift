@@ -869,6 +869,13 @@ import Darwin
             _ = host.takeSiteAccessNotice(id: extensionID)
         }
         func generationNow() -> UInt64 { host.restartGeneration[extensionID] ?? 0 }
+        /// The names of the Site Access revision fields that differ (diagnostics; "missing" when one side has none).
+        func revisionDiff(_ a: BrowserExtensionSiteAccessSnapshot.Revision, _ b: BrowserExtensionSiteAccessSnapshot.Revision?) -> [String] {
+            guard let b else { return ["missing"] }
+            return [("stored", a.stored != b.stored), ("timed", a.timed != b.timed), ("patterns", a.patterns != b.patterns), ("version", a.version != b.version),
+                    ("enabled", a.enabled != b.enabled), ("context", a.context != b.context), ("declarations", a.declarations != b.declarations),
+                    ("permissionEpoch", a.permissionEpoch != b.permissionEpoch)].filter(\.1).map(\.0)
+        }
         func checkSiteAccess() async throws {
             let ip = URL(string: "http://127.0.0.1/site-access")!, newSite = URL(string: "https://new.invalid/")!
             let ipPattern = try WKWebExtension.MatchPattern(string: "http://127.0.0.1/*")
@@ -1038,7 +1045,11 @@ import Darwin
                 for key in context.deniedPermissionMatchPatterns.keys where key.matches(optionalURL) { context.deniedPermissionMatchPatterns.removeValue(forKey: key) }
                 host.persistPermissions(context)
             }
+            let epochAfterDecline = host.siteAccess(id: extensionID)?.revision.permissionEpoch
             try dropOptionalDenial()
+            print("CONSENT_EPOCH consentBase=\(consentBase.revision.permissionEpoch) afterDecline=\(epochAfterDecline.map(String.init) ?? "-") " +
+                  "afterCleanup=\(host.siteAccess(id: extensionID).map { String($0.revision.permissionEpoch) } ?? "-") " +
+                  "diffFromConsentBase=\(revisionDiff(consentBase.revision, host.siteAccess(id: extensionID)?.revision))"); fflush(stdout)
 
             // The same policy through the installed engine, from a real extension page and a real 127.0.0.1 tab.
             let consentTabURL = { () -> URL in
@@ -1111,11 +1122,21 @@ import Darwin
                 }, (e) => { fetchDetail = {error: String(e && e.message || e)}; return 'refused'; });
                 return {found: !!tab, read, got, windows, injected, fetched, fetchDetail};
                 """, ["target": consentTabURL.absoluteString])
-            try check(withheldUse["found"] as? Bool == true && withheldUse["got"] as? Bool == true && reviewsShown == 0 &&
-                (withheldUse["injected"] as? String)?.hasPrefix("refused:") == true && withheldUse["fetched"] as? String == "refused" &&
-                !granted(ip) && deniedKeys(ip).isEmpty && undecided(consentTabURL) && recordState() == recordBefore &&
-                host.siteAccess(id: extensionID)?.state.mode == .withheld && host.siteAccess(id: extensionID)?.revision == consentBase.revision,
-                "Using a withheld requested site prompted, granted, denied or changed Site Access: shown=\(reviewsShown), \(withheldUse); " +
+            // Every predicate is named and reported, so a failure says which one (native 52fdfae reported only the composite).
+            let afterUse = host.siteAccess(id: extensionID)
+            let withheldPredicates: [(String, Bool)] = [
+                ("found", withheldUse["found"] as? Bool == true), ("got", withheldUse["got"] as? Bool == true), ("noReview", reviewsShown == 0),
+                ("injectionRefused", (withheldUse["injected"] as? String)?.hasPrefix("refused:") == true),
+                ("fetchRefused", withheldUse["fetched"] as? String == "refused"), ("notGranted", !granted(ip)), ("notDenied", deniedKeys(ip).isEmpty),
+                ("undecided", (try? undecided(consentTabURL)) == true), ("recordUnchanged", recordState() == recordBefore),
+                ("modeWithheld", afterUse?.state.mode == .withheld), ("revisionIsConsentBase", afterUse?.revision == consentBase.revision),
+            ]
+            let failedWithheld = withheldPredicates.filter { !$0.1 }.map(\.0)
+            print("CONSENT_PREDICATES stage=withheld-use failed=\(failedWithheld) revisionDiffFromConsentBase=\(revisionDiff(consentBase.revision, afterUse?.revision)) " +
+                  "epoch=\(consentBase.revision.permissionEpoch)->\(afterUse.map { String($0.revision.permissionEpoch) } ?? "-") " +
+                  "record=\(recordBefore == recordState() ? "unchanged" : "\(recordBefore) -> \(recordState())")"); fflush(stdout)
+            try check(failedWithheld.isEmpty,
+                "Using a withheld requested site prompted, granted, denied or changed Site Access: failed=\(failedWithheld) shown=\(reviewsShown), \(withheldUse); " +
                 loopbackState())
             // activeTab on the withheld site: a user gesture in the tab lets injection run with no review and no lasting grant.
             guard let consentAdapter = promptRuntime.tabs[consentTab] else { throw ExtensionSmokeTest.Failure(description: "No adapter for the consent tab") }
