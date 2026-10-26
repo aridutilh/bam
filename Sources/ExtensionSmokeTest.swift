@@ -63,7 +63,9 @@ import WebKit
         host.createWindow = { [weak host] url, profile, _ in
             createWindowCalls += 1
             guard let host, profile == profileA, let url, let configuration = host.configuration(forExtensionURL: url, profileID: profile) else { return nil }
-            let popupWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 300, height: 200), styleMask: [.titled], backing: .buffered, defer: false)
+            // Modelled on Little Bam: titled, with its real 520×320 content minimum, so requested bounds take the clamp path.
+            let popupWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 320), styleMask: [.titled], backing: .buffered, defer: false)
+            popupWindow.contentMinSize = NSSize(width: 520, height: 320)
             popupWindow.isReleasedWhenClosed = false
             let web = WKWebView(frame: NSRect(x: 0, y: 0, width: 300, height: 200), configuration: configuration)
             popupWindow.contentView = web; popupWindow.orderFront(nil); web.load(URLRequest(url: url))
@@ -309,7 +311,7 @@ import WebKit
             out.bounds = await attempt(async () => {
               const sized = await browser.windows.create({type: 'popup', url: page, left: 220, top: 200, width: 420, height: 300});
               out.sized = {left: sized.left, top: sized.top, width: sized.width, height: sized.height, type: sized.type};
-              const moved = await browser.windows.update(sized.id, {left: 260, width: 460});
+              const moved = await browser.windows.update(sized.id, {left: 260, width: 640});
               out.moved = {left: moved.left, top: moved.top, width: moved.width, height: moved.height};
               const browserWindow = (await browser.windows.getAll({windowTypes: ['normal']}))[0];
               out.browserResize = await attempt(() => browser.windows.update(browserWindow.id, {width: 500}));
@@ -332,11 +334,25 @@ import WebKit
                   "A normal or maximized windows.create was not refused before a window was created: \(targeting ?? [:]) createWindow=\(createWindowCalls)")
         func near(_ value: Any?, _ expected: Double) -> Bool { (value as? NSNumber).map { abs($0.doubleValue - expected) <= 1 } ?? false }
         let sized = targeting?["sized"] as? [String: Any], moved = targeting?["moved"] as? [String: Any]
+        // 420×300 is below Little Bam's minimum: it opens at the minimum frame, left and top kept.
+        let minimumFrame = NSWindow.frameRect(forContentRect: NSRect(x: 0, y: 0, width: 520, height: 320), styleMask: [.titled]).size
         try check(targeting?["bounds"] as? String == "ok" && sized?["type"] as? String == "popup" &&
-                  near(sized?["left"], 220) && near(sized?["top"], 200) && near(sized?["width"], 420) && near(sized?["height"], 300),
-                  "A bounded popup did not open at its requested left/top/width/height: \(targeting ?? [:])")
-        try check(near(moved?["left"], 260) && near(moved?["top"], 200) && near(moved?["width"], 460) && near(moved?["height"], 300),
-                  "windows.update did not move and resize the popup while keeping its top: \(targeting ?? [:])")
+                  near(sized?["left"], 220) && near(sized?["top"], 200) &&
+                  near(sized?["width"], Double(minimumFrame.width)) && near(sized?["height"], Double(minimumFrame.height)),
+                  "A bounded popup did not open at its requested left/top, raised to Little Bam's minimum \(minimumFrame): \(targeting ?? [:])")
+        try check(near(moved?["left"], 260) && near(moved?["top"], 200) && near(moved?["width"], 640) && near(moved?["height"], Double(minimumFrame.height)),
+                  "windows.update did not move and widen the popup while keeping its top: \(targeting ?? [:])")
+        // Stale membership (review hold): with the popup's surface gone but not yet reconciled, its retained adapter
+        // must refuse to move it, and the window must not change.
+        if let sizedPopup = popupWindows.first, let adapter = runtimeA.windows.values.first(where: { $0.native === sizedPopup.window }) {
+            let before = sizedPopup.window.frame
+            popupWindows.removeFirst()
+            var staleError: Error?, calls = 0
+            adapter.setFrame(CGRect(x: 100, y: 100, width: 700, height: 500), for: contextA) { staleError = $0; calls += 1 }
+            try check(calls == 1 && staleError?.localizedDescription == BrowserExtensionWindow.closedRefusal && sizedPopup.window.frame == before,
+                      "A retained popup adapter moved its window after its surface was gone: \(String(describing: staleError)) \(sizedPopup.window.frame) vs \(before)")
+            sizedPopup.web.stopLoading(); sizedPopup.window.orderOut(nil); sizedPopup.window.close(); host.reconcile()
+        } else { throw Failure(description: "The bounded popup's window adapter was not found for the stale-membership check") }
         try check((targeting?["browserResize"] as? String)?.contains(ExtensionWindowTargeting.browserWindowFrameRefusal) == true,
                   "An extension resized Bam's browser window: \(targeting ?? [:])")
         try check(targeting?["popupType"] as? String == "popup" && targeting?["popupListedAsNormal"] as? Bool == false,

@@ -2183,6 +2183,18 @@ struct BrowserExtensionPermissionReview {
         return nil
     }
     func isSinglePageWindow(_ key: ObjectIdentifier) -> Bool { topology()[key]?.isSinglePage ?? singlePageWindows.contains(key) }
+    /// Authority to move or resize an extension window, read live and never from cached classification: `window` must be
+    /// this runtime's current adapter for its native window, and a live, profile-owned single-page surface must be in
+    /// that window right now.
+    func authorizesPopupFrame(_ window: BrowserExtensionWindow) -> Bool {
+        guard windows[window.key] === window, let native = window.native else { return false }
+        return currentSurfaces().contains { $0.isSinglePage && $0.window === native }
+    }
+    /// Whether `window` is still a live window of this profile (current adapter, a live surface in it).
+    func hasLiveSurface(in window: BrowserExtensionWindow) -> Bool {
+        guard windows[window.key] === window, let native = window.native else { return false }
+        return currentSurfaces().contains { $0.window === native }
+    }
 
     // MARK: Tab metadata (read-only; see work/chrome-tab-metadata-api.md)
 
@@ -2665,12 +2677,17 @@ struct BrowserExtensionPermissionReview {
     /// `windows.update` bounds: Little Bam popups move and resize (kept on screen, never below their minimum);
     /// Bam's browser window is the person's, so an extension can't move or resize it.
     func setFrame(_ frame: CGRect, for context: WKWebExtensionContext, completionHandler: @escaping (Error?) -> Void) {
-        guard let runtime, runtime.owns(context), let native else { completionHandler(BrowserExtensions.failure("This window is no longer open.")); return }
-        guard runtime.isSinglePageWindow(key) else { completionHandler(BrowserExtensions.failure(ExtensionWindowTargeting.browserWindowFrameRefusal)); return }
+        guard let runtime, runtime.owns(context), let native else { completionHandler(BrowserExtensions.failure(Self.closedRefusal)); return }
+        guard runtime.authorizesPopupFrame(self) else {
+            // A live browser window refuses as such; a window whose popup surface is gone (even before reconcile) is closed.
+            completionHandler(BrowserExtensions.failure(runtime.hasLiveSurface(in: self) ? ExtensionWindowTargeting.browserWindowFrameRefusal : Self.closedRefusal))
+            return
+        }
         native.setFrame(ExtensionWindowTargeting.popupFrame(requested: frame, current: native.frame, minimum: Self.minimumFrameSize(native),
                                                             screens: NSScreen.screens.map(\.visibleFrame)), display: true)
         completionHandler(nil)
     }
+    static let closedRefusal = "This window is no longer open."
     /// The smallest frame the window allows, from its frame and content minimums.
     static func minimumFrameSize(_ window: NSWindow) -> CGSize {
         let content = window.frameRect(forContentRect: NSRect(origin: .zero, size: window.contentMinSize)).size

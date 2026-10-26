@@ -71,25 +71,31 @@ enum ExtensionWindowTargeting {
 
     /// The frame a Little Bam popup takes for `windows.create` or `windows.update` bounds. `requested` is WebKit's
     /// frame in macOS global coordinates (bottom-left origin); a NaN or non-positive component was not requested and
-    /// comes from `current`, and without a requested top the window keeps its top edge. The size is at least `minimum`
-    /// and at most the visible frame of the screen the window lands on, and the window stays on that screen.
+    /// comes from `current`. The window's top edge is the anchor: WebKit converts a requested top using the requested
+    /// height, so the desired top is `origin.y + height` of the request (or the current top when none was given), and it
+    /// is kept while the size settles. The size is at least `minimum` and at most the visible frame of the screen the
+    /// window lands on; the window is then kept on that screen, unless `minimum` itself is larger than the screen.
     static func popupFrame(requested: CGRect, current: CGRect, minimum: CGSize, screens: [CGRect]) -> CGRect {
         func given(_ value: CGFloat) -> CGFloat? { value.isFinite ? value : nil }
         func size(_ value: CGFloat) -> CGFloat? { given(value).flatMap { $0 > 0 ? $0 : nil } }
         let none = requested.isNull
+        let requestedHeight = none ? nil : size(requested.size.height)
         var width = (none ? nil : size(requested.size.width)) ?? current.width
-        var height = (none ? nil : size(requested.size.height)) ?? current.height
+        var height = requestedHeight ?? current.height
         var x = (none ? nil : given(requested.origin.x)) ?? current.minX
-        var y = (none ? nil : given(requested.origin.y)) ?? current.maxY - height
+        // The top edge WebKit's conversion encodes, before any clamping changes the height.
+        let top = (none ? nil : given(requested.origin.y)).map { $0 + height } ?? current.maxY
         let floorWidth = max(1, minimum.width.isFinite ? minimum.width : 1), floorHeight = max(1, minimum.height.isFinite ? minimum.height : 1)
         width = max(width, floorWidth); height = max(height, floorHeight)
         let usable = screens.filter { $0.width > 0 && $0.height > 0 && [$0.minX, $0.minY, $0.width, $0.height].allSatisfy(\.isFinite) }
-        let proposed = CGRect(x: x, y: y, width: width, height: height)
+        let proposed = CGRect(x: x, y: top - height, width: width, height: height)
         let center = CGPoint(x: proposed.midX, y: proposed.midY)
         guard let screen = usable.first(where: { $0.contains(center) })
                 ?? usable.max(by: { $0.intersection(proposed).area < $1.intersection(proposed).area })
                 ?? usable.first else { return proposed }
         width = max(floorWidth, min(width, screen.width)); height = max(floorHeight, min(height, screen.height))
+        // Settled size, same top; then keep it on the screen.
+        var y = top - height
         x = min(max(x, screen.minX), max(screen.minX, screen.maxX - width))
         y = min(max(y, screen.minY), max(screen.minY, screen.maxY - height))
         return CGRect(x: x, y: y, width: width, height: height)
