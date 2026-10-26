@@ -301,6 +301,7 @@ import WebKit
         let tabsBefore = createTabCalls
         let pagesBefore = Set(extensionPages.keys)
         peekPage = (UUID(), WKWebView(frame: webA.frame, configuration: configA)); host.reconcile()
+        let browserFrameBefore = window.frame
         let targeting = try? await popup.callAsyncJavaScript("""
             const page = browser.runtime.getURL('page.html'), out = {};
             const attempt = async (work) => { try { await work(); return 'ok'; } catch (error) { return String(error && error.message || error); } };
@@ -313,8 +314,12 @@ import WebKit
               out.sized = {left: sized.left, top: sized.top, width: sized.width, height: sized.height, type: sized.type};
               const moved = await browser.windows.update(sized.id, {left: 260, width: 640});
               out.moved = {left: moved.left, top: moved.top, width: moved.width, height: moved.height};
+              // A size different from the current one: WebKit answers an unchanged frame itself, without asking Bam.
               const browserWindow = (await browser.windows.getAll({windowTypes: ['normal']}))[0];
-              out.browserResize = await attempt(() => browser.windows.update(browserWindow.id, {width: 500}));
+              out.browserBefore = {left: browserWindow.left, top: browserWindow.top, width: browserWindow.width, height: browserWindow.height};
+              out.browserResize = await attempt(() => browser.windows.update(browserWindow.id, {width: browserWindow.width + 140, left: browserWindow.left + 30}));
+              const after = await browser.windows.get(browserWindow.id);
+              out.browserAfter = {left: after.left, top: after.top, width: after.width, height: after.height};
             });
             const created = await browser.windows.create({type: 'popup', url: page});
             out.popupType = (await browser.windows.get(created.id)).type;
@@ -353,8 +358,12 @@ import WebKit
                       "A retained popup adapter moved its window after its surface was gone: \(String(describing: staleError)) \(sizedPopup.window.frame) vs \(before)")
             sizedPopup.web.stopLoading(); sizedPopup.window.orderOut(nil); sizedPopup.window.close(); host.reconcile()
         } else { throw Failure(description: "The bounded popup's window adapter was not found for the stale-membership check") }
-        try check((targeting?["browserResize"] as? String)?.contains(ExtensionWindowTargeting.browserWindowFrameRefusal) == true,
-                  "An extension resized Bam's browser window: \(targeting ?? [:])")
+        // The refusal must come from Bam's setFrame (WebKit relays it), and the browser window must not move or resize.
+        let browserBefore = targeting?["browserBefore"] as? [String: Any], browserAfter = targeting?["browserAfter"] as? [String: Any]
+        try check((targeting?["browserResize"] as? String)?.contains(ExtensionWindowTargeting.browserWindowFrameRefusal) == true
+                  && window.frame == browserFrameBefore
+                  && ["left", "top", "width", "height"].allSatisfy { key in (browserBefore?[key] as? NSNumber) == (browserAfter?[key] as? NSNumber) && browserBefore?[key] != nil },
+                  "An extension resized Bam's browser window: \(targeting ?? [:]) frame \(browserFrameBefore) → \(window.frame)")
         try check(targeting?["popupType"] as? String == "popup" && targeting?["popupListedAsNormal"] as? Bool == false,
                   "A single-page window was not reported as a popup: \(targeting ?? [:])")
         let landing = (targeting?["mainTabs"] as? Int ?? 0) - 1
