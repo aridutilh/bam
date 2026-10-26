@@ -678,18 +678,21 @@ struct BrowserExtensionPermissionReview {
             records[currentIndex] = restored
             try? persist()
             let baseURL = oldContext?.baseURL
+            // What the caller sees: the original error, or the composed one when the rollback turned the extension off
+            // (callers such as Manage Extensions store the thrown error, so it must carry any failed-save disclosure).
+            var thrown: Error = error
             if retired && !unloaded, let oldContext, runtime.contexts[id] === oldContext, let baseURL {
                 // The old context never unloaded: it's still the loaded one, so its retired tabs come back on it.
                 _ = onExtensionRenderers?(.restore, before.profileID, baseURL)
             } else if unloaded && restored.enabled && !interrupted {
                 if releaseBarrierHeld(id: id) {
                     // Fail closed: the old views are still alive, so reloading would only wait on the same barrier.
-                    turnOffAfterFailedUpdate(id: id, cause: error)
+                    thrown = turnOffAfterFailedUpdate(id: id, cause: error)
                     if let baseURL { _ = onExtensionRenderers?(.unavailable, before.profileID, baseURL) }
                 } else {
                     do { try await load(id, review: false) }
                     catch {
-                        turnOffAfterFailedUpdate(id: id, cause: error)
+                        thrown = turnOffAfterFailedUpdate(id: id, cause: error)
                         if let baseURL { _ = onExtensionRenderers?(.unavailable, before.profileID, baseURL) }
                     }
                 }
@@ -697,7 +700,7 @@ struct BrowserExtensionPermissionReview {
                 _ = onExtensionRenderers?(.unavailable, before.profileID, baseURL)
             }
             changed()
-            throw error
+            throw thrown
         }
     }
 
@@ -1234,13 +1237,16 @@ struct BrowserExtensionPermissionReview {
     }
     /// After a failed update rollback: turns the extension off and reports the cause. If saving "off" fails, the message
     /// says so (it's off only for now and may load again at next launch), never implying it stays off.
-    private func turnOffAfterFailedUpdate(id: UUID, cause: Error) {
+    /// Returns the composed error, which the update also throws.
+    private func turnOffAfterFailedUpdate(id: UUID, cause: Error) -> Error {
         var disableSaveError: Error?
         if let index = records.firstIndex(where: { $0.id == id }) {
             records[index].enabled = false
             do { try persist() } catch { disableSaveError = error }
         }
-        setError(Self.failure(Self.offAfterFailureMessage(cause.localizedDescription, disableSaveError: disableSaveError)), for: id)
+        let composed = disableSaveError == nil ? cause : Self.failure(Self.offAfterFailureMessage(cause.localizedDescription, disableSaveError: disableSaveError))
+        setError(composed, for: id)
+        return composed
     }
     static func offAfterFailureMessage(_ cause: String, disableSaveError: Error?) -> String {
         guard let disableSaveError else { return cause }

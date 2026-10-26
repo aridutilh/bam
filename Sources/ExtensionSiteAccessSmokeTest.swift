@@ -879,6 +879,30 @@ extension ExtensionSiteAccessSmokeTest {
             try await host.setEnabled(true, id: subject)
             expect(host.context(for: subject)?.isLoaded == true && host.context(for: subject)?.webExtension.version == versionBefore,
                    "Enable didn't recover the old version after the failed update \(state(subject))")
+            // Held again, and saving "off" fails during the rollback (this run's own host directory made read-only once
+            // the update has saved its replacement): the error the update THROWS must carry the disclosure, so a caller
+            // that stores it (as Manage Extensions' update path does with setError) shows it.
+            try await showExtensionTab(extensionTab)
+            BrowserExtensions.siteAccessRestartReleaseDeadline = 1
+            var heldForSave: WKWebView? = controller.browsers[extensionTab]
+            let unsavedUpdate = Task { @MainActor in try await host.replacePackage(id: subject, with: try updatePackage(version: "1.0.1"), catalog: catalog) }
+            _ = await waitUntil({ host.records.first { $0.id == subject }?.version == "1.0.1" }, seconds: 10)   // replacement saved
+            try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: hostDirectory.path)
+            var thrownByUpdate: String?
+            if case .failure(let error) = await unsavedUpdate.result {
+                thrownByUpdate = error.localizedDescription
+                host.setError(error, for: subject)   // what the caller does with it
+            }
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: hostDirectory.path)
+            withExtendedLifetime(heldForSave) {}
+            BrowserExtensions.siteAccessRestartReleaseDeadline = 2
+            heldForSave = nil
+            expect(thrownByUpdate?.contains("haven’t closed yet") == true && thrownByUpdate?.contains("couldn’t save that it’s off") == true
+                   && (host.errors[subject] ?? "").contains("couldn’t save that it’s off") && host.context(for: subject) == nil,
+                   "the update's thrown error (stored by its caller) didn't disclose the failed save of off: \(thrownByUpdate ?? "no error"), stored \(host.errors[subject] ?? "none")")
+            try await host.setEnabled(true, id: subject)
+            expect(host.context(for: subject)?.isLoaded == true && host.context(for: subject)?.webExtension.version == versionBefore,
+                   "Enable didn't recover the old version after the unsaved failed update \(state(subject))")
             // Clean update: the old renderer is retired and released before the updated context loads; E keeps its tab.
             try await showExtensionTab(extensionTab)
             let oldUpdateRenderer = WeakView(controller.browsers[extensionTab])
