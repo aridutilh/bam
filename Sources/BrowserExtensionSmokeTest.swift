@@ -1105,7 +1105,15 @@ import Darwin
             // diagnostic delay, removed so the run has no artificial pause before the first withdrawal).
             print("CONSENT_N3_RELEASE observed=\(observedObjects.map(\.label)) stillAlive=\(heldObjectsState()) waited=0s"); fflush(stdout)
             extensionViewInventory("before-first-withhold")
-            BrowserExtensions.siteAccessRestartWillLoad = { id in if id == extensionID { extensionViewInventory("will-load-fresh-context") } }
+            // F2 premise: which observed extension views (pages this run created, and Bam views it observed) are still
+            // alive at the moment the fresh context is about to load. Any one of them can carry the old access into the
+            // fresh context's pages, so the premise requires none (checked after the restart settles).
+            var aliveAtFreshLoad: [String]?
+            BrowserExtensions.siteAccessRestartWillLoad = { id in
+                guard id == extensionID else { return }
+                aliveAtFreshLoad = observedExtensionViews.filter { $0.view.value != nil }.map(\.label)
+                extensionViewInventory("will-load-fresh-context")
+            }
             defer { BrowserExtensions.siteAccessRestartWillLoad = nil }
             let beforeConsentBase = generationNow()
             let consentBase = try perform(host.siteAccess(id: extensionID)!, .choose(.withheld))
@@ -1113,6 +1121,9 @@ import Darwin
             try await settleRestart("Consent checks' first Withhold", from: beforeConsentBase)
             BrowserExtensions.siteAccessRestartWillLoad = nil
             extensionViewInventory("first-withhold-settled")
+            try check(aliveAtFreshLoad?.isEmpty == true,
+                "An extension view this run created or observed was still alive when the fresh context loaded (it can carry the withdrawn access): " +
+                "\(aliveAtFreshLoad.map { "\($0)" } ?? "the fresh load was never reached")")
             var implicitAnswer: Set<URL>?
             host.permissionPrompt = { _ in reviewsShown += 1; return true }
             promptRuntime.webExtensionController(promptController, promptForPermissionToAccess: [optionalURL, ip], in: nil, for: try live()) { granted, _ in implicitAnswer = granted }
