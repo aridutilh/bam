@@ -43,12 +43,14 @@ struct SiteSettingsActions {
         let surface = NSPopover()
         surface.behavior = .transient
         surface.animates = !BamTheme.reduceMotion
-        surface.hasFullSizeContent = true
+        // Standard content area (not full-size): the 320-point view fills it exactly, inset from the popover's
+        // border and arrow, so nothing is clipped and no popover chrome shows beside it.
         surface.contentViewController = controller
         surface.contentSize = controller.preferredContentSize
         surface.delegate = self
         popover = surface; self.controller = controller
-        surface.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: .maxY)
+        // Below the address field on screen, whichever way the anchor's coordinates run.
+        surface.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: anchor.isFlipped ? .maxY : .minY)
     }
     /// Live values after an action (zoom, keep-awake) or a navigation.
     func update(_ context: SiteSettingsContext) {

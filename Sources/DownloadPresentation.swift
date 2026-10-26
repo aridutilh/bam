@@ -1,4 +1,5 @@
 import Foundation
+import CoreGraphics
 
 enum DownloadStatus: String { case choosingDestination, downloading, finished, cancelled, failed }
 
@@ -99,6 +100,15 @@ enum DownloadPresentation {
         formatter.locale = locale
         formatter.unitsStyle = .full
         return formatter.localizedString(for: date, relativeTo: now)
+    }
+
+    /// How far to move the open list sideways so it lies inside `area` (the window on its screen), `margin` from
+    /// either edge; 0 when it already does. A list wider than the area keeps its leading edge visible.
+    static func horizontalCorrection(popover frame: CGRect, within area: CGRect, margin: CGFloat = 8) -> CGFloat {
+        let minX = area.minX + margin, maxX = area.maxX - margin
+        if frame.width > maxX - minX || frame.minX < minX { return minX - frame.minX }
+        if frame.maxX > maxX { return maxX - frame.maxX }
+        return 0
     }
 
     enum PopoverToggle: Equatable { case open, close, stayClosed }

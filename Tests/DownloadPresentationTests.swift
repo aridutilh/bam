@@ -20,6 +20,19 @@ import Foundation
     static func run() throws {
         let now = Date(timeIntervalSince1970: 1_800_000_000)
         let english = Locale(identifier: "en_US")
+
+        // The compact list opened from the bottom-left Downloads button stays inside the window and screen.
+        let screen = CGRect(x: 0, y: 0, width: 1512, height: 944)
+        let centeredOnButton = CGRect(x: 28 - 160, y: 60, width: 320, height: 180)
+        try check(DownloadPresentation.horizontalCorrection(popover: centeredOnButton, within: screen) == 140,
+                  "A list hanging off the left edge was not moved fully inside")
+        try check(DownloadPresentation.horizontalCorrection(popover: centeredOnButton.offsetBy(dx: 140, dy: 0), within: screen) == 0,
+                  "A list already inside moved")
+        try check(DownloadPresentation.horizontalCorrection(popover: CGRect(x: 1400, y: 60, width: 320, height: 180), within: screen) == -216,
+                  "A list hanging off the right edge was not moved inside")
+        try check(DownloadPresentation.horizontalCorrection(popover: CGRect(x: -50, y: 0, width: 400, height: 100),
+                                                            within: CGRect(x: 0, y: 0, width: 300, height: 600)) == 58,
+                  "A list wider than its window lost its leading edge")
         let file = URL(fileURLWithPath: "/tmp/report.pdf")
 
         // Unfinished: live progress, Cancel only.

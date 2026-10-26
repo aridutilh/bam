@@ -23,6 +23,8 @@ import Darwin
     private var popoverList: DownloadsPopoverController?
     private var library: DownloadsLibraryWindowController?
     private var popoverClosedAt: TimeInterval?
+    /// The window the compact list opened over.
+    private weak var popoverHost: NSWindow?
     private var terminateObserver: NSObjectProtocol?
 
     /// The optional chooser is a test seam; ordinary callers receive NSSavePanel.
@@ -79,17 +81,38 @@ import Darwin
         let surface = NSPopover()
         surface.behavior = .transient
         surface.animates = !BamTheme.reduceMotion
-        surface.hasFullSizeContent = true
+        // Standard content area (not full-size): the list's own 320-point view fills it exactly, inset from the
+        // popover's border and arrow.
         surface.contentViewController = list
         surface.delegate = self
         surface.contentSize = list.preferredContentSize
         popover = surface; popoverList = list
+        popoverHost = window
+        // Above the anchor on screen, whichever way its coordinates run.
+        func above(_ view: NSView) -> NSRectEdge { view.isFlipped ? .minY : .maxY }
         if let button = anchor ?? Self.sidebarDownloadsButton(in: content) {
-            surface.show(relativeTo: button.bounds, of: button, preferredEdge: .maxY)
+            surface.show(relativeTo: button.bounds, of: button, preferredEdge: above(button))
         } else {
             let y = content.isFlipped ? content.bounds.height - 40 : 12
-            surface.show(relativeTo: NSRect(x: 14, y: y, width: 28, height: 28), of: content, preferredEdge: .maxY)
+            surface.show(relativeTo: NSRect(x: 14, y: y, width: 28, height: 28), of: content, preferredEdge: above(content))
         }
+        keepPopoverInside()
+    }
+
+    /// The list opens from a button near the window's leading edge; if AppKit leaves any of it outside the window
+    /// on its screen (at first show or after the list grows), slide it back in.
+    private func keepPopoverInside() {
+        guard let popover, popover.isShown, let frame = popover.contentViewController?.view.window?.frame,
+              let host = popoverHost else { return }
+        let screen = (host.screen ?? NSScreen.main)?.visibleFrame ?? host.frame
+        let window = host.frame.intersection(screen)
+        let dx = DownloadPresentation.horizontalCorrection(popover: frame, within: window.isNull || window.isEmpty ? screen : window)
+        guard dx != 0 else { return }
+        popover.positioningRect = popover.positioningRect.offsetBy(dx: dx, dy: 0)
+    }
+    func popoverDidShow(_ notification: Notification) {
+        guard (notification.object as? NSPopover) === popover else { return }
+        keepPopoverInside()
     }
 
     /// Every download as a thumbnail grid in its own window.
@@ -335,6 +358,7 @@ import Darwin
         if popover?.isShown == true, let popoverList {
             popoverList.update(items, now: now)
             popover?.contentSize = popoverList.preferredContentSize
+            keepPopoverInside()
         }
         if library?.window?.isVisible == true { library?.update(items, now: now) }
     }

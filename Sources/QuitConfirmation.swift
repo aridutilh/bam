@@ -84,11 +84,16 @@ import AppKit
     }
 
     private func button(_ title: String, prominent: Bool, key: String?, action: Selector) -> NSButton {
-        // A keycap hint sits inside the pill after the title; room is left for it.
-        let button = BamPillButton(title: key == nil ? title : title + "         ", prominent: prominent)
+        // A keyed pill draws no title of its own: the title and its keycap are laid out side by side inside it, and
+        // the pill widens to hold both (never centred text with spaces left for the cap).
+        let button = BamPillButton(title: key == nil ? title : "", prominent: prominent)
         button.target = self; button.action = action
         button.setAccessibilityLabel(title)
         guard let key else { return button }
+        let label = NSTextField(labelWithString: title)
+        label.font = BamType.sans(13.5, weight: .bold)
+        label.textColor = prominent ? BamTheme.white : BamTheme.ink
+        label.setAccessibilityElement(false)
         let cap = NSTextField(labelWithString: key)
         cap.font = BamType.sans(11, weight: .bold)
         cap.textColor = prominent ? BamTheme.white : BamTheme.muted
@@ -98,12 +103,17 @@ import AppKit
         cap.layer?.borderWidth = 1
         cap.layer?.borderColor = cap.bamCG(prominent ? BamTheme.white.withAlphaComponent(0.6) : BamTheme.line)
         cap.setAccessibilityElement(false)
-        cap.translatesAutoresizingMaskIntoConstraints = false
-        button.addSubview(cap)
+        let content = QuitKeyedTitle(views: [label, cap])
+        content.orientation = .horizontal; content.spacing = 8; content.alignment = .centerY
+        content.translatesAutoresizingMaskIntoConstraints = false
+        button.addSubview(content)
         button.setAccessibilityHelp(key == "esc" ? "Escape" : "Return")
         NSLayoutConstraint.activate([
-            cap.trailingAnchor.constraint(equalTo: button.trailingAnchor, constant: -12),
-            cap.centerYAnchor.constraint(equalTo: button.centerYAnchor),
+            // Centred on the pill's face (it rests a point above its lip), with real room on both sides.
+            content.centerXAnchor.constraint(equalTo: button.centerXAnchor),
+            content.centerYAnchor.constraint(equalTo: button.centerYAnchor, constant: -1),
+            content.leadingAnchor.constraint(greaterThanOrEqualTo: button.leadingAnchor, constant: 16),
+            content.trailingAnchor.constraint(lessThanOrEqualTo: button.trailingAnchor, constant: -12),
             cap.widthAnchor.constraint(greaterThanOrEqualToConstant: 26),
             cap.heightAnchor.constraint(equalToConstant: 18)
         ])
@@ -127,6 +137,11 @@ import AppKit
 }
 
 /// The card: Bam paper, a hairline border and a soft corner.
+/// A keyed pill's title and keycap. Clicks go to the pill itself.
+@MainActor private final class QuitKeyedTitle: NSStackView {
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}
+
 @MainActor private final class QuitConfirmationCard: NSView {
     override init(frame: NSRect) {
         super.init(frame: frame)
