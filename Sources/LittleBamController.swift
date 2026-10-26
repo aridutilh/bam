@@ -71,7 +71,9 @@ struct LittleBamDestination: Equatable {
         configuration.adoptSafariUserAgent()
         configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
         configure?(configuration)
-        adopt(webView: PreviewWKWebView(frame: .zero, configuration: configuration))
+        let page = PreviewWKWebView(frame: .zero, configuration: configuration)
+        BrowserPageGestures.configure(page)
+        adopt(webView: page)
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
 

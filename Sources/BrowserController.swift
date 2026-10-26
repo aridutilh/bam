@@ -347,6 +347,11 @@ import QuartzCore
     var sleepPassID: UUID?
     var automaticTabSleeping = true
     var keepAwakeHosts: Set<String> = []
+    /// The address field's site settings popover, and the page it describes.
+    let siteSettings = SiteSettingsPopover()
+    weak var siteSettingsWeb: WKWebView?
+    /// The site the open popover describes; its actions are bound to it (see `siteSettingsOrigin(_:)`).
+    var siteSettingsSite: String?
 
     /// `profileStores` is for disposable runs only (e.g. an isolated store from
     /// `WebsiteProfileStore(isolated:)`); nil keeps the standard store for `ephemeral`.
@@ -403,7 +408,7 @@ import QuartzCore
         sidebar.onManageSpaces = { [weak self] in self?.manageSpaces(nil) }
         sidebar.spaceContextMenu = { [weak self] in self?.spaceContextMenu(for: $0) }
         sidebar.canDropOnFavorites = { [weak self] in self?.canMakeFavorite(byDropping: $0) ?? false }
-        sidebar.onDropOnFavorites = { [weak self] in self?.makeFavorite(byDropping: $0) ?? false }
+        sidebar.onDropOnFavorites = { [weak self] id, anchor in self?.makeFavorite(byDropping: id, before: anchor) ?? false }
         sidebar.onMoveTab = { [weak self] id, space in self?.moveTab(id, toSpace: space) }
         // Footer Downloads button and its menu: the existing windows (View > Downloads ⌘J, History ⌘Y, Recently Closed).
         // Picture in Picture left the footer; it stays in View > Picture in Picture (⌥⌘P) and the command palette.
@@ -413,6 +418,7 @@ import QuartzCore
         sidebar.onExtensionAction = { [weak self] id, anchor in self?.invokeSidebarExtension(id, anchor: anchor) }
         sidebar.onExtensionsMenu = { [weak self] anchor in self?.showSidebarExtensions(anchor: anchor) }
         sidebar.onExtensionLibrary = { [weak self] in self?.showExtensionLibrary(nil) }
+        sidebar.onSiteSettings = { [weak self] in self?.showSiteSettings(from: $0) }
         connectFolderCommands()
         sidebar.onSpaceScroll = { [weak self] event, source in
             guard let self else { return false }
@@ -526,6 +532,7 @@ import QuartzCore
     func register(_ browser: WKWebView, id: UUID) {
         browser.navigationDelegate = self; browser.uiDelegate = self
         browser.allowsBackForwardNavigationGestures = true
+        BrowserPageGestures.configure(browser)
         browser.autoresizingMask = [.width, .height]
         browser.setAccessibilityLabel("Web content")
         browsers[id] = browser
@@ -813,6 +820,7 @@ import QuartzCore
         }
         refreshSplitMetadata()
         refreshFindTarget()
+        refreshSiteSettings()
         layoutBrowser()
     }
     func select(_ id: UUID) {
@@ -1172,16 +1180,17 @@ import QuartzCore
     @objc func useDarkAppearance(_ sender: Any?) { BrowserAppearance.apply(.dark) }
     @objc func useLightAppearance(_ sender: Any?) { BrowserAppearance.apply(.light) }
     @objc func useSystemAppearance(_ sender: Any?) { BrowserAppearance.apply(.system) }
-    /// A tab dragged onto the Favorites grid: an ordinary or kept tab (not a folder or Split, not already a Favorite)
-    /// while there's room. It becomes a Favorite through the same path as Add to Favorites (appended at the end).
-    func canMakeFavorite(byDropping id: UUID) -> Bool {
-        guard let tab = session.tabs.first(where: { $0.id == id }) else { return false }
-        return !tab.isFavorite && session.folder(id) == nil && session.favoriteTabs.count < 12
-    }
-    func makeFavorite(byDropping id: UUID) -> Bool {
-        guard canMakeFavorite(byDropping: id) else { return false }
-        favoriteTab(id)
-        return session.tabs.first(where: { $0.id == id })?.isFavorite == true
+    /// A tab dragged onto the Favorites grid. Exactly the session's own rule for a new Favorite (setRetention's): no Split members, no extension pages, a
+    /// saveable address, room in that tab's profile. Folders and Splits aren't tabs here and are refused.
+    func canMakeFavorite(byDropping id: UUID) -> Bool { session.canBecomeFavorite(id: id) }
+    /// Makes the dropped tab a Favorite just before `anchor` (nil: at the end), then refreshes and saves as Add to
+    /// Favorites does.
+    func makeFavorite(byDropping id: UUID, before anchor: UUID?) -> Bool {
+        guard session.canBecomeFavorite(id: id) else { return false }
+        cancelPaging()
+        guard session.makeFavorite(id: id, before: anchor) else { return false }
+        refresh(); refreshPaletteResults(); save()
+        return true
     }
     /// The Space-creation panel (it refuses, with a beep, past the Space cap).
     @objc func newSpace(_ sender: Any?) { openSpaceCreation() }
@@ -1222,9 +1231,112 @@ import QuartzCore
         let tabs = session.visibleTabs; guard let i = tabs.firstIndex(where: { $0.id == session.activeID }), !tabs.isEmpty else { return }
         select(tabs[(i + delta + tabs.count) % tabs.count].id)
     }
-    @objc func zoomIn(_ sender: Any?) { if let web = commandWebView { web.pageZoom = min(3, web.pageZoom + 0.1) } }
-    @objc func zoomOut(_ sender: Any?) { if let web = commandWebView { web.pageZoom = max(0.4, web.pageZoom - 0.1) } }
-    @objc func actualSize(_ sender: Any?) { commandWebView?.pageZoom = 1 }
+    @objc func zoomIn(_ sender: Any?) { if let web = commandWebView { zoom(web, by: 0.1) } }
+    @objc func zoomOut(_ sender: Any?) { if let web = commandWebView { zoom(web, by: -0.1) } }
+    @objc func actualSize(_ sender: Any?) { if let web = commandWebView { BrowserPageGestures.resetZoom(web) } }
+    /// View › Zoom In / Zoom Out's step, within their limits (40%–300%).
+    func zoom(_ web: WKWebView, by delta: CGFloat) { web.pageZoom = min(3, max(0.4, web.pageZoom + delta)) }
+
+    // MARK: Site settings (the address field's button)
+
+    /// Opens (or, if open, closes) site settings for the page in front: its connection, zoom, keep-awake and which of
+    /// this profile's enabled extensions may use it. Every control acts on that same page, never a later active one.
+    func showSiteSettings(from anchor: NSView) {
+        guard let web = commandWebView, let site = Self.siteSettingsOrigin(web.url) else { NSSound.beep(); return }
+        siteSettingsWeb = web; siteSettingsSite = site
+        siteSettings.show(relativeTo: anchor, context: siteSettingsContext(for: web), actions: siteSettingsActions(for: web, site: site))
+    }
+    /// Re-reads the open popover's page; closes it once a different page is in front or this one has moved to another
+    /// site, so no control can act on a site the popover no longer shows.
+    func refreshSiteSettings() {
+        guard siteSettings.isShown else { return }
+        guard let web = siteSettingsWeb, web === commandWebView, siteSettingsIsCurrent(web, site: siteSettingsSite) else {
+            siteSettings.close(); return
+        }
+        siteSettings.update(siteSettingsContext(for: web))
+    }
+    /// What site settings are bound to: a web page's scheme, host and port (the origin); any other page's whole URL.
+    static func siteSettingsOrigin(_ url: URL?) -> String? {
+        guard let url else { return nil }
+        guard let host = url.host?.lowercased(), !host.isEmpty else { return url.absoluteString }
+        return "\(url.scheme?.lowercased() ?? "")://\(host):\(url.port.map(String.init) ?? "")"
+    }
+    private func siteSettingsIsCurrent(_ web: WKWebView, site: String?) -> Bool {
+        site != nil && siteSettings.isShown && siteSettingsWeb === web && siteSettingsSite == site && Self.siteSettingsOrigin(web.url) == site
+    }
+    private func siteSettingsContext(for web: WKWebView) -> SiteSettingsContext {
+        let host = Self.keepAwakeHost(web.url)
+        // Keep awake is remembered per host; a private window can't keep it, and non-web pages have no host.
+        let awake: Bool? = privateMode ? nil : host.map { keepAwakeHosts.contains($0) }
+        return SiteSettingsSource.context(for: web, keepsAwake: awake, extensions: siteExtensionAccess(for: web))
+    }
+    /// The host keep-awake protects, exactly as View › Keep This Site Awake names it (web pages only, lowercased).
+    static func keepAwakeHost(_ url: URL?) -> String? {
+        guard let url, ["http", "https"].contains(url.scheme?.lowercased() ?? "") else { return nil }
+        return url.host?.lowercased()
+    }
+    /// Every action is bound to the page and site it was opened for, and does nothing (closing the popover) once that
+    /// page has moved to another site: a late click can never change site A's settings while B is showing, or vice versa.
+    private func siteSettingsActions(for web: WKWebView, site: String) -> SiteSettingsActions {
+        var actions = SiteSettingsActions()
+        /// The bound page, if still current; otherwise closes the popover.
+        let current: () -> (BrowserController, WKWebView)? = { [weak self, weak web] in
+            guard let self else { return nil }
+            guard let web, self.siteSettingsIsCurrent(web, site: site) else { self.siteSettings.close(); return nil }
+            return (self, web)
+        }
+        actions.zoomIn = { guard let (self_, web) = current() else { return }; self_.zoom(web, by: 0.1); self_.refreshSiteSettings() }
+        actions.zoomOut = { guard let (self_, web) = current() else { return }; self_.zoom(web, by: -0.1); self_.refreshSiteSettings() }
+        actions.resetZoom = { guard let (self_, web) = current() else { return }; BrowserPageGestures.resetZoom(web); self_.refreshSiteSettings() }
+        let host = Self.keepAwakeHost(web.url)
+        actions.setKeepsAwake = { on in
+            guard let (self_, web) = current(), let host, Self.keepAwakeHost(web.url) == host, !self_.privateMode else { return }
+            self_.setKeepAwake(host: host, on); self_.refreshSiteSettings()
+        }
+        actions.manageSiteAccess = { id in
+            guard let (self_, _) = current() else { return }
+            self_.siteSettings.close()
+            self_.showExtensionSiteAccess(id)
+        }
+        actions.copyLink = {
+            guard let (self_, web) = current(), let url = self_.copyableURL(for: web) else { return }
+            self_.pageCommandPasteboard.clearContents()
+            if self_.pageCommandPasteboard.setString(url.absoluteString, forType: .string), let host = web.superview {
+                self_.pageFeedback.show("Page copied", symbol: "link", in: host)
+            }
+            self_.siteSettings.close()
+        }
+        actions.openSettings = { [weak self] in
+            self?.siteSettings.close()
+            NSApp.sendAction(Selector(("showSettings:")), to: nil, from: self)
+        }
+        return actions
+    }
+    /// What each enabled extension in this page's profile may do on it, from WebKit's own permission check:
+    /// granted → allowed; requested or denied but not granted → withheld; never requested → not requested.
+    private func siteExtensionAccess(for web: WKWebView) -> [SiteSettingsContext.ExtensionItem] {
+        guard #available(macOS 15.4, *), let url = web.url, Self.keepAwakeHost(url) != nil else { return [] }
+        let profile = profileID(of: web) ?? commandProfileID
+        return browserExtensions.items(profileID: profile).filter(\.enabled).compactMap { record in
+            guard let context = browserExtensions.context(for: record.id) else { return nil }
+            let access: SiteSettingsContext.ExtensionAccess
+            switch context.permissionStatus(for: url) {
+            case .grantedExplicitly, .grantedImplicitly: access = .allowed
+            case .deniedExplicitly, .deniedImplicitly, .requestedExplicitly, .requestedImplicitly: access = .withheld
+            default: access = .notRequested
+            }
+            return SiteSettingsContext.ExtensionItem(id: record.id, name: record.name, access: access)
+        }
+    }
+    /// Straight to one extension's Site Access editor (in the manager, with that extension selected).
+    private func showExtensionSiteAccess(_ id: UUID) {
+        guard #available(macOS 15.4, *) else { return }
+        let profile = siteSettingsWeb.flatMap(profileID(of:)) ?? commandProfileID
+        let configuration = WKWebViewConfiguration(); configuration.websiteDataStore = profileStores.store(for: profile)
+        preloadHistoryForExtensions(profileID: profile)
+        browserExtensions.configure(configuration, profileID: profile)
+        browserExtensions.showSiteAccess(extensionID: id, profileID: profile, relativeTo: NSApp.keyWindow ?? view.window)
+    }
     func navigate(_ address: String) {
         peeks[session.activeID]?.dismiss()
         returnActiveVideo()

@@ -99,6 +99,8 @@ struct SidebarExtensionItem {
     var onExtensionAction: ((UUID, NSView) -> Void)?
     var onExtensionsMenu: ((NSView) -> Void)?
     var onExtensionLibrary: (() -> Void)?
+    /// The address field's site settings button was clicked (its view anchors the popover).
+    var onSiteSettings: ((NSView) -> Void)?
     var onSpaceScroll: ((NSEvent, SpaceScrollSource) -> Bool)?
     /// Drag and drop of sidebar rows within the shown Space (target, Space ID).
     var onDrop: ((UUID, BrowserSession.SidebarDropTarget, Int) -> Bool)?
@@ -114,7 +116,26 @@ struct SidebarExtensionItem {
     var onDropOnSpace: ((UUID, Int) -> Bool)?
     /// A dragged tab dropped on the Favorites grid becomes a Favorite (at the end).
     var canDropOnFavorites: ((UUID) -> Bool)? { didSet { favoritesHost.canAccept = canDropOnFavorites } }
-    var onDropOnFavorites: ((UUID) -> Bool)? { didSet { favoritesHost.accept = onDropOnFavorites } }
+    /// The dragged tab and the Favorite it goes before (nil: at the end).
+    var onDropOnFavorites: ((UUID, UUID?) -> Bool)?
+    /// The insertion slot a drag holds open in the Favorites grid (tiles at or after it move on one).
+    private var favoriteGap: Int? {
+        didSet { if oldValue != favoriteGap { relayoutFavorites() } }
+    }
+    /// A sidebar row is being dragged: an empty Favorites grid shows a one-row drop zone.
+    private var sidebarDragActive = false {
+        didSet { if oldValue != sidebarDragActive { relayoutFavorites() } }
+    }
+    /// The grid's last laid-out geometry, for the drop host's slot lookup.
+    private var favoriteGrid = (leading: CGFloat(0), tileWidth: CGFloat(0), columns: 1)
+    private var dragObservers: [NSObjectProtocol] = []
+    private func relayoutFavorites() {
+        guard window != nil, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { needsLayout = true; return }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.15; context.allowsImplicitAnimation = true
+            needsLayout = true; layoutSubtreeIfNeeded()
+        }
+    }
     var onToggleFolder: ((UUID) -> Void)?
     var onRenameFolder: ((UUID) -> Void)?
     /// Creates a folder; the item is a tab to put inside it or a parent folder.
@@ -130,6 +151,9 @@ struct SidebarExtensionItem {
     private let search = ArkSearchButton()
     private let extensionMenu = ArkIconButton(symbol: "puzzlepiece.extension", label: "Extensions")
     private let extensionLibrary = ArkExtensionLibraryButton()
+    /// Site settings for the page in the field; shown only for a page with an address (not Bam's own pages).
+    private let siteSettingsButton = ArkIconButton(symbol: "slider.horizontal.3", label: "Site Settings", glyphSize: 14)
+    private var showsSiteSettings = false { didSet { if oldValue != showsSiteSettings { needsLayout = true } } }
     private var extensionButtons: [ArkExtensionButton] = []
     private let downloads = ArkDownloadsButton()
     private let plus = ArkIconButton(symbol: "plus", label: "New tab")
@@ -160,7 +184,30 @@ struct SidebarExtensionItem {
         clip.wantsLayer = true; clip.layer?.masksToBounds = true
         favoritesHost.setAccessibilityLabel("Favorites")
         favoritesHost.setAccessibilityRole(.group)
-        [toggle, back, forward, reload, search, extensionMenu, extensionLibrary, favoritesHost, clip, downloads, plus, spaceOverflow].forEach(addSubview)
+        favoritesHost.slotAt = { [weak self] point in
+            guard let self else { return 0 }
+            return ArkMetrics.favoriteInsertionSlot(at: point, count: self.favorites.count, columns: self.favoriteGrid.columns,
+                                                    leading: self.favoriteGrid.leading, tileWidth: self.favoriteGrid.tileWidth)
+        }
+        favoritesHost.onGapChange = { [weak self] in self?.favoriteGap = $0 }
+        favoritesHost.accept = { [weak self] id, slot in
+            guard let self else { return false }
+            let anchor = self.favorites.indices.contains(slot) ? self.favorites[slot].item.id : nil
+            return self.onDropOnFavorites?(id, anchor) ?? false
+        }
+        // Any sidebar row drag in this window opens the empty grid's drop zone until the drag ends.
+        for (name, active) in [(Notification.Name.arkSidebarDragDidBegin, true), (.arkSidebarDragDidEnd, false)] {
+            dragObservers.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] note in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    // A drag begins in this window; any drag's end closes the zone (its row may be gone by then).
+                    if active { guard let row = note.object as? NSView, row.window != nil, row.window === self.window else { return } }
+                    self.sidebarDragActive = active
+                    if !active { self.favoriteGap = nil }
+                }
+            })
+        }
+        [toggle, back, forward, reload, search, extensionMenu, extensionLibrary, siteSettingsButton, favoritesHost, clip, downloads, plus, spaceOverflow].forEach(addSubview)
         clip.addSubview(page); connect(page); cachedPages[0] = page
         back.handler = { [weak self] in self?.onBack?() }
         forward.handler = { [weak self] in self?.onForward?() }
@@ -179,12 +226,19 @@ struct SidebarExtensionItem {
             guard let self else { return }; self.onExtensionsMenu?(self.extensionMenu)
         }
         extensionLibrary.handler = { [weak self] in self?.onExtensionLibrary?() }
+        siteSettingsButton.identifier = NSUserInterfaceItemIdentifier("site-settings")
+        siteSettingsButton.setAccessibilityHelp("Connection, zoom, keep awake and extension access for this site")
+        siteSettingsButton.isHidden = true
+        siteSettingsButton.handler = { [weak self] in
+            guard let self else { return }; self.onSiteSettings?(self.siteSettingsButton)
+        }
         configureSpaces([
             BrowserSpace(id: 0, name: "Studio", symbol: "sparkles", colorIndex: 0),
             BrowserSpace(id: 1, name: "Life", symbol: "sun.max", colorIndex: 1),
             BrowserSpace(id: 2, name: "Explore", symbol: "globe", colorIndex: 2)
         ])
     }
+    deinit { dragObservers.forEach(NotificationCenter.default.removeObserver) }
     required init?(coder: NSCoder) { fatalError() }
 
     /// Space IDs identify cached pages; their order is supplied separately by the session.
@@ -390,6 +444,7 @@ struct SidebarExtensionItem {
         let visible = SidebarDisplayPolicy.visibleAddress(address)
         // Bam's own pages keep the field's shortcut hint instead of an internal address.
         if visible.isEmpty { search.restoreHint() } else { search.toolTip = visible }
+        showsSiteSettings = !visible.isEmpty
     }
     func beginPaging(tabs: [SidebarTabItem], space: Int, direction: CGFloat) {
         guard space != selectedSpace, let definition = definition(for: space) else { return }
@@ -480,9 +535,15 @@ struct SidebarExtensionItem {
         let leading = ArkMetrics.sidebarLeading, contentWidth = ArkMetrics.sidebarContentWidth(w)
         search.frame = NSRect(x: leading, y: fieldTop, width: contentWidth, height: fieldHeight)
         let hasActions = !extensionButtons.isEmpty
-        search.trailingInset = hasActions ? 10 : 34
+        // Trailing controls inside the field, right to left: site settings (for a page), then the extension library
+        // (while no extension actions have a row of their own).
+        let trailing = [showsSiteSettings ? siteSettingsButton : nil, hasActions ? nil : extensionLibrary].compactMap { $0 }
+        search.trailingInset = trailing.isEmpty ? 10 : 6 + 28 * CGFloat(trailing.count)
+        siteSettingsButton.isHidden = !showsSiteSettings
         extensionLibrary.isHidden = hasActions
-        extensionLibrary.frame = NSRect(x: search.frame.maxX - 32, y: fieldTop + (fieldHeight - 28) / 2, width: 28, height: 28)
+        for (index, button) in trailing.enumerated() {
+            button.frame = NSRect(x: search.frame.maxX - 32 - 28 * CGFloat(index), y: fieldTop + (fieldHeight - 28) / 2, width: 28, height: 28)
+        }
         extensionMenu.isHidden = !hasActions
         let actionTop = fieldTop + fieldHeight + 6
         extensionMenu.frame = NSRect(x: 8, y: actionTop, width: 30, height: 30)
@@ -495,21 +556,28 @@ struct SidebarExtensionItem {
         extensionMenu.setSymbol(hiddenCount > 0 ? "ellipsis.circle" : "puzzlepiece.extension",
             label: hiddenCount > 0 ? "All extensions, including \(hiddenCount) more" : "Extensions")
         let gridTop = hasActions ? actionTop + 38 : fieldTop + fieldHeight + 10
-        let columns = max(1, ArkMetrics.favoriteColumns(count: favorites.count, width: w))
+        // A drag over Favorites holds a gap open (one more slot); a sidebar drag over an empty grid opens a drop zone.
+        let gapSlot = favoriteGap.map { min($0, favorites.count) }
+        let dropZone = favorites.isEmpty && sidebarDragActive
+        let slotCount = favorites.count + (gapSlot == nil ? 0 : 1)
+        let laidOutCount = max(slotCount, dropZone ? 1 : 0)
+        let columns = max(1, ArkMetrics.favoriteColumns(count: laidOutCount, width: w))
         let gap = ArkMetrics.favoriteGap, tileHeight = ArkMetrics.favoriteHeight
-        let favoriteRows = (favorites.count + columns - 1) / columns
+        let favoriteRows = (laidOutCount + columns - 1) / columns
         let favoriteHeight = favoriteRows == 0 ? CGFloat.zero : CGFloat(favoriteRows) * tileHeight + CGFloat(favoriteRows - 1) * gap
-        favoritesHost.isHidden = favorites.isEmpty
+        favoritesHost.isHidden = favoriteRows == 0
         favoritesHost.frame = NSRect(x: 0, y: gridTop, width: w, height: favoriteHeight)
         let tileWidth = max(0, (contentWidth - CGFloat(columns - 1) * gap) / CGFloat(columns))
-        for (index, button) in favorites.enumerated() {
-            button.frame = NSRect(x: leading + CGFloat(index % columns) * (tileWidth + gap),
-                                  y: CGFloat(index / columns) * (tileHeight + gap), width: tileWidth, height: tileHeight)
+        func slotFrame(_ slot: Int) -> NSRect {
+            NSRect(x: leading + CGFloat(slot % columns) * (tileWidth + gap), y: CGFloat(slot / columns) * (tileHeight + gap),
+                   width: tileWidth, height: tileHeight)
         }
-        let next = favorites.count
-        favoritesHost.nextSlot = next >= 12 ? nil : NSRect(x: leading + CGFloat(next % columns) * (tileWidth + gap),
-                                                           y: CGFloat(next / columns) * (tileHeight + gap), width: tileWidth, height: tileHeight)
-        let pageTop: CGFloat = gridTop + favoriteHeight + (favorites.isEmpty ? 0 : 10)
+        for (index, button) in favorites.enumerated() {
+            button.frame = slotFrame(ArkMetrics.favoriteSlot(forTile: index, gap: gapSlot))
+        }
+        favoriteGrid = (leading, tileWidth, columns)
+        favoritesHost.showPlaceholder(gapSlot.map(slotFrame) ?? (dropZone ? slotFrame(0) : nil), strong: gapSlot != nil)
+        let pageTop: CGFloat = gridTop + favoriteHeight + (favoriteRows == 0 ? 0 : 10)
         clip.frame = NSRect(x: 0, y: pageTop, width: w, height: max(0, bounds.height - pageTop - 45))
         setPagingOffset(offset)
         let y = bounds.height-36
@@ -1091,6 +1159,20 @@ final class ArkCenteredFieldCell: NSTextFieldCell {
         let rows = (count + fit - 1) / fit
         return (count + rows - 1) / rows
     }
+    /// The grid slot a Favorite occupies while a drag holds a gap open at `gap` (tiles at or after it move on one).
+    static func favoriteSlot(forTile index: Int, gap: Int?) -> Int {
+        guard let gap, index >= gap else { return index }
+        return index + 1
+    }
+    /// The insertion slot (0...count) under `point` in the grid: before the tile the point is over, or after it past the
+    /// tile's middle; rows top to bottom.
+    static func favoriteInsertionSlot(at point: NSPoint, count: Int, columns: Int, leading: CGFloat, tileWidth: CGFloat) -> Int {
+        guard count > 0, columns > 0, tileWidth > 0 else { return 0 }
+        let step = tileWidth + favoriteGap
+        let row = max(0, Int(floor(point.y / (favoriteHeight + favoriteGap))))
+        let column = min(columns, max(0, Int(((point.x - leading) / step).rounded())))
+        return min(count, row * columns + column)
+    }
     /// The artwork's frame in a tile, aspect preserved, never enlarged past `favoriteIconSize`.
     static func favoriteIconRect(in bounds: NSRect, imageSize: NSSize) -> NSRect {
         guard imageSize.width > 0, imageSize.height > 0 else { return .zero }
@@ -1284,16 +1366,20 @@ struct ArkDropFeedbackGate {
     static var perform: () -> Void = { NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now) }
 }
 
-/// The Favorites grid as a drop target: a dragged tab becomes a Favorite at the next slot (the model appends), shown
-/// by a placeholder tile there, or a ring around the grid when that slot would start a new row.
+/// The Favorites grid as a drop target. While an acceptable tab is dragged over it, the pointer picks an insertion
+/// slot and the grid opens a gap there (the sidebar lays the tiles out around it); dropping makes the tab a Favorite
+/// at that slot. A sidebar drag over an empty grid gets a one-row drop zone. One haptic tap per slot change.
 @MainActor private final class ArkFavoritesDropHost: ArkFlippedView {
     var canAccept: ((UUID) -> Bool)?
-    var accept: ((UUID) -> Bool)?
-    /// The next Favorite's slot in this view's coordinates; nil when the grid is full.
-    var nextSlot: NSRect?
+    /// The dragged tab and its insertion slot (0 = before the first Favorite, count = at the end).
+    var accept: ((UUID, Int) -> Bool)?
+    /// The insertion slot under a point in this view.
+    var slotAt: ((NSPoint) -> Int)?
+    /// The open gap moved (nil: closed).
+    var onGapChange: ((Int?) -> Void)?
     private let placeholder = CAShapeLayer()
     private var gate = ArkDropFeedbackGate()
-    private var dropActive = false { didSet { if oldValue != dropActive { showDropPreview() } } }
+    private var gapSlot: Int? { didSet { if oldValue != gapSlot { onGapChange?(gapSlot) } } }
     override init(frame: NSRect) {
         super.init(frame: frame)
         wantsLayer = true
@@ -1307,38 +1393,46 @@ struct ArkDropFeedbackGate {
     }
     private func evaluate(_ info: NSDraggingInfo) -> NSDragOperation {
         let accepted = draggedID(info).map { canAccept?($0) == true } ?? false
-        dropActive = accepted
-        if gate.shouldTap(sequence: info.draggingSequenceNumber, target: accepted ? "favorites" : nil) { ArkDropFeedback.perform() }
+        let slot = accepted ? slotAt?(convert(info.draggingLocation, from: nil)) : nil
+        gapSlot = slot
+        if gate.shouldTap(sequence: info.draggingSequenceNumber, target: slot.map { "favorites:\($0)" }) { ArkDropFeedback.perform() }
+        setAccessibilityHelp(accepted ? "Drop to add to Favorites" : nil)
         return accepted ? .move : []
     }
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation { evaluate(sender) }
     override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation { evaluate(sender) }
     override func draggingExited(_ sender: NSDraggingInfo?) {
-        dropActive = false
+        gapSlot = nil
         if let sender { _ = gate.shouldTap(sequence: sender.draggingSequenceNumber, target: nil) }
     }
-    override func draggingEnded(_ sender: NSDraggingInfo) { dropActive = false }
+    override func draggingEnded(_ sender: NSDraggingInfo) { gapSlot = nil }
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
-        defer { dropActive = false }
+        let slot = gapSlot ?? slotAt?(convert(sender.draggingLocation, from: nil)) ?? 0
+        defer { gapSlot = nil }
         guard let id = draggedID(sender), canAccept?(id) == true else { return false }
-        return accept?(id) ?? false
+        return accept?(id, slot) ?? false
     }
-    private func showDropPreview() {
+    /// The dashed tile where the dropped tab would land (the open gap or the empty drop zone); nil hides it.
+    func showPlaceholder(_ frame: NSRect?, strong: Bool) {
         effectiveAppearance.performAsCurrentDrawingAppearance {
-            placeholder.strokeColor = ArkPalette.ink.withAlphaComponent(0.45).cgColor
+            placeholder.strokeColor = ArkPalette.ink.withAlphaComponent(strong ? 0.5 : 0.25).cgColor
         }
-        let shape: NSRect
-        if let slot = nextSlot, bounds.contains(slot) { shape = slot.insetBy(dx: 1, dy: 1) } else { shape = bounds.insetBy(dx: 1, dy: 1) }
-        placeholder.frame = bounds
-        placeholder.path = CGPath(roundedRect: shape, cornerWidth: 9, cornerHeight: 9, transform: nil)
-        let target: Float = dropActive ? 1 : 0
-        if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
-            CATransaction.begin(); CATransaction.setDisableActions(true); placeholder.opacity = target; CATransaction.commit()
-        } else {
-            CATransaction.begin(); CATransaction.setAnimationDuration(0.14); placeholder.opacity = target; CATransaction.commit()
+        if let frame {
+            placeholder.frame = bounds
+            placeholder.path = CGPath(roundedRect: frame.insetBy(dx: 1, dy: 1), cornerWidth: 9, cornerHeight: 9, transform: nil)
         }
-        setAccessibilityHelp(dropActive ? "Drop to add to Favorites" : nil)
+        let target: Float = frame == nil ? 0 : 1
+        CATransaction.begin()
+        if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion { CATransaction.setDisableActions(true) } else { CATransaction.setAnimationDuration(0.14) }
+        placeholder.opacity = target
+        CATransaction.commit()
     }
+}
+
+extension Notification.Name {
+    /// A sidebar row drag began or ended (object: the dragged row view); the Favorites grid shows a drop zone meanwhile.
+    static let arkSidebarDragDidBegin = Notification.Name("ArkSidebarDragDidBegin")
+    static let arkSidebarDragDidEnd = Notification.Name("ArkSidebarDragDidEnd")
 }
 
 /// Hover from where the pointer actually is. Enter/exit events alone go stale: a view taken out of the window
@@ -1908,8 +2002,11 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted, Ar
             iconView.alphaValue = ArkRowInk.iconAlpha(sleeping: item.isSleeping)
         }
         if first || old.subtitle != item.subtitle { subtitleLabel.stringValue = item.subtitle }
+        // A lid animation belongs to one folder: a row reused for another item (or no longer a folder) stops it, so a
+        // late frame can never replace the new row's favicon or glyph.
+        if folderToggle != nil, !item.isFolder || old.id != item.id { cancelFolderToggle(settle: false) }
         if item.isFolder {
-            if first || !old.isFolder || old.isExpanded != item.isExpanded {
+            if first || !old.isFolder || old.id != item.id || old.isExpanded != item.isExpanded {
                 favicon = nil
                 // Only the same folder toggling animates; a reused row shows its new folder at once.
                 showFolderGlyph(animated: !first && old.isFolder && old.id == item.id && old.isExpanded != item.isExpanded)
@@ -1967,10 +2064,15 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted, Ar
     /// open or closed glyph.
     private var folderToggle: Timer?
     private(set) var folderOpenness: CGFloat = 0
+    /// Stops a lid animation. `settle` false: a reused row; its new content (favicon, other glyph) owns the icon.
+    private func cancelFolderToggle(settle: Bool) {
+        folderToggle?.invalidate(); folderToggle = nil
+        if !settle { folderOpenness = item.isFolder && item.isExpanded ? 1 : 0 }
+    }
     private func showFolderGlyph(animated: Bool = false) {
         iconView.symbolConfiguration = nil
         iconView.identifier = NSUserInterfaceItemIdentifier(item.isExpanded ? "folder-glyph-open" : "folder-glyph")
-        folderToggle?.invalidate(); folderToggle = nil
+        cancelFolderToggle(settle: true)
         let target: CGFloat = item.isExpanded ? 1 : 0
         guard animated, window != nil, folderOpenness != target,
               !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
@@ -1978,10 +2080,11 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted, Ar
             iconView.image = ArkFolderGlyph.image(openness: target, tint: spaceTint)
             return
         }
-        let start = folderOpenness, began = ProcessInfo.processInfo.systemUptime
+        let start = folderOpenness, began = ProcessInfo.processInfo.systemUptime, folderID = item.id
         let timer = Timer(timeInterval: 1.0 / 60, repeats: true) { [weak self] timer in
             MainActor.assumeIsolated {
-                guard let self else { timer.invalidate(); return }
+                // Only the folder (and toggle) that started this animation may draw it.
+                guard let self, self.folderToggle === timer, self.item.id == folderID, self.item.isFolder else { timer.invalidate(); return }
                 let progress = min(1, (ProcessInfo.processInfo.systemUptime - began) / ArkFolderGlyph.toggleDuration)
                 let eased = 1 - pow(1 - progress, 3)   // ease out: quick start, gentle landing
                 self.folderOpenness = progress >= 1 ? target : start + (target - start) * CGFloat(eased)
@@ -2178,6 +2281,10 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted, Ar
         let session = beginDraggingSession(with: [dragItem], event: event, source: self)
         session.animatesToStartingPositionsOnCancelOrFail = !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         session.draggingFormation = .none
+        NotificationCenter.default.post(name: .arkSidebarDragDidBegin, object: self)
+    }
+    func draggingSession(_ session: NSDraggingSession, endedAt screenPoint: NSPoint, operation: NSDragOperation) {
+        NotificationCenter.default.post(name: .arkSidebarDragDidEnd, object: self)
     }
     override func mouseUp(with event: NSEvent) {
         defer { dragOrigin = nil; pressedID = nil }

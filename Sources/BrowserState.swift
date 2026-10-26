@@ -667,6 +667,32 @@ struct BrowserSession: Codable {
         return true
     }
 
+    /// Whether `setRetention(id:kind: .favorite)` would turn this tab into a new Favorite, by the same rules: not an
+    /// extension page, not in a Split, a saveable address (or already saved), room in its profile's Favorites.
+    /// Drop targets use it so they only offer what the session will accept.
+    func canBecomeFavorite(id: UUID) -> Bool {
+        guard let tab = tabs.first(where: { $0.id == id }), !tab.isFavorite,
+              URLInput.extensionURL(tab.address) == nil, split(for: id) == nil,
+              favorites(in: profileID(for: tab)).count < Self.maximumFavorites else { return false }
+        return tab.saved != nil || BrowserTab.validAddress(tab.address)
+    }
+    /// Makes a tab a Favorite (exactly `setRetention`'s rules) and places it just before `anchor`, a Favorite of the
+    /// same profile; nil (or any other anchor) puts it after that profile's last Favorite. Favorites are ordered by the
+    /// tab list, so only the new Favorite moves: every other tab keeps its relative order, and nothing is added or removed.
+    @discardableResult mutating func makeFavorite(id: UUID, before anchor: UUID?) -> Bool {
+        guard canBecomeFavorite(id: id), setRetention(id: id, kind: .favorite),
+              let from = tabs.firstIndex(where: { $0.id == id }) else { return false }
+        let profile = profileID(for: tabs[from])
+        let moved = tabs.remove(at: from)
+        if let anchor, let to = tabs.firstIndex(where: { $0.id == anchor && $0.isFavorite && profileID(for: $0) == profile }) {
+            tabs.insert(moved, at: to)
+        } else if let last = tabs.lastIndex(where: { $0.isFavorite && profileID(for: $0) == profile }) {
+            tabs.insert(moved, at: last + 1)
+        } else {
+            tabs.insert(moved, at: from)   // The first Favorite: nothing to order against.
+        }
+        return true
+    }
     @discardableResult mutating func setRetention(id: UUID, kind: SavedTabKind?) -> Bool {
         guard let index = tabs.firstIndex(where: { $0.id == id }) else { return false }
         if kind != nil && URLInput.extensionURL(tabs[index].address) != nil { return false }

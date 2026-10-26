@@ -44,7 +44,7 @@ import WebKit
               let host = web.superview else { return nil }
         return (web, host)
     }
-    private func copyableURL(for web: WKWebView) -> URL? {
+    func copyableURL(for web: WKWebView) -> URL? {
         // Preserve the current page's query/fragment and history.pushState URL.
         // A requested URL is only a fallback before the first page exists.
         let url = web.url ?? (web as? PreviewWKWebView)?.requestedURL

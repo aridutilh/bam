@@ -45,6 +45,19 @@ import AppKit
         require(!gate.shouldTap(sequence: 1, target: nil), "A refused position never taps")
         require(gate.shouldTap(sequence: 1, target: "4:1"), "Coming back to an accepted target after a refused one taps")
         require(gate.shouldTap(sequence: 2, target: "4:1"), "A new drag starts fresh")
+        // Dropping into Favorites: the pointer picks an insertion slot, and the tiles at or after it move on one.
+        let tileW: CGFloat = 50, step = tileW + ArkMetrics.favoriteGap, rowStep = ArkMetrics.favoriteHeight + ArkMetrics.favoriteGap
+        func slot(_ x: CGFloat, _ y: CGFloat, count: Int = 6) -> Int {
+            ArkMetrics.favoriteInsertionSlot(at: NSPoint(x: x, y: y), count: count, columns: 4, leading: 8, tileWidth: tileW)
+        }
+        require(slot(8 + 5, 10) == 0 && slot(8 + tileW - 5, 10) == 1 && slot(8 + step + tileW - 5, 10) == 2,
+                "Left of a tile's middle inserts before it; right of it, after it")
+        require(slot(8 + 5, rowStep + 10) == 4 && slot(8 + 3 * step + tileW - 2, rowStep + 10) == 6 && slot(300, 300) == 6,
+                "The second row continues the count; past the last tile is the end")
+        require(slot(8, 10, count: 0) == 0, "An empty grid's only slot is the first")
+        require((0..<6).map { ArkMetrics.favoriteSlot(forTile: $0, gap: 2) } == [0, 1, 3, 4, 5, 6]
+                    && (0..<3).map { ArkMetrics.favoriteSlot(forTile: $0, gap: nil) } == [0, 1, 2],
+                "Tiles at or after the gap move on one slot; without a gap nothing moves")
 
         // MARK: Space sheet fields: editable text sits on the field's vertical center, inset from the edge.
         let fieldCell = ArkCenteredFieldCell.editable(); fieldCell.font = .systemFont(ofSize: 13)
@@ -273,6 +286,32 @@ import AppKit
         let settledGlyph = descendants(folderRow()).first { $0.identifier?.rawValue.hasPrefix("folder-glyph") == true } as? NSImageView
         require(settledGlyph?.identifier?.rawValue == "folder-glyph-open" && settledGlyph?.image?.accessibilityDescription == "Open folder",
                 "An opened folder ends on the open glyph (\(settledGlyph?.identifier?.rawValue ?? "none"))")
+        // A row reused mid-animation for another folder in the same state shows that folder's settled glyph, not a
+        // frame of the old folder's lid. An empty folder toggles in place (no rows inserted), so its lid animates; then
+        // scrolling it away makes the table recycle its row for a folder further down.
+        @MainActor func glyph(_ row: NSView) -> Data? {
+            (descendants(row).first { $0.identifier?.rawValue.hasPrefix("folder-glyph") == true } as? NSImageView)?.image?.tiffRepresentation
+        }
+        let manyFolders = (0..<80).map { _ in UUID() }
+        tree = manyFolders.enumerated().map { index, id in
+            SidebarTabItem(id: id, title: "Folder \(index)", subtitle: "", symbol: "folder", isPinned: true, isActive: false, isFolder: true, isExpanded: index != 0)
+        }
+        showTree()
+        let folderList = descendants(focusSidebar).compactMap { $0 as? NSTableView }.first { $0.window != nil && $0.numberOfRows >= 80 }!
+        @MainActor func settle() { folderList.layoutSubtreeIfNeeded(); folderList.prepareContent(in: folderList.visibleRect); folderList.layoutSubtreeIfNeeded() }
+        folderList.scrollRowToVisible(0); settle()
+        let animating = descendants(focusSidebar).first { $0.identifier?.rawValue == "tab-row-\(manyFolders[0].uuidString)" }!
+        tree[0].isExpanded = true; showTree()   // its lid starts opening
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        require(glyph(animating) != nil && glyph(animating) != glyph(descendants(focusSidebar).first { $0.identifier?.rawValue == "tab-row-\(manyFolders[1].uuidString)" }!),
+                "The lid is mid-animation")
+        folderList.scrollRowToVisible(79); settle()
+        let reusedAs = manyFolders.first { animating.identifier?.rawValue == "tab-row-\($0.uuidString)" }
+        require(reusedAs != nil && reusedAs != manyFolders[0], "The animating row was recycled for another folder (the case under test)")
+        let shown = descendants(focusSidebar).filter { view in view.window != nil && manyFolders.dropFirst().contains { view.identifier?.rawValue == "tab-row-\($0.uuidString)" } }
+        require(shown.count > 3 && Set(shown.map(glyph)).count == 1, "A row recycled mid-animation shows its new folder's settled glyph")
+        RunLoop.main.run(until: Date().addingTimeInterval(ArkFolderGlyph.toggleDuration + 0.1))
+        require(Set(shown.map(glyph)).count == 1, "No late frame of the old folder lands afterwards")
         withExtendedLifetime(focusWindow) {}
 
         // MARK: Folder glyph: Bam's own vector folder, tinted, distinct open and closed.
@@ -401,6 +440,19 @@ import AppKit
                 "The address field's tooltip never shows an internal address")
         policySidebar.setAddress("https://docs.example/a", title: "Docs")
         require(searchField.toolTip == "https://docs.example/a", "A real page's address still shows")
+        // Site settings: a button inside the field for a page (not Bam's own), beside the still-reachable extension library.
+        policySidebar.layoutSubtreeIfNeeded()
+        @MainActor func control(_ id: String) -> NSView { descendants(policySidebar).first { $0.identifier?.rawValue == id }! }
+        let siteButton = control("site-settings"), library = control("extension-library")
+        require(!siteButton.isHidden && !library.isHidden && !siteButton.frame.intersects(library.frame)
+                    && searchField.frame.contains(siteButton.frame) && searchField.frame.contains(library.frame),
+                "A page's field shows site settings and the extension library side by side, inside the field")
+        var anchor: NSView?
+        policySidebar.onSiteSettings = { anchor = $0 }
+        (siteButton as? NSButton)?.performClick(nil)
+        require(anchor === siteButton, "Clicking site settings anchors its popover on the button")
+        policySidebar.setAddress("orbit://newtab", title: "New tab"); policySidebar.layoutSubtreeIfNeeded()
+        require(siteButton.isHidden && !library.isHidden, "Bam's own pages show no site settings; the library stays")
         withExtendedLifetime(footerWindow) {}; withExtendedLifetime(policyWindow) {}
 
         print("PASS: \(checks) sidebar morning checks")
