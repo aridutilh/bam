@@ -1,4 +1,4 @@
-## Local 0.24.0 build 48 — visual and interaction candidate (component evidence; native and visual acceptance pending)
+## Local 0.24.0 build 48 — visual and interaction candidate (all eleven native suites passed across an original run and continuations, with two targeted retries; repaired visual acceptance and release pending)
 
 Nothing here claims Arc or Yab parity or readiness to ship.
 
@@ -19,11 +19,12 @@ Nothing here claims Arc or Yab parity or readiness to ship.
 | model | **301** |
 | session writer | **39** |
 | quit coordinator | **36** |
-| quit confirmation | **13** |
-| download presentation | **22** |
+| quit confirmation | **13** (also after `67b9a57`) |
+| download presentation | **22**, then **26** after the layout repair (`67b9a57`) |
 | PiP pinch | **8** |
-| site settings | **18** |
-| extension source preference | **7** |
+| site settings | **18** (also after `67b9a57`) |
+| extension source preference | **7** (also after `a81efcf`) |
+| extension catalog, including cross-store ranking | **115** (`a81efcf`) |
 | onboarding | **73** |
 | extension compatibility | **81** |
 | extension enumeration | **91** |
@@ -36,10 +37,33 @@ They cover:
 - **Downloads:** status text, actions, toggling, and thumbnails tied to file identity.
 - **Pinch:** aspect, anchor and limits.
 - **Site settings:** connection text, zoom limits, and the bounded extension list.
-- **Extensions:** the Chrome-first, Firefox-second build order.
+- **Extensions:** the Chrome-first, Firefox-second build order. `a81efcf` adds cross-listing ranking: at equal relevance an installable Chrome Web Store listing leads, then Firefox, then Safari (the native Dark Reader finding).
 - **Onboarding:** steps, and that both follow-ups run in order.
 
-**Native and visual acceptance:** pending (root's runtime run). Results will be recorded here, as will the vendor and visual checks.
+**Native suites** (canonical Bam Preview, candidate before the visual repairs; logs `runtime-024.log`, `runtime-remaining-024.log`, `runtime-last-two-024.log`, `interaction-retry-024.log`):
+- All eleven suites eventually passed: WebKit, PiP (positioning 70), Interactions **173**, Auto PiP **85**, Features **371**, Resources **37**, Profiles **98**, Extensions **818**, Favicons **85**, Profile Activation **45** and Arc import **155**.
+- **Not one uninterrupted green run:**
+  - two suites failed once and passed on a single targeted retry: Interactions (an initial Space-0 liveness failure) and Profile Activation (an initial focus failure);
+  - the rest ran in the original run plus bounded continuations.
+- The personal profile's files were unchanged against the post-save backup.
+
+**Manual native checks (fresh Preview, before the repairs), passed:**
+- the centered, wider, subdued search;
+- Manage Extensions from search opens the manager;
+- the Space context menu, whose theme action focuses the color field;
+- the Spaces layout;
+- site settings zoom 100% → 110% and Reset;
+- the quit dialog: Escape cancels and Quit exits.
+
+**Found and repaired, not yet re-verified:**
+- the Downloads panel partly off screen;
+- site settings content clipped, with heavy edges;
+- the quit keycaps overlapping their labels (`67b9a57`);
+- Chrome-second search results (`a81efcf`).
+
+**Still pending:** an app rebuild at `67b9a57`, then a focused visual retest of those repairs, the onboarding tour, the folder and drag visuals, and the Chrome-first vendor workflow. Release is pending too.
+
+**Physical-input limits:** automation can't perform a physical pinch or feel haptics, and the held-key check delivered a single event. So trackpad pinch, two-finger PiP movement, haptic feel and physical held-key repeat are covered by model and event tests only.
 
 **Limits:**
 - Gesture code is covered by model and event tests, which don't prove physical trackpad feel.
