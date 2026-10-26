@@ -1,6 +1,13 @@
 import AppKit
 import WebKit
 
+/// Fixtures only: an extension host with an owned persistent extension-controller store, so storage.local survives a
+/// restart as in a normal profile, inside an otherwise ephemeral window. The fixture removes that store afterwards.
+struct ExtensionHostOverride {
+    let storageURL: URL
+    let controllerIdentifier: UUID
+}
+
 @MainActor extension BrowserController {
     @available(macOS 15.4, *)
     var browserExtensions: BrowserExtensions {
@@ -9,8 +16,9 @@ import WebKit
         // offers no public removal for a persistent controller configuration. Standard runs are unchanged.
         let isolated: Bool
         if case .isolated = profileStores.policy { isolated = true } else { isolated = false }
-        let value = BrowserExtensions(storageURL: privateMode ? nil : sessionURL.deletingLastPathComponent().appendingPathComponent("Extensions", isDirectory: true),
-                                      isPrivate: privateMode, controllerStorage: isolated ? .nonPersistent : .automatic)
+        let value = extensionHostOverride.map { BrowserExtensions(storageURL: $0.storageURL, isPrivate: false, controllerStorage: .ownedPersistent($0.controllerIdentifier)) }
+            ?? BrowserExtensions(storageURL: privateMode ? nil : sessionURL.deletingLastPathComponent().appendingPathComponent("Extensions", isDirectory: true),
+                                 isPrivate: privateMode, controllerStorage: isolated ? .nonPersistent : .automatic)
         extensionStorage = value
         value.profileName = { [weak self] in self?.session.profileName($0) ?? "Profile" }
         value.surfaces = { [weak self] in self?.extensionSurfaces(profileID: $0) ?? [] }
@@ -73,7 +81,15 @@ import WebKit
             if fromOrigin { web.reloadFromOrigin() } else { web.reload() }
             return true
         }
-        value.createTab = { [weak self] url, profile, active in self?.openProfileTab(url, profileID: profile, active: active) }
+        value.createTab = { [weak self, weak value] url, profile, active in
+            self?.openProfileTab(url, profileID: profile, active: active, kept: value?.createsKeptTab == true, before: value?.createsTabBefore)
+        }
+        value.placesTabsBeforeAnchor = true
+        value.setTabPinned = { [weak self] id, profile, pinned in
+            // nil is success: never coalesce it into a refusal.
+            guard let self else { return "This tab cannot be pinned or unpinned." }
+            return self.setExtensionTabPinned(id, profileID: profile, pinned: pinned)
+        }
         // Only windows an extension opened may be closed by one; user-opened Little Bam windows are not.
         final class OpenedWindows { var ids = Set<ObjectIdentifier>() }
         let opened = OpenedWindows()
@@ -101,6 +117,8 @@ import WebKit
         }
         value.onChange = { [weak self] in self?.scheduleExtensionRefresh() }
         value.onReloadNeeded = { [weak self] profile in self?.offerExtensionReload(profileID: profile) }
+        value.onExtensionRenderers = { [weak self] phase, profile, baseURL in self?.handleExtensionRenderers(phase, profileID: profile, baseURL: baseURL) ?? [] }
+        value.onSiteAccessRestartFinished = { [weak self] _, _ in self?.scheduleExtensionRefresh() }
         return value
     }
     func configureExtensions(_ configuration: WKWebViewConfiguration, profileID: UUID) {
@@ -292,6 +310,96 @@ import WebKit
         let anchor = commandWebView?.superview ?? sidebar
         let actions = browserExtensions.actionsMenu(profileID: profile, tabID: extensionCommandTabID, anchor: anchor)
         for item in actions.items { actions.removeItem(item); menu.addItem(item) }
+    }
+    /// An extension restart replaces its context. Bam's renderers of that extension's own pages (exact
+    /// `webkit-extension://<install>/` origin, that profile only) are retired before the old context unloads, so Bam holds
+    /// no strong reference to their web views (`retireProfilePage` drops the renderer, its observers, delegates, view and
+    /// origin), then recreated from the fresh context. Tab IDs, addresses, folders, pins, order and profiles are model
+    /// state and are untouched. Ordinary site pages and other extensions' pages are never matched. A Peek or Little Bam
+    /// showing such a page is closed (no persistent identity). Background tabs stay unloaded and restore when selected.
+    /// If the extension is stopped, retired tabs stay restorable: selecting one shows the unavailable error, and a later
+    /// Enable (a `.restore` from `load`) recreates them.
+    @available(macOS 15.4, *)
+    @discardableResult
+    func handleExtensionRenderers(_ phase: BrowserExtensions.ExtensionRendererPhase, profileID: UUID, baseURL: URL) -> [RetiredRendererProbe] {
+        guard !isShuttingDown, baseURL.scheme == "webkit-extension", let origin = baseURL.host?.lowercased() else { return [] }
+        var released: [RetiredRendererProbe] = []
+        let extensionController = browserExtensions.extensionController(profileID: profileID)
+        /// A preview of this exact install in this profile's runtime: its profile and its configuration's extension
+        /// controller must match, and its current, requested or pending URL is on the install's origin (an in-flight
+        /// extension navigation can hide behind a prior ordinary URL).
+        func showsThisExtension(_ web: WKWebView?) -> Bool {
+            guard let web, self.profileID(of: web) == profileID, let extensionController,
+                  web.configuration.webExtensionController === extensionController else { return false }
+            let preview = web as? PreviewWKWebView
+            return [web.url, preview?.requestedURL, preview?.pendingReadyURL].contains { url in
+                url?.scheme == "webkit-extension" && url?.host?.lowercased() == origin
+            }
+        }
+        func retire(_ ids: [UUID]) {
+            guard !ids.isEmpty else { return }
+            // Everything AppKit autoreleases while detaching (the view hierarchy, the responder) is released when this
+            // pool ends, before the caller unloads the old context. A focused page resigns first, so the window's
+            // responder chain doesn't keep it.
+            autoreleasepool {
+                if let window = view.window, let focused = focusedView(in: window),
+                   let id = ids.first(where: { id in browsers[id].map { focused === $0 || focused.isDescendant(of: $0) } ?? false }) {
+                    retiredExtensionFocus = id
+                    window.makeFirstResponder(nil)
+                }
+                retiredRendererProbes.removeAll { $0.web == nil }   // released ones carry no evidence; don't accumulate
+                for id in ids {
+                    let probe = RetiredRendererProbe(browsers[id], role: visibleMemberIDs.contains(id) ? "tab(visible)" : "tab")
+                    retiredRendererProbes.append(probe); released.append(probe)
+                }
+                isApplyingProfileChange = true
+                for id in ids { retireProfilePage(id) }
+                isApplyingProfileChange = false
+            }
+        }
+        func showIfVisible(_ ids: Set<UUID>) {
+            guard !ids.isDisjoint(with: visibleMemberIDs) else { return }
+            showActive()
+            if let focus = retiredExtensionFocus, ids.contains(focus), let web = browsers[focus], let window = web.window,
+               window.isKeyWindow { window.makeFirstResponder(web) }
+            if let focus = retiredExtensionFocus, ids.contains(focus) { retiredExtensionFocus = nil }
+        }
+        switch phase {
+        case .retire:
+            for (owner, peek) in peeks where showsThisExtension(peek.webView) {
+                released.append(RetiredRendererProbe(peek.webView, role: "peek"))
+                peek.dismiss(); peeks.removeValue(forKey: owner); peekExtensionIDs.removeValue(forKey: owner)
+            }
+            for little in littleWindows.values where showsThisExtension(little.webView) { released.append(RetiredRendererProbe(little.webView, role: "little-bam")); little.close() }
+            let ids = session.tabs.filter { session.profileID(for: $0) == profileID && browsers[$0.id] != nil && browserExtensionOrigins[$0.id] == origin }.map(\.id)
+            retiredExtensionRenderers[origin, default: []].formUnion(ids)
+            retire(ids)
+        case .restore:
+            guard let retired = retiredExtensionRenderers.removeValue(forKey: origin) else { return [] }
+            let live = Set(session.tabs.filter { session.profileID(for: $0) == profileID }.map(\.id))
+            let ids = retired.intersection(live)
+            // A renderer made while the extension was stopped (showing the unavailable error) is replaced too.
+            retire(ids.filter { browsers[$0] != nil })
+            showIfVisible(ids)
+            refresh()
+        case .unavailable:
+            // Retired tabs stay in `retiredExtensionRenderers` for Enable; a visible one shows the unavailable error now.
+            showIfVisible(retiredExtensionRenderers[origin] ?? [])
+            refresh()
+        }
+        return released
+    }
+    /// The message a tab shows for an extension page Bam won't open right now.
+    func extensionPageUnavailableMessage(_ url: URL, profileID: UUID) -> String {
+        if #available(macOS 15.4, *), browserExtensions.isRestarting(extensionURL: url, profileID: profileID) {
+            return "This extension is restarting to apply a website access change — its page reopens when it’s back"
+        }
+        return "This extension is unavailable in this profile — open Manage Extensions to enable it"
+    }
+    /// How many renderers retired for an extension restart are still alive (weakly observed): evidence only.
+    func retiredRenderersAlive() -> Int {
+        retiredRendererProbes.removeAll { $0.web == nil }
+        return retiredRendererProbes.count
     }
     func offerExtensionReload(profileID: UUID) {
         guard !isShuttingDown else { return }

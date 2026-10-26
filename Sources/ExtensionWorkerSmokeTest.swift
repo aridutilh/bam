@@ -23,9 +23,38 @@ import WebKit
                   let data = text.data(using: .utf8) else { return nil }
             return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         }
+        // Stage markers: a hang names the last stage reached instead of ending in the wrapper's overall timeout.
+        let stageClock = ProcessInfo.processInfo.systemUptime
+        func stage(_ name: String) {
+            print("EXTENSION_WORKER_STAGE \(name) t=\(String(format: "%.2f", ProcessInfo.processInfo.systemUptime - stageClock))"); fflush(stdout)
+        }
+        /// Bounds one await that has no timeout of its own (e.g. WebKit never answering), as a named failure. Only the
+        /// wait is bounded: the operation's result is used unchanged when it finishes in time.
+        final class Once { var done = false }
+        func bounded<T>(_ name: String, seconds: Double = 20, _ operation: @escaping @MainActor () async -> T) async throws -> T {
+            stage(name)
+            return try await withCheckedThrowingContinuation { continuation in
+                let once = Once()
+                Task { @MainActor in let value = await operation(); if !once.done { once.done = true; continuation.resume(returning: value) } }
+                Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                    if !once.done { once.done = true; continuation.resume(throwing: Failure(description: "Worker stage '\(name)' did not finish within \(Int(seconds)) s")) }
+                }
+            }
+        }
+        // A worker request is bounded in the page: WebKit queues runtime.sendMessage until the background content
+        // loads and never answers it if the service worker fails to load. A timeout reports and returns nil, exactly
+        // what a failed request already returned, so no check can pass on it.
         func request(_ popup: WKWebView, kind: String = "probe") async -> [String: Any]? {
-            try? await popup.callAsyncJavaScript("return await (globalThis.browser || globalThis.chrome).runtime.sendMessage({kind});",
-                arguments: ["kind": kind], in: nil, contentWorld: .page) as? [String: Any]
+            let value = try? await popup.callAsyncJavaScript("""
+                return await Promise.race([(globalThis.browser || globalThis.chrome).runtime.sendMessage({kind}),
+                  new Promise(resolve => setTimeout(() => resolve({__bamRequestTimedOut: true}), 15000))]);
+                """, arguments: ["kind": kind], in: nil, contentWorld: .page) as? [String: Any]
+            if value?["__bamRequestTimedOut"] != nil {
+                print("EXTENSION_WORKER_REQUEST_TIMEOUT kind=\(kind) after=15s"); fflush(stdout)
+                return nil
+            }
+            return value
         }
         let fm = FileManager.default
         let fixtureRoot = fm.temporaryDirectory.appendingPathComponent("bam-worker-fixtures-" + UUID().uuidString, isDirectory: true)
@@ -50,14 +79,17 @@ import WebKit
             chrome.runtime.onUpdateAvailable.addListener(() => {});
             // history events registered at start, as Vimium's history cache does after its first search.
             const historyEvents = [];
-            chrome.history.onVisited.addListener(item => historyEvents.push({kind: 'visited', url: item.url, keys: Object.keys(item).sort().join(',')}));
-            chrome.history.onVisitRemoved.addListener(info => historyEvents.push({kind: 'removed', all: info.allHistory, urls: info.urls}));
+            // After a full Revoke WebKit hides every namespace whose permission isn't granted (cookies, storage, ...), so
+            // top-level registrations use ?. : a hidden namespace must not stop the worker before its listeners exist.
+            // Every event check below still requires delivery while the grants are live.
+            chrome.history?.onVisited.addListener(item => historyEvents.push({kind: 'visited', url: item.url, keys: Object.keys(item).sort().join(',')}));
+            chrome.history?.onVisitRemoved.addListener(info => historyEvents.push({kind: 'removed', all: info.allHistory, urls: info.urls}));
             // Registered unconditionally at start, as Session Buddy does; WebKit has no such event.
             const boundsEvents = [];
             chrome.windows.onBoundsChanged.addListener(w => boundsEvents.push({id: w.id, left: w.left, top: w.top, width: w.width, height: w.height}));
             // cookies.onChanged as Chrome extensions use it: the listener reads changeInfo fields.
             const cookieEvents = [];
-            chrome.cookies.onChanged.addListener(info => cookieEvents.push({type: typeof info, removed: info?.removed, name: info?.cookie?.name, cause: info?.cause}));
+            chrome.cookies?.onChanged.addListener(info => cookieEvents.push({type: typeof info, removed: info?.removed, name: info?.cookie?.name, cause: info?.cause}));
             // Diagnostics only (never delivered to the fixture's listener): raw firings of WebKit's own event.
             const nativeCookieFires = [];
             globalThis.__bamCompatibility?.cookies?.rawAddListener?.((...args) => nativeCookieFires.push(args.length));
@@ -75,18 +107,22 @@ import WebKit
               const streamed = await WebAssembly.instantiateStreaming(fetch(url));
               return {compiled:compiled.exports.answer(), instantiated:streamed.instance.exports.answer(), mime};
             })().catch(error => ({error:String(error)}));
-            const started = api.storage.local.get('workerStarts').then(async saved => {
+            // Storage-only start count; without the storage grant it reports the error instead of throwing at top level.
+            const started = (async () => {
+              const saved = await api.storage.local.get('workerStarts');
               const count = Number(saved.workerStarts || 0) + 1;
               await api.storage.local.set({workerStarts: count}); return count;
-            });
-            api.notifications.onClicked.addListener(id => events.push({kind:'notification', value:id}));
-            api.idle.onStateChanged.addListener(state => events.push({kind:'idle', value:state}));
-            api.idle.setDetectionInterval(15);
+            })().catch(error => 'error: ' + String(error?.message || error));
+            api.notifications?.onClicked.addListener(id => events.push({kind:'notification', value:id}));
+            api.idle?.onStateChanged.addListener(state => events.push({kind:'idle', value:state}));
+            api.idle?.setDetectionInterval(15);
             const refusal = async (application, method) => {
               try { await api.runtime.sendNativeMessage(application, {kind:'request', method, params:{id:1,url:'https://fixture.invalid/file'}}); return false; }
               catch (error) { return String(error); }
             };
             api.runtime.onMessage.addListener(async message => {
+              // Readiness without any privileged call: answers even after Revoke, when bridged calls must be refused.
+              if (message?.kind === 'ready') return {ready: true, starts: await started};
               if (message?.kind === 'last-error') {
                 // relay: a real native call failing in callback form (Bam's internal transport answers an unknown
                 // kind with an error), to learn whether WebKit's own lastError would carry Bam's text.
@@ -294,7 +330,9 @@ import WebKit
         try check((firstA?["fonts"] as? Int ?? 0) > 0 && (firstB?["fonts"] as? Int ?? 0) > 0,
                   "fontSettings.getFontList returned no installed families: classic=\(firstA?["fonts"] ?? "nil"), module=\(firstB?["fonts"] ?? "nil")")
         print("Worker Wasm response MIME: classic=\(wasmA["mime"] as? String ?? "missing"), module=\(wasmB["mime"] as? String ?? "missing")")
-        guard let popupA = contextA.action(for: nil)?.popupWebView, let popupB = contextB.action(for: nil)?.popupWebView else { throw Failure(description: "Workers have no native action popups") }
+        // Optional so the fixture can drop its own references before Revoke and Disable retire these contexts.
+        var popupA: WKWebView! = contextA.action(for: nil)?.popupWebView, popupB: WKWebView! = contextB.action(for: nil)?.popupWebView
+        guard popupA != nil, popupB != nil else { throw Failure(description: "Workers have no native action popups") }
         popupA.frame = frame; popupB.frame = frame
         try await wait("Classic worker did not answer its real action popup") { await result(popupA)?["starts"] as? Int == 1 }
         try check((try? await popupA.evaluateJavaScript("typeof Symbol.dispose + ',' + typeof Symbol.asyncDispose")) as? String == "symbol,symbol",
@@ -523,7 +561,8 @@ import WebKit
         // cookies.onChanged on real WebKit: a loopback cookie set and deleted in profile A's own store
         // reaches A's worker as Chrome-shaped changeInfo; profile B's worker sees nothing.
         let fixtureCookie = HTTPCookie(properties: [.name: "bam-fixture-cookie", .value: "1", .domain: "127.0.0.1", .path: "/"])!
-        await configA.websiteDataStore.httpCookieStore.setCookie(fixtureCookie)
+        try await bounded("cookie-set") { await configA.websiteDataStore.httpCookieStore.setCookie(fixtureCookie) }
+        stage("cookie-set-event")
         func cookieEvents(_ popup: WKWebView) async -> [[String: Any]] { await request(popup)?["cookieEvents"] as? [[String: Any]] ?? [] }
         func cookieDiagnostics() async -> String {
             let value = await request(popupA, kind: "cookie-diagnostics") ?? [:]
@@ -540,21 +579,26 @@ import WebKit
             print("EXTENSION_COOKIE_DIAGNOSTICS storeHasCookie=\(storeHas) \(privateAccess) worker=\(diagnostics)"); fflush(stdout)
             throw Failure(description: "Setting a cookie did not reach the worker's cookies.onChanged as changeInfo (storeHasCookie=\(storeHas), \(privateAccess)): \(diagnostics)")
         }
-        await configA.websiteDataStore.httpCookieStore.deleteCookie(fixtureCookie)
+        try await bounded("cookie-delete") { await configA.websiteDataStore.httpCookieStore.deleteCookie(fixtureCookie) }
+        stage("cookie-delete-event")
         try await wait("Deleting a cookie did not reach the worker's cookies.onChanged as changeInfo") {
             await cookieEvents(popupA).contains { $0["name"] as? String == "bam-fixture-cookie" && $0["removed"] as? Bool == true }
         }
         let eventsA = await cookieEvents(popupA), eventsB = await cookieEvents(popupB)
         try check(eventsA.allSatisfy { $0["type"] as? String == "object" } && !eventsB.contains { $0["name"] as? String == "bam-fixture-cookie" },
                   "cookies.onChanged delivered undefined changeInfo or crossed profiles: A=\(eventsA) B=\(eventsB)")
+        stage("denials")
         let denied = await request(popupA, kind: "denials")
         try check(denied?["external"] is String && denied?["undeclared"] is String && denied?["unknown"] is String,
                   "Worker native messaging allowed an external app, undeclared capability or unknown method: \(denied ?? [:])")
-        let foreign: (Any?, Error?) = await withCheckedContinuation { continuation in
-            runtimeB.webExtensionController(runtimeB.controller, sendMessage: ["kind": "request", "method": "idle.queryState"],
-                toApplicationWithIdentifier: ExtensionCompatibility.nativeApplicationIdentifier, for: contextA) { continuation.resume(returning: ($0, $1)) }
+        let foreign: (Any?, Error?) = try await bounded("foreign-profile") {
+            await withCheckedContinuation { continuation in
+                runtimeB.webExtensionController(runtimeB.controller, sendMessage: ["kind": "request", "method": "idle.queryState"],
+                    toApplicationWithIdentifier: ExtensionCompatibility.nativeApplicationIdentifier, for: contextA) { continuation.resume(returning: ($0, $1)) }
+            }
         }
         try check(foreign.1 != nil, "A native request accepted another profile's context")
+        stage("notification-event")
         let eventID = "classic-only-" + UUID().uuidString
         try await wait("Native notification event did not cross the worker's event port") {
             runtimeA.compatibility.dispatch("notifications.onClicked", [eventID], to: contextA.uniqueIdentifier)
@@ -562,38 +606,78 @@ import WebKit
         }
         try check((await request(popupB)?["events"] as? [[String: String]])?.contains { $0["value"] == eventID } == false,
                   "Native event delivery crossed login profiles")
+        stage("idle-event")
         idleA = 0; runtimeA.compatibility.pollIdle()
         try await wait("Inactivity transition did not cross the worker event port") {
             (await request(popupA)?["events"] as? [[String: String]])?.contains { $0["kind"] == "idle" && $0["value"] == "active" } == true
         }
         // Across revocation the snapshot hooks must not be read at all, whichever layer refuses first.
         let snapshotsBeforeRevoke = (snapshotCalls.count, historyCalls.count)
+        let generationBeforeRevoke = host.restartGeneration[idA, default: 0]
+        // The popup Revoke retires was created by the fixture, not presented by Bam, so Bam's release barrier can't see
+        // it: drop the fixture's own reference first, so only WebKit's closing action could keep it.
+        weak var retiredPopupA: WKWebView? = popupA
+        popupA = nil
+        stage("revoke")
         try host.revokePermissions(id: idA)
+        // A holds live site grants (its cookie checks above needed 127.0.0.1), so Revoke must restart it into a fresh
+        // context (two-phase). Every check after this targets that live context and a popup created from it; the
+        // retired context must be refused as inactive.
+        let generationAfterRevoke = host.restartGeneration[idA, default: 0]
+        try check(generationAfterRevoke > generationBeforeRevoke,
+                  "Revoking an extension with live site grants did not restart it (generation \(generationBeforeRevoke) -> \(generationAfterRevoke))")
+        let restart = try await bounded("revoke-restart-completion") { await host.restartCompletion(id: idA, generation: generationAfterRevoke) }
+        stage("revoke-restart-\(String(describing: restart))")
+        try check(restart == .restarted, "Revoke's restart did not finish with a fresh context: \(String(describing: restart))")
+        guard let revokedContextA = host.context(for: idA) else { throw Failure(description: "The revoked worker extension has no context after its restart") }
+        try check(revokedContextA !== contextA && revokedContextA.isLoaded && !host.isRestarting(id: idA) && !contextA.isLoaded,
+                  "Revoke's restart did not replace the old context with a loaded fresh one")
+        stage("revoke-retired-popup-release")
+        try await wait("The fixture's popup of the retired context was still retained after Revoke") { retiredPopupA == nil }
+        var revokedPopupA: WKWebView! = revokedContextA.action(for: nil)?.popupWebView
+        guard revokedPopupA != nil else { throw Failure(description: "The revoked worker extension has no action popup") }
+        revokedPopupA.frame = frame
+        // Readiness must not use the default probe: it awaits idle.queryState, which Revoke must refuse.
+        stage("revoke-ready")
+        do {
+            try await wait("The revoked worker extension's popup did not reach its worker") { await request(revokedPopupA, kind: "ready")?["ready"] as? Bool == true }
+        } catch {
+            // WebKit records a service worker that failed to load as a context error (BackgroundContentFailedToLoad).
+            let contextErrors = revokedContextA.errors.map(\.localizedDescription)
+            let pageError = (try? await revokedPopupA.evaluateJavaScript("document.documentElement.dataset.bamWorkerError || ''")) as? String ?? ""
+            throw Failure(description: "\(error); contextErrors=\(contextErrors) popupProbeError=\(pageError) hostErrors=\(host.errors)")
+        }
+        stage("revoke-checks")
+        let retired = await runtimeA.compatibility.receiveNativeMessage(["kind": "request", "method": "history.search", "params": ["text": ""]], context: contextA)
+        try check(retired.0 == nil && retired.1?.localizedDescription == "Invalid or inactive compatibility request.",
+                  "A retired worker context kept native bridge authority: \(String(describing: retired.1))")
         try check(!runtimeA.compatibility.offscreen.has(contextA.uniqueIdentifier) && runtimeB.compatibility.offscreen.has(contextB.uniqueIdentifier),
                   "Revoking one extension did not close only its offscreen document")
         try await wait("A revoked loading offscreen web view was retained") { revokedWeb == nil }
         let revokedID = "revoked-" + UUID().uuidString
-        runtimeA.compatibility.dispatch("notifications.onClicked", [revokedID], to: contextA.uniqueIdentifier)
-        let revokedNative = await runtimeA.compatibility.receiveNativeMessage(["kind": "request", "method": "idle.queryState"], context: contextA)
-        let revoked = await request(popupA, kind: "revoked")
+        runtimeA.compatibility.dispatch("notifications.onClicked", [revokedID], to: revokedContextA.uniqueIdentifier)
+        let revokedNative = await runtimeA.compatibility.receiveNativeMessage(["kind": "request", "method": "idle.queryState"], context: revokedContextA)
+        let revoked = await request(revokedPopupA, kind: "revoked")
         host.historyChanged(profileID: profileA, change: .visited(ExtensionHistory.Visit(url: "https://after-revoke.example/", title: "Late", visitedAt: Date())))
         try await Task.sleep(nanoseconds: 500_000_000)
         // Revoke Permissions removes every grant, which also closes the worker's compatibility transport, so a worker
-        // call may be refused there (before the bridge). WebKit wraps the reply error, so the worker's message must
+        // call may be refused there (before the bridge, or in the adapter when the fresh context has no transport). WebKit wraps the reply error, so the worker's message must
         // contain the complete transport refusal or the complete bridge refusal; anything else, or any data, fails.
         // The bridge itself must still refuse with exactly its own text when called directly.
         func refusedAfterRevoke(_ error: Any?, bridgeText: String) -> Bool {
             guard let text = error as? String else { return false }
+            // After Revoke the fresh context has no nativeMessaging, so the worker adapter refuses with its own exact text.
             return text.contains(bridgeText) || text.contains(BrowserExtensions.compatibilityTransportUnavailable)
+                || text.contains(ExtensionCompatibility.workerTransportUnavailable)
         }
-        let revokedHistory = await request(popupA, kind: "history")
-        let revokedHistoryNative = await runtimeA.compatibility.receiveNativeMessage(["kind": "request", "method": "history.search", "params": ["text": ""]], context: contextA)
+        let revokedHistory = await request(revokedPopupA, kind: "history")
+        let revokedHistoryNative = await runtimeA.compatibility.receiveNativeMessage(["kind": "request", "method": "history.search", "params": ["text": ""]], context: revokedContextA)
         try check(refusedAfterRevoke(revokedHistory?["error"], bridgeText: ExtensionCompatibilityBridge.historyNotGranted) && revokedHistory?["count"] == nil &&
                   (revokedHistory?["events"] as? [[String: Any]])?.contains { $0["url"] as? String == "https://after-revoke.example/" } == false &&
                   revokedHistoryNative.0 == nil && revokedHistoryNative.1?.localizedDescription == ExtensionCompatibilityBridge.historyNotGranted,
                   "Revoked history access searched, delivered an event, or was refused for another reason: \(revokedHistory ?? [:]) bridge=\(String(describing: revokedHistoryNative.1))")
-        let revokedMarks = await request(popupA, kind: "bookmarks")
-        let revokedMarksNative = await runtimeA.compatibility.receiveNativeMessage(["kind": "request", "method": "bookmarks.getTree"], context: contextA)
+        let revokedMarks = await request(revokedPopupA, kind: "bookmarks")
+        let revokedMarksNative = await runtimeA.compatibility.receiveNativeMessage(["kind": "request", "method": "bookmarks.getTree"], context: revokedContextA)
         try check(refusedAfterRevoke(revokedMarks?["error"], bridgeText: ExtensionCompatibilityBridge.bookmarksNotGranted) && revokedMarks?["tree"] == nil &&
                   revokedMarksNative.0 == nil && revokedMarksNative.1?.localizedDescription == ExtensionCompatibilityBridge.bookmarksNotGranted,
                   "Revoked bookmarks access returned a tree or was refused for another reason: \(revokedMarks ?? [:]) bridge=\(String(describing: revokedMarksNative.1))")
@@ -604,16 +688,30 @@ import WebKit
                   "Revoked worker grants still allowed native requests or event delivery")
         // Unload and recreate both actual worker contexts. WebKit storage belongs
         // to the stable extension identity, while startup executes again.
+        // Disable retires both contexts and Enable waits on the release barrier, which sees only views Bam presented or
+        // owns. The fixture's own popups are invisible to it, so drop them and require them released before Enable,
+        // so neither fresh context loads next to a view the fixture kept alive.
+        weak var disabledPopupA: WKWebView? = revokedPopupA, disabledPopupB: WKWebView? = popupB
+        revokedPopupA = nil; popupB = nil
+        stage("disable")
         try await host.setEnabled(false, id: idA); try await host.setEnabled(false, id: idB)
         try check(!runtimeB.compatibility.offscreen.has(contextB.uniqueIdentifier), "Disabling an extension left its offscreen document open")
-        try await host.setEnabled(true, id: idA); try await host.setEnabled(true, id: idB)
+        try await wait("The fixture's popups of the disabled contexts were still retained before Enable") { disabledPopupA == nil && disabledPopupB == nil }
+        stage("enable")
+        // Enable's own errors still fail the test unchanged; only a hang is bounded.
+        for (label, id) in [("enable-a", idA), ("enable-b", idB)] {
+            let failure: Error? = try await bounded(label) { do { try await host.setEnabled(true, id: id); return nil } catch { return error } }
+            if let failure { throw failure }
+        }
         guard let reloadedA = host.context(for: idA), let reloadedB = host.context(for: idB),
               let newPopupA = reloadedA.action(for: nil)?.popupWebView, let newPopupB = reloadedB.action(for: nil)?.popupWebView else { throw Failure(description: "Worker reload lost its action context") }
         newPopupA.frame = frame; newPopupB.frame = frame
+        stage("reload-ready")
         var restartedA: [String: Any]?, restartedB: [String: Any]?
         do {
             try await wait("Classic worker failed to restart with stable extension storage") {
-                restartedA = await result(newPopupA); return (restartedA?["starts"] as? Int ?? 0) >= 2
+                // Storage-only readiness (no privileged call), as after Revoke.
+                restartedA = await request(newPopupA, kind: "ready"); return (restartedA?["starts"] as? Int ?? 0) >= 2
             }
             try await wait("Module worker failed to restart with stable extension storage") {
                 restartedB = await result(newPopupB); return (restartedB?["starts"] as? Int ?? 0) >= 2
@@ -623,7 +721,8 @@ import WebKit
             throw Failure(description: "\(error); classic=\(restartedA ?? [:]), module=\(restartedB ?? [:]), pageError=\(pageError), hostErrors=\(host.errors)")
         }
         let stale = await runtimeA.compatibility.receiveNativeMessage(["kind": "request", "method": "idle.queryState"], context: contextA)
-        try check(stale.1 != nil, "A replaced worker context retained native bridge authority")
+        let staleRevoked = await runtimeA.compatibility.receiveNativeMessage(["kind": "request", "method": "idle.queryState"], context: revokedContextA)
+        try check(stale.1 != nil && staleRevoked.1 != nil && reloadedA !== revokedContextA, "A replaced worker context retained native bridge authority")
         reloadedA.action(for: nil)?.closePopup(); reloadedB.action(for: nil)?.closePopup()
 
         // Installs prepared by an earlier Bam, classic (A) and module (B): first run the older

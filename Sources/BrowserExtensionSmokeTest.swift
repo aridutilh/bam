@@ -38,6 +38,10 @@ import Darwin
         }
         let controller = BrowserController(sessionURL: FileManager.default.temporaryDirectory.appendingPathComponent("unused-extension-session.json"), ephemeral: true)
         controller.session.tabs.removeAll(); controller.automaticallyShowsVideo = false
+        /// Diagnostics (native 4e0092f consent fetch): every extension web view this run creates or observes, weakly, so
+        /// the consent checks can report which are still alive at each step of a restart. Observation only.
+        var observedExtensionViews: [(label: String, view: WeakReference<WKWebView>)] = []
+        func observeExtensionView(_ label: String, _ view: WKWebView?) { if let view { observedExtensionViews.append((label, WeakReference(view))) } }
         let profile = controller.session.currentProfileID
         let other = controller.session.createProfile(name: "Other")!
         let otherSpace = controller.session.createSpace(name: "Other", symbol: "briefcase", colorIndex: 1, profileID: other)!
@@ -81,7 +85,23 @@ import Darwin
         var fixtureAction = sourceDefinition["action"] as! [String: Any]
         fixtureAction["default_icon"] = "action-blue.png"; sourceDefinition["action"] = fixtureAction
         try JSONSerialization.data(withJSONObject: sourceDefinition).write(to: sourceManifest)
+        // A canceled install review, then Enable: the first approval must still review and grant every requested site
+        // (not migrate the never-approved record's empty grants to withheld).
+        var installReviews: [BrowserExtensionPermissionReview] = []
+        host.permissionPrompt = { review in installReviews.append(review); return false }
         let extensionID = try await host.importPackage(at: sourceFixture, profileID: profile)
+        let canceledInstall = host.records.first { $0.id == extensionID }
+        try check(installReviews.map(\.websites) == [["http://127.0.0.1/*"]] && canceledInstall?.enabled == false &&
+            canceledInstall?.awaitingFirstReview == true && canceledInstall?.siteAccess == nil && host.context(for: extensionID) == nil,
+            "A canceled install review must leave the record waiting for its first approval: \(installReviews.map(\.websites))")
+        host.permissionPrompt = { review in installReviews.append(review); return true }
+        try await host.setEnabled(true, id: extensionID)
+        let firstApproval = host.records.first { $0.id == extensionID }
+        try check(installReviews.count == 2 && installReviews[1].websites == ["http://127.0.0.1/*"] && firstApproval?.awaitingFirstReview == nil &&
+            host.siteAccess(id: extensionID)?.state.mode == .allRequested &&
+            host.context(for: extensionID)?.permissionStatus(for: pageURL) == .grantedExplicitly,
+            "Enable after a canceled install must review and grant every requested site: reviewed=\(installReviews.last?.websites ?? []), status=\(String(describing: host.context(for: extensionID)?.permissionStatus(for: pageURL)))")
+        host.permissionPrompt = { _ in true }
         let url = pageURL.appending(queryItems: [URLQueryItem(name: "profile", value: "browser-adapter")])
         guard let id = controller.openProfileTab(url, profileID: profile, active: true), let web = controller.browsers[id] else { throw ExtensionSmokeTest.Failure(description: "Browser adapter did not create its page") }
         try await wait("Browser adapter did not inject extension on first navigation") {
@@ -105,11 +125,39 @@ import Darwin
             descendants(controller.sidebar).first { $0.identifier?.rawValue == "extension-action-\(extensionID.uuidString)" } as? NSButton
         }
         try await wait("Enabled extension did not appear as a visible sidebar action") { actionButton()?.isHidden == false }
-        guard let button = actionButton(), let actionContext = host.context(for: extensionID),
+        // N3: the first context and its tab action are held only until their last use (below), like heldPopup, so the
+        // fixture keeps no stale context or action of the subject into the withdrawal checks. Same lookups as before.
+        var actionContextHolder: WKWebExtensionContext? = host.context(for: extensionID)
+        guard let button = actionButton(), actionContextHolder != nil,
               let liveRuntime = config.webExtensionController?.delegate as? BrowserExtensionRuntime,
-              let liveTab = liveRuntime.tabs[id], let tabAction = actionContext.action(for: liveTab) else {
+              let liveTab = liveRuntime.tabs[id] else {
             throw ExtensionSmokeTest.Failure(description: "Missing toolbar action fixture")
         }
+        var tabActionHolder: WKWebExtension.Action? = actionContextHolder?.action(for: liveTab)
+        guard tabActionHolder != nil else { throw ExtensionSmokeTest.Failure(description: "Missing toolbar action fixture") }
+        var actionContext: WKWebExtensionContext { actionContextHolder! }
+        var tabAction: WKWebExtension.Action { tabActionHolder! }
+        /// Diagnostics (N1): the subject's context and action objects the fixture captures, weakly, with whether each
+        /// context is still loaded; and a sampled history of which context object the subject had at each lifecycle step
+        /// before the consent checks (sampled at the fixture's own steps, so transient contexts inside a step are missed).
+        var observedObjects: [(label: String, object: WeakReference<AnyObject>)] = []
+        func observeObject(_ label: String, _ object: AnyObject?) { if let object { observedObjects.append((label, WeakReference(object))) } }
+        func heldObjectsState() -> [String] {
+            observedObjects.compactMap { entry in
+                guard let object = entry.object.value else { return nil }
+                if let context = object as? WKWebExtensionContext { return "\(entry.label)(loaded=\(context.isLoaded),current=\(context === host.context(for: extensionID)))" }
+                return entry.label
+            }
+        }
+        var subjectHistory: [String] = [], subjectContextIDs: [ObjectIdentifier] = []
+        func noteSubject(_ step: String) {
+            guard let context = host.context(for: extensionID) else { subjectHistory.append("\(step):none"); return }
+            let identifier = ObjectIdentifier(context)
+            if !subjectContextIDs.contains(identifier) { subjectContextIDs.append(identifier) }
+            subjectHistory.append("\(step):ctx\(subjectContextIDs.firstIndex(of: identifier)! + 1)")
+        }
+        observeObject("actionContext", actionContext); observeObject("tabAction", tabAction)
+        noteSubject("action-fixture")
         try check(button.accessibilityLabel() == actionContext.webExtension.displayName, "Extension button lost its vendor name")
         recordLifecycle("baseline", retiredPopovers: 0, retiredWebViews: 0)
         button.performClick(nil)
@@ -319,7 +367,17 @@ import Darwin
         try check(stalePopupError != nil && tabAction.popupPopover?.isShown != true, "An asynchronously presented popup appeared over a different profile")
         try checkLiveLookup(profile); try checkLiveLookup(other)
         host.reconcile()
-        guard let context = host.context(for: extensionID), let popup = context.action(for: nil)?.popupWebView else { throw ExtensionSmokeTest.Failure(description: "Missing browser-adapter action popup") }
+        // Held only until its last use (below): a test-held extension web view keeps its web process, and with it every
+        // CORS pattern it ever had, which would confound the withheld-fetch checks later in this run.
+        var heldPopup: WKWebView?
+        do {
+            // N3: this context is needed only here, so it is scoped instead of held for the rest of the run.
+            guard let context = host.context(for: extensionID), context.action(for: nil)?.popupWebView != nil else { throw ExtensionSmokeTest.Failure(description: "Missing browser-adapter action popup") }
+            heldPopup = context.action(for: nil)?.popupWebView
+            observeExtensionView("original-popup", heldPopup)
+            observeObject("context(popup check)", context); noteSubject("popup-check")
+        }
+        var popup: WKWebView { heldPopup! }
         try await wait("Browser-adapter popup did not initialize") { (try? await popup.evaluateJavaScript("document.title")) as? String == "Bam fixture ready" }
         // A finished load must reach the extension as `tabs.onUpdated` with `status: "complete"`
         // even though the URL did not change after commit (Dashlane's sign-in check waits for it).
@@ -329,6 +387,304 @@ import Darwin
                   let records = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return false }
             // The changeInfo must carry the status: a title-driven update also reads `status: "complete"` live.
             return records.contains { ($0["infoStatus"] as? String) == "complete" && ($0["url"] as? String)?.contains("extension-test.html") == true }
+        }
+        // Chrome `pinned` is a Bam kept tab. This extension's profile is in the background here (the window shows
+        // `other`), so creating or changing pinned tabs must leave the window's Space, profile and selection alone.
+        do {
+            func pinnedPage(_ query: String) -> URL {
+                var components = URLComponents(url: url, resolvingAgainstBaseURL: false)!
+                components.path = "/next.html"; components.query = query
+                return components.url!
+            }
+            func pinnedCall(_ body: String, _ arguments: [String: Any]) async throws -> [String: Any] {
+                let text = try await popup.callAsyncJavaScript(body, arguments: arguments, contentWorld: .page) as? String
+                guard let data = text?.data(using: .utf8), let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                    throw ExtensionSmokeTest.Failure(description: "Pinned-tab probe returned \(text ?? "nil")")
+                }
+                return value
+            }
+            // One update and the tabs.onUpdated `pinned` it produced (waited for only when a change is expected).
+            let updateScript = """
+                let event = null;
+                const listener = (tabId, info) => { if (tabId === id && 'pinned' in info) event = info.pinned; };
+                browser.tabs.onUpdated.addListener(listener);
+                try {
+                  let result;
+                  try { const tab = await browser.tabs.update(id, {pinned}); result = {ok: true, pinned: tab ? tab.pinned : null}; }
+                  catch (error) { result = {ok: false, error: String(error?.message || error)}; }
+                  const deadline = Date.now() + wait;
+                  while (event === null && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 20));
+                  result.event = event;
+                  result.after = (await browser.tabs.get(id)).pinned;
+                  return JSON.stringify(result);
+                } finally { browser.tabs.onUpdated.removeListener(listener); }
+                """
+            func update(_ tabID: Int, pinned: Bool, changes: Bool) async throws -> [String: Any] {
+                try await pinnedCall(updateScript, ["id": tabID, "pinned": pinned, "wait": changes ? 3000 : 300])
+            }
+            let place = (space: controller.session.space, profile: controller.session.currentProfileID, active: controller.session.activeID)
+            func placeKept() -> Bool {
+                controller.session.space == place.space && controller.session.currentProfileID == place.profile && controller.session.activeID == place.active
+            }
+            try check(place.profile == other, "Pinned-tab checks did not start with the extension's profile in the background")
+            let pinnedURL = pinnedPage("pinned")
+            let created = try await pinnedCall("""
+                const tab = await browser.tabs.create({url: address, pinned: true, active: false});
+                const members = await browser.tabs.query({windowId: tab.windowId});
+                return JSON.stringify({id: tab.id, pinned: tab.pinned, active: tab.active, index: tab.index, last: members.length - 1});
+                """, ["address": pinnedURL.absoluteString])
+            guard let pinnedJS = created["id"] as? Int,
+                  let pinnedID = controller.session.tabs.first(where: { $0.address == pinnedURL.absoluteString })?.id else {
+                throw ExtensionSmokeTest.Failure(description: "tabs.create({pinned: true}) did not create a Bam tab: \(created)")
+            }
+            func pinnedTab() -> BrowserTab? { controller.session.tabs.first { $0.id == pinnedID } }
+            guard let made = pinnedTab() else { throw ExtensionSmokeTest.Failure(description: "Pinned tab vanished") }
+            try check(created["pinned"] as? Bool == true && created["active"] as? Bool == false, "tabs.create did not report a pinned background tab: \(created)")
+            try check(made.saved?.kind == .kept && made.saved?.address == pinnedURL.absoluteString && made.folderID == nil
+                      && made.saved?.customTitle == nil && controller.session.profileID(for: made) == profile,
+                      "A pinned tab was not created as a kept tab at its Space's root in the extension's profile")
+            try check(created["index"] as? Int == created["last"] as? Int, "A pinned tab was not appended at the end of its window: \(created)")
+            try check(placeKept(), "Creating a background pinned tab moved the window's Space, profile or selection")
+            try await wait("Pinned tab did not load") { controller.browsers[pinnedID]?.url == pinnedURL && controller.browsers[pinnedID]?.isLoading == false }
+            let tabCount = controller.session.tabs.count
+            let ownPage = try await pinnedCall("""
+                try { await browser.tabs.create({url: browser.runtime.getURL('page.html'), pinned: true, active: false}); return JSON.stringify({ok: true}); }
+                catch (error) { return JSON.stringify({ok: false, error: String(error?.message || error)}); }
+                """, [:])
+            try check(ownPage["ok"] as? Bool == false && (ownPage["error"] as? String)?.contains("HTTP and HTTPS") == true
+                      && controller.session.tabs.count == tabCount, "A pinned extension page was created or refused untruthfully: \(ownPage)")
+            // The session as it would be written to disk.
+            func persisted() throws -> BrowserTab? {
+                var restored = try JSONDecoder().decode(BrowserSession.self, from: JSONEncoder().encode(controller.session)); restored.sanitize()
+                return restored.tabs.first { $0.id == pinnedID }
+            }
+            try check(try persisted()?.saved?.kind == .kept && persisted()?.saved?.address == pinnedURL.absoluteString, "The pinned tab was not saved as kept")
+
+            // A wrapper around createTab (a fixture's allowed addresses) sees the kept intent while it runs and can refuse;
+            // the intent never outlives that call.
+            let installedCreate = host.createTab
+            var wrappedKept: [Bool] = []
+            host.createTab = { [weak host] _, _, _ in wrappedKept.append(host?.createsKeptTab == true); return nil }
+            let wrapped = try await pinnedCall("""
+                const outcome = [];
+                for (const pinned of [true, false]) {
+                  try { await browser.tabs.create({url: address, pinned, active: false}); outcome.push('created'); }
+                  catch (error) { outcome.push('refused'); }
+                }
+                return JSON.stringify({outcome});
+                """, ["address": pinnedPage("wrapped").absoluteString])
+            host.createTab = installedCreate
+            try check(wrappedKept == [true, false] && !host.createsKeptTab && wrapped["outcome"] as? [String] == ["refused", "refused"]
+                      && controller.session.tabs.count == tabCount && placeKept(),
+                      "A wrapped create did not see, refuse or reset the kept intent: \(wrappedKept) \(wrapped)")
+
+            // A background kept tab for a profile whose Space is empty: selecting that Space adds a blank fallback
+            // tab, and the new tab must take its place rather than leave it behind.
+            guard let emptyProfile = controller.session.createProfile(name: "Pinned empty"),
+                  let emptySpace = controller.session.createSpace(name: "Pinned empty", symbol: "briefcase", colorIndex: 2, profileID: emptyProfile) else {
+                throw ExtensionSmokeTest.Failure(description: "Could not create an empty target Space")
+            }
+            let emptyURL = pinnedPage("pinned-empty")
+            guard let emptyTab = host.createTab(emptyURL, profileID: emptyProfile, active: false, kept: true) else {
+                throw ExtensionSmokeTest.Failure(description: "Bam did not create a background kept tab in an empty Space")
+            }
+            let emptyMembers = controller.session.tabs.filter { $0.space == emptySpace }
+            try check(emptyMembers.map(\.id) == [emptyTab] && emptyMembers.first?.saved?.kind == .kept && emptyMembers.first?.address == emptyURL.absoluteString
+                      && controller.session.lastSelectedTabIDsBySpace?[emptySpace] == emptyTab && placeKept() && !host.createsKeptTab,
+                      "A background kept tab in an empty Space left a blank tab, lost its selection or moved the window: \(emptyMembers.map(\.address))")
+            _ = controller.session.setRetention(id: emptyTab, kind: nil); _ = host.closeTab?(emptyTab)
+            try check(controller.session.deleteSpace(id: emptySpace, movingTabsTo: place.space) && !controller.session.tabs.contains { $0.id == emptyTab } && placeKept(),
+                      "The empty-Space fixture was not cleaned up")
+
+            // Unpin with nothing to lose, then pin again: the page stays, and the event matches the returned tab.
+            var result = try await update(pinnedJS, pinned: false, changes: true)
+            try check(result["ok"] as? Bool == true && result["pinned"] as? Bool == false && result["event"] as? Bool == false && result["after"] as? Bool == false,
+                      "Unpinning a plain kept tab failed or disagreed with tabs.onUpdated: \(result)")
+            try check(pinnedTab()?.saved == nil && pinnedTab()?.address == pinnedURL.absoluteString && controller.browsers[pinnedID]?.url == pinnedURL && placeKept()
+                      && persisted() != nil && persisted()?.saved == nil, "Unpinning did not leave (and save) an ordinary tab on the same page in place")
+            result = try await update(pinnedJS, pinned: true, changes: true)
+            try check(result["ok"] as? Bool == true && result["pinned"] as? Bool == true && result["event"] as? Bool == true
+                      && pinnedTab()?.saved?.kind == .kept && pinnedTab()?.saved?.address == pinnedURL.absoluteString && placeKept()
+                      && persisted()?.saved?.kind == .kept, "Pinning an ordinary tab did not keep (and save) it on its page: \(result)")
+            // pinned:true on a kept tab is a no-op.
+            result = try await update(pinnedJS, pinned: true, changes: false)
+            try check(result["ok"] as? Bool == true && result["event"] is NSNull && pinnedTab()?.saved?.kind == .kept, "pinned:true changed a kept tab: \(result)")
+
+            // Bam-only state refuses an unpin and survives it: custom name, folder, a different current page.
+            _ = controller.session.updateSavedTab(id: pinnedID, customTitle: "Pinned fixture", customSymbol: nil)
+            result = try await update(pinnedJS, pinned: false, changes: false)
+            try check(result["ok"] as? Bool == false && (result["error"] as? String)?.contains("custom name") == true && result["after"] as? Bool == true
+                      && pinnedTab()?.saved?.customTitle == "Pinned fixture", "Unpinning discarded a custom name: \(result)")
+            _ = controller.session.updateSavedTab(id: pinnedID, customTitle: nil, customSymbol: nil)
+            guard let space = pinnedTab()?.space,
+                  let folder = controller.session.createFolder(name: "Pinned fixture", space: space, containing: [pinnedID]) else {
+                throw ExtensionSmokeTest.Failure(description: "Could not put the pinned tab in a folder")
+            }
+            result = try await update(pinnedJS, pinned: false, changes: false)
+            try check(result["ok"] as? Bool == false && (result["error"] as? String)?.contains("folder") == true
+                      && pinnedTab()?.folderID == folder && pinnedTab()?.saved?.kind == .kept, "Unpinning took a kept tab out of its folder: \(result)")
+            _ = controller.session.ungroupFolder(id: folder)
+            let movedURL = pinnedPage("pinned-moved")
+            controller.navigatePane(pinnedID, address: movedURL.absoluteString)
+            try await wait("Pinned tab did not navigate") {
+                controller.browsers[pinnedID]?.url == movedURL && controller.browsers[pinnedID]?.isLoading == false && pinnedTab()?.address == movedURL.absoluteString
+            }
+            result = try await update(pinnedJS, pinned: false, changes: false)
+            try check(result["ok"] as? Bool == false && (result["error"] as? String)?.contains("different page") == true
+                      && pinnedTab()?.saved?.address == pinnedURL.absoluteString && pinnedTab()?.address == movedURL.absoluteString,
+                      "Unpinning forgot the kept page or moved the current one: \(result)")
+
+            // A split refuses before either pane changes.
+            controller.session.splits = (controller.session.splits ?? []) + [BrowserSplit(primaryID: id, secondaryID: pinnedID)]
+            let pageJS = try await pinnedCall("return JSON.stringify({id: (await browser.tabs.query({})).find(tab => tab.url === address)?.id ?? null});",
+                                              ["address": url.absoluteString])["id"] as? Int
+            guard let pageJS else { throw ExtensionSmokeTest.Failure(description: "The adapter page was not visible to its extension") }
+            result = try await update(pinnedJS, pinned: false, changes: false)
+            let pageResult = try await update(pageJS, pinned: true, changes: false)
+            try check(result["ok"] as? Bool == false && (result["error"] as? String)?.contains("split") == true
+                      && pageResult["ok"] as? Bool == false && (pageResult["error"] as? String)?.contains("split") == true
+                      && pinnedTab()?.saved?.kind == .kept && controller.session.tabs.first(where: { $0.id == id })?.saved == nil
+                      && controller.session.split(for: pinnedID)?.primaryID == id, "A split pane's pinned state changed: \(result) \(pageResult)")
+            controller.session.removeSplit(containing: pinnedID)
+
+            // A Favorite is reported pinned; pinned:true leaves it a Favorite, and unpinning it is refused.
+            try check(controller.session.setRetention(id: pinnedID, kind: .favorite), "Could not make the fixture tab a Favorite")
+            controller.refresh()
+            result = try await update(pinnedJS, pinned: true, changes: false)
+            try check(result["ok"] as? Bool == true && result["after"] as? Bool == true && pinnedTab()?.isFavorite == true, "pinned:true demoted a Favorite: \(result)")
+            result = try await update(pinnedJS, pinned: false, changes: false)
+            try check(result["ok"] as? Bool == false && (result["error"] as? String)?.contains("Favorite") == true && pinnedTab()?.isFavorite == true && placeKept(),
+                      "Unpinning a Favorite was not refused truthfully: \(result)")
+            try check(controller.setExtensionTabPinned(pinnedID, profileID: other, pinned: false) != nil && pinnedTab()?.isFavorite == true,
+                      "Another profile changed this profile's tab")
+
+            // Demoting a Favorite needs its profile showing (Bam's own rule); restore the window afterwards.
+            controller.session.changeSpace(space)
+            _ = controller.session.setRetention(id: pinnedID, kind: nil)
+            _ = host.closeTab?(pinnedID)
+            controller.session.changeSpace(place.space); controller.showActive(); controller.refresh()
+            try check(pinnedTab() == nil && controller.session.currentProfileID == other, "The pinned fixture tab outlived its cleanup")
+            host.reconcile()
+        }
+        // tabs.create with an index before the end inserts the tab exactly there (in session order, which extensions
+        // see), including a pinned one; later tabs shift by one without onMoved, and the window's place is unchanged.
+        do {
+            func indexedPage(_ query: String) -> URL {
+                var components = URLComponents(url: url, resolvingAgainstBaseURL: false)!
+                components.path = "/next.html"; components.query = query
+                return components.url!
+            }
+            let firstURL = indexedPage("index-first"), middleURL = indexedPage("index-middle"), endURL = indexedPage("index-end")
+            let sameURL = indexedPage("index-same"), betweenURL = indexedPage("index-between"), clampURL = indexedPage("index-clamp")
+            let place = (space: controller.session.space, profile: controller.session.currentProfileID, active: controller.session.activeID)
+            func placeKept() -> Bool {
+                controller.session.space == place.space && controller.session.currentProfileID == place.profile && controller.session.activeID == place.active
+            }
+            let tabCount = controller.session.tabs.count
+            let text = try await popup.callAsyncJavaScript("""
+                const [win] = await browser.windows.getAll({windowTypes: ['normal'], populate: true});
+                let moved = 0; const onMoved = () => { moved += 1; };
+                const created = {}; const onCreated = (tab) => { created[tab.id] = {index: tab.index, pinned: tab.pinned}; };
+                browser.tabs.onMoved.addListener(onMoved); browser.tabs.onCreated.addListener(onCreated);
+                try {
+                  const ordered = async () => (await browser.tabs.query({windowId: win.id})).sort((a, b) => a.index - b.index).map(tab => tab.id);
+                  const before = await ordered();
+                  const first = await browser.tabs.create({windowId: win.id, index: 0, url: first_, active: false});
+                  const middle = await browser.tabs.create({windowId: win.id, index: 1, url: middle_, active: false, pinned: true});
+                  const after = await ordered();
+                  const end = await browser.tabs.create({windowId: win.id, index: after.length, url: end_, active: false});
+                  // Two tabs with one URL: an insertion is anchored to the tab at that index, not to a URL.
+                  const sameA = await browser.tabs.create({windowId: win.id, url: same_, active: false});
+                  const sameB = await browser.tabs.create({windowId: win.id, url: same_, active: false});
+                  const between = await browser.tabs.create({windowId: win.id, index: (await browser.tabs.get(sameB.id)).index, url: between_, active: false});
+                  const sameOrder = await ordered();
+                  // An index past the end (no Peek) clamps to an append.
+                  const count = sameOrder.length;
+                  const clamp = await browser.tabs.create({windowId: win.id, index: count + 50, url: clamp_, active: false});
+                  await new Promise(resolve => setTimeout(resolve, 300));
+                  const final = await ordered();
+                  return JSON.stringify({before, after, moved, created, final, sameOrder,
+                    first: {id: first.id, index: first.index, read: (await browser.tabs.get(first.id)).index},
+                    middle: {id: middle.id, index: middle.index, pinned: middle.pinned, read: (await browser.tabs.get(middle.id)).index},
+                    end: {id: end.id, index: end.index, expected: after.length},
+                    same: {a: sameA.id, b: sameB.id, between: between.id},
+                    clamp: {id: clamp.id, index: clamp.index, expected: count}});
+                } finally { browser.tabs.onMoved.removeListener(onMoved); browser.tabs.onCreated.removeListener(onCreated); }
+                """, arguments: ["first_": firstURL.absoluteString, "middle_": middleURL.absoluteString, "end_": endURL.absoluteString,
+                                 "same_": sameURL.absoluteString, "between_": betweenURL.absoluteString, "clamp_": clampURL.absoluteString], contentWorld: .page) as? String
+            guard let data = text?.data(using: .utf8), let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let first = value["first"] as? [String: Any], let middle = value["middle"] as? [String: Any], let end = value["end"] as? [String: Any],
+                  let same = value["same"] as? [String: Any], let clamp = value["clamp"] as? [String: Any],
+                  let before = value["before"] as? [Int], let after = value["after"] as? [Int], let sameOrder = value["sameOrder"] as? [Int],
+                  let created = value["created"] as? [String: [String: Any]],
+                  let firstJS = first["id"] as? Int, let middleJS = middle["id"] as? Int,
+                  let sameA = same["a"] as? Int, let sameB = same["b"] as? Int, let betweenJS = same["between"] as? Int else {
+                throw ExtensionSmokeTest.Failure(description: "Indexed tabs.create probe returned \(text ?? "nil")")
+            }
+            try check(first["index"] as? Int == 0 && first["read"] as? Int == 0 && middle["index"] as? Int == 1 && middle["read"] as? Int == 1
+                      && middle["pinned"] as? Bool == true && after == [firstJS, middleJS] + before,
+                      "An indexed tabs.create was not placed, read back or shifted exactly: \(value)")
+            // onCreated reports the tab already in place (and already pinned), never a transient end position.
+            try check(created[String(firstJS)]?["index"] as? Int == 0 && created[String(firstJS)]?["pinned"] as? Bool == false
+                      && created[String(middleJS)]?["index"] as? Int == 1 && created[String(middleJS)]?["pinned"] as? Bool == true,
+                      "tabs.onCreated did not report an inserted tab's final index and pinned state: \(created)")
+            try check(end["index"] as? Int == end["expected"] as? Int && value["moved"] as? Int == 0,
+                      "An append landed elsewhere, or an insertion fired onMoved: \(value)")
+            try check(Array(sameOrder.suffix(3)) == [sameA, betweenJS, sameB],
+                      "An insertion before one of two same-URL tabs landed by URL rather than before that tab: \(sameOrder)")
+            try check(clamp["index"] as? Int == clamp["expected"] as? Int && (value["final"] as? [Int])?.last == clamp["id"] as? Int,
+                      "An index past the end did not clamp to an append: \(value)")
+            func bamID(_ address: URL) -> UUID? { controller.session.tabs.first(where: { $0.address == address.absoluteString })?.id }
+            let sameIDs = controller.session.tabs.filter { $0.address == sameURL.absoluteString }.map(\.id)
+            guard let firstID = bamID(firstURL), let middleID = bamID(middleURL), let endID = bamID(endURL),
+                  let betweenID = bamID(betweenURL), let clampID = bamID(clampURL), sameIDs.count == 2 else {
+                throw ExtensionSmokeTest.Failure(description: "Indexed tabs were not created in Bam")
+            }
+            let members = controller.session.tabs.filter { controller.session.profileID(for: $0) == profile }.map(\.id)
+            let middleTab = controller.session.tabs.first { $0.id == middleID }
+            try check(Array(members.prefix(2)) == [firstID, middleID] && Array(members.suffix(4)) == [sameIDs[0], betweenID, sameIDs[1], clampID]
+                      && members.contains(endID) && controller.session.tabs.count == tabCount + 7,
+                      "Bam's session order does not match the indices extensions were given, or an extra tab appeared")
+            try check(middleTab?.saved?.kind == .kept && middleTab?.folderID == nil
+                      && controller.session.tabs.first(where: { $0.id == firstID })?.saved == nil,
+                      "An indexed pinned tab was not kept at its Space's root, or an ordinary one was kept")
+            try check(placeKept() && host.createsTabBefore == nil && !host.createsKeptTab,
+                      "Indexed background creation moved the window's Space, profile or selection, or left placement intent behind")
+            _ = controller.session.setRetention(id: middleID, kind: nil)
+            for id in [firstID, middleID, endID, betweenID, clampID] + sameIDs { _ = host.closeTab?(id) }
+            controller.refresh(); host.reconcile()
+            try check(controller.session.tabs.count == tabCount, "Indexed fixture tabs outlived their cleanup")
+
+            // Insertion into a profile whose target Space is empty: selecting it synthesizes a blank tab, which the
+            // new tab replaces; the anchor (in that profile's other Space) keeps its place right after the new tab.
+            // A foreign-profile anchor is refused before anything changes.
+            guard let emptyProfile = controller.session.createProfile(name: "Indexed empty"),
+                  let emptySpace = controller.session.createSpace(name: "Indexed empty", symbol: "briefcase", colorIndex: 3, profileID: emptyProfile),
+                  let anchorSpace = controller.session.createSpace(name: "Indexed anchor", symbol: "briefcase", colorIndex: 4, profileID: emptyProfile) else {
+                throw ExtensionSmokeTest.Failure(description: "Could not create the empty-Space insertion fixture")
+            }
+            let anchorTab = BrowserTab(title: "Anchor", address: indexedPage("index-anchor").absoluteString, space: anchorSpace)
+            controller.session.tabs.append(anchorTab)
+            let foreignAnchor = controller.session.tabs.first { controller.session.profileID(for: $0) == profile }!.id
+            let beforeForeign = controller.session.tabs.count
+            try check(host.createTab(indexedPage("index-foreign"), profileID: emptyProfile, active: false, kept: false, before: foreignAnchor) == nil
+                      && controller.session.tabs.count == beforeForeign && controller.session.tabs.allSatisfy({ $0.space != emptySpace }) && placeKept(),
+                      "An anchor from another profile was not refused before anything changed")
+            let insertedURL = indexedPage("index-into-empty")
+            guard let inserted = host.createTab(insertedURL, profileID: emptyProfile, active: false, kept: false, before: anchorTab.id) else {
+                throw ExtensionSmokeTest.Failure(description: "Insertion into an empty target Space was refused")
+            }
+            let emptyMembers = controller.session.tabs.filter { $0.space == emptySpace }
+            let profileOrder = controller.session.tabs.filter { controller.session.profileID(for: $0) == emptyProfile }.map(\.id)
+            try check(emptyMembers.map(\.id) == [inserted] && emptyMembers.first?.address == insertedURL.absoluteString
+                      && profileOrder == [inserted, anchorTab.id] && controller.session.tabs.first(where: { $0.id == anchorTab.id })?.space == anchorSpace
+                      && controller.session.lastSelectedTabIDsBySpace?[emptySpace] == inserted && placeKept() && host.createsTabBefore == nil,
+                      "Insertion into an empty Space left its blank tab, misplaced the tab or anchor, or moved the window: \(emptyMembers.map(\.address))")
+            _ = host.closeTab?(inserted)
+            controller.session.tabs.removeAll { $0.id == anchorTab.id }
+            try check(controller.session.deleteSpace(id: emptySpace, movingTabsTo: place.space) && controller.session.deleteSpace(id: anchorSpace, movingTabsTo: place.space)
+                      && !controller.session.tabs.contains { $0.id == inserted } && placeKept(), "The empty-Space insertion fixture was not cleaned up")
+            controller.refresh(); host.reconcile()
         }
         // Measurement, not a pass/fail: idle-callback availability in the three page-side worlds
         // (Proton Pass and uBOL page scripts call requestIdleCallback without a feature check).
@@ -432,11 +788,23 @@ import Darwin
             return components.url!
         }
         let secondURL = secondPage()
-        guard let activeContext = host.context(for: activeID), let activeConfiguration = activeContext.webViewConfiguration,
+        // N3: the activeTab fixture's context is held only until its last use (below); same lookups and order as before.
+        var activeContextHolder: WKWebExtensionContext? = host.context(for: activeID)
+        // N3: its page configuration likewise, only until the page is built (below).
+        var activeConfigurationHolder: WKWebViewConfiguration? = activeContextHolder?.webViewConfiguration
+        guard activeConfigurationHolder != nil,
               let secondID = controller.openProfileTab(secondURL, profileID: profile, active: false) else { throw ExtensionSmokeTest.Failure(description: "activeTab fixture did not load") }
+        observeObject("activeConfiguration(other extension)", activeConfigurationHolder)
+        var activeContext: WKWebExtensionContext { activeContextHolder! }
+        observeObject("activeContext(other extension)", activeContextHolder)
         try await wait("activeTab second tab did not load") { controller.browsers[secondID]?.url == secondURL && controller.browsers[secondID]?.isLoading == false }
         host.reconcile()
-        let activePage = WKWebView(frame: NSRect(x: 0, y: 0, width: 320, height: 240), configuration: activeConfiguration)
+        // Held only until its last use (below), like heldPopup: a raw extension page outside Bam's ownership must not
+        // outlive its check into the later withdrawal checks.
+        var activePageHolder: WKWebView? = WKWebView(frame: NSRect(x: 0, y: 0, width: 320, height: 240), configuration: activeConfigurationHolder!)
+        activeConfigurationHolder = nil   // N3: its only use was building the page
+        var activePage: WKWebView { activePageHolder! }
+        observeExtensionView("activeTab-extension-page(other extension)", activePageHolder)
         activePage.load(URLRequest(url: activeContext.baseURL.appendingPathComponent("page.html")))
         try await wait("activeTab extension page did not load") { activePage.title == "activeTab page" }
         func activeTabAccess() async throws -> (allowed: [Int], denied: Int, callback: String) {
@@ -487,21 +855,36 @@ import Darwin
         let crossOrigin = try await activeTabAccess()
         try check(crossOrigin.allowed.isEmpty && crossOrigin.callback == "error", "Cross-origin navigation did not end the tab's activeTab grant: \(crossOrigin)")
         activePage.stopLoading()
+        // Last use: release the test's raw page and require it gone (premise for the withdrawal checks later in this run).
+        weak let releasedActivePage = activePageHolder
+        activePageHolder = nil
+        activeContextHolder = nil   // N3: last use of the activeTab fixture's context
         _ = host.closeTab?(secondID)
         try await host.remove(id: activeID)
         host.reconcile()
+        try await wait("The activeTab check's own extension page was not released after its last use") { releasedActivePage == nil }
         _ = try await popup.evaluateJavaScript("document.getElementById('open-page').click(); true")
+        // Last use of the original popup: release the test's references to it (and the first action's popup).
+        heldPopup = nil
+        tabAction.closePopup(); actionContext.action(for: nil)?.closePopup()
+        // N3: last use of the first context and its tab action.
+        tabActionHolder = nil; actionContextHolder = nil
         try await wait("Browser adapter did not open its own extension page") { controller.session.tabs.contains { URLInput.extensionURL($0.address) != nil } }
-        guard let tab = controller.session.tabs.first(where: { URLInput.extensionURL($0.address) != nil }), let extensionWeb = controller.browsers[tab.id] else { throw ExtensionSmokeTest.Failure(description: "Missing extension renderer") }
-        try await wait("Browser adapter used the wrong configuration for its extension page") { extensionWeb.title == "Bam extension page ready" }
-        try check(controller.session.profileID(for: tab) == profile && controller.profileID(of: extensionWeb) == profile, "Extension-created page escaped its source profile")
+        guard let tab = controller.session.tabs.first(where: { URLInput.extensionURL($0.address) != nil }), controller.browsers[tab.id] != nil else { throw ExtensionSmokeTest.Failure(description: "Missing extension renderer") }
+        // Bam owns its renderers; the test only observes them weakly, so it never keeps an old one (and its process) alive.
+        weak let extensionWeb = controller.browsers[tab.id]
+        observeExtensionView("bam-tab-first-extension-renderer", extensionWeb)
+        try await wait("Browser adapter used the wrong configuration for its extension page") { extensionWeb?.title == "Bam extension page ready" }
+        try check(controller.session.profileID(for: tab) == profile && extensionWeb.map { controller.profileID(of: $0) } == profile, "Extension-created page escaped its source profile")
         let extensionURL = URL(string: tab.address)!
         try check(controller.openProfileTab(extensionURL, profileID: other, active: false) == nil, "Browser adapter opened extension page in a foreign profile")
         controller.navigatePane(tab.id, address: url.absoluteString)
         try await wait("Extension-to-HTTP navigation did not replace renderer") { controller.browsers[tab.id] !== extensionWeb && controller.browsers[tab.id]?.url == url && controller.browsers[tab.id]?.isLoading == false }
-        let normal = controller.browsers[tab.id]!
+        weak let normal = controller.browsers[tab.id]
+        try check(normal != nil, "The HTTP renderer was missing")
         controller.navigatePane(tab.id, address: extensionURL.absoluteString)
         try await wait("HTTP-to-extension navigation did not replace renderer") { controller.browsers[tab.id] !== normal && controller.browsers[tab.id]?.title == "Bam extension page ready" }
+        observeExtensionView("bam-tab-second-extension-renderer", controller.browsers[tab.id])
         // Cancellation is a no-op on the running package and signed-in storage.
         let updateFolder = FileManager.default.temporaryDirectory.appendingPathComponent("bam-action-update-\(UUID().uuidString)")
         try FileManager.default.copyItem(at: sourceFixture, to: updateFolder)
@@ -511,6 +894,8 @@ import Darwin
         manifest["version"] = "2.0.0"
         manifest["optional_permissions"] = ["alarms", "cookies"]
         manifest["optional_host_permissions"] = ["http://localhost/*", "https://optional.invalid/*"]
+        // The update requests one new site: the update review must list exactly it, and declining keeps the old version.
+        manifest["host_permissions"] = ["http://127.0.0.1/*", "https://new.invalid/*"]
         try JSONSerialization.data(withJSONObject: manifest).write(to: updateManifest)
         let installedManifest = host.storageURL.appendingPathComponent(extensionID.uuidString).appendingPathComponent("package/manifest.json")
         let originalBytes = try Data(contentsOf: installedManifest)
@@ -527,21 +912,638 @@ import Darwin
             context.setPermissionStatus(.grantedExplicitly, for: removedScope, expirationDate: grantExpiry)
             host.persistPermissions(context)
         }
-        let originalContext = host.context(for: extensionID)!
+        // Site access on the live context through the panel's engine API (after the approved update).
+        /// A Site Access change that withdraws live access restarts the extension in two phases
+        /// (work/site-access-two-phase-final-contract.md): its context is nil until the restart completes. Wait for that
+        /// restart by its generation before reading the context; a change that withdrew nothing returns at once.
+        func settleRestart(_ label: String, from before: UInt64) async throws {
+            let started = host.restartGeneration[extensionID] ?? 0
+            guard started != before else { return }
+            try check(started == before + 1, "\(label): \(started - before) restarts started instead of one")
+            guard let result = await host.restartCompletion(id: extensionID, generation: started) else {
+                throw ExtensionSmokeTest.Failure(description: "\(label): no result for restart generation \(started)")
+            }
+            try check(result == .restarted && host.context(for: extensionID)?.isLoaded == true && !host.isRestarting(id: extensionID),
+                      "\(label): the restart finished \(result), or left no loaded context")
+            _ = host.takeSiteAccessNotice(id: extensionID)
+        }
+        func generationNow() -> UInt64 { host.restartGeneration[extensionID] ?? 0 }
+        /// The names of the Site Access revision fields that differ (diagnostics; "missing" when one side has none).
+        func revisionDiff(_ a: BrowserExtensionSiteAccessSnapshot.Revision, _ b: BrowserExtensionSiteAccessSnapshot.Revision?) -> [String] {
+            guard let b else { return ["missing"] }
+            return [("stored", a.stored != b.stored), ("timed", a.timed != b.timed), ("patterns", a.patterns != b.patterns), ("version", a.version != b.version),
+                    ("enabled", a.enabled != b.enabled), ("context", a.context != b.context), ("declarations", a.declarations != b.declarations),
+                    ("permissionEpoch", a.permissionEpoch != b.permissionEpoch)].filter(\.1).map(\.0)
+        }
+        func checkSiteAccess() async throws {
+            let ip = URL(string: "http://127.0.0.1/site-access")!, newSite = URL(string: "https://new.invalid/")!
+            let ipPattern = try WKWebExtension.MatchPattern(string: "http://127.0.0.1/*")
+            func granted(_ url: URL) -> Bool {
+                guard let status = host.context(for: extensionID)?.permissionStatus(for: url) else { return false }
+                return status == .grantedExplicitly || status == .grantedImplicitly
+            }
+            func isFinite(_ date: Date?) -> Bool { date.map { $0 < Date.distantFuture.addingTimeInterval(-86_400) } ?? false }
+            func perform(_ snapshot: BrowserExtensionSiteAccessSnapshot, _ change: BrowserExtensionSiteAccessChange) throws -> BrowserExtensionSiteAccessSnapshot {
+                try host.performSiteAccess(id: extensionID, profileID: profile, revision: snapshot.revision, displayed: snapshot.declarations!, change: change)
+            }
+            guard let updated = host.siteAccess(id: extensionID) else { throw ExtensionSmokeTest.Failure(description: "No site access snapshot") }
+            try check(updated.state.mode == .allRequested && updated.declarations?.requested == ["http://127.0.0.1/*", "https://new.invalid/*"] &&
+                updated.pending.isEmpty && granted(ip) && granted(newSite), "Approved update did not grant exactly the reviewed sites: \(updated.state)")
+            try check(isFinite(updated.timed.optional[optionalGranted.string]) && updated.timed.requested.isEmpty,
+                "A time-limited optional grant lost its provenance or date: \(updated.timed)")
+            let beforeWithhold = generationNow()
+            let withheld = try perform(updated, .choose(.withheld))
+            try await settleRestart("Withhold", from: beforeWithhold)
+            try check(withheld.state.mode == .withheld && !granted(ip) && !granted(newSite) && withheld.timed.optional[optionalGranted.string] != nil &&
+                host.context(for: extensionID)?.grantedPermissionMatchPatterns[optionalGranted] != nil,
+                "Withholding must remove requested sites from the live extension and keep optional grants")
+            var stale = false
+            do { _ = try perform(updated, .choose(.allRequested)) } catch BrowserExtensionSiteAccessFailure.stale { stale = true }
+            try check(stale && !granted(ip) && host.siteAccess(id: extensionID)?.state.mode == .withheld, "A stale action approved sites")
+            // Current revision but declarations the user never saw (an update between render and click): refused.
+            var unseen = false
+            do { _ = try host.performSiteAccess(id: extensionID, profileID: profile, revision: withheld.revision,
+                                                displayed: .init(requested: ["http://127.0.0.1/*"]), change: .choose(.allRequested)) }
+            catch BrowserExtensionSiteAccessFailure.stale { unseen = true }
+            try check(unseen && !granted(ip) && !granted(newSite), "An action for declarations the user never saw approved sites")
+            var refusal: ExtensionSiteAccess.Refusal?
+            do { _ = try perform(withheld, .addSite(input: "example.com", includeSubdomains: false)) }
+            catch BrowserExtensionSiteAccessFailure.refused(let reason) { refusal = reason }
+            try check(refusal == .notRequested && host.siteAccess(id: extensionID)?.revision == withheld.revision, "An unrequested site was not refused")
+            let listed = try perform(withheld, .addSite(input: "127.0.0.1", includeSubdomains: false))
+            try check(listed.state.mode == .specific(["http://127.0.0.1/*"]) && granted(ip) && !granted(newSite), "Adding a site must grant just that site")
+            try await host.setEnabled(false, id: extensionID); try await host.setEnabled(true, id: extensionID)
+            try check(host.siteAccess(id: extensionID)?.state.mode == .specific(["http://127.0.0.1/*"]) && granted(ip) && !granted(newSite),
+                "Re-enabling must keep the narrower choice, never re-grant every requested site")
+            // An explicit finite expiry on a permanent site constrains it until a fresh approval, across a reload.
+            // Measured (work/chrome-expiry-diagnostic-runtime-3b1bd88.log): setPermissionStatus(.grantedExplicitly, for:,
+            // expirationDate:) on an already-granted pattern leaves its permanent expiry. The SDK's settable
+            // grantedPermissionMatchPatterns ("replace all existing entries") sets the exact expiry instead; every other
+            // entry is carried over unchanged.
+            // Scoped: no context is held past this block, so none survives the withdrawals below.
+            do {
+            guard let live = host.context(for: extensionID) else { throw ExtensionSmokeTest.Failure(description: "Re-enable failed") }
+            let desiredExpiry = Date(timeIntervalSinceNow: 3_600)
+            let grantsBefore = live.grantedPermissionMatchPatterns
+            try check(grantsBefore[ipPattern].map { !isFinite($0) } == true, "The listed site was not permanently granted before shortening: \(String(describing: grantsBefore[ipPattern]))")
+            var shortenedGrants = grantsBefore
+            shortenedGrants[ipPattern] = desiredExpiry
+            live.grantedPermissionMatchPatterns = shortenedGrants
+            let grantsAfter = live.grantedPermissionMatchPatterns
+            try check(grantsAfter[ipPattern].map { abs($0.timeIntervalSince(desiredExpiry)) < 1 } == true &&
+                grantsAfter.count == grantsBefore.count && grantsBefore.allSatisfy { key, date in key == ipPattern || grantsAfter[key] == date },
+                "Setting the exact native expiry failed or changed other grants: \(ipPattern.string)=\(String(describing: grantsAfter[ipPattern])), desired=\(desiredExpiry), entries \(grantsBefore.count)→\(grantsAfter.count)")
+            host.persistPermissions(live)
+            let shortened = host.siteAccess(id: extensionID)
+            try check(shortened?.state.mode == .withheld && isFinite(shortened?.timed.requested[ipPattern.string]),
+                "A shortened grant must leave the permanent choice as time-limited requested access: \(String(describing: shortened?.state)); native \(ipPattern.string) expiry=\(String(describing: live.grantedPermissionMatchPatterns[ipPattern]))")
+            }
+            try await host.setEnabled(false, id: extensionID); try await host.setEnabled(true, id: extensionID)
+            try check(isFinite(host.context(for: extensionID)?.grantedPermissionMatchPatterns[ipPattern]) && granted(ip),
+                "A reload restored a shortened grant to permanent")
+            guard let reloaded = host.siteAccess(id: extensionID) else { throw ExtensionSmokeTest.Failure(description: "No snapshot after reload") }
+            let beforeEnd = generationNow()
+            let ended = try perform(reloaded, .choose(.withheld))
+            try await settleRestart("Withholding a time-limited grant", from: beforeEnd)
+            try check(ended.timed.requested.isEmpty && !granted(ip), "Withholding must end requested time-limited grants")
+            // A runtime prompt whose dialog outlives a panel change neither grants nor denies (the Allow wins).
+            guard let promptContext = host.context(for: extensionID), let promptController = promptContext.webExtensionController,
+                  let promptRuntime = promptController.delegate as? BrowserExtensionRuntime else { throw ExtensionSmokeTest.Failure(description: "No live runtime for the prompt") }
+            let previousPrompt = host.permissionPrompt
+            var promptAnswer: Set<WKWebExtension.MatchPattern>?
+            host.permissionPrompt = { _ in
+                _ = try? host.performSiteAccess(id: extensionID, profileID: profile, revision: ended.revision, displayed: ended.declarations!,
+                                                change: .addSite(input: "127.0.0.1", includeSubdomains: false))
+                return false
+            }
+            promptRuntime.webExtensionController(promptController, promptForPermissionMatchPatterns: [ipPattern], in: nil, for: promptContext) { granted, _ in promptAnswer = granted }
+            host.permissionPrompt = previousPrompt
+            try check(promptAnswer == [] && granted(ip) && host.records.first { $0.id == extensionID }?.deniedPatterns[ipPattern.string] == nil &&
+                promptContext.deniedPermissionMatchPatterns[ipPattern] == nil,
+                "A stale prompt denial overrode a newer Allow")
+            guard let allowed = host.siteAccess(id: extensionID) else { throw ExtensionSmokeTest.Failure(description: "No snapshot after prompt") }
+            let restored = try perform(allowed, .choose(.allRequested))
+            try check(restored.state.mode == .allRequested && restored.timed.requested.isEmpty && granted(ip) && granted(newSite) &&
+                !isFinite(host.context(for: extensionID)?.grantedPermissionMatchPatterns[ipPattern]),
+                "A fresh All requested approval must grant every requested site permanently")
+            // Refused before any review (undeclared): answered empty, nothing shown, and no denial recorded, for both
+            // prompt kinds. A stored denial would cover the whole host ahead of any later grant.
+            guard let liveContext = host.context(for: extensionID) else { throw ExtensionSmokeTest.Failure(description: "No live context for refusal checks") }
+            let earlierPrompt = host.permissionPrompt
+            defer { host.permissionPrompt = earlierPrompt }
+            var reviewsShown = 0
+            host.permissionPrompt = { _ in reviewsShown += 1; return false }
+            func deniedKeys(_ url: URL) -> [String] {
+                (host.context(for: extensionID)?.deniedPermissionMatchPatterns.keys.filter { $0.matches(url) }.map(\.string) ?? []) +
+                (host.records.first { $0.id == extensionID }?.deniedPatterns.keys.filter { (try? WKWebExtension.MatchPattern(string: $0))?.matches(url) == true } ?? [])
+            }
+            let undeclaredURL = URL(string: "https://undeclared.invalid/page")!
+            var urlAnswer: Set<URL>?, patternAnswer: Set<WKWebExtension.MatchPattern>?
+            promptRuntime.webExtensionController(promptController, promptForPermissionToAccess: [undeclaredURL], in: nil, for: liveContext) { granted, _ in urlAnswer = granted }
+            promptRuntime.webExtensionController(promptController, promptForPermissionMatchPatterns: [try WKWebExtension.MatchPattern(string: "https://undeclared.invalid/*")],
+                                                 in: nil, for: liveContext) { granted, _ in patternAnswer = granted }
+            try check(reviewsShown == 0 && urlAnswer == [] && patternAnswer == [] && deniedKeys(undeclaredURL).isEmpty &&
+                liveContext.permissionStatus(for: undeclaredURL) != .deniedExplicitly,
+                "A refusal the user never saw recorded a denial or showed a review: shown=\(reviewsShown), denied=\(deniedKeys(undeclaredURL))")
+        }
+        /// Chrome-style consent (work/chrome-implicit-url-consent-policy.md): WebKit's *implicit* URL requests (tab reads,
+        /// injection, cookies, CORS) are answered empty with no review and no denial, even for an optional or a
+        /// requested-but-withheld site. Only explicit pattern requests (permissions.request) are reviewed. Runs before
+        /// checkSiteAccess, from and back to All requested, so it is independent of that function's steps.
+        func checkExplicitConsent() async throws {
+            let ip = URL(string: "http://127.0.0.1/site-access")!, newSite = URL(string: "https://new.invalid/")!
+            func granted(_ url: URL) -> Bool {
+                guard let status = host.context(for: extensionID)?.permissionStatus(for: url) else { return false }
+                return status == .grantedExplicitly || status == .grantedImplicitly
+            }
+            func perform(_ snapshot: BrowserExtensionSiteAccessSnapshot, _ change: BrowserExtensionSiteAccessChange) throws -> BrowserExtensionSiteAccessSnapshot {
+                try host.performSiteAccess(id: extensionID, profileID: profile, revision: snapshot.revision, displayed: snapshot.declarations!, change: change)
+            }
+            func deniedKeys(_ url: URL) -> [String] {
+                (host.context(for: extensionID)?.deniedPermissionMatchPatterns.keys.filter { $0.matches(url) }.map(\.string) ?? []) +
+                (host.records.first { $0.id == extensionID }?.deniedPatterns.keys.filter { (try? WKWebExtension.MatchPattern(string: $0))?.matches(url) == true } ?? [])
+            }
+            guard let promptController = host.context(for: extensionID)?.webExtensionController,
+                  let promptRuntime = promptController.delegate as? BrowserExtensionRuntime else { throw ExtensionSmokeTest.Failure(description: "No live runtime for consent checks") }
+            // A withdrawal can restart the extension with a NEW context (work/extension-renderer-restart-fixture-contract.md):
+            // never keep one across a Site Access change. Every use re-reads the context and requires it to be loaded and
+            // owned by this profile's runtime, so nothing here can pass against a retired context.
+            func live() throws -> WKWebExtensionContext {
+                guard let context = host.context(for: extensionID), context.isLoaded, promptRuntime.contexts[extensionID] === context,
+                      context.webExtensionController === promptController else {
+                    throw ExtensionSmokeTest.Failure(description: "The extension has no loaded context owned by this profile's runtime")
+                }
+                return context
+            }
+            try check(host.siteAccess(id: extensionID)?.state.mode == .allRequested && granted(ip) && granted(newSite), "Consent checks did not start from All requested")
+            let earlierPrompt = host.permissionPrompt
+            defer { host.permissionPrompt = earlierPrompt }
+            var reviewsShown = 0
+            // A subset of the optional https://optional.invalid/* that overlaps no seeded grant or denial: WebKit can drop
+            // grants a denied pattern covers, and the time-limited http://localhost/kept/* grant must survive for later steps.
+            let optionalURL = URL(string: "https://optional.invalid/consent/page")!, optionalOrigin = "https://optional.invalid/consent/*"
+            // Diagnostics (native 4e0092f: the withheld-use fetch read 200 once in the full run, refused in 52fdfae): which
+            // extension views are alive at each step of this restart, and at the will-load seam (just before the fresh load).
+            let extensionHost = host.context(for: extensionID)?.baseURL.host
+            func extensionViewInventory(_ stage: String) {
+                let alive = observedExtensionViews.filter { $0.view.value != nil }.map(\.label)
+                let bamExtensionRenderers = controller.browsers.filter { $0.value.url?.scheme == "webkit-extension" && $0.value.url?.host == extensionHost }
+                    .map { "\($0.key.uuidString.prefix(8)):\($0.value.url?.path ?? "-")" }.sorted()
+                // Scope (incomplete by construction): views this fixture registered, Bam's tab renderers, and the popups Bam
+                // presented earlier that the fixture tracked. Not visible here: background pages, per-tab action popups,
+                // offscreen documents and any other view WebKit holds internally.
+                print("CONSENT_VIEWS stage=\(stage) t=\(String(format: "%.3f", ProcessInfo.processInfo.systemUptime)) observedAlive=\(alive) heldObjects=\(heldObjectsState()) " +
+                      "presentedPopupViewsAlive=\(retiredWebViews.filter { $0.value != nil }.count) presentedPopoversAlive=\(retiredPopovers.filter { $0.value != nil }.count) " +
+                      "bamExtensionRenderers=\(bamExtensionRenderers) retiredRenderersAlive=\(controller.retiredRenderersAlive()) " +
+                      "restarting=\(host.isRestarting(id: extensionID)) generation=\(generationNow())"); fflush(stdout)
+            }
+            noteSubject("consent-start")
+            print("CONSENT_HISTORY sampledSteps=\(subjectHistory) distinctSampledContexts=\(subjectContextIDs.count) " +
+                  "restartGeneration=\(generationNow()) heldObjects=\(heldObjectsState())"); fflush(stdout)
+            // N3: the fixture dropped its stale context and action references at their last uses. Report (not require)
+            // which are still alive at this moment: an immediate weak snapshot, no waiting (the earlier 3 s wait was a
+            // diagnostic delay, removed so the run has no artificial pause before the first withdrawal).
+            print("CONSENT_N3_RELEASE observed=\(observedObjects.map(\.label)) stillAlive=\(heldObjectsState()) waited=0s"); fflush(stdout)
+            extensionViewInventory("before-first-withhold")
+            // F2 premise: which observed extension views (pages this run created, and Bam views it observed) are still
+            // alive at the moment the fresh context is about to load. Any one of them can carry the old access into the
+            // fresh context's pages, so the premise requires none (checked after the restart settles).
+            var aliveAtFreshLoad: [String]?
+            BrowserExtensions.siteAccessRestartWillLoad = { id in
+                guard id == extensionID else { return }
+                aliveAtFreshLoad = observedExtensionViews.filter { $0.view.value != nil }.map(\.label)
+                extensionViewInventory("will-load-fresh-context")
+            }
+            defer { BrowserExtensions.siteAccessRestartWillLoad = nil }
+            let beforeConsentBase = generationNow()
+            let consentBase = try perform(host.siteAccess(id: extensionID)!, .choose(.withheld))
+            extensionViewInventory("first-withhold-returned")
+            try await settleRestart("Consent checks' first Withhold", from: beforeConsentBase)
+            BrowserExtensions.siteAccessRestartWillLoad = nil
+            extensionViewInventory("first-withhold-settled")
+            try check(aliveAtFreshLoad?.isEmpty == true,
+                "An extension view this run created or observed was still alive when the fresh context loaded (it can carry the withdrawn access): " +
+                "\(aliveAtFreshLoad.map { "\($0)" } ?? "the fresh load was never reached")")
+            var implicitAnswer: Set<URL>?
+            host.permissionPrompt = { _ in reviewsShown += 1; return true }
+            promptRuntime.webExtensionController(promptController, promptForPermissionToAccess: [optionalURL, ip], in: nil, for: try live()) { granted, _ in implicitAnswer = granted }
+            try check(reviewsShown == 0 && implicitAnswer == [] && !granted(ip) && deniedKeys(optionalURL).isEmpty && deniedKeys(ip).isEmpty &&
+                host.siteAccess(id: extensionID)?.state.mode == .withheld && host.siteAccess(id: extensionID)?.revision == consentBase.revision,
+                "An implicit URL request showed a review, granted, denied or changed Site Access: shown=\(reviewsShown), answer=\(String(describing: implicitAnswer))")
+            // Explicit consent keeps its decision: an offered and declined pattern is denied.
+            let optionalPattern = try WKWebExtension.MatchPattern(string: optionalOrigin)
+            var declinedAnswer: Set<WKWebExtension.MatchPattern>?
+            host.permissionPrompt = { _ in reviewsShown += 1; return false }
+            promptRuntime.webExtensionController(promptController, promptForPermissionMatchPatterns: [optionalPattern], in: nil, for: try live()) { granted, _ in declinedAnswer = granted }
+            try check(reviewsShown == 1 && declinedAnswer == [] && live().permissionStatus(for: optionalURL) == .deniedExplicitly && !deniedKeys(optionalURL).isEmpty,
+                "An offered and declined pattern must be denied: shown=\(reviewsShown), status=\(String(describing: try? live().permissionStatus(for: optionalURL).rawValue))")
+            // Test cleanup only: drop the declined denial so the installed-engine checks below start from the same state.
+            func dropOptionalDenial() throws {
+                let context = try live()
+                for key in context.deniedPermissionMatchPatterns.keys where key.matches(optionalURL) { context.deniedPermissionMatchPatterns.removeValue(forKey: key) }
+                host.persistPermissions(context)
+            }
+            let epochAfterDecline = host.siteAccess(id: extensionID)?.revision.permissionEpoch
+            try dropOptionalDenial()
+            print("CONSENT_EPOCH consentBase=\(consentBase.revision.permissionEpoch) afterDecline=\(epochAfterDecline.map(String.init) ?? "-") " +
+                  "afterCleanup=\(host.siteAccess(id: extensionID).map { String($0.revision.permissionEpoch) } ?? "-") " +
+                  "diffFromConsentBase=\(revisionDiff(consentBase.revision, host.siteAccess(id: extensionID)?.revision))"); fflush(stdout)
+
+            // The same policy through the installed engine, from a real extension page and a real 127.0.0.1 tab.
+            let consentTabURL = { () -> URL in
+                var components = URLComponents(url: url, resolvingAgainstBaseURL: false)!; components.query = "consent"; return components.url!
+            }()
+            guard let consentTab = controller.openProfileTab(consentTabURL, profileID: profile, active: false) else { throw ExtensionSmokeTest.Failure(description: "No consent tab") }
+            defer { _ = host.closeTab?(consentTab) }
+            try await wait("The consent tab did not load") { controller.browsers[consentTab]?.url == consentTabURL && controller.browsers[consentTab]?.isLoading == false }
+            // The test's own extension page, always built from the current context and rebuilt after a withdrawal; it is
+            // held in exactly one place so releasing it really drops the test's reference.
+            var consentPage: WKWebView?
+            defer { consentPage?.stopLoading() }
+            func buildConsentPage() async throws {
+                let context = try live()
+                guard let configuration = context.webViewConfiguration else { throw ExtensionSmokeTest.Failure(description: "No extension page configuration") }
+                let web = WKWebView(frame: NSRect(x: 0, y: 0, width: 320, height: 240), configuration: configuration)
+                web.load(URLRequest(url: context.baseURL.appendingPathComponent("page.html")))
+                consentPage = web
+                observeExtensionView("consent-page#\(observedExtensionViews.count)", web)
+                try await wait("The extension page for consent checks did not load") { web.title == "Bam extension page ready" }
+            }
+            /// Drops the test's reference and reports (not asserts) whether WebKit deallocated it: cleanup, not policy.
+            @discardableResult func releaseConsentPage(_ reason: String) async throws -> Bool {
+                weak let released = consentPage
+                consentPage?.stopLoading(); consentPage = nil
+                let deadline = ProcessInfo.processInfo.systemUptime + 5
+                while released != nil && ProcessInfo.processInfo.systemUptime < deadline { try await Task.sleep(nanoseconds: 40_000_000) }
+                print("CONSENT_PAGE_RELEASE reason=\(reason) deallocated=\(released == nil)"); fflush(stdout)
+                return released == nil
+            }
+            try await buildConsentPage()
+            promptRuntime.reconcile()
+            guard let surface = promptRuntime.currentSurface(consentTab) else { throw ExtensionSmokeTest.Failure(description: "The consent tab is not visible to the extension") }
+            let consentIndex = promptRuntime.tabIndex(consentTab, in: promptRuntime.windowKey(surface))
+            func consentProbe(_ body: String, _ arguments: [String: Any] = [:]) async throws -> [String: Any] {
+                let script = "const tab = (await browser.tabs.query({})).find((t) => t.index === index && t.windowId !== undefined); return JSON.stringify(await (async () => {\n" + body + "\n})());"
+                guard let page = consentPage else { throw ExtensionSmokeTest.Failure(description: "No consent page") }
+                let text = try await page.callAsyncJavaScript(script, arguments: arguments.merging(["index": consentIndex]) { a, _ in a }, contentWorld: .page) as? String
+                guard let data = text?.data(using: .utf8), let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                    throw ExtensionSmokeTest.Failure(description: "Consent probe returned \(text ?? "nil")")
+                }
+                return value
+            }
+            let injection = "return await browser.scripting.executeScript({target: {tabId: tab.id}, func: () => document.location.host})" +
+                ".then((r) => 'ran:' + (r && r[0] && r[0].result), (e) => 'refused:' + String(e && e.message));"
+            // Withheld requested host: tab reads (query, get, populated windows), injection and a CORS fetch neither prompt
+            // nor grant nor deny (the prompt would approve); the record and Site Access are unchanged.
+            func recordState() -> String {
+                guard let record = host.records.first(where: { $0.id == extensionID }) else { return "no-record" }
+                return "\(record.patterns.keys.sorted()) \(record.deniedPatterns.keys.sorted()) \(record.siteAccess?.base64EncodedString() ?? "-")"
+            }
+            func undecided(_ url: URL) throws -> Bool { ![.grantedExplicitly, .deniedExplicitly].contains(try live().permissionStatus(for: url)) }
+            func loopbackState() -> String {
+                guard let context = try? live() else { return "no loaded context" }
+                return "native status=\(context.permissionStatus(for: consentTabURL).rawValue) hasAccess=\(context.hasAccess(to: consentTabURL)) " +
+                    "granted127=\(context.grantedPermissionMatchPatterns.keys.filter { $0.string.contains("127.0.0.1") }.map(\.string).sorted()) " +
+                    "denied127=\(context.deniedPermissionMatchPatterns.keys.filter { $0.string.contains("127.0.0.1") }.map(\.string).sorted())"
+            }
+            let recordBefore = recordState()
+            // The probe's own baseline, taken with recordBefore. Since consentBase, the fixture itself made two recorded
+            // permission changes (the declined explicit request's denial, then its cleanup), and each one advances the
+            // revision's permission epoch by contract (ExtensionSiteAccessEngine.Revision). Premise, strict: nothing else
+            // differs from consentBase, and the epoch advanced at both steps.
+            guard let probeBase = host.siteAccess(id: extensionID)?.revision else { throw ExtensionSmokeTest.Failure(description: "No Site Access snapshot before the withheld-use probe") }
+            let sinceConsentBase = revisionDiff(consentBase.revision, probeBase)
+            try check(sinceConsentBase.allSatisfy { $0 == "permissionEpoch" } && (epochAfterDecline ?? 0) > consentBase.revision.permissionEpoch &&
+                probeBase.permissionEpoch > (epochAfterDecline ?? .max),
+                "Before the withheld-use probe, Site Access differs from the consent baseline beyond the fixture's two recorded permission changes: " +
+                "\(sinceConsentBase), epoch \(consentBase.revision.permissionEpoch)->\(epochAfterDecline.map(String.init) ?? "-")->\(probeBase.permissionEpoch)")
+            extensionViewInventory("before-withheld-use-probe")
+            reviewsShown = 0
+            host.permissionPrompt = { _ in reviewsShown += 1; return true }
+            let withheldUse = try await consentProbe("""
+                const read = (await browser.tabs.query({})).length;
+                const got = !!(await browser.tabs.get(tab.id));
+                const windows = (await browser.windows.getAll({populate: true})).length;
+                const injected = await (async () => { \(injection) })();
+                let fetchDetail = null;
+                const fetched = await fetch(target, {credentials: 'include', cache: 'no-store'}).then(async (r) => {
+                  const body = await r.text();
+                  fetchDetail = {status: r.status, type: r.type, url: r.url, acao: r.headers.get('access-control-allow-origin'), length: body.length};
+                  return 'read:' + r.status;
+                }, (e) => { fetchDetail = {error: String(e && e.message || e)}; return 'refused'; });
+                return {found: !!tab, read, got, windows, injected, fetched, fetchDetail};
+                """, ["target": consentTabURL.absoluteString])
+            // Every predicate is named and reported, so a failure says which one (native 52fdfae reported only the composite).
+            let afterUse = host.siteAccess(id: extensionID)
+            // The review counter as the probe left it; the failure-path diagnostics below install comparison fixtures
+            // whose own install reviews increment the same counter (native 5243ff1 reported shown=1 from them).
+            let reviewsShownAtProbe = reviewsShown
+            let withheldPredicates: [(String, Bool)] = [
+                ("found", withheldUse["found"] as? Bool == true), ("got", withheldUse["got"] as? Bool == true), ("noReview", reviewsShown == 0),
+                ("injectionRefused", (withheldUse["injected"] as? String)?.hasPrefix("refused:") == true),
+                ("fetchRefused", withheldUse["fetched"] as? String == "refused"), ("notGranted", !granted(ip)), ("notDenied", deniedKeys(ip).isEmpty),
+                ("undecided", (try? undecided(consentTabURL)) == true), ("recordUnchanged", recordState() == recordBefore),
+                ("modeWithheld", afterUse?.state.mode == .withheld), ("revisionUnchangedByProbe", afterUse?.revision == probeBase),
+            ]
+            let failedWithheld = withheldPredicates.filter { !$0.1 }.map(\.0)
+            print("CONSENT_PREDICATES stage=withheld-use failed=\(failedWithheld) revisionDiffFromProbeBase=\(revisionDiff(probeBase, afterUse?.revision)) " +
+                  "revisionDiffFromConsentBase=\(revisionDiff(consentBase.revision, afterUse?.revision)) " +
+                  "epoch=\(consentBase.revision.permissionEpoch)->\(probeBase.permissionEpoch)->\(afterUse.map { String($0.revision.permissionEpoch) } ?? "-") " +
+                  "record=\(recordBefore == recordState() ? "unchanged" : "\(recordBefore) -> \(recordState())")"); fflush(stdout)
+            if failedWithheld.contains("fetchRefused") {
+                // Discriminator, diagnostics only (the strict check below still fails): the same credentialed fetch from
+                // Bam's own extension renderers and from a second raw page built now from the live context. Together with
+                // CONSENT_VIEWS this separates a held old view from access retained below the view level.
+                func discriminatorFetch(_ web: WKWebView) async -> String {
+                    let result = try? await web.callAsyncJavaScript("""
+                        return await fetch(target, {credentials: 'include', cache: 'no-store'}).then(async (r) => { await r.text(); return 'read:' + r.status + ':' + r.type; }, () => 'refused');
+                        """, arguments: ["target": consentTabURL.absoluteString], contentWorld: .page)
+                    return (result as? String) ?? "nil"
+                }
+                var bamRenderers: [String] = []
+                for (tabID, web) in controller.browsers where web.url?.scheme == "webkit-extension" && web.url?.host == extensionHost {
+                    bamRenderers.append("\(tabID.uuidString.prefix(8))=\(await discriminatorFetch(web))")
+                }
+                var secondPage = "not-built"
+                weak var secondRawPage: WKWebView?
+                if let context = try? live(), let configuration = context.webViewConfiguration {
+                    let web = WKWebView(frame: NSRect(x: 0, y: 0, width: 320, height: 240), configuration: configuration)
+                    secondRawPage = web
+                    observeExtensionView("discriminator-second-raw-page", web)
+                    web.load(URLRequest(url: context.baseURL.appendingPathComponent("page.html")))
+                    let deadline = ProcessInfo.processInfo.systemUptime + 5
+                    while web.title != "Bam extension page ready" && ProcessInfo.processInfo.systemUptime < deadline { try await Task.sleep(nanoseconds: 40_000_000) }
+                    secondPage = web.title == "Bam extension page ready" ? await discriminatorFetch(web) : "did-not-load"
+                    web.stopLoading()
+                }
+                var repeated = "no-page"
+                if let page = consentPage { repeated = await discriminatorFetch(page) }
+                print("CONSENT_FETCH_DISCRIMINATOR consentPageRepeat=\(repeated) bamExtensionRenderers=\(bamRenderers) secondRawPage=\(secondPage)"); fflush(stdout)
+                extensionViewInventory("after-discriminator")
+                // Second-withdrawal discriminator (native 3ab4043: the updated popup, preloaded by this fixture's popupWebView
+                // getter and never presented by Bam, was alive at the first fresh load; every fresh page then read). Repeat
+                // the withdrawal once after that popup is gone, re-allowing first, and report whether the test's raw pages
+                // were actually released (logged, not required). Evidence, not proof: a refusal here supports the popup
+                // hypothesis but is confounded by the extra teardown, elapsed time and an additional restart; a read here
+                // does not prove retention below the views, because CONSENT_VIEWS can't see WebKit-internal views.
+                // The strict check below still fails either way.
+                do {
+                    let firstPageReleased = try await releaseConsentPage("causal-discriminator")
+                    let secondDeadline = ProcessInfo.processInfo.systemUptime + 5
+                    while secondRawPage != nil && ProcessInfo.processInfo.systemUptime < secondDeadline { try await Task.sleep(nanoseconds: 40_000_000) }
+                    let secondRawReleased = secondRawPage == nil
+                    _ = try perform(host.siteAccess(id: extensionID)!, .choose(.allRequested))
+                    try await buildConsentPage()
+                    let reallowedRead = consentPage == nil ? "no-page" : await discriminatorFetch(consentPage!)
+                    let controlPageReleased = try await releaseConsentPage("causal-discriminator-reallowed")
+                    print("CONSENT_CAUSAL_RELEASE consentPage=\(firstPageReleased) secondRawPage=\(secondRawReleased) positiveControlPage=\(controlPageReleased)"); fflush(stdout)
+                    extensionViewInventory("causal-before-withhold")
+                    BrowserExtensions.siteAccessRestartWillLoad = { id in if id == extensionID { extensionViewInventory("causal-will-load-fresh-context") } }
+                    let beforeCausal = generationNow()
+                    _ = try perform(host.siteAccess(id: extensionID)!, .choose(.withheld))
+                    try await settleRestart("Causal discriminator Withhold", from: beforeCausal)
+                    BrowserExtensions.siteAccessRestartWillLoad = nil
+                    try await buildConsentPage()
+                    let causalPage = consentPage == nil ? "no-page" : await discriminatorFetch(consentPage!)
+                    var causalBam: [String] = []
+                    for (tabID, web) in controller.browsers where web.url?.scheme == "webkit-extension" && web.url?.host == extensionHost {
+                        causalBam.append("\(tabID.uuidString.prefix(8))=\(await discriminatorFetch(web))")
+                    }
+                    print("CONSENT_CAUSAL reallowedPositiveControl=\(reallowedRead) afterSecondWithholdFreshPage=\(causalPage) bamExtensionRenderers=\(causalBam)"); fflush(stdout)
+                    extensionViewInventory("causal-after")
+                } catch {
+                    print("CONSENT_CAUSAL aborted=\(error)"); fflush(stdout)
+                }
+                // Never-updated comparison (native 8501db3: the subject still read after a second withdrawal with none of
+                // its observed views alive, so the earlier package Update is the next candidate). Same run, same
+                // controller and profile: a fresh fixture that was never updated gets the same shape, a page that reads
+                // while granted (released and checked), then a Withhold, its own restart, and a page of its fresh context.
+                // Refused here while the subject reads points at the subject's history (the Update most of all); read
+                // here too points at something in this run's environment. Evidence only; the subject's check still fails.
+                do {
+                    let folder = FileManager.default.temporaryDirectory.appendingPathComponent("bam-consent-never-updated-\(UUID().uuidString)")
+                    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+                    defer { try? FileManager.default.removeItem(at: folder) }
+                    try JSONSerialization.data(withJSONObject: [
+                        "manifest_version": 3, "name": "Bam consent never-updated comparison", "version": "1.0",
+                        "description": "Original Bam fixture comparing a never-updated extension's withdrawal.",
+                        "host_permissions": ["http://127.0.0.1/*"]
+                    ]).write(to: folder.appendingPathComponent("manifest.json"))
+                    try Data("<!doctype html><meta charset='utf-8'><title>never updated page</title>".utf8).write(to: folder.appendingPathComponent("page.html"))
+                    let control = try await host.importPackage(at: folder, profileID: profile)
+                    func controlPage() async throws -> WKWebView? {
+                        guard let context = host.context(for: control), let configuration = context.webViewConfiguration else { return nil }
+                        let web = WKWebView(frame: NSRect(x: 0, y: 0, width: 320, height: 240), configuration: configuration)
+                        observeExtensionView("never-updated-page#\(observedExtensionViews.count)", web)
+                        web.load(URLRequest(url: context.baseURL.appendingPathComponent("page.html")))
+                        let deadline = ProcessInfo.processInfo.systemUptime + 5
+                        while web.title != "never updated page" && ProcessInfo.processInfo.systemUptime < deadline { try await Task.sleep(nanoseconds: 40_000_000) }
+                        return web.title == "never updated page" ? web : nil
+                    }
+                    var seeded: WKWebView? = try await controlPage()
+                    let grantedRead = seeded == nil ? "did-not-load" : await discriminatorFetch(seeded!)
+                    weak let seededWeak = seeded
+                    seeded?.stopLoading(); seeded = nil
+                    let releaseDeadline = ProcessInfo.processInfo.systemUptime + 5
+                    while seededWeak != nil && ProcessInfo.processInfo.systemUptime < releaseDeadline { try await Task.sleep(nanoseconds: 40_000_000) }
+                    let seededReleased = seededWeak == nil
+                    let beforeControl = host.restartGeneration[control] ?? 0
+                    guard let snapshot = host.siteAccess(id: control), let declarations = snapshot.declarations else { throw ExtensionSmokeTest.Failure(description: "No Site Access snapshot for the never-updated comparison") }
+                    _ = try host.performSiteAccess(id: control, profileID: profile, revision: snapshot.revision, displayed: declarations, change: .choose(.withheld))
+                    let started = host.restartGeneration[control] ?? 0
+                    let result = started == beforeControl ? "no-restart" : await host.restartCompletion(id: control, generation: started).map { "\($0)" } ?? "no-result"
+                    var fresh: WKWebView? = try await controlPage()
+                    let withheldRead = fresh == nil ? "did-not-load" : await discriminatorFetch(fresh!)
+                    fresh?.stopLoading(); fresh = nil
+                    print("CONSENT_NEVER_UPDATED grantedPositiveControl=\(grantedRead) seededPageReleased=\(seededReleased) restart=\(result) " +
+                          "generations=\(started - beforeControl) afterWithholdFreshPage=\(withheldRead)"); fflush(stdout)
+                    try? await host.remove(id: control)
+                } catch {
+                    print("CONSENT_NEVER_UPDATED aborted=\(error)"); fflush(stdout)
+                }
+                // N2 lifecycle comparisons (native 5243ff1 and ecd3c0f: the never-updated control refused while the subject
+                // read). Two more local, ephemeral fixtures in the same run, each with a Bam tab of its page open and loaded
+                // while granted, then one lifecycle step the subject also went through before the consent checks:
+                // (U) a package update through replacePackage (same identity, version bump) and (R) two Disable/Enable
+                // reloads. Then a granted read on a fresh raw page (positive control, released and checked), a Withhold,
+                // its own restart awaited by generation, and a fetch from a raw page of its fresh context and from any Bam
+                // renderer of it. Outcomes are reported, not interpreted here; the subject's strict check still fails.
+                func lifecycleControl(_ name: String, step: String, _ lifecycle: (UUID) async throws -> String) async {
+                    var control: UUID?
+                    var tab: UUID?
+                    do {
+                        let title = "lifecycle control \(name)"
+                        func writePackage(version: String) throws -> URL {
+                            let folder = FileManager.default.temporaryDirectory.appendingPathComponent("bam-consent-lifecycle-\(name)-\(UUID().uuidString)")
+                            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+                            try JSONSerialization.data(withJSONObject: [
+                                "manifest_version": 3, "name": "Bam consent lifecycle comparison \(name)", "version": version,
+                                "description": "Original Bam fixture comparing a withdrawal after one lifecycle step.",
+                                "host_permissions": ["http://127.0.0.1/*"]
+                            ]).write(to: folder.appendingPathComponent("manifest.json"))
+                            try Data("<!doctype html><meta charset='utf-8'><title>\(title)</title>".utf8).write(to: folder.appendingPathComponent("page.html"))
+                            return folder
+                        }
+                        let initial = try writePackage(version: "1.0")
+                        defer { try? FileManager.default.removeItem(at: initial) }
+                        let id = try await host.importPackage(at: initial, profileID: profile)
+                        control = id
+                        func rawPage() async throws -> WKWebView? {
+                            guard let context = host.context(for: id), let configuration = context.webViewConfiguration else { return nil }
+                            let web = WKWebView(frame: NSRect(x: 0, y: 0, width: 320, height: 240), configuration: configuration)
+                            observeExtensionView("lifecycle-\(name)-page#\(observedExtensionViews.count)", web)
+                            web.load(URLRequest(url: context.baseURL.appendingPathComponent("page.html")))
+                            let deadline = ProcessInfo.processInfo.systemUptime + 5
+                            while web.title != title && ProcessInfo.processInfo.systemUptime < deadline { try await Task.sleep(nanoseconds: 40_000_000) }
+                            return web.title == title ? web : nil
+                        }
+                        /// Fetches from a fresh raw page, then releases it and reports whether it deallocated.
+                        func readOnFreshPage() async throws -> String {
+                            var page = try await rawPage()
+                            let read = page == nil ? "did-not-load" : await discriminatorFetch(page!)
+                            weak let released = page
+                            page?.stopLoading(); page = nil
+                            let deadline = ProcessInfo.processInfo.systemUptime + 5
+                            while released != nil && ProcessInfo.processInfo.systemUptime < deadline { try await Task.sleep(nanoseconds: 40_000_000) }
+                            return "\(read)(released=\(released == nil))"
+                        }
+                        func bamRenderers() async -> [String] {
+                            guard let installHost = host.context(for: id)?.baseURL.host else { return [] }
+                            var reads: [String] = []
+                            for (tabID, web) in controller.browsers where web.url?.scheme == "webkit-extension" && web.url?.host == installHost {
+                                reads.append("\(tabID.uuidString.prefix(8))=\(await discriminatorFetch(web))")
+                            }
+                            return reads
+                        }
+                        guard let base = host.context(for: id)?.baseURL,
+                              let opened = controller.openProfileTab(base.appendingPathComponent("page.html"), profileID: profile, active: false) else {
+                            throw ExtensionSmokeTest.Failure(description: "\(name): no Bam tab for the lifecycle comparison")
+                        }
+                        tab = opened
+                        let tabDeadline = ProcessInfo.processInfo.systemUptime + 5
+                        while !(controller.browsers[opened]?.title == title && controller.browsers[opened]?.isLoading == false) && ProcessInfo.processInfo.systemUptime < tabDeadline {
+                            try await Task.sleep(nanoseconds: 40_000_000)
+                        }
+                        let tabLoaded = controller.browsers[opened]?.title == title
+                        let grantedBefore = try await readOnFreshPage(), bamBefore = await bamRenderers()
+                        let lifecycleResult = try await lifecycle(id)
+                        let grantedAfter = try await readOnFreshPage(), bamAfter = await bamRenderers()
+                        let before = host.restartGeneration[id] ?? 0
+                        guard let snapshot = host.siteAccess(id: id), let declarations = snapshot.declarations else {
+                            throw ExtensionSmokeTest.Failure(description: "\(name): no Site Access snapshot after \(step)")
+                        }
+                        _ = try host.performSiteAccess(id: id, profileID: profile, revision: snapshot.revision, displayed: declarations, change: .choose(.withheld))
+                        let started = host.restartGeneration[id] ?? 0
+                        let restart = started == before ? "no-restart" : await host.restartCompletion(id: id, generation: started).map { "\($0)" } ?? "no-result"
+                        let withheldRead = try await readOnFreshPage(), bamWithheld = await bamRenderers()
+                        print("CONSENT_LIFECYCLE_CONTROL name=\(name) step=\(step) bamTabLoaded=\(tabLoaded) grantedBeforeStep=\(grantedBefore) bamBeforeStep=\(bamBefore) " +
+                              "stepResult=\(lifecycleResult) grantedAfterStep=\(grantedAfter) bamAfterStep=\(bamAfter) restart=\(restart) generations=\(started - before) " +
+                              "afterWithholdFreshPage=\(withheldRead) bamAfterWithhold=\(bamWithheld)"); fflush(stdout)
+                    } catch {
+                        print("CONSENT_LIFECYCLE_CONTROL name=\(name) step=\(step) aborted=\(error)"); fflush(stdout)
+                    }
+                    if let tab { _ = host.closeTab?(tab) }
+                    if let control { try? await host.remove(id: control) }
+                }
+                await lifecycleControl("U", step: "package-update") { id in
+                    let folder = FileManager.default.temporaryDirectory.appendingPathComponent("bam-consent-lifecycle-U-update-\(UUID().uuidString)")
+                    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+                    defer { try? FileManager.default.removeItem(at: folder) }
+                    try JSONSerialization.data(withJSONObject: [
+                        "manifest_version": 3, "name": "Bam consent lifecycle comparison U", "version": "1.1",
+                        "description": "Original Bam fixture comparing a withdrawal after one lifecycle step.",
+                        "host_permissions": ["http://127.0.0.1/*"]
+                    ]).write(to: folder.appendingPathComponent("manifest.json"))
+                    try Data("<!doctype html><meta charset='utf-8'><title>lifecycle control U</title>".utf8).write(to: folder.appendingPathComponent("page.html"))
+                    weak let oldContext = host.context(for: id)
+                    let record = ExtensionCatalogRecord(source: .local, upstreamID: nil, listingURL: nil, downloadURL: nil,
+                        publisher: "Bam test fixture", version: "1.1", sha256: "", provenance: "Original local fixture", installedAt: Date())
+                    try await host.replacePackage(id: id, with: folder, catalog: record)
+                    let version = host.items(profileID: profile).first { $0.id == id }?.version ?? "missing"
+                    return "version=\(version) newContext=\(host.context(for: id).map { $0 !== oldContext } ?? false) loaded=\(host.context(for: id)?.isLoaded == true)"
+                }
+                await lifecycleControl("R", step: "disable-enable-x2") { id in
+                    weak let firstContext = host.context(for: id)
+                    try await host.setEnabled(false, id: id); try await host.setEnabled(true, id: id)
+                    try await host.setEnabled(false, id: id); try await host.setEnabled(true, id: id)
+                    return "newContext=\(host.context(for: id).map { $0 !== firstContext } ?? false) loaded=\(host.context(for: id)?.isLoaded == true)"
+                }
+            }
+            try check(failedWithheld.isEmpty,
+                "Using a withheld requested site prompted, granted, denied or changed Site Access: failed=\(failedWithheld) shownAtProbe=\(reviewsShownAtProbe) shownIncludingDiagnostics=\(reviewsShown), \(withheldUse); " +
+                loopbackState())
+            // activeTab on the withheld site: a user gesture in the tab lets injection run with no review and no lasting grant.
+            guard let consentAdapter = promptRuntime.tabs[consentTab] else { throw ExtensionSmokeTest.Failure(description: "No adapter for the consent tab") }
+            try live().userGesturePerformed(in: consentAdapter)
+            let gestured = try await consentProbe("return {injected: await (async () => { \(injection) })()};")
+            try live().clearUserGesture(in: consentAdapter)
+            try check((gestured["injected"] as? String)?.hasPrefix("ran:127.0.0.1") == true && reviewsShown == 0 && recordState() == recordBefore &&
+                host.siteAccess(id: extensionID)?.state.mode == .withheld,
+                "activeTab on a withheld site prompted, failed or left a lasting grant: shown=\(reviewsShown), \(gestured)")
+            // An explicit request reaches the pattern review once; declining denies, approving grants and injection then works.
+            var reviewed: [BrowserExtensionPermissionReview] = []
+            host.permissionPrompt = { review in reviewed.append(review); return false }
+            let declinedRequest = try await consentProbe("return {granted: await browser.permissions.request({origins: [origin]})};", ["origin": optionalOrigin])
+            try check(reviewed.count == 1 && reviewed[0].websites == [optionalOrigin] && reviewed[0].permissions.isEmpty &&
+                declinedRequest["granted"] as? Bool == false && live().permissionStatus(for: optionalURL) == .deniedExplicitly,
+                "A declined permissions.request did not show one pattern review or record its denial: \(reviewed.map(\.websites)) \(declinedRequest)")
+            try dropOptionalDenial()
+            // A stale explicit answer: Site Access changes while the review is open (the panel adds the site); the
+            // dialog's Allow then grants nothing beyond the panel's change and denies nothing.
+            reviewed = []
+            host.permissionPrompt = { review in
+                reviewed.append(review)
+                if let current = host.siteAccess(id: extensionID) { _ = try? perform(current, .addSite(input: "127.0.0.1", includeSubdomains: false)) }
+                return true
+            }
+            let staleRequest = try await consentProbe("return {granted: await browser.permissions.request({origins: ['http://127.0.0.1/*']})};")
+            try check(reviewed.count == 1 && staleRequest["granted"] as? Bool == false && granted(ip) && deniedKeys(ip).isEmpty &&
+                host.siteAccess(id: extensionID)?.state.mode == .specific(["http://127.0.0.1/*"]),
+                "A stale explicit answer granted or denied beyond the panel's change: \(reviewed.map(\.websites)) \(staleRequest)")
+            // This withdrawal may restart the extension: the old page belongs to the old context, so release it and build
+            // the page for the approved request from the context loaded now.
+            try await releaseConsentPage("before-second-withhold")
+            let beforeSecondWithhold = generationNow()
+            _ = try perform(host.siteAccess(id: extensionID)!, .choose(.withheld))
+            try await settleRestart("Consent checks' second Withhold", from: beforeSecondWithhold)
+            try check(!granted(ip), "The consent checks could not withhold the requested site again")
+            try await buildConsentPage()
+            reviewed = []
+            host.permissionPrompt = { review in reviewed.append(review); return true }
+            let approvedRequest = try await consentProbe("const granted = await browser.permissions.request({origins: ['http://127.0.0.1/*']}); const injected = await (async () => { \(injection) })(); return {granted, injected};")
+            try check(reviewed.count == 1 && reviewed[0].websites == ["http://127.0.0.1/*"] && approvedRequest["granted"] as? Bool == true && granted(ip) &&
+                (approvedRequest["injected"] as? String)?.hasPrefix("ran:127.0.0.1") == true &&
+                host.siteAccess(id: extensionID)?.state.mode == .specific(["http://127.0.0.1/*"]),
+                "An approved permissions.request did not review once, list the site and allow injection: \(reviewed.map(\.websites)) \(approvedRequest) mode=\(String(describing: host.siteAccess(id: extensionID)?.state.mode))")
+            // Back to every requested site for the steps after this check.
+            let consentRestored = try perform(host.siteAccess(id: extensionID)!, .choose(.allRequested))
+            try check(consentRestored.state.mode == .allRequested && granted(ip) && granted(newSite), "Site Access was not restored after the consent checks")
+        }
+        // N3: held only until its last use below (the cancelled update's identity and status checks).
+        var originalContextHolder: WKWebExtensionContext? = host.context(for: extensionID)!
+        var originalContext: WKWebExtensionContext { originalContextHolder! }
+        observeObject("originalContext", originalContextHolder); noteSubject("before-update-attempts")
         seedOptionalPermissions(originalContext)
         let originalRecord = host.items(profileID: profile).first { $0.id == extensionID }!
         let catalog = ExtensionCatalogRecord(source: .local, upstreamID: nil, listingURL: nil, downloadURL: nil,
             publisher: "Bam test fixture", version: "2.0.0", sha256: "", provenance: "Original local fixture", installedAt: Date())
-        host.permissionPrompt = { _ in false }
+        var declinedReview: BrowserExtensionPermissionReview?
+        host.permissionPrompt = { review in declinedReview = review; return false }
         var cancelled = false
         do { try await host.replacePackage(id: extensionID, with: updateFolder, catalog: catalog) }
         catch is BrowserExtensionUpdateCancelled { cancelled = true }
+        noteSubject("declined-update")
         let afterCancel = host.items(profileID: profile).first { $0.id == extensionID }
         try check(cancelled && host.context(for: extensionID) === originalContext && afterCancel?.enabled == true,
             "Canceling an update unloaded or disabled the working extension")
         try check(try Data(contentsOf: installedManifest) == originalBytes && afterCancel?.version == originalRecord.version &&
             afterCancel?.permissions == originalRecord.permissions && afterCancel?.patterns == originalRecord.patterns && afterCancel?.catalog == originalRecord.catalog,
             "Canceling an update replaced package bytes, grants or provenance")
+        try check(declinedReview?.websites == ["https://new.invalid/*"] && afterCancel?.siteAccess == originalRecord.siteAccess &&
+            afterCancel?.timedOptionalSiteGrants == originalRecord.timedOptionalSiteGrants &&
+            originalContext.permissionStatus(for: URL(string: "https://new.invalid/")!) != .grantedExplicitly,
+            "Declining an update's new site must cancel it and keep the old site access: review=\(declinedReview?.websites ?? [])")
+        originalContextHolder = nil   // N3: last use of originalContext
         // The native initializer may finish synchronously for a tiny fixture.
         // Wrap the real parser so user changes happen before its result returns,
         // instead of relying on a queued Task winning an unspecified scheduling race.
@@ -561,6 +1563,7 @@ import Darwin
         var stagingCancelled = false
         do { try await host.replacePackage(id: extensionID, with: updateFolder, catalog: catalog) }
         catch is BrowserExtensionUpdateCancelled { stagingCancelled = true }
+        noteSubject("staging-mutation-update(disable+enable inside)")
         let stagedRecord = host.items(profileID: profile).first { $0.id == extensionID }
         try check(!mutateStaging && stagingCancelled && stagedRecord?.version == originalRecord.version && host.context(for: extensionID) != nil,
             "Staging mutation was not preserved: ran=\(!mutateStaging), canceled=\(stagingCancelled), version=\(stagedRecord?.version ?? "missing"), loaded=\(host.context(for: extensionID) != nil)")
@@ -579,6 +1582,7 @@ import Darwin
         var activationCancelled = false
         do { try await host.replacePackage(id: extensionID, with: updateFolder, catalog: catalog) }
         catch is BrowserExtensionUpdateCancelled { activationCancelled = true }
+        noteSubject("activation-disable-update")
         let interruptedRecord = host.items(profileID: profile).first { $0.id == extensionID }
         try check(activationDisableRan && activationCancelled && host.context(for: extensionID) == nil && interruptedRecord?.enabled == false,
             "Activation mutation was not preserved: ran=\(activationDisableRan), canceled=\(activationCancelled), enabled=\(String(describing: interruptedRecord?.enabled)), loaded=\(host.context(for: extensionID) != nil)")
@@ -599,11 +1603,16 @@ import Darwin
         try check(enableCancelled && cancelledEnableReviews == 0 && host.context(for: extensionID) == nil &&
             host.items(profileID: profile).first { $0.id == extensionID }?.enabled == false && host.errors[extensionID] == nil,
             "Canceled re-enable prompted, activated, or reported a healthy disabled extension as broken")
+        noteSubject("cancelled-enable")
         host.packageParser = nativeParser
         host.permissionPrompt = { _ in true }
         try await host.setEnabled(true, id: extensionID)
-        guard let beforeUpdateContext = host.context(for: extensionID) else { throw ExtensionSmokeTest.Failure(description: "Update fixture could not re-enable") }
-        seedOptionalPermissions(beforeUpdateContext)
+        do {
+            // N3: scoped; this context is needed only to seed the grants the update must preserve.
+            guard let beforeUpdateContext = host.context(for: extensionID) else { throw ExtensionSmokeTest.Failure(description: "Update fixture could not re-enable") }
+            observeObject("beforeUpdateContext", beforeUpdateContext); noteSubject("re-enabled-before-update")
+            seedOptionalPermissions(beforeUpdateContext)
+        }
         let grantedBeforeUpdate = host.items(profileID: profile).first { $0.id == extensionID }!
         // WebKit normalizes date precision. Preserve the expiry it actually
         // stored, rather than requiring the original sub-millisecond Date bits.
@@ -611,7 +1620,11 @@ import Darwin
             grantedBeforeUpdate.patterns[optionalGranted.string], grantedBeforeUpdate.deniedPatterns[optionalDenied.string]]
         try check(beforeValues.allSatisfy { $0 != nil && abs($0!.timeIntervalSince(grantExpiry)) < 0.001 },
             "Native fixture did not store its optional grants/denials: \(beforeValues.map { $0?.timeIntervalSince1970 })")
+        var approvedReview: BrowserExtensionPermissionReview?
+        host.permissionPrompt = { review in approvedReview = review; return true }
         try await host.replacePackage(id: extensionID, with: updateFolder, catalog: catalog)
+        noteSubject("approved-update")
+        try check(approvedReview?.websites == ["https://new.invalid/*"], "The update review must list exactly the new site: \(approvedReview?.websites ?? [])")
         let updatedRecord = host.items(profileID: profile).first { $0.id == extensionID }!
         let afterValues = [updatedRecord.permissions["alarms"], updatedRecord.deniedPermissions["cookies"],
             updatedRecord.patterns[optionalGranted.string], updatedRecord.deniedPatterns[optionalDenied.string]]
@@ -621,8 +1634,43 @@ import Darwin
             "An update retained removed permissions or lost approved required permissions")
         try check(host.items(profileID: profile).first { $0.id == extensionID }?.version == "2.0.0" && host.context(for: extensionID) != nil,
             "Approved update did not activate its final package")
-        guard let updatedPopup = host.context(for: extensionID)?.action(for: nil)?.popupWebView else { throw ExtensionSmokeTest.Failure(description: "Updated package has no popup") }
-        try await wait("Updated extension still looked for scripts at the staging URL") { (try? await updatedPopup.evaluateJavaScript("document.title")) as? String == "Bam fixture ready" }
+        do {
+            // The updated package's popup, opened the way a user opens it: Bam's own sidebar action, so Bam presents it and
+            // its restart release barrier tracks it. (Reading Action.popupWebView here instead would preload a popup outside
+            // Bam's ownership; native 2ed4dff showed that page alive at the next restart's fresh load.) Bam presents a popup
+            // only over its profile's active page, so the subject's space shows for this check and the window is restored.
+            let place = (space: controller.session.space, profile: controller.session.currentProfileID)
+            guard let subjectSpace = controller.session.tabs.first(where: { $0.id == id })?.space else {
+                throw ExtensionSmokeTest.Failure(description: "The browser-adapter tab left the session before the updated popup check")
+            }
+            controller.session.changeSpace(subjectSpace); controller.showActive(); controller.refresh()
+            let previouslyActive = controller.session.activeID
+            controller.select(id)
+            try await wait("The extension's sidebar action did not show for the updated popup check") {
+                controller.session.activeID == id && actionButton()?.isHidden == false
+            }
+            guard let updatedButton = actionButton(), let adapter = liveRuntime.tabs[id],
+                  let updatedAction = host.context(for: extensionID)?.action(for: adapter) else {
+                throw ExtensionSmokeTest.Failure(description: "Updated package has no popup")
+            }
+            updatedButton.performClick(nil)
+            try await wait("Updated extension still looked for scripts at the staging URL") {
+                guard let shown = updatedAction.popupPopover, let web = presentedWeb(shown) else { return false }
+                return (try? await web.evaluateJavaScript("document.title")) as? String == "Bam fixture ready"
+            }
+            if let shown = updatedAction.popupPopover {
+                observeExtensionView("updated-popup", presentedWeb(shown))
+                shown.performClose(nil)
+                try await wait("The updated package's popup did not close") { !shown.isShown }
+            }
+            if previouslyActive != id { controller.select(previouslyActive) }
+            controller.session.changeSpace(place.space); controller.showActive(); controller.refresh()
+            try check(controller.session.currentProfileID == place.profile, "The updated popup check did not restore the window's profile")
+        }
+        // The raw CORS lifetime diagnostic (ExtensionFetchAccessProbe: deliberately held, Bam-unmanaged extension pages)
+        // runs only as --extension-fetch-only. Acceptance here and in ExtensionRendererRestartAcceptance is strict.
+        try await checkExplicitConsent()
+        try await checkSiteAccess()
         try await host.setEnabled(false, id: extensionID)
         controller.refresh()
         try check(actionButton() == nil, "Disabling the extension left a stale sidebar action")
@@ -685,6 +1733,27 @@ import Darwin
         withExtendedLifetime(contentController) {}
         recordLifecycle("after-3-disable-reenable-cycles", retiredPopovers: retiredPopovers.filter { $0.value != nil }.count,
             retiredWebViews: retiredWebViews.filter { $0.value != nil }.count, retiredContexts: retiredContexts.filter { $0.value != nil }.count)
+        // Independent fixtures both run, so a failure in one does not hide the other. Any failure still fails the suite.
+        var compatibilityFailures: [String] = []
+        do {
+            let passed = try await ExtensionTabMetadataSmokeTest.run(controller: controller, host: host, pageURL: pageURL)
+            checks += passed
+            print("BAM_TAB_METADATA_PASS \(passed) checks"); fflush(stdout)
+        } catch {
+            compatibilityFailures.append("Tab metadata: \(error)")
+            print("BAM_TAB_METADATA_FAIL \(error)"); fflush(stdout)
+        }
+        do {
+            let passed = try await ExtensionSiteAccessSmokeTest.run(pageURL: pageURL)
+            checks += passed
+            print("BAM_SITE_ACCESS_PASS \(passed) checks"); fflush(stdout)
+        } catch {
+            compatibilityFailures.append("Site access: \(error)")
+            print("BAM_SITE_ACCESS_FAIL \(error)"); fflush(stdout)
+        }
+        if !compatibilityFailures.isEmpty {
+            throw ExtensionSmokeTest.Failure(description: compatibilityFailures.joined(separator: "\n"))
+        }
         return checks
     }
 }

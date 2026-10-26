@@ -370,13 +370,25 @@ func storedZIP(_ files: [(String, Data)]) -> Data {
         try check(runtime.approvedNativeHost(unapprovedContext) == nil && host.records.first { $0.id == unapprovedID }?.nativeHost == nil,
             "Disconnect retained the desktop grant")
         try await host.connectDesktopApp(id: unapprovedID)
+        let beforeRevoke = host.restartGeneration[unapprovedID, default: 0]
         try host.revokePermissions(id: unapprovedID)
-        try check(runtime.approvedNativeHost(unapprovedContext) == nil && host.records.first { $0.id == unapprovedID }?.nativeHost == nil &&
-            !unapprovedContext.hasPermission(.init(rawValue: "nativeMessaging")), "Revoking permissions retained native-app authority")
+        // Revoke restarts the extension into a fresh context when it held site grants (two-phase): check the live context,
+        // never the retired one, and only once it is loaded, so the refusal below is the revocation's, not a missing context's.
+        let afterRevoke = host.restartGeneration[unapprovedID, default: 0]
+        if afterRevoke > beforeRevoke {
+            let result = await host.restartCompletion(id: unapprovedID, generation: afterRevoke)
+            try check(result == .restarted, "Revoke's restart must finish with a fresh context: \(String(describing: result))")
+        }
+        guard let revokedContext = host.context(for: unapprovedID), revokedContext.isLoaded, host.isRestarting(id: unapprovedID) == false else {
+            throw Failure(message: "The revoked extension must stay loaded (only its grants are revoked)")
+        }
+        try check(runtime.approvedNativeHost(revokedContext) == nil && host.records.first { $0.id == unapprovedID }?.nativeHost == nil &&
+            !revokedContext.hasPermission(.init(rawValue: "nativeMessaging")), "Revoking permissions retained native-app authority")
         var refusedRevokedConnection = false
         do { try await host.connectDesktopApp(id: unapprovedID) }
         catch { refusedRevokedConnection = true }
-        try check(refusedRevokedConnection && host.records.first { $0.id == unapprovedID }?.nativeHost == nil,
+        try check(refusedRevokedConnection && host.context(for: unapprovedID) === revokedContext && revokedContext.isLoaded &&
+            host.records.first { $0.id == unapprovedID }?.nativeHost == nil,
             "Connecting after permission revocation falsely reported success or persisted a desktop grant")
         // Create a real pending runtime session, then unload synchronously before
         // its launch Task runs. The injected validator additionally forbids any

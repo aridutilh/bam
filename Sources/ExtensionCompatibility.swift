@@ -18,6 +18,9 @@ import UserNotifications
 @available(macOS 15.4, *)
 enum ExtensionCompatibility {
     static let nativeApplicationIdentifier = "com.ari.bam.compatibility"
+    /// The worker adapter's own refusal when the worker has no native transport (e.g. after Revoke Permissions, which
+    /// withdraws nativeMessaging): every bridged call rejects with exactly this text.
+    static let workerTransportUnavailable = "Bam's worker compatibility transport is unavailable."
     struct Plan: Codable, Equatable {
         /// Namespaces or members the layer defines when absent, in manifest order.
         var provided: [String] = []
@@ -41,6 +44,10 @@ enum ExtensionCompatibility {
         for case let value as String in manifest["permissions"] as? [Any] ?? [] { requested.append(value) }
         var plan = Plan()
         for permission in bridgedPermissions where requested.contains(permission) { plan.provided.append(permission) }
+        // The tab metadata facade is installed for extensions that declare `tabs` (required or optional); the native
+        // side still answers only while `tabs` is granted to that exact live context.
+        let optional = (manifest["optional_permissions"] as? [Any] ?? []).compactMap { $0 as? String }
+        if requested.contains("tabs") || optional.contains("tabs") { plan.provided.append("tabs.metadata") }
         plan.provided += runtimeExtras
         return plan
     }
@@ -51,6 +58,7 @@ enum ExtensionCompatibility {
             switch $0 {
             case "bookmarks": return "bookmarks (read-only: getTree of this profile's Favorites and kept tabs; no changes or events)"
             case "history": return "history (read-only: search this profile's history and hear new visits and clearing; no adding or deleting)"
+            case "tabs.metadata": return "tab addresses and titles (requires the tabs permission; no page-content access)"
             default: return $0
             }
         }
@@ -67,6 +75,7 @@ enum ExtensionCompatibility {
             .replacingOccurrences(of: "__PAGE_ENVIRONMENT__", with: ExtensionIdleCallbackCompatibility.source)
             .replacingOccurrences(of: "__WASM_ADAPTER__", with: ExtensionWasmCompatibility.source)
             .replacingOccurrences(of: "__BRIDGE__", with: javaScriptString(bridge))
+            .replacingOccurrences(of: "__TRANSPORT_UNAVAILABLE__", with: javaScriptString(workerTransportUnavailable))
             .replacingOccurrences(of: "__PROVIDED__", with: provided)
             .replacingOccurrences(of: "__VERSION__", with: javaScriptString(browserVersion))
             + "\n" + documentActionIconBinding(baseURL: baseURL)
@@ -120,6 +129,7 @@ enum ExtensionCompatibility {
             .replacingOccurrences(of: "__PAGE_ENVIRONMENT__", with: "")
             .replacingOccurrences(of: "__WASM_ADAPTER__", with: ExtensionWasmCompatibility.source)
             .replacingOccurrences(of: "__BRIDGE__", with: javaScriptString(nativeApplicationIdentifier))
+            .replacingOccurrences(of: "__TRANSPORT_UNAVAILABLE__", with: javaScriptString(workerTransportUnavailable))
             .replacingOccurrences(of: "__PROVIDED__", with: provided)
             .replacingOccurrences(of: "__VERSION__", with: javaScriptString(browserVersion))
     }
@@ -150,7 +160,7 @@ enum ExtensionCompatibility {
       const isWorker = __WORKER__;
       const nativeSend = isWorker && api.runtime && typeof api.runtime.sendNativeMessage === "function" ? api.runtime.sendNativeMessage.bind(api.runtime) : null;
       const nativeConnect = isWorker && api.runtime && typeof api.runtime.connectNative === "function" ? api.runtime.connectNative.bind(api.runtime) : null;
-      const sendNative = (body) => nativeSend ? Promise.resolve(nativeSend(__BRIDGE__, body)) : Promise.reject(new Error("Bam's worker compatibility transport is unavailable."));
+      const sendNative = (body) => nativeSend ? Promise.resolve(nativeSend(__BRIDGE__, body)) : Promise.reject(new Error(__TRANSPORT_UNAVAILABLE__));
       try { install(); } catch (error) {
         console.error("[Bam compatibility] layer failed to install", error);
         const body = { kind: "scriptError", url: location.href, message: String(error && error.message || error), stack: String(error && error.stack || "").slice(0, 1200) };
@@ -166,7 +176,10 @@ enum ExtensionCompatibility {
       const nativeEvents = new Set(["notifications.onClosed", "notifications.onClicked", "notifications.onButtonClicked", "notifications.onShown", "idle.onStateChanged", "windows.onBoundsChanged", "history.onVisited", "history.onVisitRemoved"]);
       const subscribe = (name) => {
         if (!isWorker || !nativeEvents.has(name)) return;
-        if (!nativeConnect) throw unsupported("Worker event delivery");
+        // Without a native transport (Revoke Permissions withdraws nativeMessaging) the listener is kept but can never
+        // fire, and no port is opened. Registering must not throw: an ordinary top-level addListener would otherwise
+        // stop the whole worker from loading.
+        if (!nativeConnect) return;
         if (!eventPort) {
           eventPort = nativeConnect(bridgeName);
           const port = eventPort;
@@ -587,6 +600,317 @@ enum ExtensionCompatibility {
         }
       };
 
+      // Tab metadata (Chrome's `tabs` contract: a tab's url and title without host access). WebKit blanks both unless
+      // the extension has host access to the tab's site; this adds only those two values back, for an extension whose
+      // live context holds `tabs` (checked natively on every request). It grants no site, and scripting, cookies,
+      // fetch and webRequest keep WebKit's own host checks.
+      // - The extension's own WebKit call runs first, once, synchronously and unchanged: its throws, callback
+      //   runtime.lastError, promise rejections and mutations stay WebKit's. Supplementing never repeats it.
+      // - Then a fresh WebKit read runs between a native identity token and a native answer bound to one observed tab
+      //   topology; a change in between answers null, and up to 3 attempts are made before WebKit's answer is kept.
+      // - Supplementing is computed without touching WebKit's objects and applied only before delivery, within a
+      //   deadline (reads 2 s, events 1 s). Past it the original result is delivered once, and a late answer is
+      //   discarded: nothing is mutated or called back afterwards.
+      // - Only blank url and title fields are filled, each independently, by WebKit's own tab id; a value WebKit showed
+      //   is never replaced. A url/title-filtered query keeps WebKit's own matching objects and adds blanked tabs the
+      //   native answer matched.
+      // - Tabs in several Little Bam windows, non-web pages and over-long values stay blank. favIconUrl stays WebKit's.
+      // - Events: listeners of the tabs.* and windows.* events listed in `tabEvents`/`windowEvents` (not
+      //   windows.onBoundsChanged) are delivered through one FIFO per document or worker, so their order is kept.
+      //   tabs.onCreated/onUpdated get supplemented copies (shared by that dispatch's listeners; WebKit's own objects
+      //   are never changed) if values arrive within 1 s; supplementing is skipped for an event that waited 3 s. The
+      //   queue holds at most 256 events: one more abandons the supplementing in progress and delivers everything
+      //   queued at once, in order, with WebKit's own values. No event is dropped or invented. Values are those at
+      //   delivery. changeInfo.url/title are filled only when WebKit sent the key. A removed listener is not called.
+      const metadataEnabled = provided.has("tabs.metadata");
+      const metadataNative = "__bamTabMetadataNative";
+      const readDeadline = 2000, eventDeadline = 1000, queueWait = 3000, queueCap = 256;
+      // Resolves with the promise's value, or null at the deadline (a later value is then ignored by every caller).
+      const deadline = (promise, ms) => new Promise((resolve) => {
+        const timer = setTimeout(() => resolve(null), ms);
+        Promise.resolve(promise).then((value) => { clearTimeout(timer); resolve(value); }, () => { clearTimeout(timer); resolve(null); });
+      });
+      const unwrap = (fn) => (fn && fn[metadataNative]) || fn;
+      const hasOwn = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
+      const nativeCall = (root, ns, name, args) => {
+        const holder = root && root[ns], fn = holder && unwrap(holder[name]);
+        if (typeof fn !== "function") return Promise.reject(unsupported(ns + "." + name));
+        try { return Promise.resolve(fn.apply(holder, args)); } catch (error) { return Promise.reject(error); }
+      };
+      // A bounded bridge request: null on error or at the deadline. A document request still pending then is retired
+      // from `pending`, so an unanswered native request leaves nothing behind (a worker's sendNativeMessage can't be
+      // withdrawn; its late reply is ignored).
+      const bridgeValue = (method, params) => {
+        if (isWorker) return deadline(sendNative({ kind: "request", method, params: params === undefined ? null : params }), readDeadline);
+        return new Promise((resolve) => {
+          const handler = globalThis.webkit && globalThis.webkit.messageHandlers && globalThis.webkit.messageHandlers[bridgeName];
+          if (!handler) { resolve(null); return; }
+          const id = nextRequest++;
+          const timer = setTimeout(() => { if (pending.delete(id)) resolve(null); }, readDeadline);
+          pending.set(id, { resolve: (value) => { clearTimeout(timer); resolve(value); }, reject: () => { clearTimeout(timer); resolve(null); } });
+          try { handler.postMessage({ kind: "request", id, method, params: params === undefined ? null : params }); }
+          catch (error) { pending.delete(id); clearTimeout(timer); resolve(null); }
+        });
+      };
+      const blank = (value) => value === undefined || value === null || value === "";
+      // WebKit blanked the url (it also never matches such a tab against a url/title filter).
+      const isRedacted = (tab) => !!tab && typeof tab === "object" && typeof tab.id === "number" && blank(tab.url);
+      // Some field is blank and may be supplemented; each field is considered on its own.
+      const needsFill = (tab) => !!tab && typeof tab === "object" && typeof tab.id === "number" && (blank(tab.url) || blank(tab.title));
+      // One bound read: token, fresh WebKit read, window kinds, answer. Returns {tabs, values} or null. Touches only
+      // the fresh objects it read (and only to look at them).
+      const boundRead = async (root, read, collect, filter) => {
+        for (let attempt = 0; attempt < 3; attempt++) {
+          const token = await bridgeValue("tabs.identityToken", null);
+          if (typeof token !== "string") return null;
+          let fresh, windows;
+          try { fresh = await read(); windows = await nativeCall(root, "windows", "getAll", [{ windowTypes: ["normal", "popup"] }]); }
+          catch (error) { return null; }
+          const kinds = new Map();
+          let normalCount = 0, popupCount = 0;
+          for (const w of Array.isArray(windows) ? windows : []) {
+            if (w && w.type === "normal") { normalCount++; kinds.set(w.id, "normal"); }
+            else if (w && w.type === "popup") { popupCount++; kinds.set(w.id, "popup"); }
+          }
+          const tabs = collect(fresh).filter((tab) => tab && typeof tab.id === "number");
+          const located = tabs.filter((tab) => kinds.has(tab.windowId) && Number.isInteger(tab.index) && tab.index >= 0).slice(0, 512);
+          if (filter && located.length !== tabs.length) return null;
+          const params = { token, normalCount, popupCount, entries: located.map((tab) => ({ window: kinds.get(tab.windowId), index: tab.index })) };
+          if (filter) params.filter = filter;
+          const answer = await bridgeValue("tabs.metadata", params);
+          if (!Array.isArray(answer) || answer.length !== located.length) continue;
+          const values = new Map();
+          located.forEach((tab, i) => { const v = answer[i]; if (v && typeof v.url === "string") values.set(tab, v); });
+          return { tabs, values };
+        }
+        return null;
+      };
+      // Values by WebKit tab id from a bound fresh read; nothing is applied here.
+      const valuesByID = (root, read, collect) => boundRead(root, read, collect, null).then((result) => {
+        if (!result) return null;
+        const byID = new Map();
+        for (const tab of result.tabs) if (result.values.has(tab)) byID.set(tab.id, result.values.get(tab));
+        return byID;
+      });
+      // Fills each blank field independently; a field WebKit gave a value is kept as WebKit gave it.
+      const fill = (target, value) => {
+        if (!needsFill(target) || !value) return;
+        if (blank(target.url)) target.url = value.url;
+        if (blank(target.title) && typeof value.title === "string") target.title = value.title;
+      };
+      const tabsOf = (value) => Array.isArray(value) ? value : value && typeof value === "object" ? [value] : [];
+      const windowTabs = (value) => tabsOf(value).flatMap((w) => Array.isArray(w && w.tabs) ? w.tabs : []);
+      // A reader answers a promise of an `apply` function (or null). `apply` runs only if it arrives within the read
+      // deadline, right before delivery, and returns what to deliver.
+      const filling = (root, value, baseline, read, collect) => {
+        if (!baseline.some(needsFill)) return Promise.resolve(null);
+        return valuesByID(root, read, collect).then((byID) => byID && (() => {
+          for (const tab of baseline) if (needsFill(tab)) fill(tab, byID.get(tab.id));
+          return value;
+        }));
+      };
+      const readers = {
+        "tabs.query": (root, args, value) => {
+          const info = args[0] && typeof args[0] === "object" ? args[0] : {};
+          if (info.url === undefined && info.title === undefined) {
+            return filling(root, value, tabsOf(value), () => nativeCall(root, "tabs", "query", [info]), tabsOf);
+          }
+          // WebKit never matches a url/title filter on a blanked tab: re-run the query without them and let the native
+          // answer evaluate the filter on the real values. WebKit's own matches are kept as WebKit returned them, even
+          // if a tab changed between the reads; only blanked tabs the answer matched are added, in tab order.
+          const stripped = { ...info }; delete stripped.url; delete stripped.title;
+          const filter = {};
+          if (info.url !== undefined) filter.url = info.url;
+          if (info.title !== undefined) filter.title = info.title;
+          return boundRead(root, () => nativeCall(root, "tabs", "query", [stripped]), tabsOf, filter).then((result) => result && (() => {
+            const native = tabsOf(value), nativeByID = new Map(native.map((tab) => [tab && tab.id, tab]));
+            const out = [], seen = new Set();
+            for (const tab of result.tabs) {
+              if (nativeByID.has(tab.id)) { if (!seen.has(tab.id)) { out.push(nativeByID.get(tab.id)); seen.add(tab.id); } }
+              else if (isRedacted(tab) && result.values.has(tab)) { fill(tab, result.values.get(tab)); out.push(tab); }
+            }
+            for (const tab of native) if (!seen.has(tab && tab.id)) out.push(tab);
+            return out;
+          }));
+        },
+        "tabs.get": (root, args, value) => filling(root, value, tabsOf(value), () => nativeCall(root, "tabs", "get", [args[0]]), tabsOf),
+        "tabs.getCurrent": (root, args, value) => filling(root, value, tabsOf(value), () => nativeCall(root, "tabs", "getCurrent", []), tabsOf),
+        "tabs.create": (root, args, value) => filling(root, value, tabsOf(value), () => nativeCall(root, "tabs", "get", [value.id]), tabsOf),
+        "tabs.update": (root, args, value) => filling(root, value, tabsOf(value), () => nativeCall(root, "tabs", "get", [value.id]), tabsOf),
+        "windows.create": (root, args, value) => filling(root, value, windowTabs(value), () => nativeCall(root, "windows", "get", [value.id, { populate: true }]), windowTabs)
+      };
+      for (const name of ["get", "getAll", "getCurrent", "getLastFocused"]) {
+        readers["windows." + name] = (root, args, value) => {
+          const infoIndex = name === "get" ? 1 : 0;
+          const info = args[infoIndex] && typeof args[infoIndex] === "object" ? args[infoIndex] : null;
+          if (!info || !info.populate) return Promise.resolve(null);
+          return filling(root, value, windowTabs(value), () => nativeCall(root, "windows", name, args.slice(0, infoIndex + 1)), windowTabs);
+        };
+      }
+      const wrapRead = (root, holder, ns, name, native) => {
+        const key = ns + "." + name;
+        const wrapped = function (...args) {
+          const receiver = this && typeof this === "object" ? this : holder;
+          const callback = typeof args[args.length - 1] === "function" ? args.pop() : null;
+          const supplement = (value) => {
+            let pending;
+            try { pending = readers[key](root, args, value); } catch (error) { return Promise.resolve(value); }
+            return deadline(pending, readDeadline).then((apply) => {
+              if (typeof apply !== "function") return value;
+              try { return apply(); } catch (error) { return value; }
+            });
+          };
+          if (!callback) {
+            const result = native.apply(receiver, args);
+            return result && typeof result.then === "function" ? result.then((value) => value == null ? value : supplement(value)) : result;
+          }
+          return native.apply(receiver, [...args, (...results) => {
+            let failed = false;
+            try { failed = !!(root.runtime && root.runtime.lastError); } catch (error) {}
+            // A WebKit error is reported inside WebKit's own callback, where runtime.lastError is set.
+            if (failed || results[0] == null) { callback(...results); return; }
+            supplement(results[0]).then((value) => callback(value));
+          }]);
+        };
+        Object.defineProperty(wrapped, metadataNative, { value: native });
+        return wrapped;
+      };
+      // Events: one FIFO per document or worker; listener tables per actual event object (browser and chrome event
+      // objects are separate registrations, as in WebKit; aliases of one object share its table).
+      const eventQueue = [];
+      let draining = false;
+      const eventTables = new WeakMap();
+      const pendingValues = new WeakMap(), copies = new WeakMap();
+      let preparing = null;   // the job whose supplementing is awaited (not in eventQueue)
+      let stopWaiting = null; // ends that wait at once (overload flush)
+      // Delivers a job once; a listener removed meanwhile is not called.
+      const deliver = (job, args) => {
+        if (job.delivered) return;
+        job.delivered = true;
+        if (job.table.get(job.listener) !== job.wrapper) return;
+        try { job.listener(...args); } catch (error) { console.error(error); }
+      };
+      const drain = async () => {
+        if (draining) return;
+        draining = true;
+        while (eventQueue.length) {
+          const job = eventQueue.shift();
+          let args = job.args;
+          const pending = job.prepare && performance.now() - job.at < queueWait ? job.prepare() : null;
+          if (pending) {
+            preparing = job;
+            const make = await Promise.race([deadline(pending, eventDeadline), new Promise((resolve) => { stopWaiting = () => resolve(null); })]);
+            preparing = null; stopWaiting = null;
+            // An overload flush may already have delivered it with WebKit's values; a late answer is then ignored.
+            if (job.delivered) continue;
+            if (typeof make === "function") { try { args = make(); } catch (error) {} }
+          }
+          deliver(job, args);
+        }
+        draining = false;
+      };
+      // Queue full: abandon supplementing and deliver the awaited job and everything queued now, in order, with
+      // WebKit's own values (events dispatched by those listeners join the same flush, in order).
+      const flush = () => {
+        if (preparing) { const job = preparing; preparing = null; deliver(job, job.args); }
+        if (stopWaiting) { const stop = stopWaiting; stopWaiting = null; stop(); }
+        while (eventQueue.length) { const job = eventQueue.shift(); deliver(job, job.args); }
+      };
+      const enqueue = (job) => {
+        eventQueue.push(job);
+        if (eventQueue.length + (preparing ? 1 : 0) > queueCap) flush(); else drain();
+      };
+      const tabValues = (root, tab) => {
+        if (!needsFill(tab)) return null;
+        if (!pendingValues.has(tab)) pendingValues.set(tab, valuesByID(root, () => nativeCall(root, "tabs", "get", [tab.id]), tabsOf));
+        return pendingValues.get(tab);
+      };
+      // A supplemented copy of a WebKit object, made once per dispatch and shared by its listeners.
+      const copyOf = (original, make) => { if (!copies.has(original)) copies.set(original, make()); return copies.get(original); };
+      const tabCopy = (tab, value) => copyOf(tab, () => { const copy = { ...tab }; fill(copy, value); return copy; });
+      const preparers = {
+        "tabs.onCreated": (root, args) => {
+          const tab = args[0], pending = tabValues(root, tab);
+          return pending && pending.then((byID) => {
+            const value = byID && byID.get(tab.id);
+            return value ? () => [tabCopy(tab, value), ...args.slice(1)] : null;
+          });
+        },
+        "tabs.onUpdated": (root, args) => {
+          const [tabId, changeInfo, tab] = args, pending = tabValues(root, tab);
+          return pending && pending.then((byID) => {
+            const value = byID && byID.get(tab.id);
+            if (!value) return null;
+            return () => {
+              const copy = tabCopy(tab, value);
+              const info = changeInfo && typeof changeInfo === "object" ? copyOf(changeInfo, () => {
+                const next = { ...changeInfo };
+                if (hasOwn(changeInfo, "url") && blank(changeInfo.url) && !blank(copy.url)) next.url = copy.url;
+                if (hasOwn(changeInfo, "title") && blank(changeInfo.title) && typeof copy.title === "string") next.title = copy.title;
+                return next;
+              }) : changeInfo;
+              return [tabId, info, copy, ...args.slice(3)];
+            };
+          });
+        }
+      };
+      const wrapEvent = (root, ns, name, target) => {
+        const key = ns + "." + name;
+        const add = unwrap(target.addListener), remove = unwrap(target.removeListener), has = unwrap(target.hasListener);
+        if (typeof add !== "function" || typeof remove !== "function") return;
+        const table = eventTables.get(target) || new Map();
+        eventTables.set(target, table);
+        const install = (member, fn, native) => {
+          Object.defineProperty(fn, metadataNative, { value: native });
+          try { Object.defineProperty(target, member, { value: fn, writable: true, configurable: true, enumerable: true }); } catch (error) {}
+        };
+        install("addListener", function (listener, ...rest) {
+          if (typeof listener !== "function") return add.call(target, listener, ...rest);
+          let wrapper = table.get(listener);
+          if (!wrapper) {
+            wrapper = (...args) => {
+              const prepare = preparers[key] ? () => preparers[key](root, args) : null;
+              enqueue({ table, listener, wrapper, args, prepare, at: performance.now(), delivered: false });
+            };
+            table.set(listener, wrapper);
+          }
+          return add.call(target, wrapper, ...rest);
+        }, add);
+        install("removeListener", function (listener, ...rest) {
+          const wrapper = table.get(listener);
+          table.delete(listener);
+          return remove.call(target, wrapper || listener, ...rest);
+        }, remove);
+        if (typeof has === "function") install("hasListener", function (listener) { return has.call(target, table.get(listener) || listener); }, has);
+      };
+      const tabEvents = ["onActivated", "onAttached", "onCreated", "onDetached", "onHighlighted", "onMoved", "onRemoved", "onReplaced", "onUpdated", "onZoomChange"];
+      const windowEvents = ["onCreated", "onRemoved", "onFocusChanged"];
+      const metadataHeld = [];
+      const applyTabMetadata = () => {
+        if (!metadataEnabled) return;
+        for (const root of new Set([globalThis.browser, globalThis.chrome])) {
+          if (!root || typeof root !== "object") continue;
+          for (const [ns, names, events] of [["tabs", ["query", "get", "getCurrent", "create", "update"], tabEvents], ["windows", ["get", "getAll", "getCurrent", "getLastFocused", "create"], windowEvents]]) {
+            const holder = root[ns];
+            if (!holder || typeof holder !== "object") continue;
+            for (const name of names) {
+              const current = holder[name];
+              if (typeof current !== "function" || current[metadataNative]) continue;
+              try {
+                Object.defineProperty(holder, name, { value: wrapRead(root, holder, ns, name, current), writable: true, configurable: true, enumerable: true });
+                metadataHeld.push(holder);
+              } catch (error) {}
+            }
+            for (const name of events) {
+              const target = holder[name];
+              if (!target || typeof target !== "object" || (target.addListener && target.addListener[metadataNative])) continue;
+              wrapEvent(root, ns, name, target);
+              metadataHeld.push(target);
+            }
+          }
+        }
+      };
+
       // Members added to WebKit's own namespaces. WebKit can hand the page a
       // fresh namespace object after document start (observed with 1Password's
       // HTML background page, where webNavigation lost members added at start),
@@ -601,6 +925,7 @@ enum ExtensionCompatibility {
       const held = {};
       const applyExtensions = () => {
         applyDNRGuard();
+        applyTabMetadata();
         let missing = false;
         for (const x of extensions) {
           const holder = api[x.ns];
@@ -772,7 +1097,10 @@ enum ExtensionCompatibility {
     /// frame, never in the main frame on its behalf, and dead views are dropped.
     private struct Document { weak var web: WKWebView?; let frame: WKFrameInfo; var isLive: Bool { web?.url != nil } }
     private var documents: [String: [Document]] = [:]
-    private var notificationOwners: [String: String] = [:]
+    /// Who posted each notification: the registration key (runtime.id) and the posting installation (base URL host).
+    /// A replacement install of the same store extension reuses runtime.id but never the installation host.
+    private struct NotificationOwner { let key: String; let install: String }
+    private var notificationOwners: [String: NotificationOwner] = [:]
     /// Diagnostics per context: documents that reported in, and any failure of the layer itself.
     private var helloURLs: [String: [String]] = [:]
     private var scriptErrors: [String: [String]] = [:]
@@ -804,6 +1132,11 @@ enum ExtensionCompatibility {
     /// Live, persisted review grants supplied by the owner. Unknown WebKit
     /// permission names are never inferred to be approved from API availability.
     var permissionGranted: ((WKWebExtensionContext, String) -> Bool)?
+    /// Tab metadata (work/chrome-tab-metadata-api.md): the runtime issues bindings and answers redeemed requests from one
+    /// observed topology. Tokens live here so unload, revoke and shutdown purge them with the registration.
+    var tabMetadataBinding: ((WKWebExtensionContext) -> ExtensionTabMetadata.Binding?)?
+    var answerTabMetadata: ((WKWebExtensionContext, ExtensionTabMetadata.Binding, ExtensionTabMetadata.Request) -> [ExtensionTabMetadata.Value?]?)?
+    private var metadataTokens = ExtensionTabMetadata.TokenStore()
     /// Supplied by the host: the identifier for notifications posted on behalf of an extension.
     var notificationIdentifier: ((String) -> String?)?
     /// Returns a delivery error, or nil when the notification was posted natively.
@@ -855,7 +1188,7 @@ enum ExtensionCompatibility {
         return (web, { try await loader.wait() })
     }
     /// Revoked grants close the extension's hidden document immediately.
-    func revoke(_ context: WKWebExtensionContext) { offscreen.discard(owner: context.uniqueIdentifier) }
+    func revoke(_ context: WKWebExtensionContext) { offscreen.discard(owner: context.uniqueIdentifier); metadataTokens.purge(context: context.uniqueIdentifier) }
 
     func install(_ plan: ExtensionCompatibility.Plan, for context: WKWebExtensionContext) {
         guard !plan.isEmpty, let contentController else { return }
@@ -865,8 +1198,24 @@ enum ExtensionCompatibility {
         scripts[context.uniqueIdentifier] = script
         contentController.addUserScript(script)
     }
+    /// The registration a notification response may reach: only while the identifier is still owned and the live
+    /// registration under that key is the very installation that posted it.
+    func routedOwner(for identifier: String) -> String? {
+        guard let owner = notificationOwners[identifier], let context = registrations[owner.key]?.context,
+              ownsRegisteredContext(context), context.baseURL.host == owner.install else { return nil }
+        return owner.key
+    }
     func remove(_ context: WKWebExtensionContext) {
+        // Withdraw this installation's notifications: their responses must never reach a later install.
+        let install = context.baseURL.host ?? ""
+        let owned = notificationOwners.filter { $0.value.install == install }.map(\.key)
+        for identifier in owned { notificationOwners.removeValue(forKey: identifier); ExtensionNotificationCenter.shared.forget(identifier) }
+        if !owned.isEmpty, Self.canUseNotificationCenter {
+            UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: owned)
+            UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: owned)
+        }
         offscreen.discard(owner: context.uniqueIdentifier)
+        metadataTokens.purge(context: context.uniqueIdentifier)
         documents.removeValue(forKey: context.uniqueIdentifier)
         registrations.removeValue(forKey: context.uniqueIdentifier)
         helloURLs.removeValue(forKey: context.uniqueIdentifier)
@@ -884,6 +1233,7 @@ enum ExtensionCompatibility {
         idleTimer?.invalidate(); idleTimer = nil
         let ports = eventConnections.values.flatMap { $0.values.map(\.port) }
         eventConnections.removeAll(); registrations.removeAll(); idleIntervals.removeAll(); idleStates.removeAll()
+        metadataTokens.purgeAll()
         for port in ports { port.disconnect() }
         contentController?.removeScriptMessageHandler(forName: handlerName, contentWorld: .page)
         contentController?.removeAllUserScripts()
@@ -945,6 +1295,25 @@ enum ExtensionCompatibility {
             let (value, error) = await handle(method: method, params: body["params"] as? [String: Any] ?? [:], context: context, web: nil)
             return (value, error.map(Self.bridgeError))
         default: return (nil, Self.bridgeError("Unknown compatibility request."))
+        }
+    }
+
+    /// Tab metadata bridge. Every refusal answers null, which the facade reads as "use WebKit's own answer"; no
+    /// error is invented. Only a registered context whose plan includes the facade may ask, and the runtime checks the
+    /// exact live context, `tabs`, the private boundary and the observation again when answering.
+    private func tabMetadata(_ method: String, params: [String: Any], context: WKWebExtensionContext) -> Any? {
+        guard ownsRegisteredContext(context), registrations[context.uniqueIdentifier]?.plan.provided.contains("tabs.metadata") == true else { return nil }
+        switch method {
+        case "tabs.identityToken":
+            guard let binding = tabMetadataBinding?(context), let token = metadataTokens.issue(binding, now: Date()) else { return nil }
+            BrowserExtensions.metadataTestHook?("issued")
+            return token
+        default:
+            guard let request = ExtensionTabMetadata.Request.parse(params),
+                  let issued = metadataTokens.consume(request.token, now: Date()), issued.context == context.uniqueIdentifier else { return nil }
+            BrowserExtensions.metadataTestHook?("answering")
+            guard ownsRegisteredContext(context), let values = answerTabMetadata?(context, issued, request) else { return nil }
+            return ExtensionTabMetadata.response(values)
         }
     }
 
@@ -1048,6 +1417,7 @@ enum ExtensionCompatibility {
     }
 
     private func handle(method: String, params: [String: Any], context: WKWebExtensionContext, web: WKWebView?) async -> (Any?, String?) {
+        if method == "tabs.identityToken" || method == "tabs.metadata" { return (tabMetadata(method, params: params, context: context), nil) }
         let methods = ["idle.queryState": "idle", "notifications.permissionLevel": "notifications", "notifications.create": "notifications",
                        "notifications.clear": "notifications", "downloads.download": "downloads",
                        "fontSettings.getFontList": "fontSettings", "bookmarks.getTree": "bookmarks", "history.search": "history",
@@ -1091,7 +1461,7 @@ enum ExtensionCompatibility {
             let title = params["title"] as? String ?? "", message = params["message"] as? String ?? ""
             let buttons = params["buttons"] as? [String] ?? []
             let identifier = Self.notificationIdentifier(context: context, id: id)
-            notificationOwners[identifier] = context.uniqueIdentifier
+            notificationOwners[identifier] = NotificationOwner(key: context.uniqueIdentifier, install: context.baseURL.host ?? "")
             if let failure = await post(identifier, title.isEmpty ? (context.webExtension.displayName ?? "Extension") : title, message, buttons, { [weak self, weak context] in
                 guard let self, let context else { return false }
                 return self.permits("notifications", for: context)
@@ -1206,7 +1576,9 @@ enum ExtensionCompatibility {
               let text = String(data: data, encoding: .utf8) else { return "null" }
         return String(text.dropFirst().dropLast())
     }
-    static func notificationIdentifier(context: WKWebExtensionContext, id: String) -> String { "bam-extension:\(context.uniqueIdentifier):\(id)" }
+    /// Per installation (base URL host), not per `runtime.id`: two profiles can install the same store extension, and
+    /// the shared notification center must not let one profile's notification reach the other.
+    static func notificationIdentifier(context: WKWebExtensionContext, id: String) -> String { "bam-extension:\(context.baseURL.host ?? context.uniqueIdentifier):\(id)" }
     static func parseNotificationIdentifier(_ identifier: String) -> (context: String, id: String)? {
         let parts = identifier.split(separator: ":", maxSplits: 2, omittingEmptySubsequences: false)
         guard parts.count == 3, parts[0] == "bam-extension" else { return nil }
@@ -1223,13 +1595,14 @@ enum ExtensionCompatibility {
         let identifier = response.notification.request.identifier, action = response.actionIdentifier
         Task { @MainActor [weak self] in
             defer { completionHandler() }
-            guard let self, let parsed = Self.parseNotificationIdentifier(identifier), self.notificationOwners[identifier] == parsed.context else { return }
+            // Only the bridge that posted it owns it; events go to the registration that posted it.
+            guard let self, let parsed = Self.parseNotificationIdentifier(identifier), let owner = self.routedOwner(for: identifier) else { return }
             switch action {
-            case UNNotificationDefaultActionIdentifier: self.dispatch("notifications.onClicked", [parsed.id], to: parsed.context)
-            case UNNotificationDismissActionIdentifier: self.dispatch("notifications.onClosed", [parsed.id, true], to: parsed.context)
+            case UNNotificationDefaultActionIdentifier: self.dispatch("notifications.onClicked", [parsed.id], to: owner)
+            case UNNotificationDismissActionIdentifier: self.dispatch("notifications.onClosed", [parsed.id, true], to: owner)
             default:
                 if action.hasPrefix("bam-button-"), let index = Int(action.dropFirst("bam-button-".count)) {
-                    self.dispatch("notifications.onButtonClicked", [parsed.id, index], to: parsed.context)
+                    self.dispatch("notifications.onButtonClicked", [parsed.id, index], to: owner)
                 }
             }
             self.notificationOwners.removeValue(forKey: identifier)

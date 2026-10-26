@@ -43,6 +43,12 @@ import WebKit
     /// `BAM_VENDOR_QUIET=1`: no host-initiated evaluation, action invocation or options fallback (VendorQuietMode).
     private var quiet = false
     private var plan = VendorQuietMode.plan(quiet: false)
+    /// `BAM_VENDOR_MANUAL_SITE_ACCESS=1` (diagnostic, quiet + normal only): after the initial install, runtime permission
+    /// requests use Bam's production dialog (never auto-granted) and the real reload offer stays wired, so a person can
+    /// accept the Site Access UI by hand. Off by default: the probe behaves exactly as before.
+    private var manualSiteAccess = false
+    /// Manual Site Access: the one-shot initial (non-optional) install review has been answered by the fixture rule.
+    private var initialInstallReviewConsumed = false
     private var responderSnapshots: [[String: Any]] = []
     /// IDs seeded by BAM_VENDOR_SEED_BOOKMARKS (empty when off), for the no-loaded-views check.
     private var seededBookmarkIDs: [UUID] = []
@@ -63,7 +69,18 @@ import WebKit
     private var modeRounds: [[[String: Any]]] = []
     private var controllerConfigurationPersistent: Bool?
     /// A weak handle on an owned page; nil once WebKit has released it.
-    private final class WeakView { weak var view: WKWebView?; init(_ view: WKWebView) { self.view = view } }
+    private final class WeakView {
+        weak var view: WKWebView?
+        let role: String
+        init(_ view: WKWebView, role: String = "page") { self.view = view; self.role = role }
+    }
+    /// `tracked`: an object was actually observed. An untracked probe reports null, never "released".
+    private final class WeakObject {
+        weak var object: AnyObject?
+        let tracked: Bool
+        init(_ object: AnyObject?) { self.object = object; tracked = object != nil }
+        var released: Any { tracked ? object == nil : NSNull() }
+    }
     /// Every action popup page seen during the run, so each one's release can be confirmed before the
     /// owned store is removed.
     private var observedPopups: [WeakView] = []
@@ -145,6 +162,28 @@ import WebKit
         }
         watchdog = timer; RunLoop.main.add(timer, forMode: .common)
     }
+    /// Manual Site Access: a production permission dialog or Site Access review may still be open when the run ends.
+    /// Abort the modal (an aborted dialog answers as declined, so nothing is granted) and end attached sheets, so
+    /// teardown and the controller's release stay bounded. Only this process's own windows are touched.
+    private func endManualInteraction() {
+        var aborted = false, sheets = 0
+        if NSApp.modalWindow != nil { NSApp.abortModal(); aborted = true }
+        for window in NSApp.windows {
+            if let sheet = window.attachedSheet { window.endSheet(sheet); sheets += 1 }
+        }
+        observations["manual_teardown"] = ["modal_aborted": aborted, "sheets_ended": sheets]
+    }
+    static let manualSiteAccessFlag = "BAM_VENDOR_MANUAL_SITE_ACCESS"
+    enum ManualSiteAccessDecision: Equatable { case off, on, invalid(String) }
+    /// Absent means off. Present, only "1" enables (an empty or any other value is refused), and only with quiet mode
+    /// and the normal disposable profile.
+    static func manualSiteAccessDecision(_ value: String?, quiet: Bool, normalProfile: Bool) -> ManualSiteAccessDecision {
+        guard let value else { return .off }
+        guard value == "1" else { return .invalid("\(manualSiteAccessFlag) must be 1 when set (it is \(value.isEmpty ? "empty" : "\"\(value)\""))") }
+        guard quiet else { return .invalid("\(manualSiteAccessFlag) needs quiet mode (\(VendorQuietMode.flag)=1)") }
+        guard normalProfile else { return .invalid("\(manualSiteAccessFlag) needs the normal disposable profile (BAM_VENDOR_PROFILE=normal)") }
+        return .on
+    }
     /// A deadline cancels the run, then waits (bounded) for it to return so the
     /// installer's own cleanup, including removal of its staging folder, completes
     /// before the process exits. Whether it did is reported, never assumed.
@@ -224,10 +263,27 @@ import WebKit
         plan = VendorQuietMode.plan(quiet: quiet)
         observations["quiet_mode"] = quiet
         if quiet { observations["quiet_scope"] = VendorQuietMode.quietUnmeasuredText }
+        // Opt-in manual Site Access diagnostic: decided (and refused if invalid) before any store or window exists.
+        switch Self.manualSiteAccessDecision(env[Self.manualSiteAccessFlag], quiet: quiet, normalProfile: mode == .normal) {
+        case .invalid(let why): throw BrowserExtensions.failure(why)
+        case .on: manualSiteAccess = true
+        case .off: manualSiteAccess = false
+        }
+        observations["manual_site_access"] = manualSiteAccess
+        if manualSiteAccess {
+            observations["manual_site_access_scope"] = "diagnostic: only the initial non-optional install review auto-approves Bam's supported permission set (as by default); every optional/runtime review, and any later review, uses Bam's production dialog and is never auto-granted; the browser's real reload offer stays wired; no product behavior changed"
+        }
         // Opt-in bookmark fixture: decided (and refused) before anything is created or mutated.
         let seedDecision = BookmarkVendorSeed.decide(flag: env[BookmarkVendorSeed.flag], isNormalMode: mode == .normal, site: env["BAM_VENDOR_SITE"])
         if case .refused(let why) = seedDecision { throw BrowserExtensions.failure(why) }
-        let home = BrowserTab(title: "Vendor observation", address: "orbit://newtab", space: 0)
+        // Opt-in restore fixture: also decided (and refused) before anything exists. Its start tab is the run's own
+        // ordinary today page, so the window holds only ordinary http tabs.
+        let restoreDecision = RestoreVendorFixture.decide(flag: env[RestoreVendorFixture.flag], isNormalMode: mode == .normal,
+                                                          site: env["BAM_VENDOR_SITE"], seedFlag: env[BookmarkVendorSeed.flag])
+        if case .refused(let why) = restoreDecision { throw BrowserExtensions.failure(why) }
+        let home: BrowserTab
+        if case .on(let today, _) = restoreDecision { home = BrowserTab(title: RestoreVendorFixture.startTitle, address: today, space: 0) }
+        else { home = BrowserTab(title: "Vendor observation", address: "orbit://newtab", space: 0) }
         let browser: BrowserController
         if mode == .normal {
             browser = try makeNormalController(home: home)
@@ -238,6 +294,10 @@ import WebKit
                 seededDestinations = Set(seeded.destinations)
                 observations["bookmark_seed"] = ["items": seeded.itemCount, "bookmark_pages": seeded.bookmarkPages,
                                                  "ids": seeded.ids.mapValues(\.uuidString)]
+            }
+            if case .on = restoreDecision {
+                seededDestinations = RestoreVendorFixture.destinations(restoreDecision)
+                observations["restore_fixture"] = ["start_tab": "the run's ordinary today page", "allowed_reopen_urls": seededDestinations.count]
             }
             observations["scope"] = "official Chrome Web Store CRX, signature verified for the requested ID; normal (non-private) semantics on a new random profile whose website store is task-owned and removed; non-persistent extension controller configuration; run-directory session and extension storage; no sign-in; no native companion; no compatibility claim"
         } else {
@@ -266,8 +326,25 @@ import WebKit
         }
 
         let host = browser.browserExtensions
-        host.onReloadNeeded = nil
+        // Manual Site Access keeps the browser's real reload offer; by default the probe silences it, as before.
+        if !manualSiteAccess { host.onReloadNeeded = nil }
         host.permissionPrompt = { [weak self] review in
+            // Manual Site Access: only the first non-optional review (the initial install) uses the fixture rule.
+            // Optional/runtime reviews, and any later review, go to Bam's production dialog right away, even while
+            // installer.install hasn't returned yet (the extension is already loaded and may request at startup).
+            if let self, self.manualSiteAccess {
+                if review.isOptional || self.initialInstallReviewConsumed {
+                    let approved = ExtensionManagement.reviewPermissions(review)
+                    self.reviewEvents.append([
+                        "permissions": review.permissions, "unsupported": review.unsupported,
+                        "website_patterns": review.websites, "optional": review.isOptional,
+                        "production_dialog": true, "approved_by_person": approved
+                    ])
+                    return approved
+                }
+                self.initialInstallReviewConsumed = true
+            }
+            // Default (and the manual mode's one initial install review): exactly as before.
             self?.reviewEvents.append([
                 "permissions": review.permissions, "unsupported": review.unsupported,
                 "website_patterns": review.websites, "optional": review.isOptional
@@ -331,6 +408,12 @@ import WebKit
         let package = host.storageURL.appendingPathComponent(record.id.uuidString, isDirectory: true).appendingPathComponent(record.packageName, isDirectory: true)
         observations["manifest_version"] = manifest["manifest_version"]
         observations["requests_native_messaging"] = (manifest["permissions"] as? [String] ?? []).contains("nativeMessaging")
+        if manualSiteAccess {
+            // The initial install is complete (approved under the supported-set rule above). From here, every runtime
+            // permission request goes to Bam's production dialog: nothing is auto-granted.
+            host.permissionPrompt = nil
+            observations["permission_prompt_after_install"] = "production dialog (not auto-approved); reviews answered by a person before this point are in permission_reviews with production_dialog=true"
+        }
         initialized = true
         observations["extension_name"] = context.webExtension.displayName ?? ""
         observations["has_background"] = context.webExtension.hasBackgroundContent
@@ -644,6 +727,7 @@ import WebKit
         guard !finished else { return }
         finished = true; watchdog?.invalidate(); watchdog = nil
         task?.cancel(); task = nil
+        if manualSiteAccess { endManualInteraction() }
         observations["phases"] = ["installed_and_initialized": initialized, "observation_started": observationStarted != nil,
                                   "observation_completed": observationCompleted]
         if let observationStarted {
@@ -696,16 +780,32 @@ import WebKit
         // Peek pages, and the action popup. All must be released before the owned store is removed.
         var ownedViews: [WeakView] = []
         if let browser = controller {
-            ownedViews += browser.browsers.values.map(WeakView.init)
-            ownedViews += browser.littleWindows.values.compactMap(\.webView).map(WeakView.init)
-            ownedViews += browser.peeks.values.compactMap(\.webView).map(WeakView.init)
+            for (id, web) in browser.browsers {
+                let scheme = web.url?.scheme ?? "none"
+                let role = scheme == "webkit-extension" ? "extension-tab" : (["http", "https"].contains(scheme) ? "web-tab" : "other-tab(\(scheme))")
+                ownedViews.append(WeakView(web, role: role + (browser.session.activeID == id ? "(selected)" : "")))
+            }
+            ownedViews += browser.littleWindows.values.compactMap(\.webView).map { WeakView($0, role: "little-bam") }
+            ownedViews += browser.peeks.values.compactMap(\.webView).map { WeakView($0, role: "peek") }
         }
+        // Which owner survives, each tracked on its own (evidence only): the extension host and its profile runtime
+        // hold cached surfaces with strong page references; a page's configuration holds the WKWebExtensionController.
+        var hostProbe = WeakObject(nil), runtimeProbe = WeakObject(nil)
+        // The UI state at the moment the run ends: something still on the stack (a menu being tracked, a modal or a
+        // sheet) keeps its owner alive until it unwinds.
+        observations["teardown_ui_state"] = [
+            "run_loop_mode": RunLoop.current.currentMode?.rawValue ?? "none",
+            "modal_window": NSApp.modalWindow.map { String(describing: type(of: $0)) } ?? "none",
+            "attached_sheets": NSApp.windows.filter { $0.attachedSheet != nil }.count,
+            "visible_windows": NSApp.windows.filter(\.isVisible).map { String(describing: type(of: $0)) }
+        ]
         var temporaryStorage: URL?
         // The WebKit extension controller itself (public object), captured before host shutdown: its release
         // is the evidence for the background page, which is WebKit-internal and not observed directly.
         weak var extensionController: AnyObject?
         if #available(macOS 15.4, *), let browser = controller {
             let host = browser.browserExtensions
+            hostProbe = WeakObject(host)
             temporaryStorage = host.storageURL
             if let id = extensionID {
                 if let context = host.context(for: id) {
@@ -714,8 +814,9 @@ import WebKit
                     // and not reachable; its release is covered only by the controller's.
                     extensionController = context.webExtensionController
                     let runtime = context.webExtensionController?.delegate as? BrowserExtensionRuntime
+                    runtimeProbe = WeakObject(runtime)
                     if let offscreen = runtime?.compatibility.offscreen?.currentDocument(for: context.uniqueIdentifier) {
-                        ownedViews.append(WeakView(offscreen))
+                        ownedViews.append(WeakView(offscreen, role: "offscreen"))
                     }
                     // Quiet: not read at all (the getter would create and load a popup during teardown). Quiet makes no
                     // claim that no popup exists (a person may open one); any popup is not inspected and, like the
@@ -770,7 +871,18 @@ import WebKit
             let cleanup = await self.cleanUpNormalRun(run, controllerReleased: { releasedController == nil && extensionController == nil },
                                                       extensionControllerReleased: { extensionController == nil },
                                                       livePages: { ownedViews.filter { $0.view != nil }.count })
-            self.observations["normal_cleanup"] = cleanup.report
+            var report = cleanup.report
+            // Evidence after the gate (released or timed out): which of the owners and pages are still alive.
+            report["release_evidence"] = [
+                "browser_controller_released": releasedController == nil,
+                "extension_host_released": hostProbe.released,
+                "extension_host_tracked": hostProbe.tracked,
+                "profile_runtime_released": runtimeProbe.released,
+                "profile_runtime_tracked": runtimeProbe.tracked,
+                "extension_controller_released": extensionController == nil,
+                "pages": ownedViews.map { ["role": $0.role, "alive": $0.view != nil] }
+            ]
+            self.observations["normal_cleanup"] = report
             var text = reasonText
             if !modeValid { text += "; normal-profile mode not established (\(self.observations["normal_mode_verdict"] ?? "unknown"))" }
             if !cleanup.clean { text += "; the run's own website store or directory could not be confirmed removed" }

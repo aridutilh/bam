@@ -9,6 +9,9 @@ import WebKit
 /// `contentWindow.focus()`, child timer), or `c` (pointer-click positive control). Real keys and clicks are root's only.
 /// Page-side evidence is passive and reaches the host only through a run-unique host-world script message handler; the
 /// host evaluates no page JavaScript. Results are observations; nothing here attributes a cause to WebKit or Bam.
+/// `BAM_FOCUS_HOST=plain` hosts the same page in a bare WKWebView (no BrowserController or UI) with the same kind of owned
+/// transient extension host. It still uses Bam's extension host, runtime and compatibility layer, so it isolates the
+/// BrowserController/UI layer only; it is not a pure-WebKit control.
 @available(macOS 15.4, *)
 @MainActor final class ExtensionFocusProbe {
     private static var current: ExtensionFocusProbe?
@@ -34,22 +37,31 @@ import WebKit
       if (!q.has("bam-focus-child") || window.top === window || document.getElementById("bam-focus-input")) return;
       const run = q.get("run"), kase = q.get("case"), role = q.get("role"), parentOrigin = q.get("po");
       if (!run || !kase || !role || !parentOrigin) return;
-      let seq = 0, pattern = null, armed = false, showAt = null, focusedOnce = false;
+      // Structure (BAM_FOCUS_STRUCTURE): the child only needs `editable` (focus target) and `channel` (MessageChannel port).
+      const structure = new Set(String(q.get("st") || "").split(",").filter(Boolean));
+      const editable = structure.has("editable"), channel = structure.has("channel");
+      let seq = 0, pattern = null, armed = false, showAt = null, focusedOnce = false, port = null;
       const describe = (el) => !el ? null : (el.id ? el.tagName.toLowerCase() + "#" + el.id : el.tagName.toLowerCase());
       const activation = () => navigator.userActivation
         ? {isActive: navigator.userActivation.isActive, hasBeenActive: navigator.userActivation.hasBeenActive} : null;
-      const input = document.createElement("input");
+      // The focus target: an input, or (editable) a plaintext-only contenteditable span like Vimium's HUD.
+      const input = document.createElement(editable ? "span" : "input");
+      const valueOf = () => String((editable ? input.textContent : input.value) || "");
       const state = () => ({hasFocus: document.hasFocus(), active: describe(document.activeElement),
                             activeIsInput: document.activeElement === input, activation: activation()});
       const send = (kind, fields) => {
-        try {
-          window.parent.postMessage({bamFocusProbe: 1, run, case: kase, role,
-            record: Object.assign({kind, seq: ++seq, t: Math.round(performance.now()), wall: Date.now()}, fields || {})}, parentOrigin);
-        } catch (error) {}
+        const message = {bamFocusProbe: 1, run, case: kase, role,
+          record: Object.assign({kind, seq: ++seq, t: Math.round(performance.now()), wall: Date.now()}, fields || {})};
+        try { if (port) port.postMessage(message); else window.parent.postMessage(message, parentOrigin); } catch (error) {}
       };
-      input.id = "bam-focus-input"; input.type = "text"; input.autocomplete = "off"; input.spellcheck = false;
+      input.id = "bam-focus-input";
+      if (editable) {
+        try { input.contentEditable = "plaintext-only"; } catch (error) { input.contentEditable = "true"; }
+      } else { input.type = "text"; input.autocomplete = "off"; input.spellcheck = false; }
       input.setAttribute("aria-label", "Bam focus probe child input");
       input.style.cssText = "font:600 22px -apple-system,system-ui,sans-serif;padding:10px 14px;width:80%;margin:12px;border:2px solid #222;border-radius:8px";
+      // After cssText (which would erase them): a span needs block geometry to be a usable focus/click target.
+      if (editable) { input.style.display = "inline-block"; input.style.minWidth = "60%"; input.style.minHeight = "1.4em"; }
       const label = document.createElement("div");
       label.textContent = "Bam focus probe child (" + role + ")";
       label.style.cssText = "font:600 16px -apple-system,system-ui,sans-serif;margin:12px";
@@ -70,24 +82,33 @@ import WebKit
       input.addEventListener("blur", () => send("input_blur", state()), passive);
       window.addEventListener("keydown", (event) => send("keydown", {key: String(event.key).slice(0, 12), trusted: event.isTrusted === true,
                                                                       targetIsInput: event.target === input, hasFocus: document.hasFocus()}), passive);
-      input.addEventListener("input", (event) => send("input", {value: input.value.slice(0, 32), trusted: event.isTrusted === true}), passive);
+      input.addEventListener("input", (event) => send("input", {value: valueOf().slice(0, 32), trusted: event.isTrusted === true}), passive);
       window.addEventListener("pointerdown", (event) => send("pointer", {trusted: event.isTrusted === true, onInput: event.target === input,
                                                                           activation: activation()}), passive);
+      const show = () => {
+        if (!armed || showAt !== null) return;
+        showAt = performance.now();
+        send("show", state());
+        for (const after of \#(sampleDelays)) {
+          setTimeout(() => send("sample", Object.assign({after_ms: after, actual_ms: Math.round(performance.now() - showAt)}, state())), after);
+        }
+        if (pattern === "p1" || pattern === "p3" || pattern === "p4") setTimeout(() => focusInput("timer-17ms"), 17);
+      };
+      const valid = (data) => data && data.bamFocusProbe === 1 && data.run === run && data.case === kase;
       window.addEventListener("message", (event) => {
         if (event.source !== window.parent || event.origin !== parentOrigin) return;
         const data = event.data;
-        if (!data || data.bamFocusProbe !== 1 || data.run !== run || data.case !== kase) return;
+        if (!valid(data)) return;
         if (data.type === "hello" && !armed) {
-          pattern = String(data.pattern); armed = true;
-          send("ready", Object.assign({pattern}, state()));
-        } else if (data.type === "show" && armed && showAt === null) {
-          showAt = performance.now();
-          send("show", state());
-          for (const after of \#(sampleDelays)) {
-            setTimeout(() => send("sample", Object.assign({after_ms: after, actual_ms: Math.round(performance.now() - showAt)}, state())), after);
+          // channel: take the transferred port from the validated parent hello; show then arrives only on that port.
+          if (channel) {
+            if (!event.ports || !event.ports[0]) return;
+            port = event.ports[0];
+            port.onmessage = (portEvent) => { if (valid(portEvent.data) && portEvent.data.type === "show") show(); };
           }
-          if (pattern === "p1" || pattern === "p3" || pattern === "p4") setTimeout(() => focusInput("timer-17ms"), 17);
-        }
+          pattern = String(data.pattern); armed = true;
+          send("ready", Object.assign({pattern, channel: port !== null, targetEditable: input.isContentEditable === true}, state()));
+        } else if (data.type === "show" && !channel) { show(); }
       });
       send("child_load", state());
     }
@@ -103,13 +124,17 @@ import WebKit
       const parts = String(kase || "").split(":"), role = parts[0], pattern = parts[1];
       if (!run || !["so", "xo", "ex"].includes(role) || !["p1", "p2", "p3", "p4", "c"].includes(pattern)) return;
       const parentOrigin = location.origin;
+      // Structure (BAM_FOCUS_STRUCTURE, validated natively; the page only reads the known factor names it is given).
+      const structureText = String(q.get("st") || "");
+      const structure = new Set(structureText.split(",").filter(Boolean));
+      const has = (factor) => structure.has(factor);
       const childQuery = "bam-focus-child=1&run=" + encodeURIComponent(run) + "&case=" + encodeURIComponent(kase) +
-                         "&role=" + role + "&po=" + encodeURIComponent(parentOrigin);
+                         "&role=" + role + "&po=" + encodeURIComponent(parentOrigin) + "&st=" + encodeURIComponent(structureText);
       let childURL, childOrigin;
       if (role === "so") { childOrigin = parentOrigin; childURL = parentOrigin + location.pathname + "?" + childQuery; }
       else if (role === "xo") { const u = new URL(location.href); u.hostname = "localhost"; childOrigin = u.origin; childURL = childOrigin + location.pathname + "?" + childQuery; }
       else { const base = new URL(chrome.runtime.getURL("child.html")); childOrigin = base.protocol + "//" + base.host; childURL = base.href + "?" + childQuery; }
-      const st = {run, case: kase, childOrigin, armed: false, triggered: false, rejected: 0, records: []};
+      const st = {run, case: kase, structure: structureText, childOrigin, armed: false, triggered: false, rejected: 0, records: []};
       let seq = 0;
       const publish = () => { document.documentElement.setAttribute("\#(stateAttribute)", JSON.stringify(st)); };
       const add = (frame, record) => {
@@ -126,17 +151,20 @@ import WebKit
       area.id = "bam-focus-parent-area";
       area.textContent = "Bam focus probe PARENT (" + kase + ")";
       area.style.cssText = "font:600 22px -apple-system,system-ui,sans-serif;padding:28px;margin:12px;background:#eee;border:2px dashed #888;border-radius:10px";
-      const frame = document.createElement("iframe");
-      frame.id = "bam-focus-child"; frame.src = childURL; frame.title = "Bam focus probe child";
-      frame.style.cssText = "width:90%;height:170px;border:3px solid #36c;margin:12px;border-radius:8px";
-      document.body.append(area, frame);
+      document.body.append(area);
+      // Container: the body, or (shadow) an open shadow root on a wrapper appended to documentElement, as Vimium's UIComponent.
+      let container = document.body, styleHost = document.head || document.documentElement, wrapper = null;
+      if (has("shadow")) {
+        wrapper = document.createElement("div");
+        wrapper.id = "bam-focus-shadow-wrapper";
+        const shadow = wrapper.attachShadow({mode: "open"});
+        document.documentElement.appendChild(wrapper);
+        container = shadow; styleHost = shadow;
+      }
+      let frame = null, parentPort = null, shown = false, suppressing = false, readySeen = false;
+      const ports = new Set();
       const bool = (value) => (typeof value === "boolean" ? value : null);
-      window.addEventListener("message", (event) => {
-        const data = event.data;
-        if (event.source !== frame.contentWindow || event.origin !== childOrigin) {
-          if (data && data.bamFocusProbe === 1) { st.rejected += 1; publish(); }
-          return;
-        }
+      const childRecord = (data) => {
         if (!data || data.bamFocusProbe !== 1 || data.run !== run || data.case !== kase || data.role !== role ||
             !data.record || typeof data.record !== "object") { st.rejected += 1; publish(); return; }
         const clean = {};
@@ -147,41 +175,101 @@ import WebKit
             clean[name] = {isActive: bool(value.isActive), hasBeenActive: bool(value.hasBeenActive)};
         }
         add("child", clean);
-        if (clean.kind === "ready" && !st.armed) { st.armed = true; local("armed", pstate()); }
+        if (clean.kind === "input_focus") suppressing = false;
+        if (clean.kind === "ready") {
+          readySeen = true;
+          if (!has("lazy") && !st.armed) { st.armed = true; local("armed", pstate()); }
+          if (has("lazy") && st.triggered && !shown) performShow();
+        }
+      };
+      window.addEventListener("message", (event) => {
+        const data = event.data;
+        if (!frame || event.source !== frame.contentWindow || event.origin !== childOrigin) {
+          if (data && data.bamFocusProbe === 1) { st.rejected += 1; publish(); }
+          return;
+        }
+        childRecord(data);
       });
       let helloTries = 0;
       const hello = () => {
-        if (st.armed || helloTries >= 40) return;
+        if (readySeen || helloTries >= 40 || !frame) return;
         helloTries += 1;
+        const message = {bamFocusProbe: 1, run, case: kase, type: "hello", pattern};
         try {
-          frame.contentWindow.postMessage({bamFocusProbe: 1, run, case: kase, type: "hello", pattern}, childOrigin);
-          if (helloTries === 1) local("hello_sent", {});
+          if (has("channel")) {
+            // A fresh channel per attempt; only ports this parent created are listened to.
+            const mc = new MessageChannel();
+            ports.add(mc.port1);
+            mc.port1.onmessage = (event) => { parentPort = mc.port1; childRecord(event.data); };
+            frame.contentWindow.postMessage(message, childOrigin, [mc.port2]);
+          } else frame.contentWindow.postMessage(message, childOrigin);
+          if (helloTries === 1) local("hello_sent", {channel: has("channel")});
         } catch (error) {}
         setTimeout(hello, 250);
       };
-      frame.addEventListener("load", () => { local("child_load", {}); setTimeout(hello, 50); });
-      const passive = {capture: true, passive: true};
-      window.addEventListener("focus", (event) => { if (event.target === window) local("window_focus", pstate()); }, passive);
-      window.addEventListener("blur", (event) => { if (event.target === window) local("window_blur", pstate()); }, passive);
-      window.addEventListener("pointerdown", (event) => local("pointer", Object.assign({trusted: event.isTrusted === true, target: describe(event.target)}, pstate())), passive);
-      window.addEventListener("keydown", (event) => {
-        const trusted = event.isTrusted === true, key = String(event.key).slice(0, 12);
-        local("keydown", Object.assign({key, trusted, target: describe(event.target)}, pstate()));
-        if (!st.armed || st.triggered || !trusted || pattern === "c" || key.toLowerCase() !== "\#(triggerKey)") return;
-        st.triggered = true;
-        local("trigger", Object.assign({key: "\#(triggerKey)", trusted}, pstate()));
-        frame.contentWindow.postMessage({bamFocusProbe: 1, run, case: kase, type: "show"}, childOrigin);
+      const createFrame = () => {
+        // hidden: created with the frame, as Vimium's UIComponent.load: `iframe{display:none}` first, class CSS shortly
+        // after (Vimium fetches it from storage); the frame is shown by class toggle right after "show" is posted.
+        if (has("hidden")) {
+          const style = document.createElement("style");
+          style.textContent = "iframe {display: none;}";
+          styleHost.appendChild(style);
+          setTimeout(() => {
+            style.textContent = "iframe.bam-hidden {display: none;} iframe.bam-visible {display: block;}";
+            local("style_loaded", {});
+          }, 10);
+        }
+        frame = document.createElement("iframe");
+        frame.id = "bam-focus-child"; frame.title = "Bam focus probe child";
+        if (has("allow")) frame.allow = "clipboard-read; clipboard-write";
+        if (has("hidden")) frame.className = "bam-hidden";
+        frame.style.cssText = "width:90%;height:170px;border:3px solid #36c;margin:12px;border-radius:8px";
+        frame.src = childURL;
+        frame.addEventListener("load", () => { local("child_load", {}); setTimeout(hello, 50); });
+        container.appendChild(frame);
+        local("frame_created", {lazy: has("lazy"), inShadow: frame.getRootNode() !== document,
+                                wrapperParent: wrapper && wrapper.parentNode ? wrapper.parentNode.nodeName.toLowerCase() : null,
+                                allow: frame.getAttribute("allow"), className: frame.className});
+      };
+      const performShow = () => {
+        if (shown || !frame) return;
+        shown = true;
+        const message = {bamFocusProbe: 1, run, case: kase, type: "show"};
+        if (has("channel") && parentPort) parentPort.postMessage(message); else frame.contentWindow.postMessage(message, childOrigin);
+        const displayBefore = getComputedStyle(frame).display;
+        if (has("hidden")) { frame.classList.remove("bam-hidden"); frame.classList.add("bam-visible"); }
+        const frameDisplay = getComputedStyle(frame).display;
         const shownAt = performance.now();
         let focusCall = "none", focusError = null;
         try {
           if (pattern === "p2" || pattern === "p3") { focusCall = "iframe.focus"; frame.focus(); }
           else if (pattern === "p4") { focusCall = "contentWindow.focus"; frame.contentWindow.focus(); }
         } catch (error) { focusError = String((error && error.message) || error).slice(0, 200); }
-        local("show_sent", Object.assign({pattern, focusCall, focusError}, pstate()));
+        local("show_sent", Object.assign({pattern, focusCall, focusError, via: has("channel") && parentPort ? "port" : "window",
+                                          displayBefore, frameDisplay}, pstate()));
         for (const after of \#(sampleDelays)) {
           setTimeout(() => local("sample", Object.assign({after_ms: after, actual_ms: Math.round(performance.now() - shownAt)}, pstate())), after);
         }
+      };
+      if (has("lazy")) { st.armed = true; local("armed", Object.assign({lazy: true}, pstate())); }
+      else createFrame();
+      const passive = {capture: true, passive: true};
+      window.addEventListener("focus", (event) => { if (event.target === window) local("window_focus", pstate()); }, passive);
+      window.addEventListener("blur", (event) => { if (event.target === window) local("window_blur", pstate()); }, passive);
+      window.addEventListener("pointerdown", (event) => local("pointer", Object.assign({trusted: event.isTrusted === true, target: describe(event.target)}, pstate())), passive);
+      // Recording listener first (passive), so every parent key is recorded before any suppression below.
+      window.addEventListener("keydown", (event) => {
+        local("keydown", Object.assign({key: String(event.key).slice(0, 12), trusted: event.isTrusted === true, target: describe(event.target)}, pstate()));
       }, passive);
+      window.addEventListener("keydown", (event) => {
+        const trusted = event.isTrusted === true, key = String(event.key).slice(0, 12);
+        if (suppressing) { event.preventDefault(); event.stopImmediatePropagation(); return; }
+        if (!st.armed || st.triggered || !trusted || pattern === "c" || key.toLowerCase() !== "\#(triggerKey)") return;
+        st.triggered = true;
+        if (has("suppress")) { event.preventDefault(); event.stopImmediatePropagation(); suppressing = true; }
+        local("trigger", Object.assign({key: "\#(triggerKey)", trusted, suppressed: event.defaultPrevented === true}, pstate()));
+        if (has("lazy")) createFrame(); else performShow();
+      }, {capture: true});
       publish();
     }
     """#
@@ -238,7 +326,15 @@ import WebKit
     private var extensionID: UUID?
     private var hostStorage: URL?
     private var tabID: UUID?
+    /// `BAM_FOCUS_HOST`: `bam` (BrowserController tab) or `plain` (bare WKWebView); both use these shared references.
+    private var hostMode: Rules.Host = .bam
+    private var extensionHost: BrowserExtensions?
+    private var profileID: UUID?
+    private var plainWeb: WKWebView?
+    /// The probe page's web view in either host.
+    private func probeWeb() -> WKWebView? { plainWeb ?? tabID.flatMap { controller?.browsers[$0] } }
     private var probeCase: Rules.Case?
+    private var structure: Set<Rules.Factor> = []
     private let runToken = UUID().uuidString
     private let hostWorld = WKContentWorld.world(name: "bam-focus-probe-host-\(UUID().uuidString)")
     private weak var observedContent: WKUserContentController?
@@ -259,7 +355,7 @@ import WebKit
 
     /// This run's world, main frame, probe tab and exact probe URL, bounded shape; evidence only, nothing is granted.
     private func receive(_ message: WKScriptMessage) {
-        guard message.world == hostWorld, message.frameInfo.isMainFrame, let id = tabID, message.webView === controller?.browsers[id],
+        guard message.world == hostWorld, message.frameInfo.isMainFrame, let web = probeWeb(), message.webView === web,
               let expected = probePageURL, message.frameInfo.request.url?.absoluteString == expected.absoluteString,
               let body = message.body as? [String: Any], body.count <= 6, let event = body["event"] as? String, ["ready", "state"].contains(event),
               body["perf"] is NSNumber, body["wall"] is NSNumber else { rejectedHostMessages += 1; return }
@@ -286,7 +382,7 @@ import WebKit
         entry["key_window_is_probe"] = key != nil && key === window
         let responder = window?.firstResponder
         entry["first_responder_class"] = responder.map { String(describing: type(of: $0)) } ?? "none"
-        if let id = tabID, let web = controller?.browsers[id], let view = responder as? NSView {
+        if let web = probeWeb(), let view = responder as? NSView {
             entry["first_responder_is_tab_web_view"] = view === web
             entry["first_responder_inside_tab_web_view"] = view === web || view.isDescendant(of: web)
         } else { entry["first_responder_inside_tab_web_view"] = false }
@@ -327,7 +423,24 @@ import WebKit
             throw BrowserExtensions.failure("Set BAM_FOCUS_CASE to <so|xo|ex>:<p1|p2|p3|p4|c>, one case per run")
         }
         self.probeCase = probeCase
+        guard let hostMode = Rules.parseHost(env["BAM_FOCUS_HOST"]) else {
+            throw BrowserExtensions.failure("BAM_FOCUS_HOST must be bam (default) or plain")
+        }
+        self.hostMode = hostMode
+        observations["host"] = hostMode.rawValue
+        if hostMode == .plain {
+            observations["scope"] = "original MV3 fixture (content script and one web-accessible child page; no API permissions) on the loopback page; PLAIN host: a bare WKWebView in its own window registered as the extension host's only tab surface, with no BrowserController, sidebar, overlays or Bam navigation/UI delegates; still Bam's BrowserExtensions host, extension runtime and compatibility layer (owned transient storage, non-persistent controller and data store), so a matching result excludes the BrowserController/UI layer only and is not a pure-WebKit control; same warm-up (unmarked page, then observer, then probe page); passive host-world observation; no page JavaScript evaluated by the host; measurement only, no root-cause attribution"
+        } else {
+            observations["scope"] = "original MV3 fixture (content script and one web-accessible child page; no API permissions) on the loopback page; BAM host: a real Bam window and tab (BrowserController) with Bam's extension host, runtime and compatibility layer; ephemeral profile; passive host-world observation; no page JavaScript evaluated by the host; measurement only, no root-cause attribution"
+        }
+        guard let structure = Rules.parseStructure(env["BAM_FOCUS_STRUCTURE"]) else {
+            throw BrowserExtensions.failure("BAM_FOCUS_STRUCTURE must be none, vimium, vimium-minus-<factor> or a comma list of " +
+                                            Rules.Factor.allCases.map(\.rawValue).joined(separator: "/"))
+        }
+        if let refusal = Rules.combinationRefusal(probeCase, structure) { throw BrowserExtensions.failure(refusal) }
+        self.structure = structure
         observations["case"] = probeCase.label
+        observations["structure"] = Rules.structureLabel(structure)
         observations["run"] = runToken
         // The cross-origin child is http://localhost on the same server, so the parent must be http://127.0.0.1.
         guard page.scheme == "http", page.host == "127.0.0.1", page.user == nil, page.password == nil,
@@ -335,7 +448,8 @@ import WebKit
             throw BrowserExtensions.failure("The focus probe needs the loopback fixture server at http://127.0.0.1")
         }
         components.queryItems = [URLQueryItem(name: Self.marker, value: "1"), URLQueryItem(name: "run", value: runToken),
-                                 URLQueryItem(name: "case", value: probeCase.label)]
+                                 URLQueryItem(name: "case", value: probeCase.label),
+                                 URLQueryItem(name: "st", value: Rules.sortedFactors(structure).map(\.rawValue).joined(separator: ","))]
         components.fragment = nil
         guard let probePage = components.url else { throw BrowserExtensions.failure("Could not build the probe page URL") }
         observations["protocol"] = ["trigger_key": Rules.triggerKey, "typed_text": Rules.typedText, "sample_offsets_ms": Rules.sampleDelaysMilliseconds,
@@ -349,27 +463,38 @@ import WebKit
         let package = directory.appendingPathComponent("package", isDirectory: true)
         try Self.writePackage(to: package)
 
-        let home = BrowserTab(title: "Focus probe", address: "orbit://newtab", space: 0)
-        let browser = BrowserController(sessionURL: directory.appendingPathComponent("session.json"), ephemeral: true)
-        browser.session = BrowserSession(tabs: [home], activeID: home.id)
-        // Bam's own automatic page evaluations are off before any page loads (property sets; nothing written to preferences).
-        browser.automaticallyShowsVideo = false
-        browser.documentFaviconDiscoveryEnabled = false
-        browser.automaticTabSleeping = false
-        observations["host_automatic_page_evaluations"] = ["favicon_document_discovery": "disabled", "tab_sleep_activity_inspection": "disabled",
-                                                           "automatic_playing_video_pip": "disabled"]
-        controller = browser
         let main = NSWindow(contentRect: NSRect(x: 140, y: 120, width: 900, height: 640), styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
         main.isReleasedWhenClosed = false
-        main.title = "Bam focus probe \(probeCase.label) \(runToken.prefix(8))"
-        main.contentViewController = browser
-        main.setContentSize(NSSize(width: 900, height: 640))
-        browser.view.frame = NSRect(x: 0, y: 0, width: 900, height: 640)
-        window = main; main.makeKeyAndOrderFront(nil)
-        browser.layoutBrowser(); browser.view.layoutSubtreeIfNeeded()
+        main.title = "Bam focus probe \(hostMode == .plain ? "plain " : "")\(probeCase.label) \(runToken.prefix(8))"
+        let host: BrowserExtensions, profile: UUID
+        var browser: BrowserController?
+        if hostMode == .bam {
+            let home = BrowserTab(title: "Focus probe", address: "orbit://newtab", space: 0)
+            let bam = BrowserController(sessionURL: directory.appendingPathComponent("session.json"), ephemeral: true)
+            bam.session = BrowserSession(tabs: [home], activeID: home.id)
+            // Bam's own automatic page evaluations are off before any page loads (property sets; nothing written to preferences).
+            bam.automaticallyShowsVideo = false
+            bam.documentFaviconDiscoveryEnabled = false
+            bam.automaticTabSleeping = false
+            observations["host_automatic_page_evaluations"] = ["favicon_document_discovery": "disabled", "tab_sleep_activity_inspection": "disabled",
+                                                               "automatic_playing_video_pip": "disabled"]
+            controller = bam; browser = bam
+            main.contentViewController = bam
+            main.setContentSize(NSSize(width: 900, height: 640))
+            bam.view.frame = NSRect(x: 0, y: 0, width: 900, height: 640)
+            window = main; main.makeKeyAndOrderFront(nil)
+            bam.layoutBrowser(); bam.view.layoutSubtreeIfNeeded()
+            host = bam.browserExtensions; profile = bam.session.currentProfileID
+        } else {
+            // Plain host: no BrowserController, sidebar, overlays, Bam navigation/UI delegates or Bam page evaluations. The same
+            // kind of owned transient extension host and non-persistent controller as the ephemeral Bam browser uses.
+            host = BrowserExtensions(storageURL: nil, isPrivate: true)
+            profile = UUID()
+            window = main; main.makeKeyAndOrderFront(nil)
+            observations["host_automatic_page_evaluations"] = "none (plain WKWebView: no Bam browser layer)"
+        }
+        extensionHost = host; profileID = profile
         observations["window_title"] = main.title
-
-        let host = browser.browserExtensions
         host.onReloadNeeded = nil
         hostStorage = host.storageURL
         host.permissionPrompt = { [weak self] review in
@@ -379,9 +504,8 @@ import WebKit
                                   "websites": review.websites, "answer": allowed ? "approved (install, loopback only)" : "denied"])
             return allowed
         }
-        let profile = browser.session.currentProfileID
         let configuration = WKWebViewConfiguration()
-        configuration.websiteDataStore = browser.profileStores.store(for: profile)
+        configuration.websiteDataStore = browser.map { $0.profileStores.store(for: profile) } ?? .nonPersistent()
         host.configure(configuration, profileID: profile)
         await host.ready(profileID: profile)
         let id = try await host.importPackage(at: package, profileID: profile)
@@ -391,26 +515,55 @@ import WebKit
         }
         observations["granted_permissions"] = context.grantedPermissions.keys.map(\.rawValue).sorted()
 
-        // The plain page first (no marker: the content script stays inert), then the observer, then the probe page.
-        guard let opened = browser.openProfileTab(page, profileID: profile, active: true) else { throw BrowserExtensions.failure("Could not open the loopback tab") }
-        tabID = opened
-        browser.select(opened); browser.refresh()
         let setupDeadline = started + 15
-        guard try await poll(until: setupDeadline, { browser.browsers[opened]?.url == page && browser.browsers[opened]?.isLoading == false }),
-              let web = browser.browsers[opened] else { throw BrowserExtensions.failure("The loopback fixture page did not load") }
-        let content = web.configuration.userContentController
-        let proxy = HostMessages(); proxy.owner = self; messageProxy = proxy; observedContent = content
-        content.add(proxy, contentWorld: hostWorld, name: Self.hostMessageName)
-        content.addUserScript(WKUserScript(source: Self.hostScript, injectionTime: .atDocumentStart, forMainFrameOnly: true, in: hostWorld))
-        probePageURL = probePage
-        browser.navigatePane(opened, address: probePage.absoluteString)
+        let installObserver = { (content: WKUserContentController) in
+            let proxy = HostMessages(); proxy.owner = self; self.messageProxy = proxy; self.observedContent = content
+            content.add(proxy, contentWorld: self.hostWorld, name: Self.hostMessageName)
+            content.addUserScript(WKUserScript(source: Self.hostScript, injectionTime: .atDocumentStart, forMainFrameOnly: true, in: self.hostWorld))
+        }
+        let opened: UUID
+        if let browser {
+            // The plain page first (no marker: the content script stays inert), then the observer, then the probe page.
+            guard let tab = browser.openProfileTab(page, profileID: profile, active: true) else { throw BrowserExtensions.failure("Could not open the loopback tab") }
+            opened = tab; tabID = tab
+            browser.select(tab); browser.refresh()
+            guard try await poll(until: setupDeadline, { browser.browsers[tab]?.url == page && browser.browsers[tab]?.isLoading == false }),
+                  let web = browser.browsers[tab] else { throw BrowserExtensions.failure("The loopback fixture page did not load") }
+            installObserver(web.configuration.userContentController)
+            probePageURL = probePage
+            browser.navigatePane(tab, address: probePage.absoluteString)
+        } else {
+            // Plain: the same warm-up sequence as the Bam host. First the unmarked loopback page (the content script stays
+            // inert), wait for it to finish, then install the observer, then navigate to the probe page, so the probe page is
+            // not the web view's first document in either host. The web view is registered as the host's one tab surface.
+            opened = UUID(); tabID = opened
+            let web = WKWebView(frame: NSRect(x: 0, y: 0, width: 900, height: 640), configuration: configuration)
+            plainWeb = web
+            main.contentView = web
+            host.surfaces = { [weak web, weak main] requested in
+                guard requested == profile, let web else { return [] }
+                return [BrowserExtensionSurface(id: opened, title: "Focus probe", url: web.url, webView: web, window: main, isActive: true, isSelected: true)]
+            }
+            host.reconcile()
+            main.makeFirstResponder(web)
+            web.load(URLRequest(url: page))
+            guard try await poll(until: setupDeadline, { web.url == page && !web.isLoading }) else {
+                throw BrowserExtensions.failure("The loopback fixture page did not load")
+            }
+            installObserver(web.configuration.userContentController)
+            probePageURL = probePage
+            web.load(URLRequest(url: probePage))
+        }
 
-        // Handshake before READY: the child's ready acknowledgement and the parent's armed record, both preloaded.
-        guard try await poll(until: setupDeadline, { self.hostReady && self.has("child", "ready") && self.has("parent", "armed") }) else {
+        // Handshake before READY: the child's ready acknowledgement and the parent's armed record, both preloaded. With
+        // `lazy` the child is created by the trigger, so only the parent's armed record precedes READY.
+        let lazy = structure.contains(.lazy)
+        guard try await poll(until: setupDeadline, { self.hostReady && (lazy || self.has("child", "ready")) && self.has("parent", "armed") }) else {
             throw BrowserExtensions.failure(hostReady ? "The child frame did not complete the handshake (\(probeCase.frame.rawValue) child)"
                                                       : "The passive host-world observer did not report from the probe page")
         }
-        main.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true); browser.select(opened)
+        main.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
+        if let browser { browser.select(opened) } else if let web = plainWeb { main.makeFirstResponder(web) }
         snapshotResponder("ready")
 
         if probeCase.pattern == .c {
@@ -427,9 +580,10 @@ import WebKit
                 self.has("parent", "trigger", phase: "trigger") { $0.bool("trusted") == true }
             }
             if triggered {
-                // Every scheduled reading in both frames arrives before typing is requested.
+                // Every scheduled reading in both frames arrives before typing is requested (lazy adds the child's load and
+                // handshake before "show").
                 let count = Rules.sampleDelaysMilliseconds.count
-                _ = try await poll(until: ProcessInfo.processInfo.systemUptime + 2.5) {
+                _ = try await poll(until: min(ProcessInfo.processInfo.systemUptime + (lazy ? 6 : 2.5), started + 46)) {
                     let samples = self.records().filter { $0.kind == "sample" && $0.hostPhase == "trigger" }
                     return samples.filter { $0.frame == "child" }.count >= count && samples.filter { $0.frame == "parent" }.count >= count
                 }
@@ -459,7 +613,7 @@ import WebKit
         var problems: [String] = []
         if let probeCase {
             let parsed = Rules.records(fromState: pageState, run: runToken, case: probeCase, firstSeen: ledger.firstSeen)
-            let evaluation = Rules.evaluate(parsed.records, case: probeCase)
+            let evaluation = Rules.evaluate(parsed.records, case: probeCase, structure: structure)
             problems = evaluation.problems
             if parsed.malformed > 0 { problems.append("\(parsed.malformed) malformed page records") }
             // Ledger faults from any snapshot during the run are permanent and make the measurement incomplete.
@@ -503,24 +657,31 @@ import WebKit
             report["host_message_handler_removed"] = true
         }
         messageProxy?.owner = nil; messageProxy = nil
-        if let id = extensionID, let browser = controller {
+        // Same removal and confirmation in both hosts, through the shared extension host and profile.
+        if let id = extensionID, let host = extensionHost, let profile = profileID {
             final class Outcome { var done = false; var error: String? }
             let outcome = Outcome()
             let removal = Task { @MainActor in
-                do { try await browser.browserExtensions.remove(id: id) } catch { outcome.error = String(describing: error) }
+                do { try await host.remove(id: id) } catch { outcome.error = String(describing: error) }
                 outcome.done = true
             }
             let deadline = ProcessInfo.processInfo.systemUptime + 3
             while !outcome.done, ProcessInfo.processInfo.systemUptime < deadline { try? await Task.sleep(nanoseconds: 50_000_000) }
             if !outcome.done { removal.cancel(); report["fixture_removal_timed_out"] = true }
             if let error = outcome.error { report["fixture_removal_error"] = error }
-            let host = browser.browserExtensions
             report["fixture_removed"] = outcome.done && outcome.error == nil && host.context(for: id) == nil
-                && !host.items(profileID: browser.session.currentProfileID).contains { $0.id == id }
+                && !host.items(profileID: profile).contains { $0.id == id }
         }
-        controller?.prepareToClose(persistSession: false)
-        window?.contentViewController = nil; window?.orderOut(nil); window?.close()
-        controller = nil; window = nil
+        if let browser = controller {
+            browser.prepareToClose(persistSession: false)   // also shuts its extension host down
+        } else if let host = extensionHost {
+            // Plain host: stop the page, detach the surface, shut the host down (removes its temporary storage).
+            plainWeb?.stopLoading()
+            host.surfaces = nil
+            host.shutdown()
+        }
+        window?.contentViewController = nil; window?.contentView = nil; window?.orderOut(nil); window?.close()
+        controller = nil; window = nil; plainWeb = nil; extensionHost = nil
         let fm = FileManager.default
         if let storage = hostStorage {
             if storage.standardizedFileURL.path.hasPrefix(fm.temporaryDirectory.standardizedFileURL.path + "/") {

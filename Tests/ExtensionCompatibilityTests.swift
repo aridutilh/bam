@@ -713,11 +713,51 @@ import JavaScriptCore
         result = await bridge.receiveNativeMessage(query, context: context)
         try check(result.1 != nil, "Removed context retained native capability access")
         try offscreenAdapter(check)
+        try revokedWorkerTransport(check)
         print("PASS: Extension compatibility (\(checks) checks)")
     }
 
     /// The worker adapter's offscreen, getContexts and runtime.lastError behavior, against
     /// a fake native side that answers like Bam's bridge (one document, enveloped outcomes).
+    @available(macOS 15.4, *)
+    /// After Revoke Permissions the fresh worker context has no nativeMessaging, so WebKit exposes neither
+    /// sendNativeMessage nor connectNative. Top-level listener registration must not throw (a throw stops the worker
+    /// from loading, and WebKit then never answers its queued messages); nothing is delivered, no port is opened, and
+    /// every bridged call rejects with exactly the adapter's transport text.
+    static func revokedWorkerTransport(_ check: (Bool, String) throws -> Void) throws {
+        let manifest: [String: Any] = ["manifest_version": 3, "name": "Original Revoked Worker Fixture", "version": "1.0",
+                                      "permissions": ["notifications", "idle", "history", "bookmarks"]]
+        let js = JSContext()!
+        var errors: [String] = []
+        js.exceptionHandler = { _, error in errors.append(error?.toString() ?? "JavaScript error") }
+        js.evaluateScript("""
+        var console = {error: function() {}, warn: function() {}}, performance = {now: function() { return 0; }};
+        var location = {origin: 'webkit-extension://fixture', href: 'webkit-extension://fixture/worker.js'};
+        var browser = {runtime: {
+          getURL: function(path) { return 'webkit-extension://fixture' + path; },
+          getManifest: function() { return \(String(data: try! JSONSerialization.data(withJSONObject: manifest), encoding: .utf8)!); }
+        }, storage: {}, action: {}};
+        var results = {}, heard = [];
+        """)
+        js.evaluateScript(ExtensionCompatibility.workerScript(manifest: manifest, browserVersion: "test"))
+        js.evaluateScript("""
+        var top = function(x) { heard.push(x); };
+        browser.idle.onStateChanged.addListener(top); browser.notifications.onClicked.addListener(top);
+        browser.history.onVisited.addListener(top); browser.windows && browser.windows.onBoundsChanged && browser.windows.onBoundsChanged.addListener(top);
+        results.registered = browser.idle.onStateChanged.hasListener(top) && browser.notifications.onClicked.hasListener(top) && browser.history.onVisited.hasListener(top);
+        """)
+        try check(errors.isEmpty && js.evaluateScript("results.registered === true")!.toBool(),
+                  "A revoked worker's top-level listener registration threw or was lost: \(errors)")
+        js.evaluateScript("""
+        browser.history.search({text: ''}).then(function() { results.history = 'resolved'; }, function(e) { results.history = e.message; });
+        browser.bookmarks.getTree().then(function() { results.bookmarks = 'resolved'; }, function(e) { results.bookmarks = e.message; });
+        browser.idle.queryState(15).then(function() { results.idle = 'resolved'; }, function(e) { results.idle = e.message; });
+        """)
+        let text = ExtensionCompatibility.workerTransportUnavailable
+        for name in ["history", "bookmarks", "idle"] {
+            try check(js.evaluateScript("results.\(name)")?.toString() == text, "A revoked worker's \(name) call did not refuse with the exact transport text: \(js.evaluateScript("results.\(name)")?.toString() ?? "")")
+        }
+    }
     @available(macOS 15.4, *)
     static func offscreenAdapter(_ check: (Bool, String) throws -> Void) throws {
         func context(permissions: [String], nativeFails: Bool = false) -> (JSContext, () -> [String]) {

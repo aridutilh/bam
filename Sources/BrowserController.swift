@@ -249,6 +249,13 @@ import QuartzCore
     var peekExtensionIDs: [UUID: UUID] = [:] { didSet { invalidateExtensionSurfaceTopology() } }
     var navigationTokens: [UUID: UUID] = [:]
     var browserExtensionOrigins: [UUID: String] = [:]
+    /// Tabs whose extension-page renderer was retired around an extension restart, by extension origin, and the tab
+    /// whose page had focus (BrowserExtensionIntegration.handleExtensionRenderers).
+    var retiredExtensionRenderers: [String: Set<UUID>] = [:]
+    var retiredExtensionFocus: UUID?
+    var retiredRendererProbes: [RetiredRendererProbe] = []
+    /// Fixtures only (see ExtensionHostOverride); nil in the app.
+    var extensionHostOverride: ExtensionHostOverride?
     var displayedTabID: UUID?
     var displayedMemberIDs: [UUID] = []
     var automaticDepartureQueue: [UUID] = []
@@ -551,7 +558,7 @@ import QuartzCore
         let extensionURL = URLInput.extensionURL(address)
         if let extensionURL, !allowsExtensionPage(extensionURL, profileID: profileID) {
             pendingLoads.remove(id); pendingHome.remove(id)
-            tabErrors[id] = "This extension is unavailable in this profile — open Manage Extensions to enable it"
+            tabErrors[id] = extensionPageUnavailableMessage(extensionURL, profileID: profileID)
             refresh(); return
         }
         let origin = extensionURL?.host?.lowercased()
@@ -658,7 +665,7 @@ import QuartzCore
         }
         return nil
     }
-    private func focusedView(in window: NSWindow?) -> NSView? {
+    func focusedView(in window: NSWindow?) -> NSView? {
         if let editor = window?.firstResponder as? NSTextView, editor.isFieldEditor,
            let owner = editor.delegate as? NSView { return owner }
         return window?.firstResponder as? NSView
@@ -756,6 +763,10 @@ import QuartzCore
             session.tabs[i].address = "orbit://newtab"; session.tabs[i].title = "New tab"
         }
         guard session.tabs[i] != previous else { return }
+        // Extensions hear every tab's URL and title changes (tabs.onUpdated), including same-document navigations and
+        // tabs outside the shown Space, which reach here only through KVO and get no chrome refresh below. Coalesced;
+        // reconcile publishes only real differences.
+        scheduleExtensionRefresh()
         scheduleFaviconDiscovery(in: web)
         let tab = session.tabs[i]
         if tab.isFavorite || tab.space == session.space || tab.space == pagingTarget { scheduleChromeRefresh() }
