@@ -105,11 +105,13 @@ struct OnboardingModel {
     mutating func choosePasswordManager(_ name: String?) {
         passwordManager = name.flatMap { Self.passwordManagers.contains($0) ? $0 : nil }
     }
-    /// Arc first: its sheet needs the window. A chosen password manager can be found any time after.
-    var followUp: OnboardingFollowUp {
-        if bringsFromArc && arcAvailable { return .importFromArc }
-        if let passwordManager { return .findExtension(passwordManager) }
-        return .none
+    /// Everything chosen, in order: Arc's sheet first (it needs the window), then the password
+    /// manager, which opens once that sheet has ended, imported or cancelled.
+    var followUps: [OnboardingFollowUp] {
+        var queue: [OnboardingFollowUp] = []
+        if bringsFromArc && arcAvailable { queue.append(.importFromArc) }
+        if let passwordManager { queue.append(.findExtension(passwordManager)) }
+        return queue
     }
 
     mutating func toggleBookmark(_ address: String) {
@@ -121,7 +123,7 @@ struct OnboardingModel {
     var result: OnboardingResult {
         OnboardingResult(spaceName: BrowserSpace.validName(spaceName) ?? "Studio",
                          spaceSymbol: spaceSymbol, colorIndex: colorIndex,
-                         favorites: bookmarks.filter { selectedBookmarkAddresses.contains($0.address) }, followUp: followUp)
+                         favorites: bookmarks.filter { selectedBookmarkAddresses.contains($0.address) }, followUps: followUps)
     }
 }
 
@@ -130,7 +132,7 @@ struct OnboardingResult {
     var spaceSymbol: String
     var colorIndex: Int
     var favorites: [OnboardingBookmark]
-    var followUp: OnboardingFollowUp = .none
+    var followUps: [OnboardingFollowUp] = []
 }
 
 enum OnboardingApplication {

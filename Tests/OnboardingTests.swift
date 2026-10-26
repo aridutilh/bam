@@ -84,23 +84,24 @@ struct OnboardingTests {
         var withArc = OnboardingModel(arcAvailable: true)
         try expect(withArc.steps == [.hello, .tour, .color, .name, .bring, .extensions, .shortcuts, .defaultBrowser, .finale],
                    "Arc's file adds the bring step after naming")
-        try expect(withArc.followUp == .none, "Nothing is queued by default")
+        try expect(withArc.followUps.isEmpty, "Nothing is queued by default")
         withArc.bringsFromArc = true
-        try expect(withArc.followUp == .importFromArc, "Bringing from Arc queues the import sheet")
+        try expect(withArc.followUps == [.importFromArc], "Bringing from Arc queues the import sheet")
         withArc.choosePasswordManager("Bitwarden")
-        try expect(withArc.followUp == .importFromArc, "Arc's sheet comes first; the window is needed for it")
+        try expect(withArc.followUps == [.importFromArc, .findExtension("Bitwarden")] && withArc.result.followUps == withArc.followUps,
+                   "Both choices are kept: Arc's sheet first, then the password manager")
         var noArc = OnboardingModel()
         noArc.bringsFromArc = true
-        try expect(noArc.followUp == .none, "Without Arc's file nothing is imported")
+        try expect(noArc.followUps.isEmpty, "Without Arc's file nothing is imported")
 
         // Password manager: only offered names; finding it is the follow-up.
         var managers = OnboardingModel()
         managers.choosePasswordManager("Bitwarden")
-        try expect(managers.followUp == .findExtension("Bitwarden"), "A chosen manager opens Add Extensions searching for it")
+        try expect(managers.followUps == [.findExtension("Bitwarden")], "A chosen manager opens Add Extensions searching for it")
         managers.choosePasswordManager("Something Else")
-        try expect(managers.passwordManager == nil && managers.followUp == .none, "Unknown names are not searched")
+        try expect(managers.passwordManager == nil && managers.followUps.isEmpty, "Unknown names are not searched")
         managers.choosePasswordManager(nil)
-        try expect(managers.followUp == .none, "Not now queues nothing")
+        try expect(managers.followUps.isEmpty, "Not now queues nothing")
     }
 
     static func shortcutTrainingAndBookmarkSelection() throws {

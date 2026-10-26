@@ -153,8 +153,8 @@ import WebKit
             model.colorIndex = first.colorIndex; model.spaceName = first.name; model.spaceSymbol = first.symbol
         }
         let welcome = OnboardingController(model: model)
-        var followUp = OnboardingFollowUp.none
-        welcome.onApply = { [weak self] result in self?.controller?.applyOnboarding(result); followUp = result.followUp }
+        var followUps: [OnboardingFollowUp] = []
+        welcome.onApply = { [weak self] result in self?.controller?.applyOnboarding(result); followUps = result.followUps }
         // A quit mid-welcome writes a session; the started mark keeps the next
         // launch from mistaking that profile for a pre-onboarding one.
         if controller.privateMode != true { UserDefaults.standard.set(true, forKey: OnboardingGate.startedKey) }
@@ -170,18 +170,33 @@ import WebKit
             self.window?.makeKeyAndOrderFront(nil)
             self.window?.makeFirstResponder(self.controller?.commandWebView)
             // What the person chose during setup, opened now that the window is theirs again.
-            guard let controller = self.controller else { return }
-            switch followUp {
-            case .importFromArc: controller.importFromArc(nil)
-            case .findExtension(let name):
-                if #available(macOS 15.4, *) {
-                    controller.browserExtensions.showLibrary(profileID: controller.commandProfileID, relativeTo: self.window, query: name)
-                }
-            case .none: break
-            }
+            self.runOnboardingFollowUps(followUps)
         }
         onboarding = welcome
         welcome.present(over: window)
+    }
+    /// Runs setup's choices in order. Arc's import sheet holds the window, so whatever follows waits
+    /// until that sheet ends (imported or cancelled), or runs at once if the sheet couldn't open.
+    private func runOnboardingFollowUps(_ queue: [OnboardingFollowUp]) {
+        guard let controller, let next = queue.first else { return }
+        let rest = Array(queue.dropFirst())
+        switch next {
+        case .importFromArc:
+            if let importer = controller.presentArcImport(initialSourceURL: ArcImport.defaultSourceURL()) {
+                let ended = importer.onDismiss
+                importer.onDismiss = { [weak self] in
+                    ended?()
+                    DispatchQueue.main.async { self?.runOnboardingFollowUps(rest) }
+                }
+            } else { runOnboardingFollowUps(rest) }
+        case .findExtension(let name):
+            if #available(macOS 15.4, *) {
+                controller.browserExtensions.showLibrary(profileID: controller.commandProfileID, relativeTo: window, query: name)
+            }
+            runOnboardingFollowUps(rest)
+        case .none:
+            runOnboardingFollowUps(rest)
+        }
     }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         // Fixtures deliberately minimize, replace, and close their windows.

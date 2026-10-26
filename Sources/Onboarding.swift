@@ -581,12 +581,14 @@ import QuartzCore
         let dress = model.colorIndex == BrowserSpace.prismColorIndex ? "every color at once"
             : model.colorIndex == BrowserSpace.clearColorIndex ? "glass"
             : names[min(names.count - 1, model.colorIndex)].lowercased()
-        let next: String
-        switch model.followUp {
-        case .importFromArc: next = "\nNext, Bam shows what it will bring from Arc."
-        case .findExtension(let name): next = "\nNext, Bam opens Add Extensions with \(name)."
-        case .none: next = ""
+        let steps = model.followUps.compactMap { followUp -> String? in
+            switch followUp {
+            case .importFromArc: return "Bam shows what it will bring from Arc"
+            case .findExtension(let name): return "opens Add Extensions with \(name)"
+            case .none: return nil
+            }
         }
+        let next = steps.isEmpty ? "" : "\nNext, " + (steps.count == 1 && steps[0].hasPrefix("opens") ? "Bam " : "") + steps.joined(separator: ", then ") + "."
         let summary = OnboardingText.subtitle("“\(model.result.spaceName)” is dressed in \(dress) and ready to go.\(next)")
         let start = OnboardingPillButton(title: "Start browsing", prominent: true)
         start.target = self; start.action = #selector(advance)
