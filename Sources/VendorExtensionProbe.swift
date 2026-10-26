@@ -74,7 +74,13 @@ import WebKit
         let role: String
         init(_ view: WKWebView, role: String = "page") { self.view = view; self.role = role }
     }
-    private final class WeakObject { weak var object: AnyObject?; init(_ object: AnyObject?) { self.object = object } }
+    /// `tracked`: an object was actually observed. An untracked probe reports null, never "released".
+    private final class WeakObject {
+        weak var object: AnyObject?
+        let tracked: Bool
+        init(_ object: AnyObject?) { self.object = object; tracked = object != nil }
+        var released: Any { tracked ? object == nil : NSNull() }
+    }
     /// Every action popup page seen during the run, so each one's release can be confirmed before the
     /// owned store is removed.
     private var observedPopups: [WeakView] = []
@@ -869,8 +875,10 @@ import WebKit
             // Evidence after the gate (released or timed out): which of the owners and pages are still alive.
             report["release_evidence"] = [
                 "browser_controller_released": releasedController == nil,
-                "extension_host_released": hostProbe.object == nil,
-                "profile_runtime_released": runtimeProbe.object == nil,
+                "extension_host_released": hostProbe.released,
+                "extension_host_tracked": hostProbe.tracked,
+                "profile_runtime_released": runtimeProbe.released,
+                "profile_runtime_tracked": runtimeProbe.tracked,
                 "extension_controller_released": extensionController == nil,
                 "pages": ownedViews.map { ["role": $0.role, "alive": $0.view != nil] }
             ]
