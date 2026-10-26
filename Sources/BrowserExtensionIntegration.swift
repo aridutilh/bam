@@ -350,6 +350,7 @@ final class RetiredRendererProbe {
                     retiredExtensionFocus = id
                     window.makeFirstResponder(nil)
                 }
+                retiredRendererProbes.removeAll { $0.web == nil }   // released ones carry no evidence; don't accumulate
                 for id in ids { retiredRendererProbes.append(RetiredRendererProbe(browsers[id])) }
                 isApplyingProfileChange = true
                 for id in ids { retireProfilePage(id) }
