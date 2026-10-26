@@ -93,7 +93,7 @@ struct ExtensionHostOverride {
         // Only windows an extension opened may be closed by one; user-opened Little Bam windows are not.
         final class OpenedWindows { var ids = Set<ObjectIdentifier>() }
         let opened = OpenedWindows()
-        value.createWindow = { [weak self] url, profile, focused in
+        value.createWindow = { [weak self, weak value] url, profile, focused in
             guard let self else { return nil }
             let before = Set(self.littleWindows.keys)
             // Little Bam refuses non-web addresses on its own; an extension's own page
@@ -101,7 +101,16 @@ struct ExtensionHostOverride {
             let isExtensionPage = url?.scheme == "webkit-extension"
             self.openLittleOrbit(url: isExtensionPage ? nil : url, profileID: profile)
             guard let id = self.littleWindows.keys.first(where: { !before.contains($0) }), let little = self.littleWindows[id], let window = little.window else { return nil }
-            if isExtensionPage, let url, !little.open(url: url) { little.close(); return nil }
+            // The extension's own page, in its own WebKit configuration (as extension tabs are). Every navigation in the
+            // window must stay on that extension's origin while it is still owned and enabled in this profile.
+            if isExtensionPage, let url {
+                guard let configuration = value?.configuration(forExtensionURL: url, profileID: profile) else { little.close(); return nil }
+                let authorize: (URL) -> Bool = { [weak value] candidate in
+                    guard let value, candidate.scheme == url.scheme, candidate.host == url.host, candidate.port == url.port else { return false }
+                    return value.allowsExtensionURL(candidate, profileID: profile)
+                }
+                if !little.openExtensionPage(url, configuration: configuration, authorize: authorize) { little.close(); return nil }
+            }
             opened.ids.insert(ObjectIdentifier(window))
             if !focused { self.view.window?.makeKeyAndOrderFront(nil) }
             return window

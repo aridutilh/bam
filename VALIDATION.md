@@ -1,3 +1,35 @@
+## 0.25.0 build 49 — extension pop-out windows
+
+Nothing here claims full Chrome compatibility or tabbed extension windows.
+
+**Build and native gates** (worktree `bam-popup-candidate`, tested source `2de34d5`):
+- The full `bash build.sh` passed (`build-025e.log`), with every component suite. The new or changed suites: window targeting **25**, extension compatibility **90** (including a page-adapter regression across 400+ re-apply ticks), tab-metadata facade **44**.
+- `bash scripts/test-runtime.sh` passed **all eleven native suites in one uninterrupted run** (`runtime-025f.log`): WebKit, PiP positioning 70, PiP, Interactions **173**, Auto PiP **85**, Features **371**, Resources **37**, Profiles **98**, Extensions **826**, Favicons **85**, Profile Activation **45** and Arc import **155**.
+- The run before it (`runtime-025e.log`) stopped at PiP. Playback was correct, but the app lost activation to another app, so this was a single, diagnosed retry.
+- Extensions 826 includes a real `PreviewWebContent` regression. An extension page is refused without the pop-out's authorization; with it, the page loads through both navigation gates and runs (it replies over runtime messaging); after authorization is withdrawn, navigation is cancelled. The fixture also covers requested bounds clamped to Little Bam's minimum, moving and resizing via `windows.update`, refusal for Bam's browser window, and refusal once a popup's surface is gone.
+
+**Real vendor (Dark Reader 4.9.133, official store package, disposable profile; full evidence `overnight-2026-10-26/vendor-darkreader-popout025d-full.log`):**
+- **Vendor behavior:** Dark Reader's own CSS-editor control called `windows.create({type: 'popup', width: 800, height: 600})`. Bam opened Little Bam pop-outs reported as `popup`, **800×600** at left 200 / top 77.
+- **Editor rendered:** the editor showed its real UI ("CSS EDITOR / ALL WEBSITES / Reset changes / Apply" and its CSS text area), with no extension errors.
+- **Closure:** the fixture's own teardown closed the pop-outs and removed temporary storage. Dark Reader didn't close them itself.
+- **Not tested with a vendor:** move or resize after opening (`windows.update`) is covered by the native fixture only; Dark Reader doesn't call it.
+
+**Found along the way and fixed:**
+- Little Bam refused extension pages, and both of its navigation gates did too.
+- Dark Reader's editor stayed blank because WebKit rejects Chrome's `tabs.query({windowType: 'app'})`, which Dark Reader uses as a fallback.
+
+**Personal profile (observed; cause not established):**
+- The hash check at 09:47 matched. The next check, at 10:15, didn't.
+- `library.json` changed at 09:57:21, and `session.json` was rewritten at 09:57:58 with identical content. The profile's Extensions registry now lists Google Translate, installed 09:57 PDT.
+- In that window this lane ran no vendor fixture, native suite or app: the vendor runs ended at 09:47:41 and 09:49:22, `build-025d` was stopped during the app compile (its log last wrote at 09:56:21), and the only other activity was JavaScriptCore component tests.
+- The change is preserved, not reverted. After re-baselining at 10:15, the profile was unchanged through the final vendor check and the final native run.
+
+**Limits:**
+- Pop-outs are one-page Little Bam windows, never smaller than its 520×320 content minimum. A `top` without a `height` can't be honoured (WebKit drops it).
+- Inside the page, `window.outerWidth/outerHeight` read 0 in a pop-out, while the extension API reports the true size.
+- There are no extension-created tabbed (multi-tab) windows; Session Buddy's browser-level Paste still needs them.
+- Extensions can't move Bam's main window.
+
 ## 0.24.0 build 48 — visual and interaction release (all eleven native suites passed across runs with two targeted retries; app-only rebuild at `67b9a57` passed a focused visual retest)
 
 Nothing here claims Arc or Yab parity.

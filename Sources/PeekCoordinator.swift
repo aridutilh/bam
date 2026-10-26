@@ -243,6 +243,11 @@ typealias PreviewNavigationReadiness = @MainActor (@escaping @MainActor () -> Vo
 
 /// Shared by Peek and Little Bam; no external URL is handed to NSWorkspace.
 enum PreviewURLPolicy {
+    /// An extension's own page in a pop-out window Bam opened for that extension (`windows.create`). The runtime has
+    /// already checked the page belongs to the requesting extension; the address field never uses this.
+    static func allowsExtensionWindowPage(_ url: URL) -> Bool {
+        url.scheme?.lowercased() == "webkit-extension" && url.host?.isEmpty == false && url.user == nil && url.password == nil
+    }
     static func allows(_ url: URL) -> Bool {
         guard let scheme = url.scheme?.lowercased(), ["http", "https"].contains(scheme),
               let host = url.host, !host.isEmpty, url.user == nil, url.password == nil else { return false }
@@ -271,6 +276,10 @@ enum PreviewURLPolicy {
     var onCloseRequest: (() -> Void)?
     var onDownload: ((WKDownload) -> Void)?
     var onVisit: ((String, String) -> Void)?
+    /// Set only for a pop-out window Bam opened for an extension: whether this extension page may load now. Both
+    /// navigation gates ask it every time (same extension origin, still owned and enabled in this profile); while it
+    /// is nil only http/https load.
+    var extensionPageAuthorization: ((URL) -> Bool)?
     private var uploadPanel: NSOpenPanel?
     private var uploadCompletion: (([URL]?) -> Void)?
     private var expectedDownloadNavigation = false
@@ -295,8 +304,11 @@ enum PreviewURLPolicy {
         ]
     }
 
+    private func allowsNavigation(to url: URL) -> Bool {
+        PreviewURLPolicy.allows(url) || (PreviewURLPolicy.allowsExtensionWindowPage(url) && extensionPageAuthorization?(url) == true)
+    }
     @discardableResult func load(url: URL) -> Bool {
-        guard PreviewURLPolicy.allows(url) else { status = "Only HTTP and HTTPS pages can open here"; onChange?(); return false }
+        guard allowsNavigation(to: url) else { status = "Only HTTP and HTTPS pages can open here"; onChange?(); return false }
         guard let web = webView else { return false }
         status = nil
         let token = UUID(); loadGeneration = token
@@ -328,7 +340,7 @@ enum PreviewURLPolicy {
 
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
                  decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
-        guard let url = navigationAction.request.url, PreviewURLPolicy.allows(url) else {
+        guard let url = navigationAction.request.url, allowsNavigation(to: url) else {
             if navigationAction.targetFrame?.isMainFrame != false { status = "This link cannot open in the preview"; onChange?() }
             decisionHandler(.cancel); return
         }
@@ -349,7 +361,7 @@ enum PreviewURLPolicy {
 
     func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse,
                  decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
-        guard let url = navigationResponse.response.url, PreviewURLPolicy.allows(url) else {
+        guard let url = navigationResponse.response.url, allowsNavigation(to: url) else {
             status = "This content cannot be displayed in the preview"; onChange?(); decisionHandler(.cancel); return
         }
         let attachment = (navigationResponse.response as? HTTPURLResponse)?

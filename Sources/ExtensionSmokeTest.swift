@@ -63,7 +63,9 @@ import WebKit
         host.createWindow = { [weak host] url, profile, _ in
             createWindowCalls += 1
             guard let host, profile == profileA, let url, let configuration = host.configuration(forExtensionURL: url, profileID: profile) else { return nil }
-            let popupWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 300, height: 200), styleMask: [.titled], backing: .buffered, defer: false)
+            // Modelled on Little Bam: titled, with its real 520×320 content minimum, so requested bounds take the clamp path.
+            let popupWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 320), styleMask: [.titled], backing: .buffered, defer: false)
+            popupWindow.contentMinSize = NSSize(width: 520, height: 320)
             popupWindow.isReleasedWhenClosed = false
             let web = WKWebView(frame: NSRect(x: 0, y: 0, width: 300, height: 200), configuration: configuration)
             popupWindow.contentView = web; popupWindow.orderFront(nil); web.load(URLRequest(url: url))
@@ -299,12 +301,26 @@ import WebKit
         let tabsBefore = createTabCalls
         let pagesBefore = Set(extensionPages.keys)
         peekPage = (UUID(), WKWebView(frame: webA.frame, configuration: configA)); host.reconcile()
+        let browserFrameBefore = window.frame
         let targeting = try? await popup.callAsyncJavaScript("""
             const page = browser.runtime.getURL('page.html'), out = {};
             const attempt = async (work) => { try { await work(); return 'ok'; } catch (error) { return String(error && error.message || error); } };
             out.normal = await attempt(() => browser.windows.create({url: page}));
             out.maximized = await attempt(() => browser.windows.create({type: 'popup', url: page, state: 'maximized'}));
-            out.bounds = await attempt(() => browser.windows.create({type: 'popup', url: page, left: 140, top: 160, width: 420, height: 300}));
+            // A bounded popup opens where it asked; windows.update moves and resizes it (keeping its top);
+            // Bam's browser window can't be resized by an extension.
+            out.bounds = await attempt(async () => {
+              const sized = await browser.windows.create({type: 'popup', url: page, left: 220, top: 200, width: 420, height: 300});
+              out.sized = {left: sized.left, top: sized.top, width: sized.width, height: sized.height, type: sized.type};
+              const moved = await browser.windows.update(sized.id, {left: 260, width: 640});
+              out.moved = {left: moved.left, top: moved.top, width: moved.width, height: moved.height};
+              // A size different from the current one: WebKit answers an unchanged frame itself, without asking Bam.
+              const browserWindow = (await browser.windows.getAll({windowTypes: ['normal']}))[0];
+              out.browserBefore = {left: browserWindow.left, top: browserWindow.top, width: browserWindow.width, height: browserWindow.height};
+              out.browserResize = await attempt(() => browser.windows.update(browserWindow.id, {width: browserWindow.width + 140, left: browserWindow.left + 30}));
+              const after = await browser.windows.get(browserWindow.id);
+              out.browserAfter = {left: after.left, top: after.top, width: after.width, height: after.height};
+            });
             const created = await browser.windows.create({type: 'popup', url: page});
             out.popupType = (await browser.windows.get(created.id)).type;
             const normal = await browser.windows.getAll({windowTypes: ['normal'], populate: true});
@@ -319,9 +335,35 @@ import WebKit
             return out;
             """, arguments: [:], in: nil, contentWorld: .page) as? [String: Any]
         try check((targeting?["normal"] as? String)?.contains(ExtensionWindowTargeting.normalWindowRefusal) == true &&
-                  (targeting?["maximized"] as? String)?.contains(ExtensionWindowTargeting.stateRefusal) == true &&
-                  (targeting?["bounds"] as? String)?.contains(ExtensionWindowTargeting.boundsRefusal) == true && createWindowCalls == 1,
-                  "A normal, maximized or bounded windows.create was not refused before a window was created: \(targeting ?? [:]) createWindow=\(createWindowCalls)")
+                  (targeting?["maximized"] as? String)?.contains(ExtensionWindowTargeting.stateRefusal) == true && createWindowCalls == 2,
+                  "A normal or maximized windows.create was not refused before a window was created: \(targeting ?? [:]) createWindow=\(createWindowCalls)")
+        func near(_ value: Any?, _ expected: Double) -> Bool { (value as? NSNumber).map { abs($0.doubleValue - expected) <= 1 } ?? false }
+        let sized = targeting?["sized"] as? [String: Any], moved = targeting?["moved"] as? [String: Any]
+        // 420×300 is below Little Bam's minimum: it opens at the minimum frame, left and top kept.
+        let minimumFrame = NSWindow.frameRect(forContentRect: NSRect(x: 0, y: 0, width: 520, height: 320), styleMask: [.titled]).size
+        try check(targeting?["bounds"] as? String == "ok" && sized?["type"] as? String == "popup" &&
+                  near(sized?["left"], 220) && near(sized?["top"], 200) &&
+                  near(sized?["width"], Double(minimumFrame.width)) && near(sized?["height"], Double(minimumFrame.height)),
+                  "A bounded popup did not open at its requested left/top, raised to Little Bam's minimum \(minimumFrame): \(targeting ?? [:])")
+        try check(near(moved?["left"], 260) && near(moved?["top"], 200) && near(moved?["width"], 640) && near(moved?["height"], Double(minimumFrame.height)),
+                  "windows.update did not move and widen the popup while keeping its top: \(targeting ?? [:])")
+        // Stale membership (review hold): with the popup's surface gone but not yet reconciled, its retained adapter
+        // must refuse to move it, and the window must not change.
+        if let sizedPopup = popupWindows.first, let adapter = runtimeA.windows.values.first(where: { $0.native === sizedPopup.window }) {
+            let before = sizedPopup.window.frame
+            popupWindows.removeFirst()
+            var staleError: Error?, calls = 0
+            adapter.setFrame(CGRect(x: 100, y: 100, width: 700, height: 500), for: contextA) { staleError = $0; calls += 1 }
+            try check(calls == 1 && staleError?.localizedDescription == BrowserExtensionWindow.closedRefusal && sizedPopup.window.frame == before,
+                      "A retained popup adapter moved its window after its surface was gone: \(String(describing: staleError)) \(sizedPopup.window.frame) vs \(before)")
+            sizedPopup.web.stopLoading(); sizedPopup.window.orderOut(nil); sizedPopup.window.close(); host.reconcile()
+        } else { throw Failure(description: "The bounded popup's window adapter was not found for the stale-membership check") }
+        // The refusal must come from Bam's setFrame (WebKit relays it), and the browser window must not move or resize.
+        let browserBefore = targeting?["browserBefore"] as? [String: Any], browserAfter = targeting?["browserAfter"] as? [String: Any]
+        try check((targeting?["browserResize"] as? String)?.contains(ExtensionWindowTargeting.browserWindowFrameRefusal) == true
+                  && window.frame == browserFrameBefore
+                  && ["left", "top", "width", "height"].allSatisfy { key in (browserBefore?[key] as? NSNumber) == (browserAfter?[key] as? NSNumber) && browserBefore?[key] != nil },
+                  "An extension resized Bam's browser window: \(targeting ?? [:]) frame \(browserFrameBefore) → \(window.frame)")
         try check(targeting?["popupType"] as? String == "popup" && targeting?["popupListedAsNormal"] as? Bool == false,
                   "A single-page window was not reported as a popup: \(targeting ?? [:])")
         let landing = (targeting?["mainTabs"] as? Int ?? 0) - 1
@@ -341,6 +383,31 @@ import WebKit
         let ownURL = contextA.baseURL.appendingPathComponent("page.html")
         try check(host.allowsExtensionURL(ownURL, profileID: profileA) && !host.allowsExtensionURL(ownURL, profileID: profileB), "Extension-origin validation crossed a login profile boundary")
         try check(host.configuration(forExtensionURL: contextB.baseURL.appendingPathComponent("page.html"), profileID: profileA) == nil, "Foreign-profile extension configuration was exposed")
+        // Pop-out window gates on a real PreviewWebContent (as Little Bam uses for windows.create): an extension's own
+        // page loads only with the window's live authorization, through both navigation gates, in the extension's own
+        // configuration, and runs as an extension page; withdrawing the authorization stops further navigation.
+        guard let popoutConfiguration = host.configuration(forExtensionURL: ownURL, profileID: profileA) else {
+            throw Failure(description: "The extension's own page configuration was unavailable for the pop-out check")
+        }
+        var popoutAuthorized = true
+        let popoutWeb = PreviewWKWebView(frame: NSRect(x: 0, y: 0, width: 400, height: 300), configuration: popoutConfiguration)
+        let popout = PreviewWebContent(webView: popoutWeb)
+        try check(!popout.load(url: ownURL), "A preview loaded an extension page without pop-out authorization")
+        popout.extensionPageAuthorization = { [weak host] url in
+            popoutAuthorized && url.host == ownURL.host && host?.allowsExtensionURL(url, profileID: profileA) == true
+        }
+        try check(popout.load(url: ownURL), "An authorized pop-out refused its extension's own page")
+        try await wait("The pop-out did not load and run its extension's own page through both navigation gates") {
+            let title = await javascript(popoutWeb, "document.title") as? String
+            let result = await javascript(popoutWeb, "document.getElementById('result').textContent") as? String
+            return title == "Bam extension page ready" && result != nil && result != "Loading"
+        }
+        popoutAuthorized = false
+        _ = await javascript(popoutWeb, "location.href = location.pathname + '?moved=1'; 'navigating'")
+        try await Task.sleep(nanoseconds: 800_000_000)
+        try check(popoutWeb.url?.query == nil && popout.status == "This link cannot open in the preview",
+                  "A pop-out kept navigating its extension page after authorization was withdrawn: \(String(describing: popoutWeb.url))")
+        popoutWeb.stopLoading()
         contextA.action(for: nil)?.closePopup()
         try host.revokePermissions(id: extensionA)
         try check(!contextA.hasPermission(.storage) && !contextA.hasAccess(to: urlA), "Revocation did not clear effective permissions")

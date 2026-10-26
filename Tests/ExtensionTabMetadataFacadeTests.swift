@@ -137,10 +137,11 @@ import JavaScriptCore
         try check(label == "notifications, tab addresses and titles (requires the tabs permission; no page-content access)" && !label.contains("tabs.metadata"),
                   "The tab metadata review label must be human-readable: \(label)")
 
-        // MARK: Without `tabs` nothing is wrapped.
+        // MARK: Without `tabs` the facade wraps nothing; tabs.query carries only the one-layer absent-window-type guard
+        // (Chrome's 'app'/'devtools' answer [] there), which keeps WebKit's own function for every other query.
         let (plain, plainErrors) = context(permissions: ["storage"])
-        try check(eval(plain, "browser.tabs.query === nativeQuery && browser.tabs.onUpdated.addListener === nativeAdd").toBool() && plainErrors().isEmpty,
-                  "An extension without tabs must keep WebKit's own tabs API")
+        try check(eval(plain, "browser.tabs.query.__bamTabsQueryGuard === true && browser.tabs.query.__bamTabsQueryNative === nativeQuery && browser.tabs.onUpdated.addListener === nativeAdd").toBool() && plainErrors().isEmpty,
+                  "An extension without tabs must keep WebKit's own tabs API apart from the window-type guard")
 
         let (js, errors) = context(permissions: ["tabs"])
         try check(errors().isEmpty, "Facade failed to install: \(errors())")
