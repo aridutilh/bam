@@ -755,9 +755,12 @@ import WebKit
             scroll.layoutSubtreeIfNeeded()
             let viewport = scroll.contentView.bounds
             let diagnostic = "sidebar=\(width), scroll=\(scroll.frame), viewport=\(viewport), document=\(document.frame)"
-            guard check(scroll.hasVerticalScroller && !scroll.hasHorizontalScroller
-                        && scroll.horizontalScrollElasticity == .none,
-                        "Tab-list scroll configuration permits sideways bounce or disables vertical scrolling: \(diagnostic)") else { return }
+            // No system scroller over the rows (the thumb lives in the gap beside the card), vertical scrolling still
+            // allowed and attached to that thumb, and no sideways scrolling or bounce.
+            guard check(!scroll.hasVerticalScroller && scroll.verticalScrollElasticity != .none
+                        && document.frame.height > viewport.height && controller.listScrollThumb.scrollView === scroll
+                        && !scroll.hasHorizontalScroller && scroll.horizontalScrollElasticity == .none,
+                        "Tab-list scroll configuration puts a system scroller over the rows, blocks vertical scrolling, detaches the gap thumb or permits sideways bounce: \(diagnostic), thumb attached=\(controller.listScrollThumb.scrollView === scroll)") else { return }
             guard check(viewport.width > 0 && abs(document.frame.width - viewport.width) < 0.5
                         && document.frame.height > viewport.height + 160,
                         "Overflowing tab list does not fit its viewport horizontally: \(diagnostic)") else { return }
@@ -769,6 +772,9 @@ import WebKit
             let moved = scroll.contentView.bounds.origin
             guard check(abs(start.y) < 0.001 && abs(moved.y - 160) < 0.5 && abs(moved.x) < 0.001,
                         "Native vertical scrolling failed or introduced horizontal movement: start=\(start), end=\(moved); \(diagnostic)") else { return }
+            // At every usable width the gap thumb follows that scroll rather than staying suppressed.
+            guard check(controller.listScrollThumb.scrollView === scroll && !controller.listScrollThumb.isSuppressed,
+                        "The sidebar scroll thumb is suppressed or detached after scrolling at width \(width)") else { return }
         }
         guard let sourceScroll = descendantScroll(in: controller.sidebar) else {
             finish(false, "Missing source scroll view for Space round trip"); return
