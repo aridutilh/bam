@@ -146,12 +146,15 @@ import WebKit
     func presentOnboarding() {
         guard onboarding == nil, let controller, let window, window.attachedSheet == nil else { return }
         controller.setOnboardingActive(true)
-        var model = OnboardingModel(bookmarks: ChromeBookmarks.load(from: ChromeBookmarks.defaultStoreURL()))
+        // Only offered when Arc's own layout file is there; the import itself is Bam's previewed sheet.
+        var model = OnboardingModel(bookmarks: ChromeBookmarks.load(from: ChromeBookmarks.defaultStoreURL()),
+                                    arcAvailable: FileManager.default.isReadableFile(atPath: ArcImport.defaultSourceURL().path))
         if let first = controller.session.spaces.first {
             model.colorIndex = first.colorIndex; model.spaceName = first.name; model.spaceSymbol = first.symbol
         }
         let welcome = OnboardingController(model: model)
-        welcome.onApply = { [weak self] result in self?.controller?.applyOnboarding(result) }
+        var followUp = OnboardingFollowUp.none
+        welcome.onApply = { [weak self] result in self?.controller?.applyOnboarding(result); followUp = result.followUp }
         // A quit mid-welcome writes a session; the started mark keeps the next
         // launch from mistaking that profile for a pre-onboarding one.
         if controller.privateMode != true { UserDefaults.standard.set(true, forKey: OnboardingGate.startedKey) }
@@ -166,6 +169,16 @@ import WebKit
             }
             self.window?.makeKeyAndOrderFront(nil)
             self.window?.makeFirstResponder(self.controller?.commandWebView)
+            // What the person chose during setup, opened now that the window is theirs again.
+            guard let controller = self.controller else { return }
+            switch followUp {
+            case .importFromArc: controller.importFromArc(nil)
+            case .findExtension(let name):
+                if #available(macOS 15.4, *) {
+                    controller.browserExtensions.showLibrary(profileID: controller.commandProfileID, relativeTo: self.window, query: name)
+                }
+            case .none: break
+            }
         }
         onboarding = welcome
         welcome.present(over: window)

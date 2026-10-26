@@ -65,8 +65,8 @@ struct OnboardingTests {
 
     static func stepFlowSkipsAndBounds() throws {
         var model = OnboardingModel()
-        try expect(model.steps == [.hello, .color, .name, .shortcuts, .defaultBrowser, .finale],
-                   "No bookmarks means no favorites step")
+        try expect(model.steps == [.hello, .tour, .color, .name, .extensions, .shortcuts, .defaultBrowser, .finale],
+                   "No bookmarks and no Arc means no favorites or bring step")
         try expect(model.isFirstStep && !model.isLastStep, "Flow starts at hello")
         model.goBack()
         try expect(model.step == .hello, "Back from the first step holds position")
@@ -77,8 +77,30 @@ struct OnboardingTests {
 
         var withBookmarks = OnboardingModel(bookmarks: [OnboardingBookmark(title: "A", address: "https://a.example")])
         try expect(withBookmarks.steps.contains(.favorites), "Found bookmarks add the favorites step")
-        withBookmarks.advance(); withBookmarks.advance(); withBookmarks.advance()
+        withBookmarks.advance(); withBookmarks.advance(); withBookmarks.advance(); withBookmarks.advance()
         try expect(withBookmarks.step == .favorites, "Favorites follows naming when offered")
+
+        // Arc's layout file adds "bring", after naming; choosing it queues Bam's own import sheet.
+        var withArc = OnboardingModel(arcAvailable: true)
+        try expect(withArc.steps == [.hello, .tour, .color, .name, .bring, .extensions, .shortcuts, .defaultBrowser, .finale],
+                   "Arc's file adds the bring step after naming")
+        try expect(withArc.followUp == .none, "Nothing is queued by default")
+        withArc.bringsFromArc = true
+        try expect(withArc.followUp == .importFromArc, "Bringing from Arc queues the import sheet")
+        withArc.choosePasswordManager("Bitwarden")
+        try expect(withArc.followUp == .importFromArc, "Arc's sheet comes first; the window is needed for it")
+        var noArc = OnboardingModel()
+        noArc.bringsFromArc = true
+        try expect(noArc.followUp == .none, "Without Arc's file nothing is imported")
+
+        // Password manager: only offered names; finding it is the follow-up.
+        var managers = OnboardingModel()
+        managers.choosePasswordManager("Bitwarden")
+        try expect(managers.followUp == .findExtension("Bitwarden"), "A chosen manager opens Add Extensions searching for it")
+        managers.choosePasswordManager("Something Else")
+        try expect(managers.passwordManager == nil && managers.followUp == .none, "Unknown names are not searched")
+        managers.choosePasswordManager(nil)
+        try expect(managers.followUp == .none, "Not now queues nothing")
     }
 
     static func shortcutTrainingAndBookmarkSelection() throws {

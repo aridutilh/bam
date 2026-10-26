@@ -35,7 +35,7 @@ enum OnboardingGate {
 }
 
 enum OnboardingStep: Int, CaseIterable, Equatable {
-    case hello, color, name, favorites, shortcuts, defaultBrowser, finale
+    case hello, tour, color, name, bring, favorites, extensions, shortcuts, defaultBrowser, finale
 }
 
 struct OnboardingBookmark: Equatable {
@@ -43,8 +43,17 @@ struct OnboardingBookmark: Equatable {
     var address: String
 }
 
+/// What onboarding asks Bam to open once it has closed (the window is its own until then).
+enum OnboardingFollowUp: Equatable {
+    case none
+    /// Bam's own Import from Arc sheet, with its preview; nothing is imported without it.
+    case importFromArc
+    /// Add Extensions, already searching for this name.
+    case findExtension(String)
+}
+
 /// Step flow and collected choices. The favorites step exists only when the
-/// machine found Chrome bookmarks to offer.
+/// machine found Chrome bookmarks to offer; "bring" only when Arc's layout file is there.
 struct OnboardingModel {
     var colorIndex = 0
     var spaceName = ""
@@ -52,18 +61,27 @@ struct OnboardingModel {
     var bookmarks: [OnboardingBookmark]
     var selectedBookmarkAddresses: Set<String>
     var shortcutsCompleted: Set<String> = []
+    /// Arc's StorableSidebar.json is readable on this Mac.
+    var arcAvailable = false
+    var bringsFromArc = false
+    /// A password manager to find in Add Extensions afterwards; nil means not now.
+    var passwordManager: String?
     private(set) var step: OnboardingStep = .hello
+
+    /// Names searched in Add Extensions (Chrome Web Store first); Bam installs nothing here.
+    static let passwordManagers = ["1Password", "Bitwarden", "Dashlane", "Proton Pass"]
 
     static let shortcutTargets = ["t", "s"]
     static let preselectedFavorites = 6
 
-    init(bookmarks: [OnboardingBookmark] = []) {
+    init(bookmarks: [OnboardingBookmark] = [], arcAvailable: Bool = false) {
         self.bookmarks = bookmarks
+        self.arcAvailable = arcAvailable
         selectedBookmarkAddresses = Set(bookmarks.prefix(Self.preselectedFavorites).map(\.address))
     }
 
     var steps: [OnboardingStep] {
-        OnboardingStep.allCases.filter { $0 != .favorites || !bookmarks.isEmpty }
+        OnboardingStep.allCases.filter { ($0 != .favorites || !bookmarks.isEmpty) && ($0 != .bring || arcAvailable) }
     }
     var stepIndex: Int { steps.firstIndex(of: step) ?? 0 }
     var isFirstStep: Bool { stepIndex == 0 }
@@ -84,6 +102,16 @@ struct OnboardingModel {
         guard step == .shortcuts, Self.shortcutTargets.contains(key) else { return false }
         return shortcutsCompleted.insert(key).inserted
     }
+    mutating func choosePasswordManager(_ name: String?) {
+        passwordManager = name.flatMap { Self.passwordManagers.contains($0) ? $0 : nil }
+    }
+    /// Arc first: its sheet needs the window. A chosen password manager can be found any time after.
+    var followUp: OnboardingFollowUp {
+        if bringsFromArc && arcAvailable { return .importFromArc }
+        if let passwordManager { return .findExtension(passwordManager) }
+        return .none
+    }
+
     mutating func toggleBookmark(_ address: String) {
         guard bookmarks.contains(where: { $0.address == address }) else { return }
         if selectedBookmarkAddresses.contains(address) { selectedBookmarkAddresses.remove(address) }
@@ -93,7 +121,7 @@ struct OnboardingModel {
     var result: OnboardingResult {
         OnboardingResult(spaceName: BrowserSpace.validName(spaceName) ?? "Studio",
                          spaceSymbol: spaceSymbol, colorIndex: colorIndex,
-                         favorites: bookmarks.filter { selectedBookmarkAddresses.contains($0.address) })
+                         favorites: bookmarks.filter { selectedBookmarkAddresses.contains($0.address) }, followUp: followUp)
     }
 }
 
@@ -102,6 +130,7 @@ struct OnboardingResult {
     var spaceSymbol: String
     var colorIndex: Int
     var favorites: [OnboardingBookmark]
+    var followUp: OnboardingFollowUp = .none
 }
 
 enum OnboardingApplication {

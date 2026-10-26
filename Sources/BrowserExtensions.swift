@@ -320,9 +320,9 @@ struct BrowserExtensionPermissionReview {
     /// network stack stays idle for folder-only users.
     private(set) lazy var installer = ExtensionInstaller(host: self)
     private var library: ExtensionLibraryPanel?
-    func showLibrary(profileID: UUID, relativeTo window: NSWindow?) {
+    func showLibrary(profileID: UUID, relativeTo window: NSWindow?, query: String? = nil) {
         if library == nil { library = ExtensionLibraryPanel(host: self, installer: installer) }
-        library?.show(profileID: profileID, relativeTo: window)
+        library?.show(profileID: profileID, relativeTo: window, query: query)
     }
     func actionItems(profileID: UUID, tabID: UUID?) -> [BrowserExtensionActionItem] {
         guard let runtime = runtimes[profileID] else { return [] }

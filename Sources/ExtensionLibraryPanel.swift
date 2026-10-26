@@ -73,14 +73,15 @@ import AppKit
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
 
-    func show(profileID: UUID, relativeTo parent: NSWindow?) {
+    func show(profileID: UUID, relativeTo parent: NSWindow?, query: String? = nil) {
         // An in-progress install is bound to the profile named on the panel.
         if !installing { self.profileID = profileID }
         profileLabel.stringValue = "For your \(host?.profileName?(self.profileID) ?? "current") profile · Chrome Web Store first, then Firefox and Safari"
         if let parent { window?.setFrameOrigin(NSPoint(x: parent.frame.midX - 450, y: parent.frame.midY - 330)) } else { window?.center() }
         showWindow(nil); window?.makeKeyAndOrderFront(nil); window?.makeFirstResponder(field)
         refreshInstalledState()
-        if !hasSearched { beginSearch(debounce: false) }
+        if let query, !installing, !query.isEmpty { field.stringValue = query; beginSearch(debounce: false) }
+        else if !hasSearched { beginSearch(debounce: false) }
     }
     func windowWillClose(_ notification: Notification) {
         buildPicker.dismissChoices(restoreFocus: false)
