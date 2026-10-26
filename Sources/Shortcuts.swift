@@ -21,6 +21,9 @@ enum ShortcutCommand: String, CaseIterable {
         switch paletteID {
         case "settings": self = .settings
         case "toggle-sidebar": self = .toggleSidebar
+        case "new-tab": self = .newTab
+        case "next-space": self = .nextSpace
+        case "previous-space": self = .previousSpace
         default: return nil
         }
     }

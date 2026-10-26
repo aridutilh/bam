@@ -274,6 +274,12 @@ import AppKit
         let selectedTop = CGFloat(scrolled.selectedIndex) * PaletteGeometry.rowHeight
         require(selectedTop >= shown.minY - 0.5 && selectedTop + PaletteGeometry.rowHeight - 2 <= shown.maxY + 0.5,
                 "The selected row scrolls into view (row \(scrolled.selectedIndex), visible \(shown.minY)–\(shown.maxY))")
+        // Rebindable commands show their live chord in the palette, mapped to the same command the menu binds.
+        for (id, shortcut) in [("new-tab", ShortcutCommand.newTab), ("next-space", .nextSpace), ("previous-space", .previousSpace),
+                               ("settings", .settings), ("toggle-sidebar", .toggleSidebar)] {
+            require(ShortcutCommand(paletteID: id) == shortcut && PaletteCommandCatalog.commands.contains { $0.id == id },
+                    "Palette command \(id) shows the live \(shortcut) chord")
+        }
         // Held arrow keys (auto-repeat) step and stop at the ends; a discrete press still wraps.
         let held = (0..<4).map { BrowserTab(title: "Held \($0)", address: "https://example.com/held/\($0)", space: 0) }
         results.update(tabs: held, query: "held", activeID: UUID(), canCreate: false)
