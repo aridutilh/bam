@@ -196,6 +196,12 @@ import Foundation
         try check(unsaved.contains("couldn’t save that it’s stopped (disk full)") && unsaved.contains("may load again the next time Bam opens")
                   && unsaved.contains("saved, reduced site access") && !unsaved.contains("Enable it again in Manage Extensions."),
                   "A failed disable save is reported, not hidden behind manual-only recovery: \(unsaved)")
+        // When the reduced access itself wasn't saved (the engine's failed-save native path), nothing claims it was.
+        let accessUnsaved = BrowserExtensions.stoppedMessage(name: "Docs Helper", reason: Reason(), disableSaveError: nil, accessSaved: false)
+        try check(accessUnsaved.contains("couldn’t be saved") && accessUnsaved.contains("may restore the access last saved") && !accessUnsaved.contains("saved, reduced"),
+                  "An unsaved reduction is reported honestly: \(accessUnsaved)")
+        let bothUnsaved = BrowserExtensions.stoppedMessage(name: "Docs Helper", reason: Reason(), disableSaveError: SaveFailure(), accessSaved: false)
+        try check(bothUnsaved.contains("which may be broader") && !bothUnsaved.contains("saved, reduced"), "No saved-reduction claim after two failed saves: \(bothUnsaved)")
 
         // MARK: The engine source is weak (the host owns the manager).
         do {

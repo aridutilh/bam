@@ -253,6 +253,8 @@ import QuartzCore
     /// whose page had focus (BrowserExtensionIntegration.handleExtensionRenderers).
     var retiredExtensionRenderers: [String: Set<UUID>] = [:]
     var retiredExtensionFocus: UUID?
+    /// Fixtures only (see ExtensionHostOverride); nil in the app.
+    var extensionHostOverride: ExtensionHostOverride?
     var displayedTabID: UUID?
     var displayedMemberIDs: [UUID] = []
     var automaticDepartureQueue: [UUID] = []

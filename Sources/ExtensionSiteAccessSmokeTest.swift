@@ -106,9 +106,12 @@ enum ExtensionSiteAccessSmokeTest {
         let configuration = WKWebViewConfiguration(); configuration.websiteDataStore = controller.profileStores.store(for: profile)
         host.configure(configuration, profileID: profile)
         let extensionID = try await host.importPackage(at: package, profileID: profile)
-        guard let context = host.context(for: extensionID) else {
+        guard host.context(for: extensionID) != nil else {
             throw fail("fixture did not load: \(host.errors[extensionID] ?? host.lastError ?? "no error")")
         }
+        /// A withdrawal restarts the extension into a fresh context (same identifier and base URL): always read the
+        /// current one, never a context kept from before a step.
+        func liveContext() -> WKWebExtensionContext? { host.context(for: extensionID) }
         let runtime = configuration.webExtensionController?.delegate as? BrowserExtensionRuntime
         // After install, any runtime prompt is unexpected here: record and decline it.
         host.permissionPrompt = { review in prompts.append(review); return false }
@@ -131,19 +134,20 @@ enum ExtensionSiteAccessSmokeTest {
         /// Access in the exact extension tab (runtime adapter), or nil when the adapter is missing.
         func tabAccess(_ tabID: UUID) -> (access: Bool, status: Int)? {
             host.reconcile()
-            guard let adapter = runtime?.tabs[tabID] else { return nil }
+            guard let adapter = runtime?.tabs[tabID], let context = liveContext() else { return nil }
             return (context.hasAccess(to: page, in: adapter), context.permissionStatus(for: page, in: adapter).rawValue)
         }
         func diagnostics(_ tabID: UUID?, _ state: DocumentState?) -> String {
             let web = tabID.flatMap { controller.browsers[$0] }
             let snapshot = host.siteAccess(id: extensionID)
             let scoped = tabID.flatMap(tabAccess).map { "tabAccess=\($0.access) tabStatus=\($0.status)" } ?? "tabAdapter=missing"
-            let granted = context.grantedPermissionMatchPatterns.keys.map(\.string).sorted()
-            let denied = context.deniedPermissionMatchPatterns.keys.map(\.string).sorted()
+            let context = liveContext()
+            let granted = context?.grantedPermissionMatchPatterns.keys.map(\.string).sorted() ?? []
+            let denied = context?.deniedPermissionMatchPatterns.keys.map(\.string).sorted() ?? []
             return "[state: \(state.map(String.init(describing:)) ?? "unreadable"); webURL=\(web?.url?.absoluteString ?? "nil") isLoading=\(web?.isLoading ?? false)"
-                + "; hasAccess=\(context.hasAccess(to: page)) status=\(context.permissionStatus(for: page).rawValue) \(scoped) granted=\(granted) denied=\(denied)"
+                + "; context=\(context.map { "loaded:\($0.isLoaded)" } ?? "none") hasAccess=\(context?.hasAccess(to: page) ?? false) status=\(context?.permissionStatus(for: page).rawValue ?? -1) \(scoped) granted=\(granted) denied=\(denied)"
                 + "; mode=\(snapshot.map { String(describing: $0.state.mode) } ?? "nil") effective=\(snapshot?.effective ?? [])"
-                + "; hasInjectedContent(for:)=\(context.hasInjectedContent(for: page)) prompts=\(prompts.map(\.websites)) reloadOffers=\(reloadOffers)"
+                + "; hasInjectedContent(for:)=\(context?.hasInjectedContent(for: page) ?? false) prompts=\(prompts.map(\.websites)) reloadOffers=\(reloadOffers)"
                 + "; preWithholdGranted=\(preWithholdGranted)]"
         }
         /// Waits until the tab shows a fully loaded document other than `previous` (the page's own identity) whose URL
@@ -168,7 +172,7 @@ enum ExtensionSiteAccessSmokeTest {
         /// recorded with full diagnostics; the variant continues so the restoration control still runs.
         func expectWithheld(_ state: DocumentState, in tabID: UUID, _ step: String) {
             var problems: [String] = []
-            if context.hasAccess(to: page) { problems.append("global access") }
+            if let context = liveContext() { if context.hasAccess(to: page) { problems.append("global access") } } else { problems.append("no loaded context") }
             if let scoped = tabAccess(tabID) { if scoped.access { problems.append("access in the exact tab") } } else { problems.append("no tab adapter to check tab access") }
             if !state.js.isEmpty { problems.append("JS marker present") }
             if !state.css.isEmpty { problems.append("CSS property present") }
@@ -176,7 +180,7 @@ enum ExtensionSiteAccessSmokeTest {
         }
 
         // MARK: 1. Allowed: the first document is marked (positive control: the harness sees injection).
-        guard host.siteAccess(id: extensionID)?.state.mode == .allRequested, context.hasAccess(to: page) else {
+        guard host.siteAccess(id: extensionID)?.state.mode == .allRequested, liveContext()?.hasAccess(to: page) == true else {
             throw fail("the install did not allow the fixture site " + diagnostics(nil, nil))
         }
         guard let tabID = controller.openProfileTab(page, profileID: profile, active: true) else { throw fail("could not open the fixture page") }
@@ -186,7 +190,7 @@ enum ExtensionSiteAccessSmokeTest {
 
         // MARK: 2. Withhold through the real engine API.
         guard let before = host.siteAccess(id: extensionID), let shown = before.declarations else { throw fail("no editable snapshot " + diagnostics(tabID, nil)) }
-        preWithholdGranted = context.grantedPermissionMatchPatterns.keys.map(\.string).sorted()
+        preWithholdGranted = liveContext()?.grantedPermissionMatchPatterns.keys.map(\.string).sorted() ?? []
         let withheld = try host.performSiteAccess(id: extensionID, profileID: profile, revision: before.revision, displayed: shown, change: .choose(.withheld))
         guard withheld.state.mode == .withheld else { throw fail("the engine did not withhold " + diagnostics(tabID, nil)) }
         checks += 1
@@ -214,7 +218,7 @@ enum ExtensionSiteAccessSmokeTest {
         // MARK: 7. Allow again → new documents are marked again (restoration control; runs whatever was found).
         guard let current = host.siteAccess(id: extensionID), let declarations = current.declarations else { throw fail("no snapshot to allow again " + diagnostics(tabID, nil)) }
         let restored = try host.performSiteAccess(id: extensionID, profileID: profile, revision: current.revision, displayed: declarations, change: .choose(.allRequested))
-        guard restored.state.mode == .allRequested, context.hasAccess(to: page) else { throw fail("allowing again did not restore access " + diagnostics(tabID, nil)) }
+        guard restored.state.mode == .allRequested, liveContext()?.hasAccess(to: page) == true else { throw fail("allowing again did not restore access " + diagnostics(tabID, nil)) }
         guard let again = controller.browsers[tabID] else { throw fail("the fixture tab disappeared") }
         controller.load(tab.address, in: again, id: tabID)
         let reallowed = try await newDocument(after: queried.document, in: tabID, expected: page, "allowed again")
@@ -226,18 +230,22 @@ enum ExtensionSiteAccessSmokeTest {
     }
 }
 
-// MARK: - Restart candidate acceptance (withdrawing a live host grant restarts the extension)
+// MARK: - Restart acceptance (withdrawing a live host grant restarts the extension into a fresh context)
 
 @MainActor @available(macOS 15.4, *)
 extension ExtensionSiteAccessSmokeTest {
-    /// Two original extensions in one ephemeral controller:
-    ///   A (subject): all-host (`*://*/*` + `<all_urls>`), JS and CSS markers, a background start counter in
-    ///     storage.local, and an extension page to read storage and tab IDs;
-    ///   B (unrelated): single host, its own marker and start counter.
-    /// Withholding A must restart it: A's markers leave new documents, its storage survives, its background starts
-    /// once more, B keeps marking and isn't restarted, and tab IDs are observed. Re-allowing restores A without a
-    /// restart. Revoke Permissions has the same effect. A deliberate load failure leaves A unloaded with an
-    /// actionable error, and Enable recovers its saved choice.
+    /// A weak reference the fixture can hold without keeping a page alive.
+    private final class WeakView { weak var web: WKWebView?; init(_ web: WKWebView?) { self.web = web } }
+
+    /// Two original extensions in one ephemeral window whose extension host uses an **owned persistent**
+    /// extension-controller store (a non-persistent store resets storage.local on unload; native 297f6eb), removed
+    /// and verified afterwards:
+    ///   A (subject): all-host (`*://*/*` + `<all_urls>`), JS and CSS markers, a background run counter and nonce in
+    ///     storage.local, and `page.html`, opened as a real Bam tab (E);
+    ///   B (unrelated): single host, its own marker and counter, its page also a Bam tab (F).
+    /// Contract (work/extension-renderer-restart-fixture-contract.md): every withdrawal goes through public paths
+    /// (performSiteAccess, revokePermissions); the context is re-read after each (a restart makes a fresh one with the
+    /// same identifier and base URL); Bam retires and recreates E's renderer, keeping its tab ID and address.
     static func runRestart(pageURL: URL) async throws -> (Int, [String]) {
         var checks = 0, findings: [String] = []
         func fail(_ message: String) -> ExtensionSmokeTest.Failure { .init(description: "Site access restart: " + message) }
@@ -270,8 +278,10 @@ extension ExtensionSiteAccessSmokeTest {
         let subjectPackage = try package("subject", hosts: ["*://*/*"], matches: ["<all_urls>"], marker: jsMarker, css: true)
         let otherPackage = try package("other", hosts: ["http://127.0.0.1/*"], matches: ["http://127.0.0.1/*"], marker: "bamOtherMarker", css: false)
 
-        // MARK: Ephemeral browser.
+        // MARK: Ephemeral window, owned persistent extension-controller store.
+        let storeID = UUID()
         let controller = BrowserController(sessionURL: FileManager.default.temporaryDirectory.appendingPathComponent("unused-site-access-restart-\(UUID().uuidString).json"), ephemeral: true)
+        controller.extensionHostOverride = ExtensionHostOverride(storageURL: root.appendingPathComponent("host", isDirectory: true), controllerIdentifier: storeID)
         controller.session.tabs.removeAll(); controller.automaticallyShowsVideo = false
         let profile = controller.session.currentProfileID
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 920, height: 650), styleMask: [.titled, .closable], backing: .buffered, defer: false)
@@ -280,268 +290,419 @@ extension ExtensionSiteAccessSmokeTest {
         controller.view.frame = NSRect(x: 0, y: 0, width: 920, height: 650)
         window.makeKeyAndOrderFront(nil)
         controller.layoutBrowser(); controller.view.layoutSubtreeIfNeeded()
-        defer {
-            BrowserExtensions.siteAccessRestartLoadFault = nil
-            controller.prepareToClose(persistSession: false); window.orderOut(nil); window.close()
-        }
         let host = controller.browserExtensions
-        host.permissionPrompt = { _ in true }      // install reviews
-        host.onReloadNeeded = { _ in }
-        let configuration = WKWebViewConfiguration(); configuration.websiteDataStore = controller.profileStores.store(for: profile)
-        host.configure(configuration, profileID: profile)
-        let subject = try await host.importPackage(at: subjectPackage, profileID: profile)
-        let other = try await host.importPackage(at: otherPackage, profileID: profile)
-        guard let subjectContext = host.context(for: subject), let otherContext = host.context(for: other) else {
-            throw fail("fixtures did not load: \(host.errors[subject] ?? host.errors[other] ?? host.lastError ?? "no error")")
-        }
-        let runtime = configuration.webExtensionController?.delegate as? BrowserExtensionRuntime
-        var prompts = 0
-        host.permissionPrompt = { _ in prompts += 1; return false }   // runtime prompts declined; Enable re-allowed below
+        var diagnostic: [String: Any] = ["store": "owned-persistent"]
+        var bodyError: Error?
 
-        // MARK: Helpers.
-        func evaluate(_ web: WKWebView, _ script: String) async -> [String: Any]? {
-            guard let text = try? await web.callAsyncJavaScript(script, arguments: [:], contentWorld: .page) as? String,
-                  let data = text.data(using: .utf8) else { return nil }
-            return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-        }
-        /// A fresh extension page for `id`'s current context (pages from before a restart are gone).
-        func extensionPage(_ id: UUID) async throws -> WKWebView {
-            guard let context = host.context(for: id), let pageConfiguration = context.webViewConfiguration else { throw fail("no loaded context for an extension page") }
-            let web = WKWebView(frame: NSRect(x: 0, y: 0, width: 320, height: 240), configuration: pageConfiguration)
-            web.load(URLRequest(url: context.baseURL.appendingPathComponent("page.html")))
-            let deadline = ProcessInfo.processInfo.systemUptime + 15
-            while ProcessInfo.processInfo.systemUptime < deadline {
-                if !web.isLoading, web.title == "restart fixture page" { return web }
-                try await Task.sleep(nanoseconds: 40_000_000)
+        do {
+            host.permissionPrompt = { _ in true }      // install reviews
+            host.onReloadNeeded = { _ in }
+            let configuration = WKWebViewConfiguration(); configuration.websiteDataStore = controller.profileStores.store(for: profile)
+            host.configure(configuration, profileID: profile)
+            let subject = try await host.importPackage(at: subjectPackage, profileID: profile)
+            let other = try await host.importPackage(at: otherPackage, profileID: profile)
+            guard let firstContext = host.context(for: subject), let otherContext = host.context(for: other) else {
+                throw fail("fixtures did not load: \(host.errors[subject] ?? host.errors[other] ?? host.lastError ?? "no error")")
             }
-            throw fail("the extension page did not load")
-        }
-        /// Navigates a fixture extension page away from the extension origin so it stops being one of its pages
-        /// (no longer a client of its background), before the caller drops it. WKWebView has no public close.
-        /// Returns whether the page reached about:blank in time: teardown evidence only, not proof its process ended.
-        var unreleasedPages = 0
-        @discardableResult
-        func release(_ web: WKWebView) async -> Bool {
-            web.loadHTMLString("", baseURL: nil)
-            let deadline = ProcessInfo.processInfo.systemUptime + 5
-            while ProcessInfo.processInfo.systemUptime < deadline {
-                if !web.isLoading, web.url?.absoluteString == "about:blank" { return true }
-                try? await Task.sleep(nanoseconds: 40_000_000)
+            let identity = (firstContext.uniqueIdentifier, firstContext.baseURL)
+            let runtime = configuration.webExtensionController?.delegate as? BrowserExtensionRuntime
+            var prompts = 0
+            host.permissionPrompt = { _ in prompts += 1; return false }   // runtime prompts declined; Enable re-allowed below
+
+            // MARK: Helpers.
+            func evaluate(_ web: WKWebView, _ script: String) async -> [String: Any]? {
+                guard let text = try? await web.callAsyncJavaScript(script, arguments: [:], contentWorld: .page) as? String,
+                      let data = text.data(using: .utf8) else { return nil }
+                return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
             }
-            unreleasedPages += 1
-            return false
-        }
-        struct Stored { var starts = 0; var survivor = ""; var lastRun = ""; var tabs: [Int] = [] }
-        /// Reads the extension's storage and tab IDs from a fresh extension page. Never throws: a page that doesn't
-        /// load, or a read the extension isn't allowed (for example after Revoke Permissions), is returned as an error.
-        func readStorage(_ id: UUID) async -> Result<Stored, ExtensionSmokeTest.Failure> {
-            let web: WKWebView
-            do { web = try await extensionPage(id) } catch { return .failure(fail("extension page: \(error)")) }
-            let value = await evaluate(web, """
-                try {
-                  const v = await browser.storage.local.get(['starts', 'survivor', 'lastRun']);
-                  const tabs = (await browser.tabs.query({})).map(t => t.id).sort((a, b) => a - b);
-                  return JSON.stringify({starts: v.starts || 0, survivor: v.survivor || '', lastRun: v.lastRun || '', tabs});
-                } catch (e) { return JSON.stringify({error: String((e && e.message) || e)}); }
-                """)
-            await release(web)
-            guard let value else { return .failure(fail("no result from the extension page")) }
-            if let error = value["error"] as? String { return .failure(fail("storage read: \(error)")) }
-            return .success(Stored(starts: (value["starts"] as? Int) ?? 0, survivor: (value["survivor"] as? String) ?? "",
-                                   lastRun: (value["lastRun"] as? String) ?? "", tabs: (value["tabs"] as? [Int]) ?? []))
-        }
-        func storage(_ id: UUID) async throws -> Stored { try await readStorage(id).get() }
-        /// One background measurement: asks WebKit to load the background and records its own completion result
-        /// (or that it never completed), the start counter and last-run nonce, storage read errors, and the
-        /// context's state and errors.
-        struct Background { var starts = 0; var lastRun = ""; var load = "pending"; var loaded = false; var errors: [String] = []; var readError: String? }
-        /// Waits up to 15 s for the start counter to reach at least `minimum`. Never throws: the caller asserts, and
-        /// the rest of the suite still runs.
-        func background(_ id: UUID, atLeast minimum: Int) async -> Background {
-            var result = Background()
-            let context = host.context(for: id)
-            if let context {
-                context.loadBackgroundContent { error in result.load = error.map { "error: \($0.localizedDescription)" } ?? "ok" }
-            } else { result.load = "no context" }
-            let deadline = ProcessInfo.processInfo.systemUptime + 15
-            while ProcessInfo.processInfo.systemUptime < deadline {
-                switch await readStorage(id) {
-                case .success(let stored): result.starts = stored.starts; result.lastRun = stored.lastRun; result.readError = nil
-                case .failure(let failure): result.readError = failure.description
+            var rawPages: [WeakView] = []
+            /// A raw (unmanaged, fixture-owned) page of `id`'s current context, for storage reads. Not a Bam tab: Bam's
+            /// restart can't retire it, so it's always dropped right after use and tracked weakly.
+            func extensionPage(_ id: UUID) async throws -> WKWebView {
+                guard let context = host.context(for: id), let pageConfiguration = context.webViewConfiguration else { throw fail("no loaded context for an extension page \(state(id))") }
+                let web = WKWebView(frame: NSRect(x: 0, y: 0, width: 320, height: 240), configuration: pageConfiguration)
+                rawPages.append(WeakView(web))
+                web.load(URLRequest(url: context.baseURL.appendingPathComponent("page.html")))
+                let deadline = ProcessInfo.processInfo.systemUptime + 15
+                while ProcessInfo.processInfo.systemUptime < deadline {
+                    if !web.isLoading, web.title == "restart fixture page" { return web }
+                    try await Task.sleep(nanoseconds: 40_000_000)
                 }
-                if result.readError == nil, result.starts >= minimum, result.load != "pending" { break }
-                try? await Task.sleep(nanoseconds: 100_000_000)
+                throw fail("the extension page did not load")
             }
-            result.loaded = context?.isLoaded ?? false
-            result.errors = context?.errors.map(\.localizedDescription) ?? []
-            return result
-        }
-        func record(_ value: Background) -> [String: Any] {
-            ["starts": value.starts, "last_run": value.lastRun, "load": value.load, "loaded": value.loaded,
-             "errors": value.errors, "read_error": value.readError ?? NSNull()]
-        }
-        func describe(_ value: Background) -> String {
-            guard let data = try? JSONSerialization.data(withJSONObject: record(value), options: .sortedKeys) else { return "[unencodable]" }
-            return String(decoding: data, as: UTF8.self)
-        }
-        func document(_ tabID: UUID, after previous: String?, expected: URL) async throws -> [String: String] {
-            let deadline = ProcessInfo.processInfo.systemUptime + 15
-            var last: [String: String] = [:]
-            while ProcessInfo.processInfo.systemUptime < deadline {
-                if let web = controller.browsers[tabID], !web.isLoading,
-                   let text = try? await web.evaluateJavaScript("""
-                        JSON.stringify({document: document.documentElement.dataset.bamDocument || '', js: document.documentElement.dataset.\(jsMarker) || '',
-                          css: getComputedStyle(document.documentElement).getPropertyValue('\(cssProperty)').trim(),
-                          other: document.documentElement.dataset.bamOtherMarker || '', readyState: document.readyState, url: location.href})
-                        """) as? String,
-                   let data = text.data(using: .utf8), let value = try? JSONSerialization.jsonObject(with: data) as? [String: String] {
-                    last = value
-                    if let doc = value["document"], !doc.isEmpty, doc != previous, value["readyState"] == "complete", value["url"]?.hasPrefix(expected.absoluteString) == true {
-                        checks += 1; return value
+            func rawPagesAlive() -> Int { rawPages.filter { $0.web != nil }.count }
+            struct Stored { var starts = 0; var survivor = ""; var lastRun = ""; var tabs: [Int] = [] }
+            /// Never throws: a page that doesn't load or a read that isn't allowed is returned as an error.
+            func readStorage(_ id: UUID) async -> Result<Stored, ExtensionSmokeTest.Failure> {
+                let value: [String: Any]?
+                do {
+                    let web = try await extensionPage(id)
+                    value = await evaluate(web, """
+                        try {
+                          const v = await browser.storage.local.get(['starts', 'survivor', 'lastRun']);
+                          const tabs = (await browser.tabs.query({})).map(t => t.id).sort((a, b) => a - b);
+                          return JSON.stringify({starts: v.starts || 0, survivor: v.survivor || '', lastRun: v.lastRun || '', tabs});
+                        } catch (e) { return JSON.stringify({error: String((e && e.message) || e)}); }
+                        """)
+                } catch { return .failure(fail("extension page: \(error)")) }
+                guard let value else { return .failure(fail("no result from the extension page")) }
+                if let error = value["error"] as? String { return .failure(fail("storage read: \(error)")) }
+                return .success(Stored(starts: (value["starts"] as? Int) ?? 0, survivor: (value["survivor"] as? String) ?? "",
+                                       lastRun: (value["lastRun"] as? String) ?? "", tabs: (value["tabs"] as? [Int]) ?? []))
+            }
+            func storage(_ id: UUID) async throws -> Stored { try await readStorage(id).get() }
+            struct Background { var starts = 0; var lastRun = ""; var load = "pending"; var loaded = false; var errors: [String] = []; var readError: String? }
+            /// Waits up to 15 s for the run counter to reach `minimum` and for loadBackgroundContent's own result. Never throws.
+            func background(_ id: UUID, atLeast minimum: Int) async -> Background {
+                var result = Background()
+                let context = host.context(for: id)
+                if let context {
+                    context.loadBackgroundContent { error in result.load = error.map { "error: \($0.localizedDescription)" } ?? "ok" }
+                } else { result.load = "no context" }
+                let deadline = ProcessInfo.processInfo.systemUptime + 15
+                while ProcessInfo.processInfo.systemUptime < deadline {
+                    switch await readStorage(id) {
+                    case .success(let stored): result.starts = stored.starts; result.lastRun = stored.lastRun; result.readError = nil
+                    case .failure(let failure): result.readError = failure.description
                     }
+                    if result.readError == nil, result.starts >= minimum, result.load != "pending" { break }
+                    try? await Task.sleep(nanoseconds: 100_000_000)
                 }
-                try await Task.sleep(nanoseconds: 40_000_000)
+                result.loaded = context?.isLoaded ?? false
+                result.errors = context?.errors.map(\.localizedDescription) ?? []
+                return result
             }
-            throw fail("no new completed document: \(last)")
+            func record(_ value: Background) -> [String: Any] {
+                ["starts": value.starts, "last_run": value.lastRun, "load": value.load, "loaded": value.loaded,
+                 "errors": value.errors, "read_error": value.readError ?? NSNull()]
+            }
+            func describe(_ value: Background) -> String {
+                guard let data = try? JSONSerialization.data(withJSONObject: record(value), options: .sortedKeys) else { return "[unencodable]" }
+                return String(decoding: data, as: UTF8.self)
+            }
+            func document(_ tabID: UUID, after previous: String?, expected: URL) async throws -> [String: String] {
+                let deadline = ProcessInfo.processInfo.systemUptime + 15
+                var last: [String: String] = [:]
+                while ProcessInfo.processInfo.systemUptime < deadline {
+                    if let web = controller.browsers[tabID], !web.isLoading,
+                       let text = try? await web.evaluateJavaScript("""
+                            JSON.stringify({document: document.documentElement.dataset.bamDocument || '', js: document.documentElement.dataset.\(jsMarker) || '',
+                              css: getComputedStyle(document.documentElement).getPropertyValue('\(cssProperty)').trim(),
+                              other: document.documentElement.dataset.bamOtherMarker || '', readyState: document.readyState, url: location.href})
+                            """) as? String,
+                       let data = text.data(using: .utf8), let value = try? JSONSerialization.jsonObject(with: data) as? [String: String] {
+                        last = value
+                        if let doc = value["document"], !doc.isEmpty, doc != previous, value["readyState"] == "complete", value["url"]?.hasPrefix(expected.absoluteString) == true {
+                            checks += 1; return value
+                        }
+                    }
+                    try await Task.sleep(nanoseconds: 40_000_000)
+                }
+                throw fail("no new completed document: \(last)")
+            }
+            /// Selects the site tab and loads a new document in it.
+            func reload(_ tabID: UUID, after previous: String?) async throws -> [String: String] {
+                controller.select(tabID); controller.view.layoutSubtreeIfNeeded()
+                guard let web = controller.browsers[tabID], let tab = controller.session.tabs.first(where: { $0.id == tabID }) else { throw fail("the fixture tab disappeared") }
+                controller.load(tab.address, in: web, id: tabID)
+                return try await document(tabID, after: previous, expected: page)
+            }
+            func state(_ id: UUID) -> String {
+                let context = host.context(for: id)
+                let snapshot = host.siteAccess(id: id)
+                return "[loaded=\(context?.isLoaded ?? false) enabled=\(host.records.first { $0.id == id }?.enabled ?? false) error=\(host.errors[id] ?? "none")"
+                    + " mode=\(snapshot.map { String(describing: $0.state.mode) } ?? "nil") granted=\(context?.grantedPermissionMatchPatterns.keys.map(\.string).sorted() ?? [])]"
+            }
+            func expect(_ condition: Bool, _ message: @autoclosure () -> String) { if condition { checks += 1 } else { findings.append(message()) } }
+            func withhold(_ id: UUID) throws {
+                guard let snapshot = host.siteAccess(id: id), let shown = snapshot.declarations else { throw fail("no editable snapshot \(state(id))") }
+                _ = try host.performSiteAccess(id: id, profileID: profile, revision: snapshot.revision, displayed: shown, change: .choose(.withheld))
+            }
+            func allow(_ id: UUID) throws {
+                guard let snapshot = host.siteAccess(id: id), let shown = snapshot.declarations else { throw fail("no editable snapshot to allow \(state(id))") }
+                _ = try host.performSiteAccess(id: id, profileID: profile, revision: snapshot.revision, displayed: shown, change: .choose(.allRequested))
+            }
+            func address(_ id: UUID) -> String? { controller.session.tabs.first(where: { $0.id == id })?.address }
+            func renderer(_ id: UUID) -> ObjectIdentifier? { controller.browsers[id].map(ObjectIdentifier.init) }
+            /// Selects an extension tab and waits for its page (in its current renderer) to load.
+            func showExtensionTab(_ id: UUID) async throws {
+                controller.select(id); controller.view.layoutSubtreeIfNeeded()
+                let deadline = ProcessInfo.processInfo.systemUptime + 15
+                while ProcessInfo.processInfo.systemUptime < deadline {
+                    if let web = controller.browsers[id], !web.isLoading, web.title == "restart fixture page" { return }
+                    try await Task.sleep(nanoseconds: 40_000_000)
+                }
+                throw fail("extension tab didn't load: error \(controller.tabErrors[id] ?? "none"), url \(controller.browsers[id]?.url?.absoluteString ?? "none")")
+            }
+            /// A credentialed fetch of the loopback page from an extension tab's current renderer: "read" (status and
+            /// body length) or "refused" (the error), never inferred.
+            func fetch(fromTab id: UUID) async -> [String: Any] {
+                guard let web = controller.browsers[id] else { return ["result": "no renderer"] }
+                let target = page.absoluteString + "?fetch=\(UUID().uuidString)"
+                return await evaluate(web, """
+                    try { const r = await fetch('\(target)', {credentials: 'include', cache: 'no-store'}); const t = await r.text();
+                          return JSON.stringify({result: 'read', status: r.status, length: t.length}); }
+                    catch (e) { return JSON.stringify({result: 'refused', error: String((e && e.message) || e)}); }
+                    """) ?? ["result": "no result"]
+            }
+            func waitUntil(_ condition: () -> Bool, seconds: Double = 5) async -> Bool {
+                let deadline = ProcessInfo.processInfo.systemUptime + seconds
+                while ProcessInfo.processInfo.systemUptime < deadline {
+                    if condition() { return true }
+                    try? await Task.sleep(nanoseconds: 40_000_000)
+                }
+                return condition()
+            }
+            /// The handoff boundary (old unloaded, renderers retired, fresh not yet loaded): records whether the watched
+            /// Bam renderer is already gone and how many raw fixture pages are still alive.
+            var handoffs: [[String: Any]] = []
+            var watched = WeakView(nil)
+            BrowserExtensions.siteAccessRestartWillLoad = { id in
+                guard id == subject else { return }
+                handoffs.append(["old_renderer_released": watched.web == nil, "raw_pages_alive": rawPagesAlive()])
+            }
+
+            // MARK: 1. Both allowed: tabs T (site), E (A's page), F (B's page); storage, runs, fetch positive control.
+            guard let siteTab = controller.openProfileTab(page, profileID: profile, active: true) else { throw fail("could not open the fixture page") }
+            let first = try await document(siteTab, after: nil, expected: page)
+            guard first["js"] == "js", first["css"] == "injected", first["other"] == "js" else { throw fail("allowed document isn't marked by both: \(first)") }
+            let token = UUID().uuidString
+            do {
+                let writer = try await extensionPage(subject)
+                _ = await evaluate(writer, "await browser.storage.local.set({survivor: '\(token)'}); return JSON.stringify({ok: true});")
+            }
+            let subjectBefore = await background(subject, atLeast: 1)
+            let otherBefore = await background(other, atLeast: 1)
+            guard subjectBefore.starts >= 1, otherBefore.starts >= 1 else {
+                throw fail("the backgrounds never started: A \(describe(subjectBefore)), B \(describe(otherBefore))")
+            }
+            let tabsBefore = try await storage(subject).tabs
+            let pagePath = "page.html"
+            guard let extensionTab = controller.openProfileTab(identity.1.appendingPathComponent(pagePath), profileID: profile, active: true),
+                  let otherTab = controller.openProfileTab(otherContext.baseURL.appendingPathComponent(pagePath), profileID: profile, active: false) else {
+                throw fail("could not open the extension tabs")
+            }
+            try await showExtensionTab(extensionTab)
+            let extensionAddress = address(extensionTab)
+            let allowedFetch = await fetch(fromTab: extensionTab)
+            expect(allowedFetch["result"] as? String == "read", "positive control: E couldn't read the loopback page while allowed: \(allowedFetch)")
+            try await showExtensionTab(otherTab)
+            controller.select(extensionTab); controller.view.layoutSubtreeIfNeeded()
+            let siteRenderer = renderer(siteTab), otherRenderer = renderer(otherTab)
+            _ = host.takeSiteAccessNotice(id: subject)
+
+            // MARK: 2. Withhold A with E visible: fresh context, E's renderer retired before the load and recreated.
+            watched = WeakView(controller.browsers[extensionTab])
+            try withhold(subject)
+            let notice = host.takeSiteAccessNotice(id: subject)
+            expect(notice?.contains("Restarted") == true, "withholding didn't report a restart \(state(subject))")
+            let secondContext = host.context(for: subject)
+            expect(secondContext != nil && secondContext !== firstContext && secondContext?.isLoaded == true,
+                   "the restart didn't produce a fresh loaded context \(state(subject))")
+            expect(secondContext?.uniqueIdentifier == identity.0 && secondContext?.baseURL == identity.1,
+                   "the fresh context changed identity: \(secondContext?.uniqueIdentifier ?? "nil") \(secondContext?.baseURL.absoluteString ?? "nil")")
+            expect(host.context(for: other) === otherContext && otherContext.isLoaded, "the unrelated extension's context changed \(state(other))")
+            expect(handoffs.last?["old_renderer_released"] as? Bool == true, "E's old renderer was still alive when the fresh context loaded: \(handoffs)")
+            expect(watched.web == nil, "E's old renderer is still alive after the restart")
+            expect(address(extensionTab) == extensionAddress && controller.session.tabs.contains(where: { $0.id == extensionTab }),
+                   "E's tab ID or address changed: \(address(extensionTab) ?? "missing") (was \(extensionAddress ?? "nil"))")
+            try await showExtensionTab(extensionTab)
+            let withheldFetch = await fetch(fromTab: extensionTab)
+            expect(withheldFetch["result"] as? String == "refused", "after withholding, the recreated E still reads the loopback page: \(withheldFetch) (handoff \(handoffs.last ?? [:]))")
+            expect(renderer(siteTab) == siteRenderer && renderer(otherTab) == otherRenderer, "the site tab's or B's tab's renderer was replaced")
+            let withheld = try await reload(siteTab, after: first["document"])
+            expect((withheld["js"] ?? "").isEmpty && (withheld["css"] ?? "").isEmpty, "after the restart, A's content still reaches a new document: \(withheld) \(state(subject))")
+            expect(withheld["other"] == "js", "the unrelated extension stopped marking new documents: \(withheld)")
+            host.reconcile()
+            let tabAccess = runtime?.tabs[siteTab].flatMap { tab in host.context(for: subject).map { $0.hasAccess(to: page, in: tab) } }
+            expect(runtime != nil && tabAccess != nil, "no runtime or tab adapter to check A's tab access (runtime \(runtime != nil), tab \(String(describing: tabAccess)))")
+            expect(host.context(for: subject)?.hasAccess(to: page) == false && tabAccess == false, "A still has access after withholding (tab \(String(describing: tabAccess))) \(state(subject))")
+            let afterRestart = try await storage(subject)
+            expect(afterRestart.survivor == token, "A's storage.local didn't survive the restart: '\(afterRestart.survivor)'")
+            let subjectAfter = await background(subject, atLeast: subjectBefore.starts + 1)
+            expect(subjectAfter.lastRun != subjectBefore.lastRun && !subjectAfter.lastRun.isEmpty, "A's background didn't run again (same nonce) \(describe(subjectAfter))")
+            expect(subjectAfter.starts == subjectBefore.starts + 1,
+                   "A's background run count went \(subjectBefore.starts) → \(subjectAfter.starts), expected +1 (before \(describe(subjectBefore)), after \(describe(subjectAfter)))")
+            let otherAfter = await background(other, atLeast: otherBefore.starts)
+            expect(otherAfter.starts == otherBefore.starts && otherAfter.lastRun == otherBefore.lastRun,
+                   "the unrelated extension's background ran again (\(describe(otherBefore)) → \(describe(otherAfter)))")
+            let tabsAfter = try await storage(subject).tabs
+            expect(!tabsAfter.isEmpty, "A sees no tabs after the restart")
+
+            // MARK: 3. Allow again: A marks again; no restart, same context.
+            try allow(subject)
+            expect(host.takeSiteAccessNotice(id: subject) == nil && host.context(for: subject) === secondContext, "re-allowing restarted A")
+            let reallowed = try await reload(siteTab, after: withheld["document"])
+            expect(reallowed["js"] == "js" && reallowed["css"] == "injected", "after re-allowing, A doesn't mark the new document: \(reallowed) \(state(subject))")
+            let afterAllow = try await storage(subject)
+            expect(afterAllow.starts == subjectAfter.starts && afterAllow.lastRun == subjectAfter.lastRun, "re-allowing ran A's background again")
+
+            // MARK: 4. Revoke Permissions with E in the background: E retired (no renderer until selected), then recreated.
+            // (Revoke also withdraws storage, so nothing here reads it.)
+            expect(renderer(extensionTab) != nil, "E lost its renderer before Revoke")
+            watched = WeakView(controller.browsers[extensionTab])
+            try host.revokePermissions(id: subject)
+            expect(host.takeSiteAccessNotice(id: subject)?.contains("Restarted") == true, "Revoke Permissions didn't restart A \(state(subject))")
+            expect(host.context(for: subject) !== secondContext, "Revoke Permissions didn't make a fresh context")
+            expect(renderer(extensionTab) == nil && address(extensionTab) == extensionAddress, "background E wasn't retired with its tab kept (renderer \(renderer(extensionTab) != nil), address \(address(extensionTab) ?? "missing"))")
+            expect(handoffs.last?["old_renderer_released"] as? Bool == true && watched.web == nil, "background E's old renderer stayed alive: \(handoffs.last ?? [:])")
+            let revoked = try await reload(siteTab, after: reallowed["document"])
+            expect((revoked["js"] ?? "").isEmpty && (revoked["css"] ?? "").isEmpty, "after Revoke Permissions, A's content still reaches a new document: \(revoked) \(state(subject))")
+            expect(host.context(for: subject)?.hasAccess(to: page) == false, "A still has access after Revoke Permissions \(state(subject))")
+            try await showExtensionTab(extensionTab)
+            let revokedFetch = await fetch(fromTab: extensionTab)
+            expect(revokedFetch["result"] as? String == "refused", "after Revoke Permissions, the recreated E still reads the loopback page: \(revokedFetch)")
+            try allow(subject)
+            let afterRevokeAllow = try await reload(siteTab, after: revoked["document"])
+            expect(afterRevokeAllow["js"] == "js", "re-allowing after Revoke Permissions didn't restore A: \(afterRevokeAllow) \(state(subject))")
+
+            // MARK: 5. Deliberate load failure with E visible: stopped, E's tab kept with the unavailable error; Enable recovers.
+            controller.select(extensionTab); controller.view.layoutSubtreeIfNeeded()
+            struct InjectedFailure: LocalizedError { let text: String; var errorDescription: String? { text } }
+            BrowserExtensions.siteAccessRestartLoadFault = { $0 == subject ? InjectedFailure(text: "injected restart load failure (test)") : nil }
+            var failedMessage: String?
+            do { try withhold(subject) } catch BrowserExtensionSiteAccessFailure.failed(let message) { failedMessage = message }
+            BrowserExtensions.siteAccessRestartLoadFault = nil
+            expect(failedMessage?.contains("Enable it again") == true, "a failed restart didn't report an actionable failure: \(failedMessage ?? "no error")")
+            expect(host.context(for: subject) == nil && host.records.first { $0.id == subject }?.enabled == false && (host.errors[subject] ?? "").contains("Enable"),
+                   "a failed restart didn't leave A unloaded and disabled with an error \(state(subject))")
+            expect(host.siteAccess(id: subject)?.state.mode == .withheld, "the saved (withheld) choice wasn't kept after the failed restart \(state(subject))")
+            let unavailableShown = await waitUntil({ (controller.tabErrors[extensionTab] ?? "").contains("unavailable") })
+            expect(unavailableShown && address(extensionTab) == extensionAddress,
+                   "visible E didn't show the unavailable error with its tab kept: \(controller.tabErrors[extensionTab] ?? "no error"), address \(address(extensionTab) ?? "missing")")
+            expect(!host.allowsExtensionURL(identity.1.appendingPathComponent(pagePath), profileID: profile), "a stopped A still backs extension pages")
+            let stopped = try await reload(siteTab, after: afterRevokeAllow["document"])
+            expect((stopped["js"] ?? "").isEmpty && (stopped["css"] ?? "").isEmpty, "a stopped A still marks new documents (JS or CSS): \(stopped)")
+            host.permissionPrompt = { _ in true }
+            try await host.setEnabled(true, id: subject)
+            expect(host.context(for: subject)?.isLoaded == true && host.siteAccess(id: subject)?.state.mode == .withheld,
+                   "Enable didn't recover A with its saved choice \(state(subject))")
+            expect(renderer(extensionTab) == nil, "Enable left E's unavailable renderer in place (it should be retired until shown)")
+            // Before re-allowing, the recovered context must have no effective access (global and this exact tab) and
+            // must not mark a new document: a stored withheld state alone could hide accidental broad access.
+            host.reconcile()
+            let recoveredContext = host.context(for: subject)
+            let recoveredGlobal = recoveredContext?.hasAccess(to: page)
+            let recoveredTab = recoveredContext.flatMap { context in runtime?.tabs[siteTab].map { context.hasAccess(to: page, in: $0) } }
+            expect(recoveredGlobal == false && recoveredTab == false,
+                   "after Enable, A has access or can't be checked before re-allowing (global \(String(describing: recoveredGlobal)), tab \(String(describing: recoveredTab))) \(state(subject))")
+            let recoveredWithheld = try await reload(siteTab, after: stopped["document"])
+            expect((recoveredWithheld["js"] ?? "").isEmpty && (recoveredWithheld["css"] ?? "").isEmpty,
+                   "after Enable (still withheld), A marks a new document (JS or CSS): \(recoveredWithheld) \(state(subject))")
+            try allow(subject)
+            let recovered = try await reload(siteTab, after: recoveredWithheld["document"])
+            expect(recovered["js"] == "js" && recovered["css"] == "injected", "after Enable and re-allowing, A doesn't mark with both JS and CSS: \(recovered) \(state(subject))")
+            try await showExtensionTab(extensionTab)
+            expect(controller.tabErrors[extensionTab] == nil, "E still shows an error after Enable: \(controller.tabErrors[extensionTab] ?? "")")
+
+            // MARK: 6. Unload failure (WebKit keeps running it): quarantined, Bam stops owning it; Enable retries the unload.
+            let beforeQuarantine = host.context(for: subject)
+            BrowserExtensions.siteAccessRestartUnloadFault = { $0 == subject ? InjectedFailure(text: "injected restart unload failure (test)") : nil }
+            var quarantineMessage: String?
+            do { try withhold(subject) } catch BrowserExtensionSiteAccessFailure.failed(let message) { quarantineMessage = message }
+            BrowserExtensions.siteAccessRestartUnloadFault = nil
+            expect(quarantineMessage?.contains("couldn’t be stopped") == true && quarantineMessage?.contains("may still run it") == true,
+                   "an unload failure wasn't reported honestly: \(quarantineMessage ?? "no error")")
+            expect(host.context(for: subject) == nil && host.records.first { $0.id == subject }?.enabled == false,
+                   "a quarantined A is still Bam-owned or enabled \(state(subject))")
+            expect(!host.allowsExtensionURL(identity.1.appendingPathComponent(pagePath), profileID: profile)
+                   && host.configuration(forExtensionURL: identity.1.appendingPathComponent(pagePath), profileID: profile) == nil,
+                   "a quarantined context still backs extension pages")
+            let quarantinedShown = await waitUntil({ (controller.tabErrors[extensionTab] ?? "").contains("unavailable") })
+            expect(quarantinedShown, "visible E didn't show the unavailable error while A is quarantined: \(controller.tabErrors[extensionTab] ?? "no error")")
+            expect(beforeQuarantine?.isLoaded == true, "the injected unload failure unexpectedly unloaded the context (fixture premise)")
+            // The quarantined context still runs in WebKit: a page of it asks Bam to open a tab and a window. Bam's
+            // shared delegate gate must refuse both (no session tab, no Little Bam window).
+            var mutationAttempt: [String: Any] = ["result": "not attempted"]
+            if let quarantined = beforeQuarantine, let quarantinedConfiguration = quarantined.webViewConfiguration {
+                expect(runtime?.owns(quarantined) == false, "the runtime's shared gate still accepts the quarantined context")
+                let tabCount = controller.session.tabs.count, littleCount = controller.littleWindows.count
+                do {
+                    let web = WKWebView(frame: NSRect(x: 0, y: 0, width: 320, height: 240), configuration: quarantinedConfiguration)
+                    web.load(URLRequest(url: identity.1.appendingPathComponent(pagePath)))
+                    _ = await waitUntil({ !web.isLoading && web.title == "restart fixture page" }, seconds: 15)
+                    mutationAttempt = await evaluate(web, """
+                        const out = {};
+                        try { const t = await browser.tabs.create({url: '\(page.absoluteString)?quarantine=tab'}); out.tab = 'created ' + (t && t.id); }
+                        catch (e) { out.tab = 'refused: ' + String((e && e.message) || e); }
+                        try { await browser.windows.create({url: '\(page.absoluteString)?quarantine=window'}); out.window = 'created'; }
+                        catch (e) { out.window = 'refused: ' + String((e && e.message) || e); }
+                        return JSON.stringify(out);
+                        """) ?? ["result": "no result"]
+                    web.stopLoading()
+                }
+                try? await Task.sleep(nanoseconds: 300_000_000)
+                expect(controller.session.tabs.count == tabCount && controller.littleWindows.count == littleCount
+                       && (mutationAttempt["tab"] as? String)?.hasPrefix("refused") == true && (mutationAttempt["window"] as? String)?.hasPrefix("refused") == true,
+                       "the quarantined context could still open a tab or window: \(mutationAttempt) (tabs \(tabCount) → \(controller.session.tabs.count))")
+            } else { findings.append("no quarantined context page to attempt a host mutation \(state(subject))") }
+            // Remove while it still can't be stopped: refused, record and its data kept.
+            BrowserExtensions.siteAccessRestartUnloadFault = { $0 == subject ? InjectedFailure(text: "injected quarantine unload failure (test)") : nil }
+            var removeFailure: String?
+            do { try await host.remove(id: subject) } catch { removeFailure = error.localizedDescription }
+            BrowserExtensions.siteAccessRestartUnloadFault = nil
+            let keptRecords = await host.extensionController(profileID: profile)?.dataRecords(ofTypes: WKWebExtensionController.allExtensionDataTypes) ?? []
+            let keptData = keptRecords.filter { $0.uniqueIdentifier == identity.0 }.map(\.totalSizeInBytes).reduce(0, +)
+            let recordKept = host.records.contains(where: { $0.id == subject })
+            expect(removeFailure?.contains("couldn’t be stopped") == true && recordKept && keptData > 0,
+                   "a Remove that couldn't stop the quarantined context didn't fail safely: \(removeFailure ?? "no error"), record kept \(recordKept), data \(keptData) bytes")
+            // Disable stops it for real.
+            try await host.setEnabled(false, id: subject)
+            expect(beforeQuarantine?.isLoaded == false && host.context(for: subject) == nil, "Disable didn't stop the quarantined context \(state(subject))")
+            try await host.setEnabled(true, id: subject)
+            let afterQuarantine = host.context(for: subject)
+            expect(afterQuarantine?.isLoaded == true && afterQuarantine !== beforeQuarantine,
+                   "Enable didn't load a fresh context after the quarantine \(state(subject))")
+            diagnostic["quarantine_mutation"] = mutationAttempt
+            try await showExtensionTab(extensionTab)
+            let quarantineRecovered = try await reload(siteTab, after: recovered["document"])
+            expect((quarantineRecovered["js"] ?? "").isEmpty && (quarantineRecovered["css"] ?? "").isEmpty,
+                   "after the quarantine recovery (withheld), A marks a new document: \(quarantineRecovered) \(state(subject))")
+
+            diagnostic["findings"] = findings.count
+            diagnostic["tab_ids"] = ["before": tabsBefore, "after": tabsAfter]
+            diagnostic["subject_before"] = record(subjectBefore); diagnostic["subject_after"] = record(subjectAfter)
+            diagnostic["other_before"] = record(otherBefore); diagnostic["other_after"] = record(otherAfter)
+            diagnostic["fetch"] = ["allowed": allowedFetch, "withheld": withheldFetch, "revoked": revokedFetch]
+            diagnostic["handoffs"] = handoffs
+            diagnostic["raw_pages_alive_at_end"] = rawPagesAlive()
+            diagnostic["prompts"] = prompts
+        } catch { bodyError = error }
+
+        // MARK: Cleanup: the owned persistent store (data, then its directory), verified.
+        BrowserExtensions.siteAccessRestartLoadFault = nil; BrowserExtensions.siteAccessRestartUnloadFault = nil
+        BrowserExtensions.siteAccessRestartWillLoad = nil
+        var cleanup: [String: Any] = [:]
+        if let extensionController = host.extensionController(profileID: profile) {
+            let records = await extensionController.dataRecords(ofTypes: WKWebExtensionController.allExtensionDataTypes)
+            await extensionController.removeData(ofTypes: WKWebExtensionController.allExtensionDataTypes, from: records)
+            let after = await extensionController.dataRecords(ofTypes: WKWebExtensionController.allExtensionDataTypes)
+            cleanup["data_bytes"] = [records.map(\.totalSizeInBytes).reduce(0, +), after.map(\.totalSizeInBytes).reduce(0, +)]
         }
-        func reload(_ tabID: UUID, after previous: String?) async throws -> [String: String] {
-            guard let web = controller.browsers[tabID], let tab = controller.session.tabs.first(where: { $0.id == tabID }) else { throw fail("the fixture tab disappeared") }
-            controller.load(tab.address, in: web, id: tabID)
-            return try await document(tabID, after: previous, expected: page)
+        controller.prepareToClose(persistSession: false); window.orderOut(nil); window.close()
+        try? await Task.sleep(nanoseconds: 500_000_000)   // WebKit writes context state on unload
+        // WebKit's persistent store for Configuration(identifier:): Library/WebKit/<bundle or process>/WebExtensions/<UUID>
+        // (unsandboxed) or Library/WebKit/WebExtensions/<UUID> (sandboxed). Only this run's fresh identifier is removed.
+        let library = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)[0].appendingPathComponent("WebKit", isDirectory: true)
+        let name = storeID.uuidString.uppercased()
+        let app = Bundle.main.bundleIdentifier ?? ProcessInfo.processInfo.processName
+        let candidates = [library.appendingPathComponent(app).appendingPathComponent("WebExtensions").appendingPathComponent(name),
+                          library.appendingPathComponent("WebExtensions").appendingPathComponent(name)]
+        var removed: [String] = []
+        for directory in candidates where directory.lastPathComponent == name && directory.deletingLastPathComponent().lastPathComponent == "WebExtensions"
+            && FileManager.default.fileExists(atPath: directory.path) {
+            if (try? FileManager.default.removeItem(at: directory)) != nil { removed.append(directory.path) }
         }
-        func state(_ id: UUID) -> String {
-            let context = host.context(for: id)
-            let snapshot = host.siteAccess(id: id)
-            return "[loaded=\(context?.isLoaded ?? false) enabled=\(host.records.first { $0.id == id }?.enabled ?? false) error=\(host.errors[id] ?? "none")"
-                + " mode=\(snapshot.map { String(describing: $0.state.mode) } ?? "nil") granted=\(context?.grantedPermissionMatchPatterns.keys.map(\.string).sorted() ?? [])]"
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        let remaining = candidates.filter { FileManager.default.fileExists(atPath: $0.path) }.map(\.path)
+        cleanup["store_directories_removed"] = removed; cleanup["store_directories_remaining"] = remaining
+        diagnostic["cleanup"] = cleanup
+        if !remaining.isEmpty { findings.append("the owned extension store wasn't removed: \(remaining)") }
+        if let bytes = cleanup["data_bytes"] as? [Int64], bytes.count == 2, bytes[1] != 0 { findings.append("the owned extension store still has \(bytes[1]) bytes after removal") }
+        if let data = try? JSONSerialization.data(withJSONObject: diagnostic, options: .sortedKeys) {
+            print("BAM_SITE_ACCESS_RESTART " + String(decoding: data, as: UTF8.self)); fflush(stdout)
         }
-        func expect(_ condition: Bool, _ message: @autoclosure () -> String) { if condition { checks += 1 } else { findings.append(message()) } }
-        func withhold(_ id: UUID) throws {
-            guard let snapshot = host.siteAccess(id: id), let shown = snapshot.declarations else { throw fail("no editable snapshot \(state(id))") }
-            _ = try host.performSiteAccess(id: id, profileID: profile, revision: snapshot.revision, displayed: shown, change: .choose(.withheld))
-        }
-        func allow(_ id: UUID) throws {
-            guard let snapshot = host.siteAccess(id: id), let shown = snapshot.declarations else { throw fail("no editable snapshot to allow \(state(id))") }
-            _ = try host.performSiteAccess(id: id, profileID: profile, revision: snapshot.revision, displayed: shown, change: .choose(.allRequested))
-        }
-
-        // MARK: 1. Both allowed: A and B mark the page; record storage, starts and tab IDs.
-        guard let tabID = controller.openProfileTab(page, profileID: profile, active: true) else { throw fail("could not open the fixture page") }
-        let first = try await document(tabID, after: nil, expected: page)
-        guard first["js"] == "js", first["css"] == "injected", first["other"] == "js" else { throw fail("allowed document isn't marked by both: \(first)") }
-        let token = UUID().uuidString
-        let writer = try await extensionPage(subject)
-        _ = await evaluate(writer, "await browser.storage.local.set({survivor: '\(token)'}); return JSON.stringify({ok: true});")
-        let writerReleased = await release(writer)   // no fixture-held extension page across the first restart
-        let subjectBefore = await background(subject, atLeast: 1)
-        let otherBefore = await background(other, atLeast: 1)
-        let subjectStartsBefore = subjectBefore.starts, otherStartsBefore = otherBefore.starts
-        guard subjectStartsBefore >= 1, otherStartsBefore >= 1 else {
-            throw fail("the backgrounds never started: A \(describe(subjectBefore)), B \(describe(otherBefore))")
-        }
-        let tabsBefore = try await storage(subject).tabs
-        _ = host.takeSiteAccessNotice(id: subject)
-
-        // MARK: 2. Withhold A (withdraws its all-host grants): restart, same context, A's content gone, B untouched.
-        try withhold(subject)
-        let notice = host.takeSiteAccessNotice(id: subject)
-        expect(notice?.contains("Restarted") == true, "withholding all-host access didn't report a restart \(state(subject))")
-        expect(host.context(for: subject) === subjectContext && subjectContext.isLoaded, "the restart didn't keep the same loaded context \(state(subject))")
-        expect(host.context(for: other) === otherContext && otherContext.isLoaded, "the unrelated extension's context changed \(state(other))")
-        let withheld = try await reload(tabID, after: first["document"])
-        expect((withheld["js"] ?? "").isEmpty && (withheld["css"] ?? "").isEmpty, "after the restart, A's content still reaches a new document: \(withheld) \(state(subject))")
-        expect(withheld["other"] == "js", "the unrelated extension stopped marking new documents: \(withheld)")
-        host.reconcile()
-        // A concrete runtime and tab adapter are required: a missing one must not pass as "access denied".
-        let tabAccess = runtime?.tabs[tabID].map { subjectContext.hasAccess(to: page, in: $0) }
-        expect(runtime != nil && tabAccess != nil, "no runtime or tab adapter to check A's tab access (runtime \(runtime != nil), tab \(String(describing: tabAccess)))")
-        expect(!subjectContext.hasAccess(to: page) && tabAccess == false, "A still has access after withholding (global \(subjectContext.hasAccess(to: page)), tab \(String(describing: tabAccess)))")
-        let afterRestart = try await storage(subject)
-        expect(afterRestart.survivor == token, "A's storage.local didn't survive the restart: \(afterRestart.survivor)")
-        let subjectAfter = await background(subject, atLeast: subjectStartsBefore + 1)
-        let subjectStartsAfter = subjectAfter.starts
-        expect(subjectStartsAfter == subjectStartsBefore + 1,
-               "A's background started \(subjectStartsAfter - subjectStartsBefore) times across the restart, expected 1 (before \(describe(subjectBefore)), after \(describe(subjectAfter)), writer released \(writerReleased)) \(state(subject))")
-        let otherStartsAfter = try await storage(other).starts
-        expect(otherStartsAfter == otherStartsBefore, "the unrelated extension's background restarted (\(otherStartsBefore) → \(otherStartsAfter))")
-        let tabsAfter = try await storage(subject).tabs
-        expect(!tabsAfter.isEmpty, "A sees no tabs after the restart")
-
-        // MARK: 3. Allow again: A marks again, no restart (nothing withdrawn).
-        try allow(subject)
-        expect(host.takeSiteAccessNotice(id: subject) == nil, "re-allowing restarted A")
-        let reallowed = try await reload(tabID, after: withheld["document"])
-        expect(reallowed["js"] == "js" && reallowed["css"] == "injected", "after re-allowing, A doesn't mark the new document: \(reallowed) \(state(subject))")
-        let startsAfterAllow = try await storage(subject).starts
-        expect(startsAfterAllow == subjectStartsAfter, "re-allowing restarted A's background (\(subjectStartsAfter) → \(startsAfterAllow))")
-
-        // MARK: 3b. Diagnostic only (not asserted): an extension page held open across a site-only withhold, where
-        // storage stays granted, to measure whether an open extension page keeps the old background from starting
-        // again. Release success is recorded; it is not proof the page's process ended.
-        let held = try await extensionPage(subject)
-        let heldBefore = await background(subject, atLeast: 0)
-        try withhold(subject)
-        let heldRestarted = host.takeSiteAccessNotice(id: subject)?.contains("Restarted") == true
-        let heldAfter = await background(subject, atLeast: heldBefore.starts + 1)
-        let heldRead = await evaluate(held, """
-            try { const v = await browser.storage.local.get(['starts', 'lastRun']); return JSON.stringify({starts: v.starts || 0, lastRun: v.lastRun || ''}); }
-            catch (e) { return JSON.stringify({error: String((e && e.message) || e)}); }
-            """)
-        let heldReleased = await release(held)
-        try allow(subject)
-        _ = host.takeSiteAccessNotice(id: subject)
-        let heldRecord: [String: Any] = ["restarted": heldRestarted, "before": record(heldBefore), "after": record(heldAfter),
-                                         "held_page_read": heldRead ?? ["error": "no result"], "held_page_released": heldReleased]
-
-        // MARK: 4. Revoke Permissions: same restart effect. (It also withdraws storage, so nothing here reads it.)
-        try host.revokePermissions(id: subject)
-        expect(host.takeSiteAccessNotice(id: subject)?.contains("Restarted") == true, "Revoke Permissions didn't restart A \(state(subject))")
-        let revoked = try await reload(tabID, after: reallowed["document"])
-        expect((revoked["js"] ?? "").isEmpty && (revoked["css"] ?? "").isEmpty, "after Revoke Permissions, A's content still reaches a new document: \(revoked) \(state(subject))")
-        expect(!subjectContext.hasAccess(to: page), "A still has access after Revoke Permissions \(state(subject))")
-        try allow(subject)
-        let afterRevokeAllow = try await reload(tabID, after: revoked["document"])
-        expect(afterRevokeAllow["js"] == "js", "re-allowing after Revoke Permissions didn't restore A: \(afterRevokeAllow) \(state(subject))")
-
-        // MARK: 5. Deliberate load failure: A stays unloaded with an actionable error; Enable recovers the saved choice.
-        struct InjectedLoadFailure: LocalizedError { var errorDescription: String? { "injected restart load failure (test)" } }
-        BrowserExtensions.siteAccessRestartLoadFault = { $0 == subject ? InjectedLoadFailure() : nil }
-        var failedMessage: String?
-        do { try withhold(subject) } catch BrowserExtensionSiteAccessFailure.failed(let message) { failedMessage = message }
-        BrowserExtensions.siteAccessRestartLoadFault = nil
-        expect(failedMessage?.contains("Enable it again") == true, "a failed restart didn't report an actionable failure: \(failedMessage ?? "no error")")
-        expect(host.context(for: subject) == nil && host.records.first { $0.id == subject }?.enabled == false && (host.errors[subject] ?? "").contains("Enable"),
-               "a failed restart didn't leave A unloaded and disabled with an error \(state(subject))")
-        expect(host.siteAccess(id: subject)?.state.mode == .withheld, "the saved (withheld) choice wasn't kept after the failed restart \(state(subject))")
-        let stopped = try await reload(tabID, after: afterRevokeAllow["document"])
-        expect((stopped["js"] ?? "").isEmpty && (stopped["css"] ?? "").isEmpty, "a stopped A still marks new documents (JS or CSS): \(stopped)")
-        host.permissionPrompt = { _ in true }
-        try await host.setEnabled(true, id: subject)
-        expect(host.context(for: subject)?.isLoaded == true && host.siteAccess(id: subject)?.state.mode == .withheld,
-               "Enable didn't recover A with its saved choice \(state(subject))")
-        // Before re-allowing, the recovered context must have no effective access (global and this exact tab) and
-        // must not mark a new document: a stored withheld state alone could hide accidental broad access.
-        host.reconcile()
-        let recoveredContext = host.context(for: subject)
-        let recoveredGlobal = recoveredContext?.hasAccess(to: page)
-        let recoveredTab = recoveredContext.flatMap { context in runtime?.tabs[tabID].map { context.hasAccess(to: page, in: $0) } }
-        expect(recoveredGlobal == false && recoveredTab == false,
-               "after Enable, A has access or can't be checked before re-allowing (global \(String(describing: recoveredGlobal)), tab \(String(describing: recoveredTab))) \(state(subject))")
-        let recoveredWithheld = try await reload(tabID, after: stopped["document"])
-        expect((recoveredWithheld["js"] ?? "").isEmpty && (recoveredWithheld["css"] ?? "").isEmpty,
-               "after Enable (still withheld), A marks a new document (JS or CSS): \(recoveredWithheld) \(state(subject))")
-        try allow(subject)
-        let recovered = try await reload(tabID, after: recoveredWithheld["document"])
-        expect(recovered["js"] == "js" && recovered["css"] == "injected", "after Enable and re-allowing, A doesn't mark with both JS and CSS: \(recovered) \(state(subject))")
-
-        let diagnostic: [String: Any] = [
-            "findings": findings.count, "tab_ids": ["before": tabsBefore, "after": tabsAfter],
-            "subject_before": record(subjectBefore), "subject_after": record(subjectAfter),
-            "other_starts": [otherStartsBefore, otherStartsAfter], "held_page_site_withhold": heldRecord,
-            "writer_released": writerReleased, "unreleased_pages": unreleasedPages, "prompts": prompts
-        ]
-        let encoded = try JSONSerialization.data(withJSONObject: diagnostic, options: .sortedKeys)
-        print("BAM_SITE_ACCESS_RESTART " + String(decoding: encoded, as: UTF8.self)); fflush(stdout)
+        if let bodyError { throw ExtensionSmokeTest.Failure(description: "\(bodyError) (also: \(findings.joined(separator: "; ")))") }
         return (checks, findings)
     }
 }

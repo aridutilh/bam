@@ -1,6 +1,13 @@
 import AppKit
 import WebKit
 
+/// Fixtures only: an extension host with an owned persistent extension-controller store, so storage.local survives a
+/// restart as in a normal profile, inside an otherwise ephemeral window. The fixture removes that store afterwards.
+struct ExtensionHostOverride {
+    let storageURL: URL
+    let controllerIdentifier: UUID
+}
+
 @MainActor extension BrowserController {
     @available(macOS 15.4, *)
     var browserExtensions: BrowserExtensions {
@@ -9,8 +16,9 @@ import WebKit
         // offers no public removal for a persistent controller configuration. Standard runs are unchanged.
         let isolated: Bool
         if case .isolated = profileStores.policy { isolated = true } else { isolated = false }
-        let value = BrowserExtensions(storageURL: privateMode ? nil : sessionURL.deletingLastPathComponent().appendingPathComponent("Extensions", isDirectory: true),
-                                      isPrivate: privateMode, controllerStorage: isolated ? .nonPersistent : .automatic)
+        let value = extensionHostOverride.map { BrowserExtensions(storageURL: $0.storageURL, isPrivate: false, controllerStorage: .ownedPersistent($0.controllerIdentifier)) }
+            ?? BrowserExtensions(storageURL: privateMode ? nil : sessionURL.deletingLastPathComponent().appendingPathComponent("Extensions", isDirectory: true),
+                                 isPrivate: privateMode, controllerStorage: isolated ? .nonPersistent : .automatic)
         extensionStorage = value
         value.profileName = { [weak self] in self?.session.profileName($0) ?? "Profile" }
         value.surfaces = { [weak self] in self?.extensionSurfaces(profileID: $0) ?? [] }
