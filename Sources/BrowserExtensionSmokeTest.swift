@@ -125,11 +125,18 @@ import Darwin
             descendants(controller.sidebar).first { $0.identifier?.rawValue == "extension-action-\(extensionID.uuidString)" } as? NSButton
         }
         try await wait("Enabled extension did not appear as a visible sidebar action") { actionButton()?.isHidden == false }
-        guard let button = actionButton(), let actionContext = host.context(for: extensionID),
+        // N3: the first context and its tab action are held only until their last use (below), like heldPopup, so the
+        // fixture keeps no stale context or action of the subject into the withdrawal checks. Same lookups as before.
+        var actionContextHolder: WKWebExtensionContext? = host.context(for: extensionID)
+        guard let button = actionButton(), actionContextHolder != nil,
               let liveRuntime = config.webExtensionController?.delegate as? BrowserExtensionRuntime,
-              let liveTab = liveRuntime.tabs[id], let tabAction = actionContext.action(for: liveTab) else {
+              let liveTab = liveRuntime.tabs[id] else {
             throw ExtensionSmokeTest.Failure(description: "Missing toolbar action fixture")
         }
+        var tabActionHolder: WKWebExtension.Action? = actionContextHolder?.action(for: liveTab)
+        guard tabActionHolder != nil else { throw ExtensionSmokeTest.Failure(description: "Missing toolbar action fixture") }
+        var actionContext: WKWebExtensionContext { actionContextHolder! }
+        var tabAction: WKWebExtension.Action { tabActionHolder! }
         /// Diagnostics (N1): the subject's context and action objects the fixture captures, weakly, with whether each
         /// context is still loaded; and a sampled history of which context object the subject had at each lifecycle step
         /// before the consent checks (sampled at the fixture's own steps, so transient contexts inside a step are missed).
@@ -360,12 +367,16 @@ import Darwin
         try check(stalePopupError != nil && tabAction.popupPopover?.isShown != true, "An asynchronously presented popup appeared over a different profile")
         try checkLiveLookup(profile); try checkLiveLookup(other)
         host.reconcile()
-        guard let context = host.context(for: extensionID), context.action(for: nil)?.popupWebView != nil else { throw ExtensionSmokeTest.Failure(description: "Missing browser-adapter action popup") }
         // Held only until its last use (below): a test-held extension web view keeps its web process, and with it every
         // CORS pattern it ever had, which would confound the withheld-fetch checks later in this run.
-        var heldPopup: WKWebView? = context.action(for: nil)?.popupWebView
-        observeExtensionView("original-popup", heldPopup)
-        observeObject("context(popup check)", context); noteSubject("popup-check")
+        var heldPopup: WKWebView?
+        do {
+            // N3: this context is needed only here, so it is scoped instead of held for the rest of the run.
+            guard let context = host.context(for: extensionID), context.action(for: nil)?.popupWebView != nil else { throw ExtensionSmokeTest.Failure(description: "Missing browser-adapter action popup") }
+            heldPopup = context.action(for: nil)?.popupWebView
+            observeExtensionView("original-popup", heldPopup)
+            observeObject("context(popup check)", context); noteSubject("popup-check")
+        }
         var popup: WKWebView { heldPopup! }
         try await wait("Browser-adapter popup did not initialize") { (try? await popup.evaluateJavaScript("document.title")) as? String == "Bam fixture ready" }
         // A finished load must reach the extension as `tabs.onUpdated` with `status: "complete"`
@@ -777,8 +788,12 @@ import Darwin
             return components.url!
         }
         let secondURL = secondPage()
-        guard let activeContext = host.context(for: activeID), let activeConfiguration = activeContext.webViewConfiguration,
+        // N3: the activeTab fixture's context is held only until its last use (below); same lookups and order as before.
+        var activeContextHolder: WKWebExtensionContext? = host.context(for: activeID)
+        guard let activeConfiguration = activeContextHolder?.webViewConfiguration,
               let secondID = controller.openProfileTab(secondURL, profileID: profile, active: false) else { throw ExtensionSmokeTest.Failure(description: "activeTab fixture did not load") }
+        var activeContext: WKWebExtensionContext { activeContextHolder! }
+        observeObject("activeContext(other extension)", activeContextHolder)
         try await wait("activeTab second tab did not load") { controller.browsers[secondID]?.url == secondURL && controller.browsers[secondID]?.isLoading == false }
         host.reconcile()
         // Held only until its last use (below), like heldPopup: a raw extension page outside Bam's ownership must not
@@ -839,6 +854,7 @@ import Darwin
         // Last use: release the test's raw page and require it gone (premise for the withdrawal checks later in this run).
         weak let releasedActivePage = activePageHolder
         activePageHolder = nil
+        activeContextHolder = nil   // N3: last use of the activeTab fixture's context
         _ = host.closeTab?(secondID)
         try await host.remove(id: activeID)
         host.reconcile()
@@ -847,6 +863,8 @@ import Darwin
         // Last use of the original popup: release the test's references to it (and the first action's popup).
         heldPopup = nil
         tabAction.closePopup(); actionContext.action(for: nil)?.closePopup()
+        // N3: last use of the first context and its tab action.
+        tabActionHolder = nil; actionContextHolder = nil
         try await wait("Browser adapter did not open its own extension page") { controller.session.tabs.contains { URLInput.extensionURL($0.address) != nil } }
         guard let tab = controller.session.tabs.first(where: { URLInput.extensionURL($0.address) != nil }), controller.browsers[tab.id] != nil else { throw ExtensionSmokeTest.Failure(description: "Missing extension renderer") }
         // Bam owns its renderers; the test only observes them weakly, so it never keeps an old one (and its process) alive.
@@ -1078,6 +1096,17 @@ import Darwin
             noteSubject("consent-start")
             print("CONSENT_HISTORY sampledSteps=\(subjectHistory) distinctSampledContexts=\(subjectContextIDs.count) " +
                   "restartGeneration=\(generationNow()) heldObjects=\(heldObjectsState())"); fflush(stdout)
+            // N3: the fixture dropped its stale context and action references at their last uses. Establish (report, not
+            // require) whether WebKit actually released them before the first withdrawal: bounded wait, elapsed time
+            // printed, survivors named. Measured, so a survivor is evidence about what else retains it.
+            do {
+                let start = ProcessInfo.processInfo.systemUptime, deadline = start + 3
+                while observedObjects.contains(where: { $0.object.value != nil }) && ProcessInfo.processInfo.systemUptime < deadline {
+                    try await Task.sleep(nanoseconds: 40_000_000)
+                }
+                print("CONSENT_N3_RELEASE observed=\(observedObjects.map(\.label)) stillAlive=\(heldObjectsState()) " +
+                      "waited=\(String(format: "%.3f", ProcessInfo.processInfo.systemUptime - start))s"); fflush(stdout)
+            }
             extensionViewInventory("before-first-withhold")
             BrowserExtensions.siteAccessRestartWillLoad = { id in if id == extensionID { extensionViewInventory("will-load-fresh-context") } }
             defer { BrowserExtensions.siteAccessRestartWillLoad = nil }
@@ -1482,8 +1511,10 @@ import Darwin
             let consentRestored = try perform(host.siteAccess(id: extensionID)!, .choose(.allRequested))
             try check(consentRestored.state.mode == .allRequested && granted(ip) && granted(newSite), "Site Access was not restored after the consent checks")
         }
-        let originalContext = host.context(for: extensionID)!
-        observeObject("originalContext", originalContext); noteSubject("before-update-attempts")
+        // N3: held only until its last use below (the cancelled update's identity and status checks).
+        var originalContextHolder: WKWebExtensionContext? = host.context(for: extensionID)!
+        var originalContext: WKWebExtensionContext { originalContextHolder! }
+        observeObject("originalContext", originalContextHolder); noteSubject("before-update-attempts")
         seedOptionalPermissions(originalContext)
         let originalRecord = host.items(profileID: profile).first { $0.id == extensionID }!
         let catalog = ExtensionCatalogRecord(source: .local, upstreamID: nil, listingURL: nil, downloadURL: nil,
@@ -1504,6 +1535,7 @@ import Darwin
             afterCancel?.timedOptionalSiteGrants == originalRecord.timedOptionalSiteGrants &&
             originalContext.permissionStatus(for: URL(string: "https://new.invalid/")!) != .grantedExplicitly,
             "Declining an update's new site must cancel it and keep the old site access: review=\(declinedReview?.websites ?? [])")
+        originalContextHolder = nil   // N3: last use of originalContext
         // The native initializer may finish synchronously for a tiny fixture.
         // Wrap the real parser so user changes happen before its result returns,
         // instead of relying on a queued Task winning an unspecified scheduling race.
@@ -1567,9 +1599,12 @@ import Darwin
         host.packageParser = nativeParser
         host.permissionPrompt = { _ in true }
         try await host.setEnabled(true, id: extensionID)
-        guard let beforeUpdateContext = host.context(for: extensionID) else { throw ExtensionSmokeTest.Failure(description: "Update fixture could not re-enable") }
-        observeObject("beforeUpdateContext", beforeUpdateContext); noteSubject("re-enabled-before-update")
-        seedOptionalPermissions(beforeUpdateContext)
+        do {
+            // N3: scoped; this context is needed only to seed the grants the update must preserve.
+            guard let beforeUpdateContext = host.context(for: extensionID) else { throw ExtensionSmokeTest.Failure(description: "Update fixture could not re-enable") }
+            observeObject("beforeUpdateContext", beforeUpdateContext); noteSubject("re-enabled-before-update")
+            seedOptionalPermissions(beforeUpdateContext)
+        }
         let grantedBeforeUpdate = host.items(profileID: profile).first { $0.id == extensionID }!
         // WebKit normalizes date precision. Preserve the expiry it actually
         // stored, rather than requiring the original sub-millisecond Date bits.
