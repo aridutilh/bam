@@ -847,6 +847,52 @@ extension ExtensionSiteAccessSmokeTest {
             expect(host.context(for: subject)?.isLoaded == true, "Enable didn't recover A after the quarantined cancelled load \(state(subject))")
             diagnostic["fail_closed"] = ["timeout": String(describing: timeoutResult), "reentrant": String(describing: reentrantResult)]
 
+            // MARK: 9. Update with an old view held: the updated same-identity context must not load while a Bam-retired
+            // view of the old context is alive (fail closed); after release, Enable recovers and a clean update succeeds.
+            func updatePackage(version: String) throws -> URL {
+                let folder = root.appendingPathComponent("subject-\(version)", isDirectory: true)
+                if FileManager.default.fileExists(atPath: folder.path) { try FileManager.default.removeItem(at: folder) }
+                try FileManager.default.copyItem(at: subjectPackage, to: folder)
+                let manifestURL = folder.appendingPathComponent("manifest.json")
+                guard var manifest = try JSONSerialization.jsonObject(with: Data(contentsOf: manifestURL)) as? [String: Any] else { throw fail("unreadable fixture manifest") }
+                manifest["version"] = version
+                try JSONSerialization.data(withJSONObject: manifest, options: .sortedKeys).write(to: manifestURL)
+                return folder
+            }
+            let catalog = ExtensionCatalogRecord(source: .local, upstreamID: nil, listingURL: nil, downloadURL: nil,
+                publisher: "Bam test fixture", version: "1.0.1", sha256: "", provenance: "Original local fixture", installedAt: Date())
+            host.permissionPrompt = { _ in true }   // the update's own review approves
+            if host.context(for: subject) == nil { try await host.setEnabled(true, id: subject) }
+            try await showExtensionTab(extensionTab)
+            let versionBefore = host.context(for: subject)?.webExtension.version
+            BrowserExtensions.siteAccessRestartReleaseDeadline = 0.3
+            var heldOldView: WKWebView? = controller.browsers[extensionTab]
+            var heldUpdateError: String?
+            do { try await host.replacePackage(id: subject, with: try updatePackage(version: "1.0.1"), catalog: catalog) }
+            catch { heldUpdateError = error.localizedDescription }
+            withExtendedLifetime(heldOldView) {}   // the old renderer provably stays alive through the update attempt
+            BrowserExtensions.siteAccessRestartReleaseDeadline = 2
+            heldOldView = nil
+            expect(heldUpdateError?.contains("haven’t closed yet") == true && host.context(for: subject) == nil
+                   && host.records.first { $0.id == subject }?.enabled == false && host.records.first { $0.id == subject }?.version == versionBefore,
+                   "an update loaded while an old view was held, or didn't fail closed with the old version kept: \(heldUpdateError ?? "no error") \(state(subject))")
+            try await host.setEnabled(true, id: subject)
+            expect(host.context(for: subject)?.isLoaded == true && host.context(for: subject)?.webExtension.version == versionBefore,
+                   "Enable didn't recover the old version after the failed update \(state(subject))")
+            // Clean update: the old renderer is retired and released before the updated context loads; E keeps its tab.
+            try await showExtensionTab(extensionTab)
+            let oldUpdateRenderer = WeakView(controller.browsers[extensionTab])
+            let contextBeforeUpdate = host.context(for: subject)
+            try await host.replacePackage(id: subject, with: try updatePackage(version: "1.0.2"), catalog: catalog)
+            let updatedContext = host.context(for: subject)
+            expect(updatedContext?.isLoaded == true && updatedContext !== contextBeforeUpdate && updatedContext?.webExtension.version == "1.0.2"
+                   && updatedContext?.uniqueIdentifier == identity.0 && updatedContext?.baseURL == identity.1,
+                   "a clean update didn't load the new version with the same identity \(state(subject))")
+            expect(oldUpdateRenderer.web == nil && address(extensionTab) == extensionAddress,
+                   "the update didn't release E's old renderer or kept a different tab address: alive \(oldUpdateRenderer.web != nil), \(address(extensionTab) ?? "missing")")
+            try await showExtensionTab(extensionTab)
+            diagnostic["update_barrier"] = ["held_error": heldUpdateError ?? "none", "clean_version": updatedContext?.webExtension.version ?? "none"]
+
             diagnostic["findings"] = findings.count
             diagnostic["tab_ids"] = ["before": tabsBefore, "after": tabsAfter]
             diagnostic["subject_before"] = record(subjectBefore); diagnostic["subject_after"] = record(subjectAfter)
