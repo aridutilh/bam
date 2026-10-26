@@ -43,7 +43,7 @@ import AppKit
         profileLabel.frame = NSRect(x: 28, y: 573, width: 620, height: 22); root.addSubview(profileLabel)
         manageButton.frame = NSRect(x: 690, y: 592, width: 182, height: 34); manageButton.target = self; manageButton.action = #selector(manage); root.addSubview(manageButton)
         field.frame = NSRect(x: 28, y: 524, width: 844, height: 34)
-        field.placeholderString = "Search extensions or paste a store link"; field.delegate = self
+        field.placeholderString = "Search, or paste a Chrome Web Store or Firefox Add-ons link"; field.delegate = self
         field.setAccessibilityLabel("Search extensions across stores"); root.addSubview(field)
         resultLabel.font = .systemFont(ofSize: 12, weight: .medium); resultLabel.textColor = .secondaryLabelColor
         resultLabel.frame = NSRect(x: 28, y: 491, width: 380, height: 22); root.addSubview(resultLabel)
@@ -76,7 +76,7 @@ import AppKit
     func show(profileID: UUID, relativeTo parent: NSWindow?) {
         // An in-progress install is bound to the profile named on the panel.
         if !installing { self.profileID = profileID }
-        profileLabel.stringValue = "For your \(host?.profileName?(self.profileID) ?? "current") profile · Chrome, Firefox & Safari sources"
+        profileLabel.stringValue = "For your \(host?.profileName?(self.profileID) ?? "current") profile · Chrome Web Store first, then Firefox and Safari"
         if let parent { window?.setFrameOrigin(NSPoint(x: parent.frame.midX - 450, y: parent.frame.midY - 330)) } else { window?.center() }
         showWindow(nil); window?.makeKeyAndOrderFront(nil); window?.makeFirstResponder(field)
         refreshInstalledState()
@@ -191,7 +191,7 @@ import AppKit
         let generation = searchGeneration, text = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         hasSearched = true; listings = []; chosenBuild = [:]; table.reloadData(); updateControls()
         resultLabel.stringValue = text.isEmpty ? "Popular extensions" : "Searching all stores…"
-        status.stringValue = text.isEmpty ? "Finding popular extensions…" : "Searching Chrome, Firefox and Safari sources…"
+        status.stringValue = text.isEmpty ? "Finding popular extensions…" : "Searching the Chrome Web Store, Firefox Add-ons and Safari…"
         searchTask = Task { @MainActor [weak self] in
             if debounce { try? await Task.sleep(nanoseconds: 350_000_000) }
             guard !Task.isCancelled, let self else { return }

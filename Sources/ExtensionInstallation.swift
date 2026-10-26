@@ -42,7 +42,7 @@ struct ExtensionProductListing: Equatable {
     var publisher: String { recommended.publisher }
 }
 
-/// Picks a build on what Bam can actually run, not on a fixed store preference.
+/// Picks a build: one Bam can run first, then the Chrome Web Store, then Firefox Add-ons.
 @available(macOS 15.4, *)
 enum ExtensionBuildResolver {
     /// Dated observations from Bam's own vendor probes, keyed by upstream ID.
@@ -56,48 +56,39 @@ enum ExtensionBuildResolver {
         "pachckjkecffpdphbpmfolblodfkgbhl": "2026-10-24: Chrome service worker and welcome popup initialize; the YouTube overlay appears in a signed-out probe.",
     ]
 
+    static func facts(_ c: ExtensionBuildCandidate) -> ExtensionSourcePreference.Facts {
+        .init(source: c.source, canInstallInBam: c.canInstallInBam,
+              failedInBamProbe: c.upstreamID.flatMap { observations[$0] }.map(ExtensionSourcePreference.isFailureNote) ?? false,
+              version: c.version)
+    }
+    /// The product's builds, preferred first: Chrome Web Store, then Firefox Add-ons (see ExtensionSourcePreference).
+    static func ordered(_ candidates: [ExtensionBuildCandidate]) -> [ExtensionBuildCandidate] {
+        candidates.enumerated().sorted { a, b in
+            let fa = facts(a.element), fb = facts(b.element)
+            if ExtensionSourcePreference.prefers(fa, over: fb) { return true }
+            if ExtensionSourcePreference.prefers(fb, over: fa) { return false }
+            return a.offset < b.offset
+        }.map(\.element)
+    }
+
     static func recommend(_ candidates: [ExtensionBuildCandidate]) -> (ExtensionBuildCandidate, [String])? {
-        guard !candidates.isEmpty else { return nil }
+        guard let pick = ordered(candidates).first else { return nil }
         var reasons: [String] = []
-        func score(_ c: ExtensionBuildCandidate) -> Int {
-            var s = c.canInstallInBam ? 0 : -1000
-            let needsLayer = !Set(c.permissions).intersection(ExtensionCompatibility.bridgedPermissions).isEmpty
-            // Prefer the broader tested page-build coverage while worker support matures.
-            if c.backgroundKind == .serviceWorker { s -= needsLayer ? 5 : 2 }
-            if c.backgroundKind == .page || c.backgroundKind == .scripts { s += 10 }
-            if c.permissions.contains("nativeMessaging") { s -= 3 }
-            if c.source == .amo { s += 2 }  // published hash, no product-version gate
-            if let id = c.upstreamID, let note = observations[id] {
-                if note.contains("cannot receive") || note.contains("not reached") || note.contains("stopped at") { s -= 15 }
-                if note.contains("inject") || note.contains("render") { s += 8 }
-            }
-            return s
-        }
-        let ranked = candidates.sorted { a, b in
-            let sa = score(a), sb = score(b)
-            return sa != sb ? sa > sb : compareVersions(a.version, b.version) == .orderedDescending
-        }
-        let pick = ranked[0]
         if pick.backgroundKind == .serviceWorker {
             reasons.append("This build uses a service worker. Bam prepares its background to provide a limited compatibility layer.")
         } else if pick.backgroundKind != nil {
             reasons.append("HTML background page: Bam's compatibility layer can stand in for missing APIs.")
         }
-        if candidates.count > 1 { reasons.append("Other builds of the same product are listed below; Bam picked \(pick.source == .amo ? "the Firefox Add-ons build" : pick.source == .chromeWebStore ? "the Chrome Web Store build" : "this build").") }
+        if candidates.count > 1 {
+            let name = pick.source == .amo ? "the Firefox Add-ons build" : pick.source == .chromeWebStore ? "the Chrome Web Store build" : "this build"
+            let chromeFailed = pick.source != .chromeWebStore && candidates.contains { $0.source == .chromeWebStore && facts($0).failedInBamProbe }
+            reasons.append("Other builds of the same product are listed below; Bam picked \(name)\(chromeFailed ? " because the Chrome Web Store build failed in Bam’s probe" : "").")
+        }
         if let id = pick.upstreamID, let note = observations[id] { reasons.append("Bam probe: " + note) }
         return (pick, reasons)
     }
 
-    /// Dotted numeric comparison; non-numeric parts compare lexically after numbers.
-    static func compareVersions(_ a: String, _ b: String) -> ComparisonResult {
-        let pa = a.split(separator: ".").map(String.init), pb = b.split(separator: ".").map(String.init)
-        for i in 0..<max(pa.count, pb.count) {
-            let x = i < pa.count ? pa[i] : "0", y = i < pb.count ? pb[i] : "0"
-            if let nx = Int(x), let ny = Int(y) { if nx != ny { return nx < ny ? .orderedAscending : .orderedDescending } }
-            else if x != y { return x < y ? .orderedAscending : .orderedDescending }
-        }
-        return .orderedSame
-    }
+    static func compareVersions(_ a: String, _ b: String) -> ComparisonResult { ExtensionSourcePreference.compareVersions(a, b) }
 }
 
 /// Resolves a pasted link or search text into product listings, fetches a chosen
@@ -189,7 +180,7 @@ enum ExtensionBuildResolver {
         for candidate in candidates {
             let identity = ExtensionCatalogIdentity(candidate)
             if let index = listings.firstIndex(where: { $0.identity.matches(identity) }) {
-                listings[index].candidates.append(candidate)
+                listings[index].candidates = ExtensionBuildResolver.ordered(listings[index].candidates + [candidate])
                 listings[index].identity = listings[index].identity.absorbing(identity)
                 if let (pick, reasons) = ExtensionBuildResolver.recommend(listings[index].candidates) { listings[index].recommended = pick; listings[index].reasons = reasons }
             } else if let (pick, reasons) = ExtensionBuildResolver.recommend([candidate]) {
@@ -202,7 +193,7 @@ enum ExtensionBuildResolver {
         let (pick, reasons) = ExtensionBuildResolver.recommend(candidates)!
         var identity = ExtensionCatalogIdentity(candidates[0])
         for c in candidates.dropFirst() { identity = identity.absorbing(ExtensionCatalogIdentity(c)) }
-        return ExtensionProductListing(identity: identity, candidates: candidates, recommended: pick, reasons: reasons)
+        return ExtensionProductListing(identity: identity, candidates: ExtensionBuildResolver.ordered(candidates), recommended: pick, reasons: reasons)
     }
 
     /// After a Chrome Web Store fetch the manifest names the product; look for the
