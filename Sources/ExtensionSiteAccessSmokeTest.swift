@@ -893,6 +893,27 @@ extension ExtensionSiteAccessSmokeTest {
             try await showExtensionTab(extensionTab)
             diagnostic["update_barrier"] = ["held_error": heldUpdateError ?? "none", "clean_version": updatedContext?.webExtension.version ?? "none"]
 
+            // MARK: 10. Update-contamination comparison (native 8501db3: the full-suite consent check reads 200 after an earlier
+            // Update even with no old page alive at the fresh load). Same order as there: allowed → Update while allowed
+            // → withhold → a new document's fetch from the recreated extension tab. Stage 2 (never updated, same
+            // fetch) is the control: if this stage reads while stage 2 refused, a prior Update carries the access over.
+            try allow(subject)
+            try await showExtensionTab(extensionTab)
+            let beforeUpdateFetch = await fetch(fromTab: extensionTab)
+            expect(beforeUpdateFetch["result"] as? String == "read", "comparison control: E couldn't read while allowed before the update: \(beforeUpdateFetch)")
+            try await host.replacePackage(id: subject, with: try updatePackage(version: "1.0.3"), catalog: catalog)
+            try await showExtensionTab(extensionTab)
+            let afterUpdateFetch = await fetch(fromTab: extensionTab)
+            try withhold(subject)
+            let updateWithholdResult = await awaitRestart(subject)
+            expect(updateWithholdResult == .restarted, "the withhold after an update ended \(String(describing: updateWithholdResult)) \(state(subject))")
+            try await showExtensionTab(extensionTab)
+            let afterUpdateWithholdFetch = await fetch(fromTab: extensionTab)
+            expect(afterUpdateWithholdFetch["result"] as? String == "refused",
+                   "after an Update while allowed and then a withhold, the recreated E still reads the loopback page: \(afterUpdateWithholdFetch) (never-updated control: \(withheldFetch))")
+            diagnostic["update_comparison"] = ["before_update": beforeUpdateFetch, "after_update_allowed": afterUpdateFetch,
+                                               "after_update_withheld": afterUpdateWithholdFetch, "never_updated_withheld": withheldFetch]
+
             diagnostic["findings"] = findings.count
             diagnostic["tab_ids"] = ["before": tabsBefore, "after": tabsAfter]
             diagnostic["subject_before"] = record(subjectBefore); diagnostic["subject_after"] = record(subjectAfter)
