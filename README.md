@@ -23,7 +23,7 @@ An independent open-source experiment, not affiliated with Arc, The Browser Comp
 - macOS 14 or later on Apple Silicon. Extensions need macOS 15.4 or later.
 - Releases are prereleases: ad-hoc signed, not notarized, and without an auto-updater.
 - Extension compatibility is partial and varies by extension; see the [extension notes](docs/extensions.md).
-- There's no content blocker, password manager or sync. Arc import covers the layout only, not passwords, cookies or history.
+- There's no built-in content blocker, password manager or sync. Arc import covers the layout only, not passwords, cookies or history.
 
 See the [feature inventory](FEATURE-INVENTORY.md) for what's left and [VALIDATION.md](VALIDATION.md) for what was tested.
 
