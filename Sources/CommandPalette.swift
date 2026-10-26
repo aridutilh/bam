@@ -57,6 +57,22 @@ import WebKit
     }
 }
 
+/// Palette geometry, as Arc's: about 60% of the window wide, vertically centered for a full list (the top stays put
+/// as results come and go, so the field never jumps), a 12pt corner and a 56pt input row.
+enum PaletteGeometry {
+    static let cornerRadius: CGFloat = 12
+    static let inputHeight: CGFloat = 56
+    static let rowHeight: CGFloat = 40
+    static let typicalRows = 6
+    static func width(forWindowWidth w: CGFloat) -> CGFloat {
+        min(max(0, w - 60), max(540, min(820, (w * 0.6).rounded())))
+    }
+    static func top(forWindowHeight h: CGFloat) -> CGFloat {
+        let typical = inputHeight + 7 + CGFloat(typicalRows) * rowHeight + 8
+        return max(40, ((h - typical) / 2).rounded())
+    }
+}
+
 /// The command palette: open/search, Arc-style Tab-to-search site scoping,
 /// remote suggestions, layout and dismissal.
 extension BrowserController {
@@ -81,7 +97,8 @@ extension BrowserController {
         let box = PaletteCard()
         box.material = .popover; box.blendingMode = .withinWindow; box.state = .active
         box.wantsLayer = true
-        box.layer?.cornerRadius = 16; box.layer?.masksToBounds = true
+        box.layer?.cornerRadius = PaletteGeometry.cornerRadius; box.layer?.masksToBounds = true
+        box.layer?.borderWidth = 1   // Arc's thin outline; its color follows the appearance in layoutPalette
         let tint = NSView(); tint.wantsLayer = true
         tint.alphaValue = 0
         tint.setAccessibilityElement(false)
@@ -126,13 +143,15 @@ extension BrowserController {
     func layoutPalette(width w: CGFloat, height h: CGFloat) {
         guard let overlay = addressOverlay, let content = addressCard else { return }
         overlay.frame = root.bounds
-        let cw = min(620, w - 60)
-        let inputHeight: CGFloat = 54
+        let cw = PaletteGeometry.width(forWindowWidth: w)
+        let inputHeight = PaletteGeometry.inputHeight
         let rowsHeight = tabSearchResults?.preferredHeight ?? 44
-        content.frame = NSRect(x: (w - cw) / 2, y: min(110, h * 0.12), width: cw, height: inputHeight + 7 + rowsHeight + 8)
+        content.frame = NSRect(x: (w - cw) / 2, y: PaletteGeometry.top(forWindowHeight: h), width: cw, height: inputHeight + 7 + rowsHeight + 8)
+        content.layer?.borderColor = (root.isDark ? NSColor(white: 1, alpha: 0.14) : NSColor(white: 0, alpha: 0.12)).cgColor
         paletteGlow?.frame = content.frame
+        let radius = PaletteGeometry.cornerRadius
         paletteGlow?.layer?.shadowPath = CGPath(roundedRect: CGRect(origin: .zero, size: content.frame.size),
-                                                cornerWidth: 16, cornerHeight: 16, transform: nil)
+                                                cornerWidth: radius, cornerHeight: radius, transform: nil)
         paletteTint?.frame = content.bounds
         paletteIcon?.frame = NSRect(x: 22, y: (inputHeight - 16) / 2, width: 16, height: 16)
         var fieldX: CGFloat = 50
@@ -205,10 +224,13 @@ extension BrowserController {
     private func applyPaletteResults() {
         guard let field = addressField else { return }
         let commands = paletteEngine == nil ? PaletteCommandCatalog.matches(field.stringValue) : []
+        let activeSpace = session.spaces.first { $0.id == session.space }
         tabSearchResults?.update(tabs: session.tabs, query: field.stringValue, activeID: focusedTabID,
                                  canCreate: true, spaces: session.spaces, profiles: session.profiles,
-                                 engine: paletteEngine, suggestions: paletteSuggestions, commands: commands)
-        layoutBrowser()
+                                 engine: paletteEngine, suggestions: paletteSuggestions, commands: commands,
+                                 selectionTint: activeSpace.map { ArkPalette.spaceTint(for: $0) })
+        // Only the palette's own frames depend on its results: no whole-browser layout per keystroke or suggestion.
+        layoutPalette(width: root.bounds.width, height: root.bounds.height)
     }
     /// Runs a catalog command through the responder chain once the palette is
     /// gone, so the same entry reaches the controller, the app delegate, or a
@@ -317,8 +339,10 @@ extension BrowserController {
     func controlTextDidChange(_ obj: Notification) { if obj.object as AnyObject? === addressField { refreshPaletteResults() } }
     func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
         if commandSelector == #selector(NSResponder.cancelOperation(_:)) { dismissAddress(); return true }
-        if commandSelector == #selector(NSResponder.moveDown(_:)) { tabSearchResults?.moveSelection(delta: 1); return true }
-        if commandSelector == #selector(NSResponder.moveUp(_:)) { tabSearchResults?.moveSelection(delta: -1); return true }
+        // A held arrow key auto-repeats: step instantly and stop at the ends instead of gliding and wrapping.
+        let repeating = NSApp.currentEvent?.type == .keyDown && NSApp.currentEvent?.isARepeat == true
+        if commandSelector == #selector(NSResponder.moveDown(_:)) { tabSearchResults?.moveSelection(delta: 1, repeating: repeating); return true }
+        if commandSelector == #selector(NSResponder.moveUp(_:)) { tabSearchResults?.moveSelection(delta: -1, repeating: repeating); return true }
         if commandSelector == #selector(NSResponder.insertNewline(_:)) { submitAddress(control); return true }
         if commandSelector == #selector(NSResponder.insertTab(_:)) {
             // Tab scopes the palette to the hinted site; otherwise keep focus put.

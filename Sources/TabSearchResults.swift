@@ -154,11 +154,16 @@ enum TabSearchMatcher {
     func update(tabs: [BrowserTab], query: String, activeID: UUID, canCreate: Bool,
                 spaces: [BrowserSpace] = BrowserSpace.legacyDefaults, profiles: [BrowserProfile] = BrowserProfile.defaults,
                 engine: SiteSearchEngine? = nil, suggestions: [String] = [],
-                commands: [PaletteCommandMatch] = []) {
+                commands: [PaletteCommandMatch] = [], selectionTint: NSColor? = nil) {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         let previousIdentity = entries.indices.contains(selectedIndex) ? entries[selectedIndex].identity : nil
-        accent = engine?.color ?? .controlAccentColor
-        accentText = engine?.accentTextColor ?? .white
+        if let engine {
+            // Scoped to one site: its own color, as Arc does.
+            accent = engine.color; accentText = engine.accentTextColor
+        } else {
+            // Arc's selection is a quiet wash of the Space's color with normal text, not a saturated accent fill.
+            accent = (selectionTint ?? .controlAccentColor).withAlphaComponent(0.3); accentText = .labelColor
+        }
         engineURL = engine.flatMap { URL(string: "https://\($0.host)") }
         entries = []
         if engine != nil {
@@ -188,10 +193,10 @@ enum TabSearchMatcher {
             row.selectedTextColor = accentText
             switch entry {
             case .query(let text):
-                row.configure(title: text, detail: "", badge: "Open or Search", symbol: "magnifyingglass")
+                row.configure(title: text, detail: "", badge: "", symbol: "magnifyingglass", action: "Open or Search")
             case .search(let text):
-                let badge = (engine != nil && index == 0) ? "Search \(engine?.name ?? "")" : ""
-                row.configure(title: text, detail: "", badge: badge, symbol: "magnifyingglass")
+                let action = (engine != nil && index == 0) ? "Search \(engine?.name ?? "")" : "Search"
+                row.configure(title: text, detail: "", badge: "", symbol: "magnifyingglass", action: action)
             case .tab(let tab):
                 // IDs remain stable when Spaces are renamed, reordered or deleted.
                 let space = spaces.first(where: { $0.id == tab.space })?.name ?? "Unknown Space"
@@ -200,8 +205,9 @@ enum TabSearchMatcher {
                 let context = tab.isFavorite ? "Favorite · \(profile)" : (tab.id == activeID ? "\(space) · Current" : space)
                 let address = tab.isHome ? "New tab" : tab.isVideoDemo ? "Picture in Picture demo" : tab.address
                 let detail = tab.isUnloaded ? "Sleeping · \(address)" : address
+                // The Space stays as quiet context; the trailing label says what Return does.
                 row.configure(title: tab.displayTitle.isEmpty ? address : tab.displayTitle, detail: detail,
-                              badge: context, symbol: tab.symbol)
+                              badge: context, symbol: tab.symbol, action: tab.id == activeID ? nil : "Switch to Tab")
             case .command(let command):
                 let live = ShortcutCommand(paletteID: command.id).map { ShortcutStore.shared.combo(for: $0).compact }
                 row.configure(title: command.title, detail: command.detail,
@@ -217,7 +223,7 @@ enum TabSearchMatcher {
             }
             row.onHover = { [weak self] in
                 guard let self, self.selectedIndex != index else { return }
-                self.selectedIndex = index; self.refreshSelection(animated: true)
+                self.selectedIndex = index; self.refreshSelection(animated: false)
             }
             addSubview(row)
             return row
@@ -255,11 +261,20 @@ enum TabSearchMatcher {
         }
     }
 
-    func moveSelection(delta: Int) {
+    /// A discrete press wraps at the ends and glides. A held key (auto-repeat) steps instantly, applies colors at
+    /// once and stops at the first or last row, so selection never flickers or jumps back to the top mid-hold.
+    func moveSelection(delta: Int, repeating: Bool = false) {
         guard !entries.isEmpty, delta != 0 else { return }
-        let amount = delta % entries.count
-        selectedIndex = (selectedIndex + amount + entries.count) % entries.count
-        refreshSelection(animated: true)
+        if repeating {
+            let next = min(entries.count - 1, max(0, selectedIndex + delta))
+            guard next != selectedIndex else { return }
+            selectedIndex = next
+            refreshSelection(animated: false)
+        } else {
+            let amount = delta % entries.count
+            selectedIndex = (selectedIndex + amount + entries.count) % entries.count
+            refreshSelection(animated: true)
+        }
     }
 
     @discardableResult func activateSelection() -> Bool {
@@ -283,6 +298,8 @@ enum TabSearchMatcher {
 
     private func refreshSelection(animated: Bool = false) {
         selectionFlip?.cancel(); selectionFlip = nil
+        // A highlight still gliding toward an earlier row stops where it is before retargeting.
+        if !animated { highlight.layer?.removeAllAnimations() }
         let applyColors = { [weak self] in
             guard let self else { return }
             for (index, row) in self.rows.enumerated() { row.isSelected = index == self.selectedIndex }
@@ -340,8 +357,8 @@ extension NSTextField {
     }
 }
 
-/// One Arc-style single-line result: icon, title, dimmed address, trailing
-/// action badge. Selection fills the row with the palette's accent.
+/// One Arc-style single-line result: icon, title, dimmed address, quiet context, and a trailing action
+/// ("Switch to Tab" with an arrow box) that brightens on the selected row.
 @MainActor private final class TabSearchResultRow: NSView {
     var onActivate: (() -> Void)?
     var onHover: (() -> Void)?
@@ -353,6 +370,8 @@ extension NSTextField {
     private let title = NSTextField(labelWithString: "")
     private let detail = NSTextField(labelWithString: "")
     private let badge = NSTextField(labelWithString: "")
+    private let action = NSTextField(labelWithString: "")
+    private let arrowBox = NSView()
     private let arrow = NSImageView()
     private var hoverArea: NSTrackingArea?
     override var isFlipped: Bool { true }
@@ -362,27 +381,31 @@ extension NSTextField {
         wantsLayer = true
         setAccessibilityElement(true)
         setAccessibilityRole(.button)
-        for child in [icon, title, detail, badge, arrow] { child.setAccessibilityElement(false); addSubview(child) }
+        arrowBox.wantsLayer = true; arrowBox.layer?.cornerRadius = 5
+        for child in [icon, title, detail, badge, action, arrowBox, arrow] { child.setAccessibilityElement(false); addSubview(child) }
         title.font = .systemFont(ofSize: 13, weight: .medium)
         detail.font = .systemFont(ofSize: 12)
         badge.font = .systemFont(ofSize: 11, weight: .medium)
         badge.alignment = .right
-        for label in [title, detail, badge] { label.lineBreakMode = .byTruncatingTail; label.maximumNumberOfLines = 1 }
+        action.font = .systemFont(ofSize: 12, weight: .medium)
+        action.alignment = .right
+        for label in [title, detail, badge, action] { label.lineBreakMode = .byTruncatingTail; label.maximumNumberOfLines = 1 }
         icon.imageScaling = .scaleProportionallyUpOrDown
         arrow.imageScaling = .scaleProportionallyDown
         arrow.image = NSImage(systemSymbolName: "arrow.right", accessibilityDescription: nil)
         applySelection()
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
-    func configure(title: String, detail: String, badge: String, symbol: String) {
+    func configure(title: String, detail: String, badge: String, symbol: String, action: String? = nil) {
         self.title.stringValue = title
         self.detail.stringValue = detail
         self.badge.stringValue = badge
+        self.action.stringValue = action ?? ""
         self.symbol = symbol
         favicon = nil
         icon.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
         icon.identifier = nil
-        setAccessibilityLabel([title, detail, badge].filter { !$0.isEmpty }.joined(separator: ", "))
+        setAccessibilityLabel([title, detail, badge, action ?? ""].filter { !$0.isEmpty }.joined(separator: ", "))
         toolTip = detail.isEmpty ? title : detail
         applySelection()
         needsLayout = true
@@ -402,18 +425,32 @@ extension NSTextField {
         detail.textColor = secondary
         badge.textColor = secondary
         icon.contentTintColor = favicon == nil ? (isSelected ? selectedTextColor : .secondaryLabelColor) : nil
-        arrow.contentTintColor = selectedTextColor
-        arrow.isHidden = !isSelected
+        // Every actionable row shows its action; the selected one reads at full strength.
+        let hasAction = !action.stringValue.isEmpty
+        action.isHidden = !hasAction; arrow.isHidden = !hasAction; arrowBox.isHidden = !hasAction
+        action.textColor = isSelected ? primary : .tertiaryLabelColor
+        arrow.contentTintColor = isSelected ? primary : .tertiaryLabelColor
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            arrowBox.layer?.backgroundColor = (isSelected ? NSColor.labelColor.withAlphaComponent(0.14)
+                                                          : NSColor.labelColor.withAlphaComponent(0.06)).cgColor
+        }
         needsLayout = true
     }
     override func layout() {
         super.layout()
         let middle = bounds.height / 2
         icon.frame = NSRect(x: 12, y: middle - 8, width: 16, height: 16)
-        let showsArrow = !arrow.isHidden
-        arrow.frame = NSRect(x: bounds.width - 26, y: middle - 7, width: 14, height: 14)
+        var trailing = bounds.width - 10
+        if !arrowBox.isHidden {
+            arrowBox.frame = NSRect(x: trailing - 22, y: middle - 11, width: 22, height: 22)
+            arrow.frame = arrowBox.frame.insetBy(dx: 4, dy: 4)
+            trailing = arrowBox.frame.minX - 8
+            let actionWidth = min(160, action.measuredTextWidth + 6)
+            action.frame = NSRect(x: trailing - actionWidth, y: middle - 8, width: actionWidth, height: 16)
+            trailing = action.frame.minX - 12
+        }
         let badgeWidth = min(180, badge.stringValue.isEmpty ? 0 : badge.measuredTextWidth + 6)
-        let badgeX = bounds.width - badgeWidth - (showsArrow ? 32 : 12)
+        let badgeX = trailing - badgeWidth
         badge.frame = NSRect(x: badgeX, y: middle - 7, width: badgeWidth, height: 15)
         let titleWidth = min(title.measuredTextWidth + 6, max(0, badgeX - 46))
         title.frame = NSRect(x: 38, y: middle - 9, width: titleWidth, height: 18)
@@ -429,7 +466,11 @@ extension NSTextField {
         addTrackingArea(area); hoverArea = area
         super.updateTrackingAreas()
     }
-    override func mouseMoved(with event: NSEvent) { onHover?() }
+    /// Only an actual pointer movement takes the selection (a zero-delta move from a re-laid-out row never does).
+    override func mouseMoved(with event: NSEvent) {
+        guard event.deltaX != 0 || event.deltaY != 0 else { return }
+        onHover?()
+    }
     override func mouseDown(with event: NSEvent) { onActivate?() }
     override func hitTest(_ point: NSPoint) -> NSView? { super.hitTest(point) == nil ? nil : self }
     override func accessibilityPerformPress() -> Bool { guard let onActivate else { return false }; onActivate(); return true }

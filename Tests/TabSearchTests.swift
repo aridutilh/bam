@@ -221,6 +221,22 @@ import AppKit
         require(results.activateSelection() && submitted == "page" && ran == nil, "A trailing command leaves Open or Search first")
         results.moveSelection(delta: 1)
         require(results.activateSelection() && ran?.id == page.first?.command.id, "A trailing command follows the query row when no tab matches")
+        // Held arrow keys (auto-repeat) step and stop at the ends; a discrete press still wraps.
+        let held = (0..<4).map { BrowserTab(title: "Held \($0)", address: "https://example.com/held/\($0)", space: 0) }
+        results.update(tabs: held, query: "held", activeID: UUID(), canCreate: false)
+        let lastRow = results.selectedIndex + 3
+        for _ in 0..<10 { results.moveSelection(delta: 1, repeating: true) }
+        require(results.selectedIndex == lastRow, "A held Down arrow stops at the last row instead of wrapping (\(results.selectedIndex))")
+        for _ in 0..<10 { results.moveSelection(delta: -1, repeating: true) }
+        require(results.selectedIndex == 0, "A held Up arrow stops at the first row")
+        results.moveSelection(delta: -1)
+        require(results.selectedIndex == lastRow, "A discrete Up press at the top still wraps to the last row")
+        // Trailing actions: other tabs say what Return does; the current tab keeps its Space context only.
+        let current = held[0], other = held[1]
+        results.update(tabs: [current, other], query: "held", activeID: current.id, canCreate: false)
+        let actionLabels = labels(in: results)
+        require(actionLabels.filter { $0 == "Switch to Tab" }.count == 1 && actionLabels.contains("Studio · Current"),
+                "Only the non-current tab offers Switch to Tab; the current one keeps its context: \(actionLabels)")
         print("PASS: \(checks) tab search ranking, command, favicon and selection checks")
     }
 }
