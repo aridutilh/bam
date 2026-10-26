@@ -681,8 +681,17 @@ extension ExtensionSiteAccessSmokeTest {
         var dataErrors: [String] = []
         if let extensionController = host.extensionController(profileID: profile) {
             let records = await extensionController.dataRecords(ofTypes: persistentDataTypes)
-            dataErrors += records.flatMap { record in record.errors.map { "query \(record.uniqueIdentifier): \($0.localizedDescription)" } }
+            let queryErrors = records.map { record in record.errors.map(\.localizedDescription) }
+            dataErrors += zip(records, queryErrors).flatMap { record, errors in errors.map { "query \(record.uniqueIdentifier): \($0)" } }
             await extensionController.removeData(ofTypes: persistentDataTypes, from: records)
+            // removeData reports failures on the records it was given: read them right after it returns.
+            for (record, seen) in zip(records, queryErrors) {
+                var remaining = seen
+                for error in record.errors.map(\.localizedDescription) {
+                    if let index = remaining.firstIndex(of: error) { remaining.remove(at: index); continue }   // already reported by the query
+                    dataErrors.append("removal \(record.uniqueIdentifier): \(error)")
+                }
+            }
             let after = await extensionController.dataRecords(ofTypes: persistentDataTypes)
             dataErrors += after.flatMap { record in record.errors.map { "after removal \(record.uniqueIdentifier): \($0.localizedDescription)" } }
             dataBytesBefore = records.map(\.totalSizeInBytes).reduce(0, +)
