@@ -1531,17 +1531,43 @@ struct BrowserExtensionPermissionReview {
         Self.nativeWithdrawalRestartHook?(id)
         // Unsaved: the helper's texts then never claim a save; the engine composes the final warning below.
         let unsavedBefore = unsavedWithdrawals[id]
-        let outcome = restartForSiteAccess(id: id, context: context, reducedAccessSaved: unsavedBefore == nil)
-        guard let before = unsavedBefore else { return }
-        // Durability now, not as captured: the helper's own successful save (turning it off) may have saved the reduced
-        // access mid-call, which settled the warning; then the saved wording is the true one.
-        let texts = Self.withdrawalOutcomeTexts(name: before.name, sites: before.sites, saveError: before.saveError, outcome: outcome)
+        let result = restartForSiteAccess(id: id, context: context, reducedAccessSaved: unsavedBefore == nil)
+        guard result == .pending else { finishWithdrawalRestart(id, before: unsavedBefore, result: result); return }
+        // Two-phase: bound to the generation this phase A started (read in the same synchronous step), so the result is
+        // this restart's even if it finished before the wait began, and never a newer one's.
+        let generation = restartGeneration[id, default: 0]
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let final = await self.restartCompletion(id: id, generation: generation) ?? .superseded
+            // A newer restart began since: it governs what the user is told.
+            guard self.restartGeneration[id, default: 0] == generation else { self.armExpiryTimer(id); return }
+            self.finishWithdrawalRestart(id, before: unsavedBefore, result: final)
+        }
+    }
+    /// After the restart's terminal result: re-arms the expiry check (a handoff had no context to check), and, when the
+    /// reduced access was unsaved at the restart, states what is true now. Durability is read now, not as captured: a
+    /// save during the restart (the helper turning it off, or any later registry save) settles the warning.
+    private func finishWithdrawalRestart(_ id: UUID, before: UnsavedWithdrawal?, result: SiteAccessRestart) {
+        armExpiryTimer(id)
+        guard let before else { return }
+        guard result != .superseded, result != .pending else {
+            // A newer action (Disable, Remove, Update, shutdown, another restart) governs: no restart claim.
+            if var unsaved = unsavedWithdrawals[id] {
+                unsaved.message = "\(before.name) lost access to \(before.sites), but Bam couldn’t save that change (\(before.saveError)). " +
+                    "Until it’s saved, it may have that access again the next time Bam opens."
+                unsaved.afterSave = nil
+                unsavedWithdrawals[id] = unsaved
+                setError(Self.failure(unsaved.message), for: id)
+            }
+            return
+        }
+        let texts = Self.withdrawalOutcomeTexts(name: before.name, sites: before.sites, saveError: before.saveError, outcome: result)
         if var unsaved = unsavedWithdrawals[id] {
             unsaved.message = texts.unsaved; unsaved.afterSave = texts.saved
             unsavedWithdrawals[id] = unsaved
             setError(Self.failure(texts.unsaved), for: id)
         } else if let saved = texts.saved { setError(Self.failure(saved), for: id) }
-        else if errors[id] != nil, outcome == .restarted { errors.removeValue(forKey: id); changed() }
+        else if errors[id] != nil, result == .restarted { errors.removeValue(forKey: id); changed() }
     }
     /// What to tell the user after a native-withdrawal restart, while the reduced access is unsaved and once saved
     /// (nil: nothing remains to say once saved).
@@ -1558,6 +1584,15 @@ struct BrowserExtensionPermissionReview {
                     "again after Bam reopens. Quit and reopen Bam, then set its site access in Manage Extensions.",
                     "Site access was saved, but \(name) couldn’t be stopped to apply it. WebKit may still run it with its earlier website access " +
                     "until you quit Bam; Bam turned it off. Quit and reopen Bam, then enable it in Manage Extensions.")
+        case .releaseTimedOut(let failure):
+            // Fail closed: old pages stayed alive past the deadline, so it was left off rather than loaded with residual access.
+            return ("\(lead) and stays off: Bam couldn’t finish restarting it while its old pages were still in use. Bam also couldn’t save " +
+                    "that change (\(saveError)), so it may have that access again the next time Bam opens. Quit and reopen Bam, then set its " +
+                    "site access in Manage Extensions.", failure)
+        case .pending, .superseded:
+            // Not a terminal restart result (handled by the caller); nothing about a restart can be claimed.
+            return ("\(lead), but Bam couldn’t save that change (\(saveError)). Until it’s saved, it may have that access again the next time " +
+                    "Bam opens.", nil)
         case .unloadFailed, .loadFailed:
             return ("\(lead) and stopped because it couldn’t restart. Bam couldn’t save that change (\(saveError)), so it may load again " +
                     "with that access the next time Bam opens. Enable or disable it in Manage Extensions to save the change.",
@@ -1584,8 +1619,15 @@ struct BrowserExtensionPermissionReview {
     private func expiryDue(_ id: UUID, token: UUID) {
         guard expiryChecks[id] == token else { return }
         expiryChecks.removeValue(forKey: id)
-        guard !stopped, let record = records.first(where: { $0.id == id }), record.enabled,
-              let context = runtimes[record.profileID]?.contexts[id] else { return }
+        guard !stopped, let record = records.first(where: { $0.id == id }), record.enabled else { return }
+        guard let context = runtimes[record.profileID]?.contexts[id] else {
+            // Mid-handoff there is no context to read: check again once the restart settles.
+            if isRestarting(id: id) {
+                let generation = restartGeneration[id, default: 0]
+                Task { @MainActor [weak self] in _ = await self?.restartCompletion(id: id, generation: generation); self?.armExpiryTimer(id) }
+            }
+            return
+        }
         persistPermissions(context)
     }
 

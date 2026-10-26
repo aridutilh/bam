@@ -108,8 +108,10 @@ import WebKit
         guard let raceSnapshot = host.siteAccess(id: id), let raceDeclarations = raceSnapshot.declarations else { throw Failure(message: "No snapshot for the race") }
         let raceGeneration = host.restartGeneration[id, default: 0]
         _ = try host.performSiteAccess(id: id, profileID: profile, revision: raceSnapshot.revision, displayed: raceDeclarations, change: .choose(.withheld))
-        try check(host.restartGeneration[id, default: 0] == raceGeneration + 1 && (try current()) !== contextA,
-                  "Fixture: the panel withhold must restart synchronously, with a fresh context")
+        try check(host.restartGeneration[id, default: 0] == raceGeneration + 1 && host.isRestarting(id: id),
+                  "Fixture: the panel withhold must start its restart (phase A) synchronously")
+        let panelResult = await host.restartCompletion(id: id, generation: raceGeneration + 1)
+        try check(panelResult == .restarted && (try current()) !== contextA, "Fixture: the panel restart must finish with a fresh context: \(String(describing: panelResult))")
         let contextB = try current()
         contextB.setPermissionStatus(.grantedExplicitly, for: optionalSite, expirationDate: Date(timeIntervalSinceNow: 600))
         host.persistPermissions(contextB)                                    // recorded as a time-limited optional grant
@@ -216,6 +218,84 @@ import WebKit
                   "When the helper's own save made the change durable, the final text must be the saved outcome: \(host.errors[id] ?? "-")")
         try await host.setEnabled(true, id: id)
         try check(host.context(for: id) != nil && (try current()).grantedPermissionMatchPatterns[optionalSite] == nil, "Enable must recover")
+
+        // MARK: Two-phase: a repeated withdrawal restarts again, each restart completing with its own generation.
+        BrowserExtensions.siteAccessRestartLoadFault = nil
+        try await grantOptional()
+        let repeatStart = nativeRestarts, repeatGeneration = host.restartGeneration[id, default: 0]
+        (try current()).setPermissionStatus(.unknown, for: optionalSite)
+        await settle()
+        try await grantOptional()
+        (try current()).setPermissionStatus(.unknown, for: optionalSite)
+        await settle()
+        let first = await host.restartCompletion(id: id, generation: repeatGeneration + 1)
+        let second = await host.restartCompletion(id: id, generation: repeatGeneration + 2)
+        try check(nativeRestarts == repeatStart + 2 && host.restartGeneration[id, default: 0] == repeatGeneration + 2 && second == .restarted &&
+                  (first == nil || first == .restarted || first == .superseded) && (try current()).grantedPermissionMatchPatterns[optionalSite] == nil,
+                  "Two withdrawals must restart twice, the latest completing: \(String(describing: first)), \(String(describing: second))")
+
+        // MARK: Disable during the handoff, with an unsaved change: superseded, no fresh load, a neutral warning (no restart claim).
+        try await grantOptional()
+        let cancelStart = nativeRestarts
+        try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: registry.path)
+        let cancelContext = try current()
+        cancelContext.setPermissionStatus(.unknown, for: optionalSite)
+        host.persistPermissions(cancelContext)                                  // detected; the save fails; restart queued
+        var turns = 0
+        while !host.isRestarting(id: id), turns < 200 { await Task.yield(); try? await Task.sleep(nanoseconds: 1_000_000); turns += 1 }
+        try check(host.isRestarting(id: id) && nativeRestarts == cancelStart + 1, "Fixture: phase A must have run (handoff pending)")
+        let cancelGeneration = host.restartGeneration[id, default: 0]
+        do { try await host.setEnabled(false, id: id) } catch { /* the disable can't be saved either: read-only registry */ }
+        let cancelled = await host.restartCompletion(id: id, generation: cancelGeneration)
+        await settle()
+        let neutral = host.errors[id] ?? ""
+        try check(cancelled == .superseded && host.context(for: id) == nil && !host.isRestarting(id: id),
+                  "Disable during the handoff must cancel it without loading: \(String(describing: cancelled))")
+        try check(neutral.contains("couldn’t save that change") && neutral.contains("Until it’s saved") && !neutral.contains("restarted it"),
+                  "A cancelled restart's unsaved warning must make no restart claim: \(neutral)")
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: registry.path)
+        try await host.setEnabled(true, id: id)
+        await settle()
+        try check(host.context(for: id) != nil && (try current()).grantedPermissionMatchPatterns[optionalSite] == nil, "Enable must recover with the reduced access")
+
+        // MARK: Fail closed: an old view still alive at the deadline means no fresh load, the extension stays off.
+        let savedDeadline = BrowserExtensions.siteAccessRestartReleaseDeadline
+        BrowserExtensions.siteAccessRestartReleaseDeadline = 0.3
+        defer { BrowserExtensions.siteAccessRestartReleaseDeadline = savedDeadline }
+        var held: WKWebView? = WKWebView(frame: .zero)
+        host.onExtensionRenderers = { phase, _, _ in phase == .retire ? [RetiredRendererProbe(held)] : [] }
+        try await grantOptional()
+        let timeoutStart = nativeRestarts, timeoutGeneration = host.restartGeneration[id, default: 0]
+        (try current()).setPermissionStatus(.unknown, for: optionalSite)
+        await settle(1.2)
+        let timedOut = await host.restartCompletion(id: id, generation: timeoutGeneration + 1)
+        guard case .releaseTimedOut(let failure)? = timedOut else { throw Failure(message: "Expected releaseTimedOut, got \(String(describing: timedOut))") }
+        try check(nativeRestarts == timeoutStart + 1 && host.context(for: id) == nil && record()?.enabled == false && host.errors[id] == failure,
+                  "A held old view must fail closed: no fresh load, turned off, the helper's message: \(host.errors[id] ?? "-")")
+        held = nil
+        try await host.setEnabled(true, id: id)
+        await settle()
+        try check(host.context(for: id) != nil && (try current()).grantedPermissionMatchPatterns[optionalSite] == nil, "Once released, Enable must load with the reduced access")
+
+        // MARK: Fail closed with the change unsaved: says it stays off and wasn't saved, never "saved"; a later save gives the saved wording.
+        held = WKWebView(frame: .zero)
+        try await grantOptional()
+        let unsavedTimeoutGeneration = host.restartGeneration[id, default: 0]
+        try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: registry.path)
+        (try current()).setPermissionStatus(.unknown, for: optionalSite)
+        await settle(1.2)
+        let unsavedTimedOut = await host.restartCompletion(id: id, generation: unsavedTimeoutGeneration + 1)
+        let unsavedText = host.errors[id] ?? ""
+        guard case .releaseTimedOut(let savedWording)? = unsavedTimedOut else { throw Failure(message: "Expected releaseTimedOut, got \(String(describing: unsavedTimedOut))") }
+        try check(unsavedText.contains("stays off") && unsavedText.contains("couldn’t save") && !unsavedText.contains("was saved") && host.context(for: id) == nil,
+                  "An unsaved fail-closed restart must say it stays off and wasn't saved: \(unsavedText)")
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: registry.path)
+        host.persistPermissions(other)
+        try check(host.errors[id] == savedWording, "Once saved, the warning must become the helper's fail-closed message: \(host.errors[id] ?? "-")")
+        held = nil; host.onExtensionRenderers = nil
+        try await host.setEnabled(true, id: id)
+        await settle()
+        try check(host.context(for: id) != nil, "Recovery after release")
         return checks
     }
 }
