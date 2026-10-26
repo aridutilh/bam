@@ -38,6 +38,7 @@ struct SiteSettingsActions {
     func show(relativeTo anchor: NSView, context: SiteSettingsContext, actions: SiteSettingsActions) {
         if let popover, popover.isShown { popover.performClose(nil); return }
         let controller = SiteSettingsViewController(actions: actions)
+        controller.screenHeight = anchor.window?.screen?.visibleFrame.height ?? NSScreen.main?.visibleFrame.height ?? 700
         controller.update(context)
         let surface = NSPopover()
         surface.behavior = .transient
@@ -62,6 +63,9 @@ struct SiteSettingsActions {
 @MainActor private final class SiteSettingsViewController: NSViewController {
     private let actions: SiteSettingsActions
     private let column = NSStackView()
+    /// The anchor screen's visible height; the extension list scrolls within what is left of it.
+    var screenHeight: CGFloat = 700
+    private static let rowHeight: CGFloat = 40, rowSpacing: CGFloat = 6
     init(actions: SiteSettingsActions) { self.actions = actions; super.init(nibName: nil, bundle: nil) }
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
 
@@ -127,9 +131,29 @@ struct SiteSettingsActions {
 
         // Extensions and their access to this site.
         let items = SiteSettingsModel.extensions(context)
+        var listHeight: NSLayoutConstraint?
         if !items.isEmpty {
             divider()
             full(label("Extensions", font: BamType.sans(11, weight: .bold), color: BamTheme.muted))
+            // Rows scroll in a bounded list so a long list never pushes the popover off a small screen;
+            // the actions above and below it stay visible.
+            let list = NSStackView(); list.orientation = .vertical; list.alignment = .leading; list.spacing = Self.rowSpacing
+            list.translatesAutoresizingMaskIntoConstraints = false
+            let document = SiteSettingsListDocument(); document.translatesAutoresizingMaskIntoConstraints = false
+            document.addSubview(list)
+            let scroll = NSScrollView()
+            scroll.drawsBackground = false; scroll.hasVerticalScroller = true; scroll.autohidesScrollers = true
+            scroll.borderType = .noBorder
+            scroll.documentView = document
+            scroll.setAccessibilityLabel("Extensions on this site")
+            NSLayoutConstraint.activate([
+                list.leadingAnchor.constraint(equalTo: document.leadingAnchor), list.trailingAnchor.constraint(equalTo: document.trailingAnchor),
+                list.topAnchor.constraint(equalTo: document.topAnchor), list.bottomAnchor.constraint(equalTo: document.bottomAnchor),
+                document.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor)
+            ])
+            full(scroll)
+            let height = scroll.heightAnchor.constraint(equalToConstant: 0); height.isActive = true
+            listHeight = height
             for item in items {
                 let name = label(item.name, font: BamType.sans(13, weight: .medium), color: BamTheme.ink)
                 name.lineBreakMode = .byTruncatingTail
@@ -140,7 +164,10 @@ struct SiteSettingsActions {
                 let manage = textButton("Site Access…", enabled: true) { [actions] in actions.manageSiteAccess(id) }
                 manage.setAccessibilityLabel("Site Access for \(item.name)")
                 let row = NSStackView(views: [text, NSView(), manage]); row.alignment = .centerY
-                full(row)
+                row.translatesAutoresizingMaskIntoConstraints = false
+                list.addArrangedSubview(row)
+                row.heightAnchor.constraint(equalToConstant: Self.rowHeight).isActive = true
+                row.widthAnchor.constraint(equalTo: list.widthAnchor).isActive = true
             }
         }
         divider()
@@ -148,6 +175,13 @@ struct SiteSettingsActions {
         let settings = textButton("Settings…", enabled: true) { [actions] in actions.openSettings() }
         full(NSStackView(views: [copy, NSView(), settings]))
         view.layoutSubtreeIfNeeded()
+        if let listHeight {
+            // Fixed parts measured with an empty list; the list gets the rest of the screen (less a margin).
+            let fixed = view.fittingSize.height
+            listHeight.constant = SiteSettingsModel.extensionListHeight(rows: items.count, rowHeight: Self.rowHeight, spacing: Self.rowSpacing,
+                                                                        available: screenHeight - fixed - 48)
+            view.layoutSubtreeIfNeeded()
+        }
         preferredContentSize = view.fittingSize
     }
 
@@ -185,6 +219,12 @@ struct SiteSettingsActions {
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
     @objc private func press() { run() }
+    /// Tabbing to a button in the scrolling extension list brings it into view.
+    override func becomeFirstResponder() -> Bool {
+        let accepted = super.becomeFirstResponder()
+        if accepted { scrollToVisible(bounds) }
+        return accepted
+    }
 }
 
 @MainActor private final class SiteSettingsBackground: NSView {
@@ -192,4 +232,9 @@ struct SiteSettingsActions {
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
     private func paint() { layer?.backgroundColor = bamCG(BamTheme.surface) }
     override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); paint() }
+}
+
+/// The scrolling list's document, laid out top-down.
+@MainActor private final class SiteSettingsListDocument: NSView {
+    override var isFlipped: Bool { true }
 }

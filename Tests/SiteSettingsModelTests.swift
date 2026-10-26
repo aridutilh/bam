@@ -44,6 +44,12 @@ import Foundation
         withExtensions.extensions = [.init(id: UUID(), name: "zeta", access: .notRequested), .init(id: UUID(), name: "Beta", access: .withheld),
                                      .init(id: UUID(), name: "alpha", access: .withheld), .init(id: UUID(), name: "Gamma", access: .allowed)]
         try check(SiteSettingsModel.extensions(withExtensions).map(\.name) == ["Gamma", "alpha", "Beta", "zeta"], "Extension order was wrong")
+        // The extension list scrolls instead of outgrowing the screen; at least two rows always show.
+        try check(SiteSettingsModel.extensionListHeight(rows: 3, rowHeight: 40, spacing: 6, available: 500) == 132, "A short list was not shown whole")
+        try check(SiteSettingsModel.extensionListHeight(rows: 40, rowHeight: 40, spacing: 6, available: 300) == 300, "A long list was not bounded by the screen")
+        try check(SiteSettingsModel.extensionListHeight(rows: 40, rowHeight: 40, spacing: 6, available: 20) == 86, "A tiny screen hid the list below two rows")
+        try check(SiteSettingsModel.extensionListHeight(rows: 1, rowHeight: 40, spacing: 6, available: 10) == 40
+                  && SiteSettingsModel.extensionListHeight(rows: 0, rowHeight: 40, spacing: 6, available: 300) == 0, "Edge sizes were wrong")
         try check(SiteSettingsModel.accessText(.allowed) == "Can read and change this site"
                   && SiteSettingsModel.accessText(.withheld) == "Not allowed on this site", "Access text was wrong")
     }

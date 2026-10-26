@@ -78,6 +78,16 @@ enum SiteSettingsModel {
         }
     }
 
+    /// Height of the scrolling extension list: every row when they fit in `available` (the screen
+    /// space left after the popover's fixed parts), otherwise what fits, never under `minimumRows`.
+    static func extensionListHeight(rows: Int, rowHeight: CGFloat, spacing: CGFloat, available: CGFloat, minimumRows: Int = 2) -> CGFloat {
+        guard rows > 0, rowHeight > 0 else { return 0 }
+        let full = CGFloat(rows) * rowHeight + CGFloat(rows - 1) * max(0, spacing)
+        let floor = CGFloat(min(rows, max(1, minimumRows))) * rowHeight + CGFloat(min(rows, max(1, minimumRows)) - 1) * max(0, spacing)
+        let room = available.isFinite ? available : full
+        return min(full, max(floor, room))
+    }
+
     static func connection(url: URL?, onlySecureContent: Bool, certificate: String?) -> SiteSettingsContext.Connection {
         switch url?.scheme?.lowercased() {
         case "https": return onlySecureContent ? .secure(certificate: certificate) : .mixed
