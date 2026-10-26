@@ -941,6 +941,36 @@ extension ExtensionSiteAccessSmokeTest {
             diagnostic["update_comparison"] = ["before_update": beforeUpdateFetch, "after_update_allowed": afterUpdateFetch,
                                                "after_update_withheld": afterUpdateWithholdFetch, "never_updated_withheld": withheldFetch]
 
+            // MARK: 11. Disable with the extension tab open and its old renderer held: Disable retires it (same tab ID and
+            // address, shown unavailable), and Enable (same identity) must not load while it's alive; after the release
+            // Enable recovers with a new renderer. Then Disable → Enable back to back, no hold, works (as in the suite).
+            if host.context(for: subject) == nil { try await host.setEnabled(true, id: subject) }
+            try await showExtensionTab(extensionTab)
+            BrowserExtensions.siteAccessRestartReleaseDeadline = 0.3
+            var heldDisabled: WKWebView? = controller.browsers[extensionTab]
+            let heldWatch = WeakView(heldDisabled)
+            try host.disable(id: subject)
+            let disabledShown = await waitUntil({ (controller.tabErrors[extensionTab] ?? "").contains("unavailable") })
+            expect(host.context(for: subject) == nil && address(extensionTab) == extensionAddress && controller.browsers[extensionTab] !== heldDisabled && disabledShown,
+                   "Disable didn't retire E with its tab kept and shown unavailable: \(controller.tabErrors[extensionTab] ?? "no error"), address \(address(extensionTab) ?? "missing") \(state(subject))")
+            var disabledEnableError: String?
+            do { try await host.setEnabled(true, id: subject) } catch { disabledEnableError = error.localizedDescription }
+            withExtendedLifetime(heldDisabled) {}   // the old renderer provably stays alive through Disable and the Enable attempt
+            expect(disabledEnableError?.contains("haven’t closed yet") == true && host.context(for: subject) == nil,
+                   "Enable loaded next to the disabled context's still-alive renderer: \(disabledEnableError ?? "no error") \(state(subject))")
+            BrowserExtensions.siteAccessRestartReleaseDeadline = 2
+            heldDisabled = nil
+            try await host.setEnabled(true, id: subject)
+            expect(host.context(for: subject)?.isLoaded == true, "Enable didn't recover after the old renderer was released \(state(subject))")
+            try await showExtensionTab(extensionTab)
+            expect(heldWatch.web == nil && address(extensionTab) == extensionAddress && controller.tabErrors[extensionTab] == nil,
+                   "after Enable, E isn't a new renderer with its tab kept: old alive \(heldWatch.web != nil), address \(address(extensionTab) ?? "missing"), error \(controller.tabErrors[extensionTab] ?? "none")")
+            try host.disable(id: subject)
+            try await host.setEnabled(true, id: subject)
+            expect(host.context(for: subject)?.isLoaded == true, "Disable then Enable back to back (no hold) didn't load \(state(subject))")
+            try await showExtensionTab(extensionTab)
+            diagnostic["disable_barrier"] = ["held_enable_error": disabledEnableError ?? "none"]
+
             diagnostic["findings"] = findings.count
             diagnostic["tab_ids"] = ["before": tabsBefore, "after": tabsAfter]
             diagnostic["subject_before"] = record(subjectBefore); diagnostic["subject_after"] = record(subjectAfter)
