@@ -807,6 +807,45 @@ extension ExtensionSiteAccessSmokeTest {
             }
             diagnostic["closed_popup_barrier"] = ["premise": popupPremise, "result": String(describing: popupResult)]
 
+            // MARK: 7d. A popup WebKit prepared but Bam declined to present (its tab stopped being active before WebKit
+            // asked): Bam must still remember it, and while that view is retained the restart must fail closed.
+            try allow(subject)
+            controller.select(siteTab); controller.view.layoutSubtreeIfNeeded()
+            var declinedHeld: WKWebView?
+            var outcomes: [Bool] = []
+            BrowserExtensions.popupViewRecorded = { id, web in if id == subject, declinedHeld == nil { declinedHeld = web } }
+            BrowserExtensions.popupPresentationOutcome = { id, presented in if id == subject { outcomes.append(presented) } }
+            host.performAction(extensionID: subject, tabID: siteTab, anchor: controller.sidebar)
+            controller.select(extensionTab); controller.view.layoutSubtreeIfNeeded()   // before WebKit asks to present
+            _ = await waitUntil({ !outcomes.isEmpty }, seconds: 10)
+            BrowserExtensions.popupViewRecorded = nil; BrowserExtensions.popupPresentationOutcome = nil
+            // The claim needs both: Bam's delegate actually declined this request (its own outcome), and recorded the view.
+            let declined = outcomes == [false]
+            let declinedRecorded = declined && declinedHeld != nil
+            let popoverVisible = NSApp.windows.contains { $0.isVisible && String(describing: type(of: $0)).contains("Popover") }
+            var declinedResult: BrowserExtensions.SiteAccessRestart?
+            if declinedRecorded {
+                BrowserExtensions.siteAccessRestartReleaseDeadline = 0.3
+                try withhold(subject)
+                declinedResult = await awaitRestart(subject)
+                withExtendedLifetime(declinedHeld) {}   // the declined popup's view provably stays alive through the restart
+                BrowserExtensions.siteAccessRestartReleaseDeadline = 2
+            }
+            declinedHeld = nil
+            expect(declined, "premise: Bam's delegate didn't decline exactly once (outcomes \(outcomes)), so the declined path wasn't exercised \(state(subject))")
+            expect(!declined || declinedHeld != nil, "Bam declined the popup but didn't remember its view \(state(subject))")
+            if declinedRecorded {
+                var declinedTimedOut = false
+                if case .releaseTimedOut = declinedResult { declinedTimedOut = true }
+                expect(declinedTimedOut && host.context(for: subject) == nil,
+                       "a declined but retained popup didn't hold the release barrier: \(String(describing: declinedResult)) (popover visible \(popoverVisible)) \(state(subject))")
+                host.permissionPrompt = { _ in true }
+                try await host.setEnabled(true, id: subject)
+                expect(host.context(for: subject)?.isLoaded == true, "Enable didn't recover once the declined popup was released \(state(subject))")
+            }
+            diagnostic["declined_popup_barrier"] = ["outcomes": outcomes, "recorded": declinedHeld != nil || declinedRecorded,
+                                                    "popover_visible": popoverVisible, "result": String(describing: declinedResult)]
+
             // MARK: 8. Post-load reentrancy: a Disable while the fresh context loads (seam right after load) cancels it;
             // the loaded fresh context is unloaded, never published.
             try allow(subject)
@@ -986,7 +1025,8 @@ extension ExtensionSiteAccessSmokeTest {
             BrowserExtensions.disableUnloadFaultAfterUnload = { $0 == subject ? InjectedFailure(text: "injected post-unload report (test)") : nil }
             var unlistedError: String?
             do { try host.disable(id: subject) } catch { unlistedError = error.localizedDescription }
-            BrowserExtensions.disableUnloadFaultAfterUnload = nil
+            BrowserExtensions.disableUnloadFaultAfterUnload = nil; BrowserExtensions.popupViewRecorded = nil
+        BrowserExtensions.popupPresentationOutcome = nil
             let unlistedShown = await waitUntil({ (controller.tabErrors[extensionTab] ?? "").contains("unavailable") })
             expect(unlistedError == nil && host.context(for: subject) == nil && stillLoadedContext?.isLoaded == false
                    && host.records.first { $0.id == subject }?.enabled == false
@@ -1009,7 +1049,8 @@ extension ExtensionSiteAccessSmokeTest {
         // MARK: Cleanup: the owned persistent store (data, then its directory), verified.
         BrowserExtensions.siteAccessRestartLoadFault = nil; BrowserExtensions.siteAccessRestartUnloadFault = nil
         BrowserExtensions.siteAccessRestartWillLoad = nil; BrowserExtensions.siteAccessRestartDidLoad = nil
-        BrowserExtensions.disableUnloadFaultAfterUnload = nil
+        BrowserExtensions.disableUnloadFaultAfterUnload = nil; BrowserExtensions.popupViewRecorded = nil
+        BrowserExtensions.popupPresentationOutcome = nil
         BrowserExtensions.siteAccessRestartReleaseDeadline = 2
         try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: root.appendingPathComponent("host", isDirectory: true).path)
         var cleanup: [String: Any] = [:]
