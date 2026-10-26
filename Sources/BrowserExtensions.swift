@@ -991,6 +991,12 @@ struct BrowserExtensionPermissionReview {
     static var siteAccessRestartDidLoad: ((UUID) -> Void)?
     /// Test seam: a non-nil error makes the restart's `unload` fail for that extension. nil in production.
     static var siteAccessRestartUnloadFault: ((UUID) -> Error?)?
+    /// Test seam: called whenever Bam remembers a popup view (presented or declined), with its extension. nil in
+    /// production.
+    static var popupViewRecorded: ((UUID, WKWebView) -> Void)?
+    /// Test seam: the outcome of each presentActionPopup request Bam answered: true presented, false declined. nil in
+    /// production.
+    static var popupPresentationOutcome: ((UUID, Bool) -> Void)?
     /// Test seam: Disable's `unload` succeeds, then reports this error (WebKit no longer lists the context). nil in
     /// production.
     static var disableUnloadFaultAfterUnload: ((UUID) -> Error?)?
@@ -1910,6 +1916,14 @@ struct BrowserExtensionPermissionReview {
     /// Every popup view Bam presented, weakly, with the install it belongs to (`webkit-extension://<install>`). Kept
     /// across close and replacement (a closed popup may still be retained elsewhere); pruned only when deallocated.
     private var presentedPopups: [(install: String, probe: RetiredRendererProbe)] = []
+    /// Remembers a popup view of `context` (weakly, by install) for later release barriers.
+    private func rememberPopupView(_ web: WKWebView, of context: WKWebExtensionContext) {
+        guard let install = context.baseURL.host?.lowercased() else { return }
+        presentedPopups.removeAll { $0.probe.web == nil }
+        guard !presentedPopups.contains(where: { $0.probe.web === web }) else { return }
+        presentedPopups.append((install, RetiredRendererProbe(web, role: "popup")))
+        if let id = BrowserExtensions.recordID(of: context) { BrowserExtensions.popupViewRecorded?(id, web) }
+    }
     /// The still-alive popup views Bam presented for this install, any of its contexts (current or earlier).
     func presentedPopupViews(of context: WKWebExtensionContext) -> [WKWebView] {
         presentedPopups.removeAll { $0.probe.web == nil }
@@ -2419,6 +2433,14 @@ struct BrowserExtensionPermissionReview {
         owner.persistPermissions(context); completionHandler(granted, nil)
     }
     func webExtensionController(_ controller: WKWebExtensionController, presentActionPopup action: WKWebExtension.Action, for context: WKWebExtensionContext, completionHandler: @escaping (Error?) -> Void) {
+        // WebKit asks only once the popup page exists (it calls this from readyToPresentPopup, after loading that page),
+        // so the getter returns that existing page here and creates nothing. Remember it whether Bam presents or
+        // declines it: a declined popup is closed by WebKit but its view may stay alive, and must hold a later
+        // restart's release barrier like any other. (During a restart Bam never reads this getter.)
+        if controller === self.controller, context.webExtensionController === self.controller, action.presentsPopup,
+           let prepared = action.popupWebView {
+            rememberPopupView(prepared, of: context)
+        }
         let associatedID = (action.associatedTab as? BrowserExtensionTab)?.id
         let requested = popupContextID == context.uniqueIdentifier && (associatedID == nil || associatedID == popupTabID)
         let tabID = associatedID ?? (requested ? popupTabID : nil)
@@ -2428,6 +2450,7 @@ struct BrowserExtensionPermissionReview {
         guard authorizes(action.associatedTab, for: context), let surface, surface.isActive,
               let popup = action.popupPopover, let anchor = requestedAnchor ?? surface.window?.contentView,
               anchor.window === surface.window, anchor.window?.isVisible == true else {
+            if let id = BrowserExtensions.recordID(of: context) { BrowserExtensions.popupPresentationOutcome?(id, false) }
             completionHandler(BrowserExtensions.failure("Open a page in this profile to show its extension popup.")); return
         }
         // Closing this same WK action would destroy the freshly loaded popup
@@ -2441,13 +2464,11 @@ struct BrowserExtensionPermissionReview {
         let rect = isButton ? anchor.bounds : NSRect(x: max(0, anchor.bounds.maxX - 28), y: anchor.isFlipped ? 0 : anchor.bounds.maxY - 28, width: 28, height: 28)
         popup.show(relativeTo: rect, of: anchor, preferredEdge: isButton ? .maxX : .minY)
         // Remember the presented popup's actual views (the popover's hierarchy, no getter) for restart release barriers.
-        if let install = context.baseURL.host?.lowercased(), let root = popup.contentViewController?.view {
+        if let root = popup.contentViewController?.view {
             func webViews(in view: NSView) -> [WKWebView] { (view as? WKWebView).map { [$0] } ?? view.subviews.flatMap(webViews) }
-            presentedPopups.removeAll { $0.probe.web == nil }
-            for web in webViews(in: root) where !presentedPopups.contains(where: { $0.probe.web === web }) {
-                presentedPopups.append((install, RetiredRendererProbe(web, role: "popup")))
-            }
+            for web in webViews(in: root) { rememberPopupView(web, of: context) }
         }
+        if let id = BrowserExtensions.recordID(of: context) { BrowserExtensions.popupPresentationOutcome?(id, true) }
         completionHandler(nil)
     }
     func webExtensionController(_ controller: WKWebExtensionController, didUpdate action: WKWebExtension.Action, forExtensionContext context: WKWebExtensionContext) { if owns(context) { owner?.changed() } }
