@@ -151,7 +151,9 @@ import WebKit
             try await wait("Enable did not restore the extension tab") {
                 controller.browsers[background]?.title == "renderer page" && controller.browsers[background]?.isLoading == false && controller.tabErrors[background] == nil
             }
-            try check(host.context(for: requested)?.uniqueIdentifier == requestedIdentity.0, "Enable lost the extension's identity")
+            let enabled = host.context(for: requested)
+            try check(enabled?.isLoaded == true && enabled?.uniqueIdentifier == requestedIdentity.0 && enabled?.baseURL == requestedIdentity.1,
+                      "Enable lost the extension's identity or base URL: \(String(describing: enabled?.uniqueIdentifier)) \(String(describing: enabled?.baseURL))")
             try check(try await fetch(from: background) == "refused", "after Enable, the extension tab could still read the host withheld before the failed restart")
         }
 
