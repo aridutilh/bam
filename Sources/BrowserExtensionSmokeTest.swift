@@ -130,6 +130,27 @@ import Darwin
               let liveTab = liveRuntime.tabs[id], let tabAction = actionContext.action(for: liveTab) else {
             throw ExtensionSmokeTest.Failure(description: "Missing toolbar action fixture")
         }
+        /// Diagnostics (N1): the subject's context and action objects the fixture captures, weakly, with whether each
+        /// context is still loaded; and a sampled history of which context object the subject had at each lifecycle step
+        /// before the consent checks (sampled at the fixture's own steps, so transient contexts inside a step are missed).
+        var observedObjects: [(label: String, object: WeakReference<AnyObject>)] = []
+        func observeObject(_ label: String, _ object: AnyObject?) { if let object { observedObjects.append((label, WeakReference(object))) } }
+        func heldObjectsState() -> [String] {
+            observedObjects.compactMap { entry in
+                guard let object = entry.object.value else { return nil }
+                if let context = object as? WKWebExtensionContext { return "\(entry.label)(loaded=\(context.isLoaded),current=\(context === host.context(for: extensionID)))" }
+                return entry.label
+            }
+        }
+        var subjectHistory: [String] = [], subjectContextIDs: [ObjectIdentifier] = []
+        func noteSubject(_ step: String) {
+            guard let context = host.context(for: extensionID) else { subjectHistory.append("\(step):none"); return }
+            let identifier = ObjectIdentifier(context)
+            if !subjectContextIDs.contains(identifier) { subjectContextIDs.append(identifier) }
+            subjectHistory.append("\(step):ctx\(subjectContextIDs.firstIndex(of: identifier)! + 1)")
+        }
+        observeObject("actionContext", actionContext); observeObject("tabAction", tabAction)
+        noteSubject("action-fixture")
         try check(button.accessibilityLabel() == actionContext.webExtension.displayName, "Extension button lost its vendor name")
         recordLifecycle("baseline", retiredPopovers: 0, retiredWebViews: 0)
         button.performClick(nil)
@@ -344,6 +365,7 @@ import Darwin
         // CORS pattern it ever had, which would confound the withheld-fetch checks later in this run.
         var heldPopup: WKWebView? = context.action(for: nil)?.popupWebView
         observeExtensionView("original-popup", heldPopup)
+        observeObject("context(popup check)", context); noteSubject("popup-check")
         var popup: WKWebView { heldPopup! }
         try await wait("Browser-adapter popup did not initialize") { (try? await popup.evaluateJavaScript("document.title")) as? String == "Bam fixture ready" }
         // A finished load must reach the extension as `tabs.onUpdated` with `status: "complete"`
@@ -1048,11 +1070,14 @@ import Darwin
                 // Scope (incomplete by construction): views this fixture registered, Bam's tab renderers, and the popups Bam
                 // presented earlier that the fixture tracked. Not visible here: background pages, per-tab action popups,
                 // offscreen documents and any other view WebKit holds internally.
-                print("CONSENT_VIEWS stage=\(stage) t=\(String(format: "%.3f", ProcessInfo.processInfo.systemUptime)) observedAlive=\(alive) " +
+                print("CONSENT_VIEWS stage=\(stage) t=\(String(format: "%.3f", ProcessInfo.processInfo.systemUptime)) observedAlive=\(alive) heldObjects=\(heldObjectsState()) " +
                       "presentedPopupViewsAlive=\(retiredWebViews.filter { $0.value != nil }.count) presentedPopoversAlive=\(retiredPopovers.filter { $0.value != nil }.count) " +
                       "bamExtensionRenderers=\(bamExtensionRenderers) retiredRenderersAlive=\(controller.retiredRenderersAlive()) " +
                       "restarting=\(host.isRestarting(id: extensionID)) generation=\(generationNow())"); fflush(stdout)
             }
+            noteSubject("consent-start")
+            print("CONSENT_HISTORY sampledSteps=\(subjectHistory) distinctSampledContexts=\(subjectContextIDs.count) " +
+                  "restartGeneration=\(generationNow()) heldObjects=\(heldObjectsState())"); fflush(stdout)
             extensionViewInventory("before-first-withhold")
             BrowserExtensions.siteAccessRestartWillLoad = { id in if id == extensionID { extensionViewInventory("will-load-fresh-context") } }
             defer { BrowserExtensions.siteAccessRestartWillLoad = nil }
@@ -1348,6 +1373,7 @@ import Darwin
             try check(consentRestored.state.mode == .allRequested && granted(ip) && granted(newSite), "Site Access was not restored after the consent checks")
         }
         let originalContext = host.context(for: extensionID)!
+        observeObject("originalContext", originalContext); noteSubject("before-update-attempts")
         seedOptionalPermissions(originalContext)
         let originalRecord = host.items(profileID: profile).first { $0.id == extensionID }!
         let catalog = ExtensionCatalogRecord(source: .local, upstreamID: nil, listingURL: nil, downloadURL: nil,
@@ -1357,6 +1383,7 @@ import Darwin
         var cancelled = false
         do { try await host.replacePackage(id: extensionID, with: updateFolder, catalog: catalog) }
         catch is BrowserExtensionUpdateCancelled { cancelled = true }
+        noteSubject("declined-update")
         let afterCancel = host.items(profileID: profile).first { $0.id == extensionID }
         try check(cancelled && host.context(for: extensionID) === originalContext && afterCancel?.enabled == true,
             "Canceling an update unloaded or disabled the working extension")
@@ -1386,6 +1413,7 @@ import Darwin
         var stagingCancelled = false
         do { try await host.replacePackage(id: extensionID, with: updateFolder, catalog: catalog) }
         catch is BrowserExtensionUpdateCancelled { stagingCancelled = true }
+        noteSubject("staging-mutation-update(disable+enable inside)")
         let stagedRecord = host.items(profileID: profile).first { $0.id == extensionID }
         try check(!mutateStaging && stagingCancelled && stagedRecord?.version == originalRecord.version && host.context(for: extensionID) != nil,
             "Staging mutation was not preserved: ran=\(!mutateStaging), canceled=\(stagingCancelled), version=\(stagedRecord?.version ?? "missing"), loaded=\(host.context(for: extensionID) != nil)")
@@ -1404,6 +1432,7 @@ import Darwin
         var activationCancelled = false
         do { try await host.replacePackage(id: extensionID, with: updateFolder, catalog: catalog) }
         catch is BrowserExtensionUpdateCancelled { activationCancelled = true }
+        noteSubject("activation-disable-update")
         let interruptedRecord = host.items(profileID: profile).first { $0.id == extensionID }
         try check(activationDisableRan && activationCancelled && host.context(for: extensionID) == nil && interruptedRecord?.enabled == false,
             "Activation mutation was not preserved: ran=\(activationDisableRan), canceled=\(activationCancelled), enabled=\(String(describing: interruptedRecord?.enabled)), loaded=\(host.context(for: extensionID) != nil)")
@@ -1424,10 +1453,12 @@ import Darwin
         try check(enableCancelled && cancelledEnableReviews == 0 && host.context(for: extensionID) == nil &&
             host.items(profileID: profile).first { $0.id == extensionID }?.enabled == false && host.errors[extensionID] == nil,
             "Canceled re-enable prompted, activated, or reported a healthy disabled extension as broken")
+        noteSubject("cancelled-enable")
         host.packageParser = nativeParser
         host.permissionPrompt = { _ in true }
         try await host.setEnabled(true, id: extensionID)
         guard let beforeUpdateContext = host.context(for: extensionID) else { throw ExtensionSmokeTest.Failure(description: "Update fixture could not re-enable") }
+        observeObject("beforeUpdateContext", beforeUpdateContext); noteSubject("re-enabled-before-update")
         seedOptionalPermissions(beforeUpdateContext)
         let grantedBeforeUpdate = host.items(profileID: profile).first { $0.id == extensionID }!
         // WebKit normalizes date precision. Preserve the expiry it actually
@@ -1439,6 +1470,7 @@ import Darwin
         var approvedReview: BrowserExtensionPermissionReview?
         host.permissionPrompt = { review in approvedReview = review; return true }
         try await host.replacePackage(id: extensionID, with: updateFolder, catalog: catalog)
+        noteSubject("approved-update")
         try check(approvedReview?.websites == ["https://new.invalid/*"], "The update review must list exactly the new site: \(approvedReview?.websites ?? [])")
         let updatedRecord = host.items(profileID: profile).first { $0.id == extensionID }!
         let afterValues = [updatedRecord.permissions["alarms"], updatedRecord.deniedPermissions["cookies"],
