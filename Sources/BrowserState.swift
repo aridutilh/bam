@@ -55,6 +55,9 @@ struct BrowserTab: Codable, Identifiable, Equatable {
     /// The kept-section folder holding this tab. Only kept tabs live in folders;
     /// Favorites and ordinary (Today) tabs are always at their section root.
     var folderID: UUID?
+    /// A name the user gave an ordinary (Today) tab. Kept tabs and Favorites
+    /// carry theirs in `saved`; the name moves across when a tab is kept or let go.
+    var customTitle: String?
 
     init(id: UUID = UUID(), title: String, address: String, space: Int,
          pinned: Bool = false, saved: SavedTabState? = nil, sleepState: TabSleepState? = nil, folderID: UUID? = nil) {
@@ -73,7 +76,7 @@ struct BrowserTab: Codable, Identifiable, Equatable {
     var isSaved: Bool { saved != nil }
     var isUnloaded: Bool { saved?.isUnloaded == true }
     var isSleeping: Bool { sleepState != nil }
-    var displayTitle: String { saved?.customTitle ?? title }
+    var displayTitle: String { saved?.customTitle ?? customTitle ?? title }
     var isHome: Bool { address == "orbit://newtab" }
     var isVideoDemo: Bool { address == "orbit://video" }
     /// A row kept in place of an Arc Easel; it has no web page.
@@ -109,7 +112,7 @@ struct BrowserTab: Codable, Identifiable, Equatable {
     fileprivate static func validCustomTitle(_ title: String) -> Bool {
         title.count <= 80 && !title.unicodeScalars.contains { CharacterSet.controlCharacters.contains($0) }
     }
-    private enum CodingKeys: String, CodingKey { case id, title, address, space, pinned, saved, sleepState, folderID }
+    private enum CodingKeys: String, CodingKey { case id, title, address, space, pinned, saved, sleepState, folderID, customTitle }
     private enum SavedProfileKeys: String, CodingKey { case profileID }
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -131,6 +134,7 @@ struct BrowserTab: Codable, Identifiable, Equatable {
         else { saved = try? values.decodeIfPresent(SavedTabState.self, forKey: .saved) }
         sleepState = try? values.decodeIfPresent(TabSleepState.self, forKey: .sleepState)
         folderID = try? values.decodeIfPresent(UUID.self, forKey: .folderID)
+        customTitle = (try? values.decodeIfPresent(String.self, forKey: .customTitle)).flatMap { $0 }.flatMap { Self.validCustomTitle($0) && !$0.isEmpty ? $0 : nil }
         if saved == nil, (try? values.decodeIfPresent(Bool.self, forKey: .pinned)) == true {
             saved = SavedTabState(kind: .kept, address: address)
         }
@@ -143,6 +147,7 @@ struct BrowserTab: Codable, Identifiable, Equatable {
         try values.encodeIfPresent(saved, forKey: .saved)
         try values.encodeIfPresent(sleepState, forKey: .sleepState)
         try values.encodeIfPresent(folderID, forKey: .folderID)
+        try values.encodeIfPresent(customTitle, forKey: .customTitle)
     }
 }
 
@@ -722,9 +727,11 @@ struct BrowserSession: Codable {
         if let kind {
             if tabs[index].saved == nil {
                 guard BrowserTab.validAddress(tabs[index].address) else { return false }
-                tabs[index].saved = SavedTabState(kind: kind, address: tabs[index].address)
+                var saved = SavedTabState(kind: kind, address: tabs[index].address)
+                saved.customTitle = tabs[index].customTitle
+                tabs[index].saved = saved; tabs[index].customTitle = nil
             } else { tabs[index].saved?.kind = kind }
-        } else { tabs[index].saved = nil }
+        } else { let name = tabs[index].saved?.customTitle; tabs[index].customTitle = name; tabs[index].saved = nil }
         if kind == .favorite { tabs[index].saved?.profileID = profile }
         else { tabs[index].saved?.profileID = nil }
         if kind != .kept { tabs[index].folderID = nil }
@@ -896,6 +903,36 @@ struct BrowserSession: Codable {
         let kept = visibleKeptLayout(in: space, revealing: activeID).compactMap { $0.isFolder ? nil : byID[$0.id]?.id }
         let today = tabs.filter { $0.space == space && !$0.isSaved && !grouped.contains($0.id) && (!$0.isHome || $0.id == activeID) }.map(\.id)
         return favoriteIDs + kept + today
+    }
+    /// Names a tab (any kind); nil, empty or blank restores the page's own title.
+    @discardableResult mutating func renameTab(id: UUID, title: String?) -> Bool {
+        guard let index = tabs.firstIndex(where: { $0.id == id }) else { return false }
+        let trimmed = title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let value: String? = trimmed.isEmpty || trimmed == tabs[index].title ? nil : trimmed
+        if let value, !BrowserTab.validCustomTitle(value) { return false }
+        if tabs[index].saved != nil { tabs[index].saved?.customTitle = value } else { tabs[index].customTitle = value }
+        return true
+    }
+    /// A copy of a tab as a new Today tab just below it (a kept tab or Favorite's
+    /// copy goes to the top of Today), selected. Nil for pages that can't be copied.
+    @discardableResult mutating func duplicate(id: UUID) -> UUID? {
+        guard let source = tabs.first(where: { $0.id == id }), !source.isArcEasel,
+              BrowserTab.validAddress(source.address), URLInput.extensionURL(source.address) == nil else { return nil }
+        if source.isFavorite || source.space != space {
+            guard source.isFavorite ? profileID(for: source) == currentProfileID : spaceDefinition(source.space) != nil else { return nil }
+            if !source.isFavorite { space = source.space }
+        }
+        let new = add(address: source.address, title: source.title, opener: source.isSaved ? nil : id)
+        if let index = tabs.firstIndex(where: { $0.id == new }) { tabs[index].customTitle = source.saved?.customTitle ?? source.customTitle }
+        return new
+    }
+    /// Today tabs below `id`, top to bottom (Arc's "Tabs Below"). Empty for kept tabs and Favorites.
+    func todayTabs(below id: UUID) -> [UUID] {
+        guard let tab = tabs.first(where: { $0.id == id }), !tab.isSaved else { return [] }
+        let secondaries = splitSecondaryIDs
+        let today = tabs.filter { $0.space == tab.space && !$0.isSaved && !secondaries.contains($0.id) }.map(\.id)
+        guard let index = today.firstIndex(of: split(for: id)?.primaryID ?? id) else { return [] }
+        return Array(today[(index + 1)...])
     }
     /// ⌘1–⌘8 go to that tab, ⌘9 to the last one.
     func shortcutTab(_ number: Int) -> UUID? {

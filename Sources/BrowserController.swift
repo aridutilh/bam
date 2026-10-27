@@ -597,6 +597,7 @@ import QuartzCore
         BrowserPageGestures.configure(browser)
         WebsitePreferences.apply(to: browser) // Settings › Websites: default zoom, minimum font size.
         preparePageTools(browser)
+        tabNavigation.linkStatus.install(in: browser, owner: self); reapplyMute(browser, id: id)
         browser.autoresizingMask = [.width, .height]
         browser.setAccessibilityLabel("Web content")
         browsers[id] = browser

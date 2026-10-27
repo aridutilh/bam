@@ -126,6 +126,34 @@ import Foundation
         _ = s.add(); s.select(id(s, "One"))
         expect(s.shortcutTabs().count == 5, "Hidden blank tabs get no number")
 
+        // Rename: any tab; empty restores the page title; the name follows keep/unkeep and survives a save.
+        s = base()
+        let renamed = id(s, "Two")
+        expect(s.renameTab(id: renamed, title: "  My name  ") && s.tabs.first { $0.id == renamed }?.displayTitle == "My name", "Today tabs can be renamed")
+        _ = s.setRetention(id: renamed, kind: .kept)
+        expect(s.tabs.first { $0.id == renamed }?.saved?.customTitle == "My name", "Keeping a renamed tab keeps its name")
+        _ = s.setRetention(id: renamed, kind: nil)
+        expect(s.tabs.first { $0.id == renamed }?.displayTitle == "My name", "Letting it go keeps the name too")
+        let roundTrip = try JSONDecoder().decode(BrowserSession.self, from: try JSONEncoder().encode(s))
+        expect(roundTrip.tabs.first { $0.id == renamed }?.displayTitle == "My name", "Names are saved")
+        expect(s.renameTab(id: renamed, title: "") && s.tabs.first { $0.id == renamed }?.displayTitle == "Two", "An empty name restores the page title")
+        expect(!s.renameTab(id: renamed, title: String(repeating: "x", count: 81)), "Overlong names are refused")
+
+        // Duplicate: just below the original, selected, same page and name.
+        s = base()
+        let original = id(s, "Two")
+        _ = s.renameTab(id: original, title: "Named")
+        let copy = s.duplicate(id: original)
+        expect(copy != nil && s.activeID == copy, "The duplicate is selected")
+        expect(today(s) == ["One", "Two", "Two", "Three"] && s.tabs.first { $0.id == copy }?.displayTitle == "Named",
+               "The duplicate sits just below with the same page and name, got \(today(s))")
+        expect(s.tabs.first { $0.id == copy }?.address == s.tabs.first { $0.id == original }?.address, "Same address")
+
+        // Tabs below: Today rows under this one only.
+        s = base()
+        expect(s.todayTabs(below: id(s, "One")).map { title(s, $0)! } == ["Two", "Three"], "Tabs below One")
+        expect(s.todayTabs(below: id(s, "Three")).isEmpty, "Nothing below the last row")
+
         print("PASS: \(count) tab ordering checks")
     }
 }

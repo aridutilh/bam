@@ -498,6 +498,11 @@ import WebKit
             let entry = NSMenuItem(title: number == 9 ? "Last Tab" : "Tab \(number)", action: #selector(BrowserController.selectTabByNumber(_:)), keyEquivalent: String(number))
             entry.keyEquivalentModifierMask = .command; entry.tag = number; entry.target = controller; tabNumbers.addItem(entry)
         }
+        tabs.addItem(.separator())
+        item(tabs, "Duplicate Tab", #selector(BrowserController.duplicateTab(_:)), "", .command, controller)
+        item(tabs, "Rename Tab…", #selector(BrowserController.renameTab(_:)), "", .command, controller)
+        item(tabs, "Mute Tab", #selector(BrowserController.toggleMuteTab(_:)), "", .command, controller)
+        item(tabs, "Close Tabs Below", #selector(BrowserController.closeTabsBelow(_:)), "", .command, controller)
         bound(tabs, "Next Space", #selector(BrowserController.nextSpace(_:)), .nextSpace, controller)
         bound(tabs, "Previous Space", #selector(BrowserController.previousSpace(_:)), .previousSpace, controller)
         tabs.addItem(.separator())
