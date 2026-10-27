@@ -40,13 +40,16 @@ struct ContentBlockingConverter {
     /// list ends with all network exceptions and every cosmetic list with all cosmetic ones.
     struct Output {
         var blocks: [ContentBlockerRule] = []
+        /// `$document` blocks, the only filters that stop a page you go to (see `opensPages`).
+        var documents: [ContentBlockerRule] = []
         var exceptions: [ContentBlockerRule] = []
         /// `$important` blocks, which exceptions must not undo: compiled after them.
         var important: [ContentBlockerRule] = []
+        var importantDocuments: [ContentBlockerRule] = []
         var cosmetic: [ContentBlockerRule] = []
         var cosmeticExceptions: [ContentBlockerRule] = []
         var skipped = 0
-        var ruleCount: Int { blocks.count + exceptions.count + important.count + cosmetic.count + cosmeticExceptions.count }
+        var ruleCount: Int { blocks.count + documents.count + exceptions.count + important.count + importantDocuments.count + cosmetic.count + cosmeticExceptions.count }
     }
 
     /// WebKit refuses a list over 150,000 rules; stay clear of it.
@@ -100,8 +103,8 @@ struct ContentBlockingConverter {
             case let .rules(rules, kind):
                 for rule in rules where seenNetwork.insert(rule).inserted {
                     switch kind {
-                    case .block: output.blocks.append(rule)
-                    case .important: output.important.append(rule)
+                    case .block: if stopsPages(rule) { output.documents.append(rule) } else { output.blocks.append(rule) }
+                    case .important: if stopsPages(rule) { output.importantDocuments.append(rule) } else { output.important.append(rule) }
                     case .exception: output.exceptions.append(rule)
                     }
                 }
@@ -147,6 +150,17 @@ struct ContentBlockingConverter {
         return output
     }
 
+    /// Placed after the ordinary blocks: a page you go to (top frame) always opens, even on a host a
+    /// whole-host filter like `||googleadservices.com^` blocks, so ad and affiliate links still work.
+    /// That host's scripts, images, frames and popups stay blocked. Only `$document` filters, which
+    /// come after this, stop the page itself (malware and scam lists use them for exactly that).
+    static let opensPages = ContentBlockerRule.allow(.init(urlFilter: ".*", resourceType: ["document"], loadContext: ["top-frame"]))
+
+    /// A block that applies to the page itself, not only to what it loads.
+    static func stopsPages(_ rule: ContentBlockerRule) -> Bool {
+        rule.action.type == "block" && rule.trigger.loadContext == nil && rule.trigger.resourceType?.contains("document") == true
+    }
+
     /// The rule lists to compile, each a JSON array under WebKit's per-list limit.
     static func encodedLists(_ output: Output, maximum: Int = maximumRulesPerList) -> [String] {
         var lists: [[ContentBlockerRule]] = []
@@ -160,8 +174,11 @@ struct ContentBlockingConverter {
                 start = end
             }
         }
-        chunk(output.blocks, tail: output.exceptions)
-        chunk(output.important, tail: [])
+        func network(_ rules: [ContentBlockerRule], pages: [ContentBlockerRule], exceptions: [ContentBlockerRule]) {
+            if rules.isEmpty { chunk(pages, tail: exceptions) } else { chunk(rules, tail: [opensPages] + pages + exceptions) }
+        }
+        network(output.blocks, pages: output.documents, exceptions: output.exceptions)
+        network(output.important, pages: output.importantDocuments, exceptions: [])
         chunk(output.cosmetic, tail: output.cosmeticExceptions)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
@@ -368,8 +385,9 @@ struct ContentBlockingConverter {
         if !unique.isEmpty { var t = trigger; t.resourceType = unique; add(t) }
         if frames { var t = trigger; t.resourceType = ["document"]; t.loadContext = ["child-frame"]; add(t) }
         if unique.isEmpty && !frames {
-            // No type named. A whole-host filter (`||ads.example^`) also stops pages on that host, as uBO's strict
-            // blocking does; any other pattern must never stop a page you navigate to, only what pages load.
+            // No type named. A whole-host filter (`||ads.example^`) covers everything from that host, frames
+            // included (a page you go to directly still opens: see `opensPages`); any other pattern only
+            // covers what pages load.
             if isException || anchoredHost(String(pattern)) != nil { add(trigger) }
             else { var t = trigger; t.resourceType = allTypes; add(t) }
         }

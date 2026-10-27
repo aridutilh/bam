@@ -113,6 +113,11 @@ import WebKit
     static func isExtensionPage(_ webView: WKWebView) -> Bool {
         webView.url?.scheme?.lowercased().hasSuffix("-extension") == true // webkit-extension, safari-web-extension…
     }
+    /// The ad blocker stopped a page itself (a `$document` filter: malware and scam lists), so retrying won't help.
+    static func stoppedPage(_ error: Error) -> Bool {
+        let error = error as NSError
+        return error.domain == "WebKitErrorDomain" && error.code == 104 // WebKitErrorFrameLoadBlockedByContentBlocker
+    }
     private func applyEverywhere() {
         for webView in pages.keyEnumerator().allObjects.compactMap({ $0 as? WKWebView }) { apply(to: webView) }
     }

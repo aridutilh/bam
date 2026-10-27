@@ -1437,7 +1437,7 @@ import QuartzCore
         if let id = browsers.first(where: { $0.value === web })?.key {
             pendingLoads.remove(id); pendingNonGetDocuments.removeValue(forKey: id); historyTitleFollowUps.removeValue(forKey: id)
             if let failed = (error as NSError).userInfo[NSURLErrorFailingURLStringErrorKey] as? String, URLInput.directURL(failed) != nil { requestedAddresses[id] = failed }
-            tabErrors[id] = "Couldn’t load page — ⌘R to retry"; refresh()
+            tabErrors[id] = ContentBlocking.stoppedPage(error) ? "Page blocked by Bam’s filter lists" : "Couldn’t load page — ⌘R to retry"; refresh()
         }
     }
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
