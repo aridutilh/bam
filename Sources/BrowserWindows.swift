@@ -109,12 +109,21 @@ extension BrowserController {
     }
 
 
-    /// Another window changed the shared tabs or Spaces: drop pages of tabs closed there, keep this
-    /// window's selection valid, and redraw.
+    /// Another window changed the shared tabs or Spaces: drop pages of tabs closed there (a kept tab
+    /// closed there is unloaded, a tab moved to another profile needs that profile's website data),
+    /// keep this window's selection valid, and redraw.
     func sessionChangedElsewhere() {
         guard isViewLoaded, !isShuttingDown else { return }
-        let live = Set(session.tabs.map(\.id))
-        for id in Array(browsers.keys) where !live.contains(id) { teardownPage(id) }
+        let live = Dictionary(session.tabs.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        var retired = false
+        for (id, web) in Array(browsers) {
+            if let tab = live[id], !tab.isUnloaded,
+               profileStores.profileID(for: web.configuration.websiteDataStore).map({ $0 == session.profileID(for: tab) }) ?? true { continue }
+            if let group = session.split(for: id), let split = splitCoordinators.removeValue(forKey: group.primaryID) {
+                split.detach(); split.view.removeFromSuperview()
+            }
+            teardownPage(id); retired = true
+        }
         let groups = Set((session.splits ?? []).map(\.primaryID))
         for (primary, split) in splitCoordinators where !groups.contains(primary) {
             split.detach(); split.view.removeFromSuperview(); splitCoordinators.removeValue(forKey: primary)
@@ -123,7 +132,9 @@ extension BrowserController {
         if repaired.activeID != session.activeID || repaired.space != session.space || repaired.tabs.count != session.tabs.count {
             session = repaired
         }
-        if displayedTabID != session.activeID || webHost.subviews.contains(where: { $0 is PageElsewhereView }) { showActive() }
+        // A main window closed while others stay open keeps no pages; it shows its tab again when it comes back.
+        if primaryBrowser == nil, !isWindowOpen, sessionWindows.count > 1 { return }
+        if retired || displayedTabID != session.activeID || webHost.subviews.contains(where: { $0 is PageElsewhereView }) { showActive() }
         else { refresh() }
     }
 
