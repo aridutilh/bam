@@ -417,6 +417,12 @@ import WebKit
         let tabs = menu("Tabs")
         item(tabs, "Next Tab", #selector(BrowserController.nextTab(_:)), "\t", .control, controller)
         item(tabs, "Previous Tab", #selector(BrowserController.previousTab(_:)), "\t", [.control, .shift], controller)
+        let goToTab = NSMenuItem(title: "Go to Tab", action: nil, keyEquivalent: "")
+        let tabNumbers = NSMenu(title: "Go to Tab"); goToTab.submenu = tabNumbers; tabs.addItem(goToTab)
+        for number in 1...9 {
+            let entry = NSMenuItem(title: number == 9 ? "Last Tab" : "Tab \(number)", action: #selector(BrowserController.selectTabByNumber(_:)), keyEquivalent: String(number))
+            entry.keyEquivalentModifierMask = .command; entry.tag = number; entry.target = controller; tabNumbers.addItem(entry)
+        }
         bound(tabs, "Next Space", #selector(BrowserController.nextSpace(_:)), .nextSpace, controller)
         bound(tabs, "Previous Space", #selector(BrowserController.previousSpace(_:)), .previousSpace, controller)
         tabs.addItem(.separator())

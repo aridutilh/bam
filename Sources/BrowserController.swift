@@ -276,6 +276,8 @@ import QuartzCore
     var littleWindows: [UUID: LittleBamController] = [:] { didSet { invalidateExtensionSurfaceTopology() } }
     var swipe = SpaceSwipeStateMachine()
     var scrollMonitor: Any?
+    /// ⌃⇥ switcher, page thumbnails and tab-key monitors (TabSwitcher.swift).
+    let tabNavigation = TabNavigationState()
     var trackingSwipe = false
     var pagingOffset: CGFloat = 0
     var pagingTarget: Int?
@@ -455,7 +457,7 @@ import QuartzCore
         window.backgroundColor = windowTranslucent ? .clear : BrowserChrome.windowBackground
         window.invalidateShadow()
     }
-    override func viewDidAppear() { super.viewDidAppear(); applyWindowTranslucency(); layoutBrowser() }
+    override func viewDidAppear() { super.viewDidAppear(); applyWindowTranslucency(); layoutBrowser(); installTabNavigation() }
 
     /// Arc hides the traffic lights together with the sidebar: once the page
     /// owns the whole window the close/minimize/zoom buttons fade out with the
@@ -626,6 +628,7 @@ import QuartzCore
     }
     func showActive() {
         guard let tab = session.active, !isShuttingDown, !isApplyingProfileChange else { return }
+        noteTabShown(tab.id, leaving: displayedTabID)
         let arriving = visibleMemberIDs
         for id in arriving { tabLastUsed[id] = ProcessInfo.processInfo.systemUptime }
         let outgoing = displayedMemberIDs.filter { !arriving.contains($0) }
@@ -1240,12 +1243,6 @@ import QuartzCore
         peeks[session.activeID]?.dismiss()
         if let split = splitCoordinators[session.activeID], session.split(for: session.activeID) != nil { split.focusAddress(split.focusedSide) }
         else { openAddress(newTab: false, empty: session.active?.isHome ?? true) }
-    }
-    @objc func nextTab(_ sender: Any?) { cycleTab(1) }
-    @objc func previousTab(_ sender: Any?) { cycleTab(-1) }
-    func cycleTab(_ delta: Int) {
-        let tabs = session.visibleTabs; guard let i = tabs.firstIndex(where: { $0.id == session.activeID }), !tabs.isEmpty else { return }
-        select(tabs[(i + delta + tabs.count) % tabs.count].id)
     }
     @objc func zoomIn(_ sender: Any?) { if let web = commandWebView { zoom(web, by: 0.1) } }
     @objc func zoomOut(_ sender: Any?) { if let web = commandWebView { zoom(web, by: -0.1) } }
