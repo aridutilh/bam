@@ -327,7 +327,11 @@ extension BrowserController {
         }
         // Address-like text never feeds remote autocomplete: ⌘L prefills the
         // current page URL, which must not leave the app just for opening the bar.
+        // That includes hosts with no dot ("localhost:3000", "intranet") once a completion names them exactly:
+        // accepting "intr" → "intranet" must not send a visited address to the engine.
+        let namesKnownSite = state.completion.map { $0.tail.isEmpty && $0.text == typed } ?? false
         let urlLike = trimmed.contains("://") || (!trimmed.contains(" ") && trimmed.contains("."))
+            || TabSearchResultsView.looksLikeAddress(trimmed) || namesKnownSite
         let suggestURL = (paletteEngine ?? defaultSuggestionEngine)?.suggestURL(for: trimmed)
         if let suggestURL, !trimmed.isEmpty, !urlLike {
             suggestionFetcher.fetch(url: suggestURL) { [weak self] suggestions in
@@ -340,6 +344,7 @@ extension BrowserController {
             suggestionFetcher.cancel()
         }
         applyPaletteResults()
+        state.lastFieldText = field.stringValue
     }
     private func applyPaletteResults() {
         guard addressField != nil else { return }
@@ -555,7 +560,13 @@ extension BrowserController {
         let text = field.stringValue
         let editor = paletteEditor
         let caretAtEnd = editor.map { $0.selectedRange().location == ($0.string as NSString).length && $0.selectedRange().length == 0 } ?? true
-        if state.suppressCompletion || !caretAtEnd || editor?.hasMarkedText() == true {
+        // Only typing completes. A paste, drop or dictation lands several characters at once ("github.com/ari"),
+        // and completing it would send Return somewhere the person didn't paste.
+        let previous = Array(state.lastFieldText), current = Array(text)
+        var shared = 0
+        while shared < min(previous.count, current.count), previous[shared] == current[shared] { shared += 1 }
+        let typedOneCharacter = current.count - shared <= 1
+        if state.suppressCompletion || !caretAtEnd || !typedOneCharacter || editor?.hasMarkedText() == true {
             state.suppressCompletion = false
             state.completion = nil
         } else {
@@ -588,7 +599,11 @@ extension BrowserController {
         if commandSelector == #selector(NSResponder.deleteBackward(_:)) || commandSelector == #selector(NSResponder.deleteForward(_:))
             || commandSelector == #selector(NSResponder.deleteWordBackward(_:)) || commandSelector == #selector(NSResponder.deleteToBeginningOfLine(_:)) {
             if dropPaletteCompletion() { return true }
-            paletteState.suppressCompletion = true
+            // Only a delete that removes something holds completion off; one at the field's edge would
+            // otherwise leave the flag set and swallow the next typed letter's completion.
+            let range = textView.selectedRange(), length = (textView.string as NSString).length
+            let forward = commandSelector == #selector(NSResponder.deleteForward(_:))
+            if range.length > 0 || (forward ? range.location < length : range.location > 0) { paletteState.suppressCompletion = true }
         }
         return false
     }
