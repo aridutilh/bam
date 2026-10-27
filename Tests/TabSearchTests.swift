@@ -362,6 +362,16 @@ enum PaletteFieldChecks {
             require(PaletteCalculator.evaluate(text) == nil, "\(text) is not a sum")
         }
 
+        // The selected row's white text stays readable on every Space hue, light and dark.
+        for appearanceName in [NSAppearance.Name.aqua, .darkAqua] {
+            guard let appearance = NSAppearance(named: appearanceName) else { continue }
+            for step in 0..<36 {
+                let tint = NSColor(deviceHue: CGFloat(step) / 36, saturation: 0.6, brightness: 1, alpha: 1)
+                let contrast = PaletteSelection.whiteContrast(on: PaletteSelection.fill(for: tint, in: appearance))
+                require(contrast >= 4.5, "White on the \(appearanceName.rawValue) selection fill for hue \(step * 10)° reads at \(contrast):1")
+            }
+        }
+
         // Quick Actions.
         let doc = PaletteQuickActionCatalog.matches("doc")
         require(doc.first?.action.host == "docs.new" && doc.first?.leading == true, "An alias names a Quick Action outright")
