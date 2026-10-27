@@ -20,7 +20,7 @@ Bam now looks, moves and behaves much more like Arc, which shuts down on Decembe
 **Search box (⌘T / ⌘L)**
 - Redrawn as Arc's: a card washed with your Space's color, roomy "Title — address" rows, the selected row filled with the Space's color, "Switch to Tab →" on open tabs. It appears instantly.
 - Finishes addresses as you type ("git" → github.com; → or Tab takes it), shows pages you visited before alongside open tabs without listing a page twice, answers sums (12*(3+4)), and opens docs.new, meet.new or sheets.new from "doc", "meet" or "sheet".
-- An empty ⌘T lists your recent tabs, previous one first, so ⌘T then Return jumps back. ⌘L lists the current page, with Copy URL at the end.
+- An empty ⌘T lists your recent tabs, previous one first, so ⌘T then Return jumps back. ⌘L lists the current page and your recent pages, as in Arc.
 - ⌘Return opens in a background tab, ⇧⌘Return in a new tab, ⇧⌘C copies a result's link, ⌘K shows actions for it, and Esc steps back before it closes. The box finds every command by its menu name.
 
 **Sidebar**
