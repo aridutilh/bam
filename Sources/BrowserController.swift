@@ -931,6 +931,7 @@ import QuartzCore
         observations.removeValue(forKey: id)
         let web = browsers.removeValue(forKey: id)
         if let web { tabActivityProbe.invalidate(web) }
+        tabNavigation.thumbnails.removeValue(forKey: id)
         tabLastUsed.removeValue(forKey: id); sleepRestores.removeValue(forKey: id); nonGetDocuments.remove(id); pendingNonGetDocuments.removeValue(forKey: id)
         web?.navigationDelegate = nil; web?.uiDelegate = nil; web?.stopLoading()
         // PiP restoration can synchronously re-enter showActive. The retired

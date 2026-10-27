@@ -15,6 +15,7 @@ import WebKit
     var thumbnails: [UUID: NSImage] = [:]
     var monitors: [Any] = []
     var resignObserver: NSObjectProtocol?
+    var deactivateObserver: NSObjectProtocol?
     /// Set while a ⌘Z that belongs to the page is sent through again.
     var replayingUndo = false
     /// Tabs (Split primaries) the user muted; reapplied to pages created later.
@@ -40,11 +41,20 @@ import WebKit
         if let monitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged, handler: { [weak self] event in
             self?.handleTabNavigationFlags(event); return event
         }) { tabNavigation.monitors.append(monitor) }
-        if let window = view.window {
-            tabNavigation.resignObserver = NotificationCenter.default.addObserver(
-                forName: NSWindow.didResignKeyNotification, object: window, queue: .main) { [weak self] _ in
-                MainActor.assumeIsolated { self?.cancelTabSwitcher() }
+        // Losing the keyboard (another window, another app) ends a session
+        // without moving: its ⌃ release would never reach these monitors.
+        // Matched by window at fire time, so it works even if the window
+        // wasn't attached yet when this ran.
+        tabNavigation.resignObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.didResignKeyNotification, object: nil, queue: .main) { [weak self] note in
+            MainActor.assumeIsolated {
+                guard let self, let window = note.object as? NSWindow, window === self.view.window else { return }
+                self.cancelTabSwitcher()
             }
+        }
+        tabNavigation.deactivateObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.cancelTabSwitcher() }
         }
     }
 
@@ -59,12 +69,14 @@ import WebKit
     func captureThumbnail(_ id: UUID, completion: (() -> Void)? = nil) {
         guard let web = browsers[id], web.window != nil, web.bounds.width > 40, web.bounds.height > 40 else { completion?(); return }
         let configuration = WKSnapshotConfiguration()
-        configuration.snapshotWidth = NSNumber(value: Double(TabSwitcherView.thumbnailSize.width * 2))
+        // Points: WebKit already renders at the screen's scale, so this is a 2x picture on Retina.
+        configuration.snapshotWidth = NSNumber(value: Double(TabSwitcherView.thumbnailSize.width))
         configuration.afterScreenUpdates = false
         web.takeSnapshot(with: configuration) { [weak self] image, _ in
             MainActor.assumeIsolated {
                 guard let self else { return }
-                if let image {
+                // The tab may have closed while the picture was being taken.
+                if let image, self.browsers[id] != nil {
                     if self.tabNavigation.thumbnails.count >= TabNavigationState.thumbnailLimit {
                         let live = Set(self.session.recentTabIDs?.prefix(TabNavigationState.thumbnailLimit / 2) ?? [])
                         self.tabNavigation.thumbnails = self.tabNavigation.thumbnails.filter { live.contains($0.key) }
@@ -109,11 +121,16 @@ import WebKit
         state.index = (state.index + delta % state.items.count + state.items.count) % state.items.count
         tabNavigation.switcher = state
         state.view?.select(state.index)
-        if !NSEvent.modifierFlags.contains(.control) { commitTabSwitcher() }
+        // Only a held ⌃ in this (key) window keeps the session open. From the
+        // menu while another window is key (Settings), the release would land
+        // in that window and never close the strip, so land at once instead.
+        if !NSEvent.modifierFlags.contains(.control) || view.window?.isKeyWindow != true { commitTabSwitcher() }
     }
 
     private func revealTabSwitcher() {
         guard var state = tabNavigation.switcher, state.view == nil, let content = view.window?.contentView else { return }
+        // ⌃ already let go but the release was missed: land instead of showing a strip nothing will close.
+        guard NSEvent.modifierFlags.contains(.control) else { commitTabSwitcher(); return }
         let tiles = state.items.compactMap { id -> TabSwitcherView.Tile? in
             guard let tab = session.tabs.first(where: { $0.id == id }) else { return nil }
             let companion = session.split(for: id).flatMap { group in session.tabs.first { $0.id == group.secondaryID } }
@@ -170,13 +187,23 @@ import WebKit
     // MARK: Keys
 
     private func handleTabNavigationFlags(_ event: NSEvent) {
-        guard tabNavigation.switcher != nil, event.window === view.window || event.window == nil else { return }
+        // Any window's ⌃ release lands: the session belongs to the key window, and a
+        // release reported against another of Bam's windows must not leave it stuck open.
+        guard tabNavigation.switcher != nil else { return }
         if !event.modifierFlags.contains(.control) { commitTabSwitcher() }
     }
 
     private func handleTabNavigationKey(_ event: NSEvent) -> NSEvent? {
         if tabNavigation.switcher != nil {
             let flags = event.modifierFlags.intersection([.command, .control, .option, .shift])
+            // Keys for another window are never swallowed by this window's session.
+            if event.window !== view.window { cancelTabSwitcher(); return event }
+            // ⌃ is up but its release was missed: land, then let the key through
+            // (Return and Esc keep their switcher meaning).
+            if !flags.contains(.control), event.keyCode != 53 {
+                commitTabSwitcher()
+                return event.keyCode == 36 || event.keyCode == 76 ? nil : event
+            }
             switch event.keyCode {
             case 53: cancelTabSwitcher(); return nil                                   // Esc
             case 48 where flags.contains(.control): stepTabSwitcher(flags.contains(.shift) ? -1 : 1); return nil   // ⇥
