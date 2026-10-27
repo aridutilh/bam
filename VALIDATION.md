@@ -1,7 +1,7 @@
 ## 0.26.0 build 52 — the Arc pass (full build and all twelve native suites passed at `341d161`)
 
 **Gates (release build from a frozen worktree of `night/chrome` at `341d161`):**
-- `bash build.sh` passed with no failures (all component suites, including tab ordering 50, archive 42, link routes 34, link behavior 17, Space theme n/a (not in this release), content-blocking converter 78, extension navigation policy 27, clean links 25, favicon ink 8).
+- `bash build.sh` passed with no failures (all component suites, including tab ordering 50, archive 42, link routes 34, link behavior 17, content-blocking converter 78, extension navigation policy 27, clean links 25, favicon ink 8).
 - All twelve native suites passed against the installed Bam Preview: WebKit, PiP positioning 83, PiP, Interactions 187, Automatic PiP 85, Features 417, Tab resources 37, Profiles 98, Extensions 826, Favicons 85, Profile activation 45, Arc import 155, Windows 59 (new).
 - The focus-dependent suites (PiP, Automatic PiP, Features, Profiles, Profile activation, Arc import, Windows) first failed while the Mac's screen was locked (macOS refuses app activation); they all passed in one run once it was unlocked. The same PiP failure reproduced on the previous good commit while locked, ruling out a code cause.
 
