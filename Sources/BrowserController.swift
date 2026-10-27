@@ -815,7 +815,7 @@ import QuartzCore
             historyTitleFollowUps[id] = followUp.isSpent ? nil : followUp
         }
     }
-    private func scheduleChromeRefresh() {
+    func scheduleChromeRefresh() {
         guard chromeRefreshWork == nil, !isShuttingDown else { return }
         let work = DispatchWorkItem { [weak self] in
             self?.chromeRefreshWork = nil; self?.refresh()
@@ -838,7 +838,12 @@ import QuartzCore
         }
         if let tab = session.active {
             let host = tab.addressLabel
-            sidebar.setAddress(tab.address, title: tabErrors[tab.id] ?? (tab.isHome ? "Search or enter URL" : host))
+            // While a Peek is up, the address field shows the Peek's page (as the reference does).
+            if let peek = peeks[tab.id], peek.isShowing, let url = peek.pageURL {
+                sidebar.setAddress(url.absoluteString, title: url.host?.replacingOccurrences(of: "www.", with: "", options: .anchored) ?? url.absoluteString)
+            } else {
+                sidebar.setAddress(tab.address, title: tabErrors[tab.id] ?? (tab.isHome ? "Search or enter URL" : host))
+            }
             view.window?.title = "\(tab.displayTitle) — Bam"
         }
         refreshSplitMetadata()

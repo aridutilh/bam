@@ -110,7 +110,9 @@ import WebKit
             self.peeks.removeValue(forKey: owner); self.peekExtensionIDs.removeValue(forKey: owner)
             self.scheduleExtensionRefresh()
             self.refreshFindTarget()
+            self.scheduleChromeRefresh()
         }
+        peek.onPageChange = { [weak self] in self?.scheduleChromeRefresh() }
         peek.onPromote = { [weak self] web in _ = self?.adoptWebView(web) }
         peek.onOpenLittleOrbit = { [weak self] web in self?.openLittleOrbit(adopting: web) }
         peek.onSplit = { [weak self] web in self?.openSplit(adopting: web, beside: owner) }
