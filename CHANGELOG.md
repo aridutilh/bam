@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Opening a Split now shows the search bar over the new page: pick a site, search or an open tab and it loads there. Press Esc (or click outside) and the empty page closes again.
 - Right-clicking a tab follows Arc's order: Copy Link, Share, Change Icon…, Rename…, Mute, Duplicate and, for Today tabs, Move to (with New Space…), with Close Tab and Close Tabs Below last.
 - Double-click a tab's title to rename it in place; Return keeps the name, Esc cancels, and an empty name goes back to the page's own title.
 - The footer's bottom-left button is now Arc's archive box: it opens Archived Tabs, and its menu has Downloads, History and Manage Spaces.

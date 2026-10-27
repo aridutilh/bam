@@ -123,6 +123,8 @@ import WebKit
         return result
     }
 
+    /// A pane's frame in another view's coordinates (where the command bar centres over a new pane).
+    func paneFrame(_ side: Side, in other: NSView) -> NSRect { other.convert(pane(for: side).frame, from: container) }
     private func pane(for side: Side) -> OrbitSplitPane { side == .left ? leftPane : rightPane }
     private func refreshFocusAppearance() {
         leftPane.setFocused(focusedSide == .left, accent: accent)

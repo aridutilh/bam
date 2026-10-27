@@ -49,13 +49,14 @@ extension BrowserController {
     }
     private var reduceMotion: Bool { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }
 
-    func openAddress(newTab: Bool, empty: Bool) {
+    func openAddress(newTab: Bool, empty: Bool, overSplitPane splitPane: UUID? = nil) {
         cancelPaging(); dismissAddress(); view.window?.makeKeyAndOrderFront(nil); newTabOnSubmit = newTab
         let state = paletteState
+        state.splitPaneID = splitPane
         prepareSuggestionSources(state)
         // No dimming: the page stays as it is, as in Arc. A click outside still closes.
         let overlay = DismissView(); overlay.wantsLayer = true
-        overlay.dismiss = { [weak self] in self?.dismissAddress() }
+        overlay.dismiss = { [weak self] in self?.dismissAddressClosingEmptyPane() }
         let shadow = PaletteShadowView()
         overlay.addSubview(shadow)
         // The card clips to rounded corners, so a sibling behind it carries the
@@ -146,12 +147,15 @@ extension BrowserController {
         guard let overlay = addressOverlay, let content = addressCard else { return }
         overlay.frame = root.bounds
         let state = paletteState
-        let cw = PaletteGeometry.width(forWindowWidth: w)
+        var cw = PaletteGeometry.width(forWindowWidth: w)
         let inputHeight = PaletteGeometry.inputHeight
         let rowsHeight = tabSearchResults?.preferredHeight ?? 44
         // Stable centered top; moved up, and the rows scroll, only when the whole card wouldn't fit the window.
         let fit = PaletteGeometry.fit(windowHeight: h, resultsHeight: rowsHeight)
-        content.frame = NSRect(x: ((w - cw) / 2).rounded(), y: fit.top, width: cw, height: PaletteGeometry.chromeHeight + fit.visibleResultsHeight)
+        var centerX = w / 2
+        // Opened for a new Split pane: the bar sits over that pane, as in the reference.
+        if let pane = splitPaneFrameForPalette() { cw = min(cw, max(320, pane.width - 32)); centerX = pane.midX }
+        content.frame = NSRect(x: (centerX - cw / 2).rounded(), y: fit.top, width: cw, height: PaletteGeometry.chromeHeight + fit.visibleResultsHeight)
         state.shadow?.frame = content.frame
         paletteGlow?.frame = content.frame
         let radius = PaletteGeometry.cornerRadius
@@ -551,6 +555,10 @@ extension BrowserController {
     }
 
     func selectSearchResult(_ id: UUID) {
+        // Over a new Split pane, picking an open tab puts its page in that pane.
+        if paletteSplitPaneID != nil, let tab = session.tabs.first(where: { $0.id == id }), tab.id != paletteSplitPaneID {
+            navigate(tab.isUnloaded ? (tab.saved?.address ?? tab.address) : tab.address); return
+        }
         select(id)
         if let group = session.split(for: id), let split = splitCoordinators[group.primaryID] {
             split.setFocusedSide(id == group.secondaryID ? .right : .left)
@@ -616,7 +624,7 @@ extension BrowserController {
     func paletteEscape() {
         if paletteEngine != nil { clearPaletteEngine(); return }
         if dropPaletteCompletion() { return }
-        dismissAddress()
+        dismissAddressClosingEmptyPane()
     }
 
     /// ⌘K, ⌘↩, ⇧⌘↩ and ⇧⌘C reach the field before the menus do while it has focus.
