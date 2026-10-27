@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Close Window (⇧⌘W) closes the window you're in, private windows included.
+- A tab's Share menu now opens as a submenu of share options (AirDrop, Mail, Messages, Notes…), and the ⌃⇥ switcher shows the same letter icon as the sidebar for pages without a favicon.
+
 ## 0.26.0 build 52 — The Arc pass
 
 Bam now looks, moves and behaves much more like Arc, which shuts down on December 22. Arc was the reference for every change; nothing here claims full Arc or Chrome parity.
