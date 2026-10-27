@@ -9,6 +9,12 @@ import AppKit
         snapshot.sleepsIdlePages = automaticTabSleeping
         snapshot.keepAwakeHost = currentSleepProtectionHost
         snapshot.keepsCurrentSiteAwake = currentSleepProtectionHost.map { keepAwakeHosts.contains($0) } ?? false
+        snapshot.keepAwakeHosts = keepAwakeHosts.sorted()
+        snapshot.canKeepSitesAwake = !privateMode
+        snapshot.pageZoom = WebsitePreferences.pageZoom
+        snapshot.zoomChoices = WebsitePreferences.zoomChoices
+        snapshot.minimumFontSize = WebsitePreferences.minimumFontSize
+        snapshot.fontChoices = WebsitePreferences.fontChoices
         snapshot.asksBeforeQuitting = QuitConfirmationPreference().asksBeforeQuitting
         snapshot.canChangeQuitPreference = !privateMode
         snapshot.searchEngine = URLInput.searchEngine
@@ -36,6 +42,17 @@ import AppKit
             self.toggleAutomaticTabSleeping(nil)
         }
         actions.setKeepsSiteAwake = { [weak self] host, on in self?.setKeepAwake(host: host, on) }
+        actions.hostFromTyped = { WebsitePreferences.host(fromTyped: $0) }
+        actions.setPageZoom = { [weak self] zoom in
+            let previous = WebsitePreferences.pageZoom
+            WebsitePreferences.pageZoom = zoom
+            WebsitePreferences.update(self.map { Array($0.browsers.values) } ?? [], previousZoom: previous)
+            self?.refreshSiteSettings()
+        }
+        actions.setMinimumFontSize = { [weak self] size in
+            WebsitePreferences.minimumFontSize = size
+            WebsitePreferences.update(self.map { Array($0.browsers.values) } ?? [], previousZoom: .nan)
+        }
         // Like the quit dialog's "don't ask again": a private window never changes the normal preference.
         actions.setAsksBeforeQuitting = { [weak self] on in
             guard let self, !self.privateMode else { return }

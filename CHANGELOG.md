@@ -6,7 +6,7 @@
 - ⌘1 to ⌘8 jump to that tab in the sidebar, Favorites first, and ⌘9 jumps to the last tab (Tabs › Go to Tab).
 - New tabs open at the top of Today. Links you open in a new tab land right below the page they came from, in the order you opened them, and closing one takes you to its neighbor from the same page, then back to that page.
 - ⌘Z reopens the last closed tab when you're not typing, and closed tabs come back where they were instead of at the bottom.
-- Bam now blocks ads and trackers on its own, on by default. It uses uBlock Origin's standard lists (EasyList, EasyPrivacy and more), refreshed weekly in the background, and stops requests before they're made. Turn it off for one site in the site controls, or everywhere in Settings › General › Privacy. If a page keeps failing to load, Bam offers "Allow Ads Here".
+- Bam now blocks ads and trackers on its own, on by default. It uses uBlock Origin's standard lists (EasyList, EasyPrivacy and more), refreshed weekly in the background, and stops requests before they're made. Turn it off for one site in the site controls, or everywhere in Settings › Privacy. If a page keeps failing to load, Bam offers "Allow Ads Here".
 - Copy Link (⇧⌘C) now copies a clean address: tracking tags like utm_, fbclid, gclid and YouTube or Spotify share codes are removed, and everything the page needs is kept. The confirmation says "Link copied".
 - Copy Markdown Link (⌥⇧⌘C) copies [Title](address), and pastes as the page's title as a live link in Mail, Notes and Slack.
 - Reading Mode (⌥⌘R): the article alone in one clean column over the page, opening at the paragraph you were reading. Choose text size (⌘+ / ⌘-), serif or sans, and a Light, Sepia, Dark or matching theme. ⌘F finds words in the article, and Esc or ⌥⌘R returns to the page exactly as you left it.
@@ -27,6 +27,12 @@
 - New keys in the search box: ⌘Return opens in a background tab, ⇧⌘Return in a new tab, ⇧⌘C copies the selected result's link, ⌘K shows actions for it (Open in Split View, Copy Link, Close Tab…), and Esc steps back before it closes.
 - The search box finds the new page tools by name: Copy Link, Copy Markdown Link, Reading Mode, Hide Elements, Restore Hidden Elements, Web Inspector, JavaScript Console and Inspect Element.
 - Search box fixes: address completion keeps a site's port and http (typing "localh" now finishes to localhost:3000), and pasted text is never completed. Typing a site's name such as "figma" or "notion" and pressing Return goes to the site instead of creating a new file. The selected row stays readable on yellow and green Spaces, sums like "0x10" or "1,5+1" no longer show a wrong answer, and typing stays quick with a full history.
+- Settings is reorganized into General, Appearance, Websites, Privacy, Search, Spaces, Shortcuts, Extensions and About, with denser rows that are quicker to scan.
+- A search field at the top of Settings (⌘F) finds any setting by name, and any command by name or keys (try "zoom" or "⇧⌘C"). Return jumps to the first result and highlights it.
+- Every command in the menu bar can now have its own shortcut, not just seven. Settings › Shortcuts lists them by menu with a filter for names or keys. Pick a key another command already uses and Bam offers to move it. Each command can be reset to its default or left without a shortcut. Shortcuts you changed before carry over.
+- Settings › Websites sets the zoom every page starts at (90%, 100%, 110% or 125%; ⌘0 returns to it) and a minimum font size for small text. It also lists the sites you keep awake, so you can add one by typing its address or remove one.
+- Settings › Appearance shows each Space's color next to the light and dark theme, so you can recolor a Space without opening it.
+- Settings › Privacy lists the sites where you've allowed ads, so you can block them there again.
 
 ## 0.25.1 build 51 — Quit dialog and sidebar scroll bar polish
 

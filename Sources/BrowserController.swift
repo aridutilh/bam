@@ -552,6 +552,7 @@ import QuartzCore
         ContentBlocking.shared.track(browser)
         browser.allowsBackForwardNavigationGestures = true
         BrowserPageGestures.configure(browser)
+        WebsitePreferences.apply(to: browser) // Settings › Websites: default zoom, minimum font size.
         preparePageTools(browser)
         browser.autoresizingMask = [.width, .height]
         browser.setAccessibilityLabel("Web content")
