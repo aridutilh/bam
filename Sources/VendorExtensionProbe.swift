@@ -230,7 +230,7 @@ import WebKit
               total++;
               const sig = (el.tagName + " " + el.id + " " + (typeof el.className === "string" ? el.className : "") + " " + Array.from(el.attributes).map(a => a.name + "=" + a.value).join(" ")).toLowerCase();
               if (needle && (sig.includes(needle) || sig.includes(alt))) named++;
-              if (el.tagName === "IFRAME" && (el.src || "").startsWith("webkit-extension://")) extensionFrames++;
+              if (el.tagName === "IFRAME" && /^(webkit|safari-web)-extension:\\/\\//.test(el.src || "")) extensionFrames++;
               if (el.shadowRoot) { shadows++; visit(el.shadowRoot); }
             }
           };
