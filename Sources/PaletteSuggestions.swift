@@ -272,6 +272,9 @@ enum PaletteCalculator {
         // Dates and phone numbers ("2026-10-27", "555-1234") are not sums.
         if text.range(of: #"^\d+(-\d+)+$"#, options: .regularExpression) != nil { return nil }
         if text.range(of: #"^\d+(/\d+){2}$"#, options: .regularExpression) != nil { return nil }
+        // Hex ("0x1F") is not 0 × 1F; and a comma only groups thousands ("1,000"), so "1,5" isn't read as 15.
+        if text.range(of: #"(^|[^0-9.])0[xX]"#, options: .regularExpression) != nil { return nil }
+        if text.range(of: #",(?!\d{3}(\D|$))"#, options: .regularExpression) != nil { return nil }
         var parser = Parser(text)
         guard let value = parser.parse(), parser.sawBinaryOperator, value.isFinite else { return nil }
         return PaletteCalculation(expression: text, value: value)

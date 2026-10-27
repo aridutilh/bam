@@ -355,7 +355,10 @@ enum PaletteFieldChecks {
                     && PaletteCalculator.evaluate("50%")?.value == 0.5 && PaletteCalculator.evaluate("10 / 4")?.display == "2.5"
                     && PaletteCalculator.evaluate("-3 - -3")?.display == "0",
                 "Arithmetic with precedence, powers, percent, grouping and unicode operators")
-        for text in ["42", "3.14", "-5", "2026-10-27", "555-1234", "10/27/2026", "1.2.3", "1/0", "abc", "2+", "github.com", "(1+2"] {
+        require(PaletteCalculator.evaluate("1,000,000*2")?.plain == "2000000" && PaletteCalculator.evaluate("2x4")?.value == 8,
+                "Thousands grouping and x as times")
+        for text in ["42", "3.14", "-5", "2026-10-27", "555-1234", "10/27/2026", "1.2.3", "1/0", "abc", "2+", "github.com", "(1+2",
+                     "0x10", "0x1F+1", "1,5+1", "3,5", "2**999", "9^9^9^9", "(-8)^0.5", String(repeating: "(", count: 60) + "1"] {
             require(PaletteCalculator.evaluate(text) == nil, "\(text) is not a sum")
         }
 
