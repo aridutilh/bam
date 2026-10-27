@@ -47,6 +47,11 @@ enum PaletteAddressKey {
         if host.hasPrefix("www.") { host = String(host.dropFirst(4)) }
         return host
     }
+    /// The host with its port when it has one ("localhost:3000"), without "www.": what a host completion shows.
+    static func authority(_ address: String) -> String? {
+        guard let host = host(address) else { return nil }
+        return URL(string: address)?.port.map { "\(host):\($0)" } ?? host
+    }
     /// How a row shows an address: no scheme, no "www.", no trailing slash.
     static func display(_ address: String) -> String {
         var value = address
@@ -106,12 +111,15 @@ struct PaletteHistoryIndex {
         let query = PaletteText.normalized(raw)
         guard !query.isEmpty, limit > 0 else { return [] }
         let tokens = query.split(separator: " ").map(String.init)
+        let spacedQuery = " " + query
         var ranked: [(Site, Int)] = []
         for site in sites where !excluding.contains(site.key) {
             let rank: Int
-            if site.key.hasPrefix(query) { rank = 0 }
-            else if site.normalizedTitle.hasPrefix(query) || site.normalizedTitle.contains(" " + query) { rank = 1 }
-            else if tokens.allSatisfy({ site.normalizedTitle.contains($0) || site.key.contains($0) }) { rank = 2 }
+            // Byte compares: both sides are already folded, and String's Unicode-aware search costs
+            // milliseconds per keystroke across a full 5,000-page history.
+            if PaletteBytes.hasPrefix(site.key, query) { rank = 0 }
+            else if PaletteBytes.hasPrefix(site.normalizedTitle, query) || PaletteBytes.contains(site.normalizedTitle, spacedQuery) { rank = 1 }
+            else if tokens.allSatisfy({ PaletteBytes.contains(site.normalizedTitle, $0) || PaletteBytes.contains(site.key, $0) }) { rank = 2 }
             else { continue }
             ranked.append((site, rank))
         }
@@ -122,9 +130,42 @@ struct PaletteHistoryIndex {
 
 /// A place autocompletion may finish the typed text with.
 struct PaletteCompletionCandidate {
-    var address: String
-    var title: String
-    var weight: Double
+    let address: String
+    let title: String
+    let weight: Double
+    /// Parsed once when the palette opens, not on every keystroke: host with port, key, scheme.
+    fileprivate let authority: String?
+    fileprivate let key: String
+    fileprivate let scheme: String
+    init(address: String, title: String, weight: Double) {
+        self.address = address; self.title = title; self.weight = weight
+        authority = PaletteAddressKey.authority(address)
+        key = PaletteAddressKey.key(address)
+        scheme = address.lowercased().hasPrefix("http://") ? "http" : "https"
+    }
+}
+
+/// Byte-level text tests for strings that are already case- and diacritic-folded.
+enum PaletteBytes {
+    static func hasPrefix(_ text: String, _ prefix: String) -> Bool { text.utf8.starts(with: prefix.utf8) }
+    static func contains(_ text: String, _ needle: String) -> Bool {
+        let n = Array(needle.utf8)
+        guard let first = n.first else { return true }
+        return text.utf8.withContiguousStorageIfAvailable { h -> Bool in
+            guard h.count >= n.count else { return false }
+            var i = 0
+            let last = h.count - n.count
+            while i <= last {
+                if h[i] == first {
+                    var j = 1
+                    while j < n.count && h[i + j] == n[j] { j += 1 }
+                    if j == n.count { return true }
+                }
+                i += 1
+            }
+            return false
+        } ?? text.contains(needle)
+    }
 }
 
 /// Inline autocompletion: "git" → "github.com". Only address-shaped text completes
@@ -136,15 +177,18 @@ enum PaletteAutocomplete {
         let lower = typed.lowercased()
         let wantsWWW = lower.hasPrefix("www.")
         let wantsPath = lower.contains("/")
-        struct Option { var text: String; var weight: Double; var address: String; var title: String; var rootAddress: String? }
+        struct Option { var text: String; var weight: Double; var address: String; var addressWeight: Double; var title: String; var rootAddress: String? }
         var options: [String: Option] = [:]
         for candidate in candidates {
-            guard let host = PaletteAddressKey.host(candidate.address) else { continue }
-            let key = PaletteAddressKey.key(candidate.address)
+            // The host keeps its port ("localhost:3000"), and a site only ever visited over http stays http.
+            guard let host = candidate.authority else { continue }
+            let key = candidate.key
             let text = (wantsWWW ? "www." : "") + (wantsPath ? key : host)
-            guard text.hasPrefix(lower) else { continue }
-            var option = options[text] ?? Option(text: text, weight: 0, address: "https://\(host)", title: "", rootAddress: nil)
+            guard PaletteBytes.hasPrefix(text, lower) else { continue }
+            let fallback = "\(candidate.scheme)://\(host)"
+            var option = options[text] ?? Option(text: text, weight: 0, address: fallback, addressWeight: candidate.weight, title: "", rootAddress: nil)
             option.weight += candidate.weight
+            if candidate.weight > option.addressWeight { option.address = fallback; option.addressWeight = candidate.weight }
             // The site's own front page names the completion ("github.com  GitHub").
             if wantsPath || key == host {
                 if option.rootAddress == nil { option.rootAddress = candidate.address }

@@ -341,6 +341,13 @@ enum PaletteFieldChecks {
                     && PaletteAutocomplete.complete("zz", candidates: candidates) == nil && PaletteAutocomplete.complete("", candidates: candidates) == nil,
                 "Words, schemes and unknown text never complete")
         require(PaletteAutocomplete.complete("github.com", candidates: candidates)?.tail == "", "An exact host stays a completion with no ending")
+        let dev = [PaletteCompletionCandidate(address: "http://localhost:3000/dashboard", title: "Dev", weight: 5),
+                   PaletteCompletionCandidate(address: "http://192.168.1.10:8080/", title: "Router", weight: 1)]
+        let local = PaletteAutocomplete.complete("localh", candidates: dev)
+        require(local?.text == "localhost:3000" && local?.address == "http://localhost:3000",
+                "A host completion keeps its port and an http-only site's scheme: \(String(describing: local))")
+        require(PaletteAutocomplete.complete("192", candidates: dev)?.address == "http://192.168.1.10:8080/",
+                "An IP with a port completes to the visited root")
 
         // Calculator.
         require(PaletteCalculator.evaluate("2*21+0.5")?.display == "42.5" && PaletteCalculator.evaluate("= (1+2)^2 × 3")?.value == 27
