@@ -72,8 +72,12 @@ import WebKit
 
     static func encodedRules(_ rules: [String: [String]]) -> String? {
         let entries: [[String: Any]] = rules.keys.sorted().compactMap { site in
-            guard let selectors = rules[site], !selectors.isEmpty else { return nil }
-            return ["trigger": ["url-filter": ".*", "if-domain": ["*" + site]],
+            // One bad domain would fail the whole list, so only plain host names go in.
+            guard let selectors = rules[site], !selectors.isEmpty,
+                  site.range(of: "^[a-z0-9.-]+$", options: .regularExpression) != nil else { return nil }
+            // Exactly this site (and its www. twin): rules picked on example.com must not
+            // reach mail.example.com, where Restore on that site could not find them.
+            return ["trigger": ["url-filter": ".*", "if-domain": [site, "www." + site]],
                     "action": ["type": "css-display-none", "selector": selectors.joined(separator: ", ")]]
         }
         guard !entries.isEmpty, let data = try? JSONSerialization.data(withJSONObject: entries) else { return nil }
@@ -259,7 +263,8 @@ import WebKit
     }
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        guard !finished, window?.isKeyWindow == true else { return false }
+        // ⌘Z is the picker's only while it has focus; in the address field it stays text undo.
+        guard !finished, window?.isKeyWindow == true, window?.firstResponder === self else { return false }
         let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask).subtracting([.capsLock, .numericPad, .function])
         if mods == .command, event.charactersIgnoringModifiers?.lowercased() == "z" { undoLast(); return true }
         return false
@@ -488,7 +493,6 @@ enum HideElementsScript {
       const stableClass = (c) => /^[A-Za-z][\w-]{1,40}$/.test(c) && !/\d{3,}/.test(c) && !/[0-9a-f]{6,}/i.test(c)
         && !/(^css-|^sc-|^jsx-|^svelte-|^tw-|__[A-Za-z0-9]{5}$|^is-|^has-|hover|active|focus|open|visible|hidden|show)/.test(c);
       const unique = (sel, el) => { try { const all = document.querySelectorAll(sel); return all.length === 1 && all[0] === el; } catch (e) { return false; } };
-      const matches = (sel, el) => { try { return document.querySelector(sel) === el; } catch (e) { return false; } };
       const part = (el, withIndex) => {
         let s = el.localName;
         if (!/^[a-z][a-z0-9-]*$/.test(s)) s = '*';
@@ -504,7 +508,7 @@ enum HideElementsScript {
         if (el.id && stableID(el.id) && unique('#' + CSS.escape(el.id), el)) return '#' + CSS.escape(el.id);
         const plain = [], indexed = [];
         let node = el;
-        for (let depth = 0; node && node.nodeType === 1 && node !== document.documentElement && depth < 8; depth++) {
+        for (let depth = 0; node && node.nodeType === 1 && node !== document.documentElement && depth < 32; depth++) {
           if (node !== el && node.id && stableID(node.id)) {
             const anchor = '#' + CSS.escape(node.id);
             if (unique(anchor, node)) { plain.unshift(anchor); indexed.unshift(anchor); break; }
@@ -515,8 +519,10 @@ enum HideElementsScript {
           const b = indexed.join(' > '); if (unique(b, el)) return b;
           node = node.parentElement;
         }
+        // Never a selector that also matches other elements: it is saved for the whole
+        // site, where a loose one would hide far more than what was clicked.
         const last = indexed.join(' > ');
-        return matches(last, el) ? last : null;
+        return unique(last, el) ? last : null;
       };
       const box = (el) => { const r = el.getBoundingClientRect(); return { x: r.left, y: r.top, w: r.width, h: r.height }; };
       const meaningful = (el) => {
