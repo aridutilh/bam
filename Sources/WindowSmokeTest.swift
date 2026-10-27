@@ -98,6 +98,15 @@ import WebKit
         try check(p.browsers[c.id] == nil, "Main window kept a page for a tab closed elsewhere")
         try check(p.session.tabs.contains { $0.id == p.session.activeID }, "Main window's selection points at a closed tab")
 
+        // A kept tab closed in one window is unloaded: its live page in the other window goes too.
+        try check(sc.browsers[b.id] != nil, "B's page left the second window early")
+        p.pinTab(b.id)
+        p.close(b.id)
+        try await settle()
+        try check(p.session.tabs.first { $0.id == b.id }?.isUnloaded == true, "Closing a kept tab didn't unload it")
+        try check(sc.browsers[b.id] == nil, "A kept tab closed in one window kept playing in the other")
+        try check(sc.session.activeID != b.id, "Second window still shows a closed kept tab")
+
         // A tab added in the main window appears in the second window without changing its selection.
         let selectedThere = sc.session.activeID
         let e = p.session.add(address: page("e"))
@@ -110,6 +119,41 @@ import WebKit
         try check(p.promotionTarget === sc, "Little Bam would open in the main window instead of the frontmost one")
         BrowserController.frontmostNormalBrowser = nil
 
+        // Auto-archive runs in the main browser only and counts every window: the tab on screen in the
+        // second window is never due, a tab on screen nowhere is.
+        try check(await sc.sweepArchive() == 0 && sc.tabArchiver.clock == nil, "A second window ran its own archive sweep")
+        p.stampViewed(p.session.tabs.map(\.id), at: Date())
+        let due = TabArchivePolicy().due(p.archiveCandidates(staying: []), now: Date().addingTimeInterval(10_000_000), after: 60)
+        try check(!due.contains(sc.session.activeID), "Auto-archive would close the tab on screen in the second window")
+        try check(!due.contains(p.session.activeID), "Auto-archive would close the tab on screen in the main window")
+        try check(due.contains(d.id), "Auto-archive missed a tab on screen in no window")
+        try check(p.livePage(sc.session.activeID) != nil || sc.browsers[sc.session.activeID] == nil, "Main browser can't see the second window's pages")
+
+        // Nothing keeps a closed window alive (no cycle through the shared browser or the group).
+        weak var probeController: BrowserController?
+        do {
+            let probe = SecondaryWindowController(primary: p, group: group, state: nil, like: p, frame: nil)
+            probeController = probe.controller
+            probe.show(openingPalette: false)
+            try await settle()
+            probe.window.close()
+        }
+        s.window.makeKeyAndOrderFront(nil)
+        try await wait("closed window freed") { probeController == nil }
+
+        // The main window closed while the second stays open: its pages go and don't come back on the
+        // next shared change; its shown tab no longer counts as viewed.
+        pWindow.orderOut(nil)
+        p.releasePagesWhileHidden()
+        _ = sc.session.add(address: page("f"))
+        try await settle()
+        try check(p.browsers.isEmpty, "A closed main window loaded pages again")
+        try check(!p.viewingWindows.contains { $0 === p }, "A closed main window's tab still counts as viewed")
+        pWindow.makeKeyAndOrderFront(nil)
+        try await wait("main window back") { pWindow.isKeyWindow }
+        p.showActive()
+        try await wait("main window shows its tab again") { p.browsers[p.session.activeID] != nil }
+
         // Save, reload: every tab exactly once, and the second window comes back with its selection.
         let state = s.state
         let stateURL = folder.appendingPathComponent("windows.json")
@@ -120,6 +164,7 @@ import WebKit
         let reloaded = SessionFile.load(sessionURL)
         let reloadedIDs = reloaded.tabs.map(\.id)
         try check(Set(reloadedIDs).count == reloadedIDs.count, "A tab was saved twice")
+        try check(Set(reloadedIDs) == Set(p.session.tabs.map(\.id)) && Set(reloadedIDs) == Set(sc.session.tabs.map(\.id)), "Saved tabs differ from the windows' tabs (one lost or duplicated)")
         for id in [a.id, b.id, d.id, e] { try check(reloadedIDs.contains(id), "A tab was lost on save") }
         try check(!reloadedIDs.contains(c.id), "A closed tab came back")
         try check(reloaded.activeID == p.session.activeID, "Main window's selection wasn't saved")
