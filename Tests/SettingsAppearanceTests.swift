@@ -27,7 +27,7 @@ import AppKit
             MainActor.assumeIsolated { settings.syncAppearance() }
         }
         defer { NotificationCenter.default.removeObserver(token) }
-        settings.select(.general)
+        settings.select(.appearance)
         settle()
         func chips() -> [BamChip] {
             descendants(settings.window.contentView!).compactMap { $0 as? BamChip }.filter { $0.accessibilityLabel()?.hasSuffix(" appearance") == true }
@@ -57,6 +57,55 @@ import AppKit
                 "Menu changes re-pick chips without rebuilding Settings")
         require(settings.window.firstResponder === focusedBefore, "Menu changes leave Settings focus alone")
         BrowserAppearance.apply(.system)
-        print("PASS: \(checks) Settings appearance focus checks")
+
+        // Websites: the chips and the keep-awake list call the browser with real values.
+        var zoom: Double?, font: Double?, awake: [(String, Bool)] = []
+        var webActions = SettingsActions()
+        webActions.setPageZoom = { zoom = $0 }
+        webActions.setMinimumFontSize = { font = $0 }
+        webActions.setKeepsSiteAwake = { awake.append(($0, $1)) }
+        webActions.hostFromTyped = { $0.contains(".") ? $0.lowercased() : nil }
+        let web = SettingsController(snapshot: {
+            var s = SettingsSnapshot()
+            s.zoomChoices = [0.9, 1, 1.1, 1.25]; s.pageZoom = 1
+            s.fontChoices = [0, 9, 12, 14, 18]; s.minimumFontSize = 0
+            s.keepAwakeHosts = ["web.whatsapp.com"]
+            return s
+        }, actions: webActions)
+        web.select(.websites)
+        settle()
+        func control<T: NSView>(_ type: T.Type, _ label: String) -> T? {
+            descendants(web.window.contentView!).compactMap { $0 as? T }.first { $0.accessibilityLabel() == label }
+        }
+        control(BamChip.self, "125% page zoom")?.performClick(nil)
+        require(zoom == 1.25, "Page zoom chip sets 125%")
+        control(BamChip.self, "14 minimum font size")?.performClick(nil)
+        require(font == 14, "Minimum font size chip sets 14 pt")
+        require(control(BamChip.self, "125% page zoom")?.isPicked == true && control(BamChip.self, "100% page zoom")?.isPicked == false,
+                "Zoom chips re-pick in place")
+        control(SettingsIconButton.self, "Stop keeping web.whatsapp.com awake")?.performClick(nil)
+        require(awake.first.map { $0.0 == "web.whatsapp.com" && !$0.1 } == true, "Removing a site stops keeping it awake")
+
+        // Search finds rows by title and keyword, and shortcuts by name or keys.
+        let store = ShortcutStore.shared
+        store.configure(persists: false)
+        store.register([MenuShortcut(id: "copyCurrentURL:", title: "Copy Link", menu: "Edit", defaultCombo: KeyCombo("c", [.command, .shift])),
+                        MenuShortcut(id: "zoomIn:", title: "Zoom In", menu: "View", defaultCombo: KeyCombo("+", .command))])
+        let zoomHits = web.search("zoom")
+        require(zoomHits.first == SettingsSearchHit(section: .websites, title: "Page zoom", detail: zoomHits.first?.detail),
+                "“zoom” finds Page zoom first, got \(zoomHits.map(\.title))")
+        require(zoomHits.contains { $0.shortcutID == "zoomIn:" }, "and the Zoom In shortcut")
+        require(web.search("ad blocker").first?.title == "Block ads and trackers", "keywords find the ad blocker")
+        require(web.search("⇧⌘C").map(\.shortcutID) == ["copyCurrentURL:"], "keys find the command wearing them")
+        require(web.search("nothing like this").isEmpty, "no results for nonsense")
+        web.go(to: zoomHits[0])
+        settle()
+        require(web.section == .websites && web.searchField.stringValue.isEmpty, "a result opens its section")
+        web.go(to: web.search("copy link")[0])
+        settle()
+        require(web.section == .shortcuts, "a shortcut result opens Shortcuts")
+        let recorders = descendants(web.window.contentView!).compactMap { $0 as? BamShortcutRecorder }
+        require(recorders.contains { $0.commandID == "copyCurrentURL:" } && recorders.count >= 2, "Shortcuts lists every registered command")
+        print("PASS: \(checks) Settings appearance, websites and search checks")
     }
 }

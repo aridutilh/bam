@@ -7,9 +7,9 @@ import WebKit
     static func configure(_ web: WKWebView) {
         web.allowsMagnification = true
     }
-    /// Actual Size (⌘0) should also undo a pinch.
+    /// Actual Size (⌘0) returns to Settings › Websites' default zoom and also undoes a pinch.
     static func resetZoom(_ web: WKWebView) {
-        web.pageZoom = 1
+        web.pageZoom = CGFloat(WebsitePreferences.pageZoom)
         if web.magnification != 1 { web.magnification = 1 }
     }
 }
