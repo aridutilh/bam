@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Extensions can be inspected like pages: each extension's background and pages appear under its name in Safari's Develop menu, so its console errors can be read.
 - The permission review when adding an extension no longer mentions 1Password's desktop app for extensions that have nothing to do with it; the desktop-app note now only appears for extensions that ask to talk to a desktop app.
 
 - Close Window (⇧⌘W) closes the window you're in, private windows included.
