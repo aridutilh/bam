@@ -152,6 +152,10 @@ struct SidebarExtensionItem {
     }
     var onToggleFolder: ((UUID) -> Void)?
     var onRenameFolder: ((UUID) -> Void)?
+    /// The controller's tab actions for a row's menu (Arc's order): the top group, and Close Tabs Below for Today rows.
+    var tabActionItems: ((UUID) -> (top: [NSMenuItem], moveTo: NSMenuItem?, closeBelow: NSMenuItem?))?
+    /// A tab renamed in place (double-click its title); an empty name goes back to the page's own title.
+    var onRenameTab: ((UUID, String) -> Void)?
     /// Creates a folder; the item is a tab to put inside it or a parent folder.
     var onNewFolder: ((UUID?) -> Void)?
     var onUngroupFolder: ((UUID) -> Void)?
@@ -250,7 +254,8 @@ struct SidebarExtensionItem {
         toggle.handler = { [weak self] in self?.onToggleSidebar?() }
         search.handler = { [weak self] in self?.onSearch?() }
         plus.handler = { [weak self] in self?.onNewTab?() }
-        downloads.handler = { [weak self] in self?.onShowDownloads?() }
+        downloads.handler = { [weak self] in self?.onShowRecentlyClosed?() }
+        downloads.showDownloads = { [weak self] in self?.onShowDownloads?() }
         downloads.showHistory = { [weak self] in self?.onShowHistory?() }
         downloads.showRecentlyClosed = { [weak self] in self?.onShowRecentlyClosed?() }
         downloads.manageSpaces = { [weak self] in self?.onManageSpaces?() }
@@ -383,6 +388,8 @@ struct SidebarExtensionItem {
         page.move = { [weak self] in self?.onMoveTab?($0, $1) }
         page.toggleFolder = { [weak self] in self?.onToggleFolder?($0) }
         page.renameFolder = { [weak self] in self?.onRenameFolder?($0) }
+        page.tabActionItems = { [weak self] in self?.tabActionItems?($0) }
+        page.renameTab = { [weak self] in self?.onRenameTab?($0, $1) }
         page.newFolder = { [weak self] in self?.onNewFolder?($0) }
         page.ungroupFolder = { [weak self] in self?.onUngroupFolder?($0) }
         page.moveToFolder = { [weak self] in self?.onMoveToFolder?($0, $1) }
@@ -674,6 +681,8 @@ struct SidebarExtensionItem {
     var reorderSaved: ((UUID, Int) -> Void)?
     var toggleFolder: ((UUID) -> Void)?
     var renameFolder: ((UUID) -> Void)?
+    var tabActionItems: ((UUID) -> (top: [NSMenuItem], moveTo: NSMenuItem?, closeBelow: NSMenuItem?)?)?
+    var renameTab: ((UUID, String) -> Void)?
     var newFolder: ((UUID?) -> Void)?
     var ungroupFolder: ((UUID) -> Void)?
     var moveToFolder: ((UUID, UUID?) -> Void)?
@@ -923,6 +932,27 @@ struct SidebarExtensionItem {
         while suffix < min(oldKeys.count, newKeys.count) - prefix,
               oldKeys[oldKeys.count - 1 - suffix] == newKeys[newKeys.count - 1 - suffix] { suffix += 1 }
         let removed = oldKeys.count - prefix - suffix, inserted = newKeys.count - prefix - suffix
+        // One row moved (a reorder, a drop, Keep/Unkeep): it slides to its new place and the rows between make room.
+        if removed == inserted, removed >= 2, removed <= 300 {
+            let i = prefix, j = prefix + removed - 1
+            let from: Int?, to: Int?
+            if Array(oldKeys[(i + 1)...j]) == Array(newKeys[i..<j]) && oldKeys[i] == newKeys[j] { from = i; to = j }
+            else if Array(oldKeys[i..<j]) == Array(newKeys[(i + 1)...j]) && oldKeys[j] == newKeys[i] { from = j; to = i }
+            else { from = nil; to = nil }
+            if let from, let to {
+                NSAnimationContext.runAnimationGroup { context in
+                    context.duration = 0.22
+                    context.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0.8, 0.2, 1)
+                    table.beginUpdates(); table.moveRow(at: from, to: to); table.endUpdates()
+                }
+                table.enumerateAvailableRowViews { [weak self] _, row in
+                    guard let self, self.entries.indices.contains(row), case .tab(let index) = self.entries[row],
+                          let cell = self.table.view(atColumn: 0, row: row, makeIfNecessary: false) as? SidebarTabCell else { return }
+                    self.configure(cell, item: self.tabs[index])
+                }
+                return true
+            }
+        }
         guard (removed == 0) != (inserted == 0), max(removed, inserted) <= 300 else { return false }
         NSAnimationContext.runAnimationGroup { context in
             context.duration = 0.18
@@ -974,6 +1004,8 @@ struct SidebarExtensionItem {
         row.reorderSaved = { [weak self, weak row] direction in if let id = row?.item.id { self?.reorderSaved?(id, direction) } }
         row.toggleFolder = { [weak self, weak row] in if let id = row?.item.id { self?.toggleFolder?(id) } }
         row.renameFolder = { [weak self, weak row] in if let id = row?.item.id { self?.renameFolder?(id) } }
+        row.tabActionItems = { [weak self, weak row] in row.flatMap { self?.tabActionItems?($0.item.id) } ?? nil }
+        row.renameTab = { [weak self, weak row] title in if let id = row?.item.id { self?.renameTab?(id, title) } }
         row.newFolder = { [weak self, weak row] in if let id = row?.item.id { self?.newFolder?(id) } }
         row.ungroupFolder = { [weak self, weak row] in if let id = row?.item.id { self?.ungroupFolder?(id) } }
         row.moveToFolder = { [weak self, weak row] target in if let id = row?.item.id { self?.moveToFolder?(id, target) } }
@@ -1063,8 +1095,30 @@ struct SidebarExtensionItem {
     func tableView(_ tableView: NSTableView, acceptDrop info: NSDraggingInfo, row: Int, dropOperation: NSTableView.DropOperation) -> Bool {
         guard let raw = info.draggingPasteboard.string(forType: .bamSidebarRow), let id = UUID(uuidString: raw),
               let space = spaceAppearance?.id else { return false }
-        return drop?(id, dropTarget(row: row, operation: dropOperation).target, space) ?? false
+        guard drop?(id, dropTarget(row: row, operation: dropOperation).target, space) ?? false else { return false }
+        glideDrop(info, to: id)
+        return true
     }
+    /// Arc: a dropped row glides from where it was let go into its new place. The list has already been rebuilt
+    /// with the row in place; the row starts where the drag image was and slides home.
+    private func glideDrop(_ info: NSDraggingInfo, to id: UUID) {
+        guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion, let row = rowByID[id], window != nil else { return }
+        table.layoutSubtreeIfNeeded()
+        guard let cell = table.view(atColumn: 0, row: row, makeIfNecessary: false), let layer = cell.layer else { return }
+        // The drag image's top-left, in the table (the image is the row's own snapshot, so its top is the row's top).
+        let imageBottom = table.convert(info.draggedImageLocation, from: nil)
+        let imageTop = table.isFlipped ? imageBottom.y - (info.draggedImage?.size.height ?? cell.bounds.height) : imageBottom.y
+        let target = cell.convert(NSPoint.zero, to: table)
+        let dy = imageTop - target.y, dx = imageBottom.x - target.x
+        guard abs(dy) > 2 || abs(dx) > 2, abs(dy) < 2000 else { return }
+        let start = CATransform3DMakeTranslation(dx, layer.isGeometryFlipped == cell.isFlipped ? dy : -dy, 0)
+        let glide = CABasicAnimation(keyPath: "transform")
+        glide.fromValue = NSValue(caTransform3D: start); glide.toValue = NSValue(caTransform3D: CATransform3DIdentity)
+        glide.duration = Self.dropGlideDuration
+        glide.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0.8, 0.2, 1)
+        layer.add(glide, forKey: "bam.dropGlide")
+    }
+    static let dropGlideDuration: TimeInterval = 0.24
 
     override func layout() {
         super.layout(); let w = bounds.width
@@ -2122,7 +2176,35 @@ private final class ArkSpaceButton: ArkHoverButton, SpaceTinted {
     /// A dragged tab or folder dropped here moves to this Space.
     var acceptDrop: ((UUID) -> Bool)?
     private var dropHovered = false { didSet { if oldValue != dropHovered { needsDisplay = true } } }
-    var selected = false { didSet { needsDisplay = true; setAccessibilityValue(selected ? "Selected" : "Not selected") } }
+    var selected = false {
+        didSet {
+            setAccessibilityValue(selected ? "Selected" : "Not selected")
+            guard oldValue != selected else { return }
+            animateLit(to: selected ? 1 : 0)
+        }
+    }
+    /// 0: a gray, receded icon; 1: the Space's own colors. Changes fade over `litDuration` (Arc's footer).
+    private(set) var lit: CGFloat = 0
+    private var litTimer: Timer?
+    static let litDuration: TimeInterval = 0.16
+    private func animateLit(to target: CGFloat) {
+        litTimer?.invalidate(); litTimer = nil
+        guard window != nil, !isHiddenOrHasHiddenAncestor, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
+            lit = target; needsDisplay = true; return
+        }
+        let start = lit, began = ProcessInfo.processInfo.systemUptime
+        let timer = Timer(timeInterval: 1.0 / 60, repeats: true) { [weak self] timer in
+            MainActor.assumeIsolated {
+                guard let self, self.litTimer === timer else { timer.invalidate(); return }
+                let t = min(1, (ProcessInfo.processInfo.systemUptime - began) / Self.litDuration)
+                self.lit = start + (target - start) * CGFloat(1 - pow(1 - t, 2))
+                self.needsDisplay = true
+                if t >= 1 { self.lit = target; timer.invalidate(); self.litTimer = nil }
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        litTimer = timer
+    }
     init(space: BrowserSpace) {
         index = space.id
         super.init(frame: .zero)
@@ -2156,10 +2238,11 @@ private final class ArkSpaceButton: ArkHoverButton, SpaceTinted {
             let ring = NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: 7, yRadius: 7); ring.lineWidth = 1.5; ring.stroke()
         }
         let size: CGFloat = 16
-        let lit = selected || hovered || dropHovered
-        ArkSpaceIcon.draw((emoji, symbolName, lit ? tint : ArkPalette.secondary),
-                          in: NSRect(x: (bounds.width - size) / 2, y: (bounds.height - size) / 2, width: size, height: size),
-                          opacity: lit ? 1 : 0.55, grayscale: !lit)
+        let rect = NSRect(x: (bounds.width - size) / 2, y: (bounds.height - size) / 2, width: size, height: size)
+        let amount = hovered || dropHovered ? 1 : lit
+        // Crossfade the receded gray icon into the colored one.
+        if amount < 1 { ArkSpaceIcon.draw((emoji, symbolName, ArkPalette.secondary), in: rect, opacity: 0.55 * (1 - amount), grayscale: true) }
+        if amount > 0 { ArkSpaceIcon.draw((emoji, symbolName, tint), in: rect, opacity: amount) }
     }
     override func menu(for event: NSEvent) -> NSMenu? {
         if let menu = contextMenu?() { return menu }
@@ -2201,7 +2284,7 @@ private final class ArkSpaceHeading: ArkHoverButton, SpaceTinted {
 }
 
 @MainActor
-private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted, ArkHoverTracking {
+private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted, ArkHoverTracking, NSTextFieldDelegate {
     var displayedSpaceTint: NSColor { spaceTint }
     override func resetCursorRects() {
         super.resetCursorRects()
@@ -2218,6 +2301,8 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted, Ar
     var reorderSaved: ((Int) -> Void)?
     var toggleFolder: (() -> Void)?
     var renameFolder: (() -> Void)?
+    var tabActionItems: (() -> (top: [NSMenuItem], moveTo: NSMenuItem?, closeBelow: NSMenuItem?)?)?
+    var renameTab: ((String) -> Void)?
     var newFolder: (() -> Void)?
     var ungroupFolder: (() -> Void)?
     var moveToFolder: ((UUID?) -> Void)?
@@ -2297,6 +2382,7 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted, Ar
             identifier = NSUserInterfaceItemIdentifier("tab-row-\(item.id.uuidString)")
             // Reused for another row mid-press: abandon that press and any drag it began.
             dragOrigin = nil; pressedID = nil; didDrag = false
+            endRename(commit: false)
         }
         if first || old.title != item.title || old.isFolder != item.isFolder || old.subtitle != item.subtitle || old.knownTitle != item.knownTitle || old.hasCustomTitle != item.hasCustomTitle {
             // Assistive tech hears exactly what the row shows, including the blank-title fallback.
@@ -2554,6 +2640,7 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted, Ar
     }
     override func hitTest(_ point: NSPoint) -> NSView? {
         guard let hit = super.hitTest(point) else { return nil }
+        if let renameField, hit === renameField || hit.isDescendant(of: renameField) { return hit }
         // Labels and symbols belong to the row's selection target; the close
         // button keeps its own native control hit target.
         return hit === closeButton ? closeButton : self
@@ -2564,6 +2651,10 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted, Ar
         // woken) or a folder toggled only on mouse-up without a drag, so
         // dragging never selects or wakes anything. The pressed identity is
         // captured now in case the view is reused before release.
+        // Arc: double-clicking a tab's title renames it in place.
+        if event.clickCount == 2, !item.isFolder, renameTab != nil {
+            dragOrigin = nil; pressedID = nil; beginRename(); return
+        }
         dragOrigin = convert(event.locationInWindow, from: nil); didDrag = false; pressedID = item.id
         // Pointer input: no row shows a keyboard ring now (also one that kept focus from earlier arrows).
         (window?.firstResponder as? ArkTabRow)?.hideFocusRing()
@@ -2665,6 +2756,15 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted, Ar
     override func menu(for event: NSEvent) -> NSMenu? {
         if item.isFolder { return folderMenu() }
         let menu = NSMenu(); menu.autoenablesItems = false
+        // Arc's order: Copy Link, Share | Change Icon…, Rename…, Mute | Duplicate, Move to; then Bam's keeping and
+        // folder entries; closing last.
+        let actions = tabActionItems?()
+        let arcMoveTo = item.isPinned ? nil : actions?.moveTo
+        if let top = actions?.top, !top.isEmpty {
+            top.forEach(menu.addItem)
+            if let arcMoveTo { menu.addItem(arcMoveTo) }
+            menu.addItem(.separator())
+        }
         let keepTitle = item.isSplit ? (item.isPinned ? "Unkeep Left Tab" : "Keep Left Tab") : (item.isPinned ? "Unkeep Tab" : "Keep Tab")
         let pinItem = NSMenuItem(title: keepTitle, action: #selector(pinFromMenu), keyEquivalent: "")
         pinItem.image = NSImage(systemSymbolName: item.isPinned ? "pin.slash" : "pin", accessibilityDescription: nil)
@@ -2694,13 +2794,15 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted, Ar
             let out = NSMenuItem(title: "Remove from Folder", action: #selector(removeFromFolderFromMenu), keyEquivalent: "")
             out.target = self; menu.addItem(out)
         }
-        if destinations.count > 1 { menu.addItem(spaceSubmenu()) }
+        // Today rows move through Arc's "Move to" (with New Space…) above; kept rows keep their own Space list.
+        if arcMoveTo == nil, destinations.count > 1 { menu.addItem(spaceSubmenu()) }
         menu.addItem(.separator())
         let closeItem = NSMenuItem(title: item.isSplit ? "Close Split" : item.isPinned ? "Unload Tab" : "Close Tab", action: #selector(closeFromMenu), keyEquivalent: "")
         closeItem.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: nil)
         closeItem.target = self; closeItem.isEnabled = !item.isPinned || !item.isUnloaded
         closeItem.toolTip = item.isSplit ? "Saved panes unload and remain in the sidebar; ordinary panes close." : nil
         menu.addItem(closeItem)
+        if !item.isPinned, let below = actions?.closeBelow { menu.addItem(below) }
         if removesOnTrailingAction {
             // The menu's way to the cross on an unloaded kept tab (keyboard and VoiceOver users never see that button).
             let removeItem = NSMenuItem(title: "Remove Tab", action: #selector(removeFromMenu), keyEquivalent: "")
@@ -2720,6 +2822,48 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted, Ar
     @objc private func closeFromMenu() { close?() }
     @objc private func toggleFromMenu() { toggleFolder?() }
     @objc private func renameFromMenu() { renameFolder?() }
+
+    // MARK: Rename in place
+    private var renameField: NSTextField?
+    private var renameCancelled = false
+    /// The title becomes an edit field over the same spot: Return keeps the new name (empty restores the page's
+    /// own title), Esc or clicking away without changes leaves it as it was.
+    func beginRename() {
+        guard renameField == nil, !item.isFolder else { return }
+        let field = NSTextField(string: titleLabel.stringValue)
+        field.isBordered = false; field.drawsBackground = true; field.focusRingType = .none
+        field.backgroundColor = effectiveAppearance.isDarkChrome ? NSColor(white: 1, alpha: 0.10) : NSColor(white: 1, alpha: 0.85)
+        field.font = titleLabel.font; field.textColor = ArkPalette.ink
+        field.usesSingleLineMode = true; field.lineBreakMode = .byClipping; field.cell?.isScrollable = true
+        field.placeholderString = SidebarDisplayPolicy.displayHost(item.subtitle)
+        field.delegate = self
+        field.identifier = NSUserInterfaceItemIdentifier("tab-rename-field")
+        field.setAccessibilityLabel("Tab name")
+        let end = bounds.width - ArkMetrics.trailingGap
+        field.frame = NSRect(x: titleLabel.frame.minX - 1, y: titleLabel.frame.minY - 1, width: max(40, end - titleLabel.frame.minX + 1), height: titleLabel.frame.height + 2)
+        field.wantsLayer = true; field.layer?.cornerRadius = 4
+        renameCancelled = false
+        titleLabel.isHidden = true
+        addSubview(field); renameField = field
+        window?.makeFirstResponder(field)
+        field.currentEditor()?.selectAll(nil)
+    }
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        if commandSelector == #selector(NSResponder.cancelOperation(_:)) { renameCancelled = true; endRename(commit: false); return true }
+        if commandSelector == #selector(NSResponder.insertNewline(_:)) { endRename(commit: true); return true }
+        return false
+    }
+    func controlTextDidEndEditing(_ obj: Notification) { endRename(commit: !renameCancelled) }
+    private func endRename(commit: Bool) {
+        guard let field = renameField else { return }
+        renameField = nil
+        let value = field.stringValue
+        field.delegate = nil
+        if window?.firstResponder === field.currentEditor() { window?.makeFirstResponder(self) }
+        field.removeFromSuperview()
+        titleLabel.isHidden = false
+        if commit, value != titleLabel.stringValue { renameTab?(value) }
+    }
     @objc private func newFolderFromMenu() { newFolder?() }
     @objc private func ungroupFromMenu() { ungroupFolder?() }
     @objc private func removeFromFolderFromMenu() { moveToFolder?(nil) }
@@ -2732,16 +2876,17 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted, Ar
     var showHistory: (() -> Void)?
     var showRecentlyClosed: (() -> Void)?
     var manageSpaces: (() -> Void)?
+    /// Opens Downloads (the menu's Downloads item; the button itself opens Archived Tabs, as Arc's archive box does).
+    var showDownloads: (() -> Void)?
     init() {
         super.init(frame: .zero)
-        identifier = NSUserInterfaceItemIdentifier("sidebar-downloads")
-        setAccessibilityLabel("Downloads")
-        setAccessibilityHelp("Opens Downloads. Its menu has History, Recently Closed and Manage Spaces.")
-        // View > Downloads keeps a fixed ⌘J (App.swift); the menu bar owns that key.
-        toolTip = "Downloads (⌘J)"
+        identifier = NSUserInterfaceItemIdentifier("sidebar-library")
+        setAccessibilityLabel("Archived Tabs")
+        setAccessibilityHelp("Opens Archived Tabs. Its menu has Downloads, History and Manage Spaces.")
+        toolTip = "Archived Tabs"
         let menu = NSMenu(title: "Library")
-        for (title, action) in [("Downloads", #selector(downloadsFromMenu)), ("History", #selector(historyFromMenu)),
-                                ("Recently Closed", #selector(recentlyClosedFromMenu))] {
+        for (title, action) in [("Archived Tabs", #selector(recentlyClosedFromMenu)), ("Downloads", #selector(downloadsFromMenu)),
+                                ("History", #selector(historyFromMenu))] {
             let item = NSMenuItem(title: title, action: action, keyEquivalent: ""); item.target = self; menu.addItem(item)
         }
         menu.addItem(.separator())
@@ -2750,13 +2895,14 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted, Ar
         self.menu = menu
     }
     required init?(coder: NSCoder) { fatalError() }
-    @objc private func downloadsFromMenu() { handler?() }
+    @objc private func downloadsFromMenu() { showDownloads?() }
     @objc private func historyFromMenu() { showHistory?() }
     @objc private func recentlyClosedFromMenu() { showRecentlyClosed?() }
     @objc private func manageSpacesFromMenu() { manageSpaces?() }
     override func draw(_ dirtyRect: NSRect) {
         if (hovered || isHighlighted) && isEnabled { fill(isHighlighted ? ArkPalette.pressed : ArkPalette.iconHover, radius: 7) }
-        symbol("arrow.down.circle", rect: NSRect(x: (bounds.width - 17) / 2, y: (bounds.height - 17) / 2, width: 17, height: 17),
+        // Arc's footer corner: the archive box.
+        symbol("archivebox", rect: NSRect(x: (bounds.width - 17) / 2, y: (bounds.height - 17) / 2, width: 17, height: 17),
                color: hovered ? ArkPalette.ink : ArkPalette.chromeIcon, size: 16)
     }
 }

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Right-clicking a tab follows Arc's order: Copy Link, Share, Change Icon…, Rename…, Mute, Duplicate and, for Today tabs, Move to (with New Space…), with Close Tab and Close Tabs Below last.
+- Double-click a tab's title to rename it in place; Return keeps the name, Esc cancels, and an empty name goes back to the page's own title.
+- The footer's bottom-left button is now Arc's archive box: it opens Archived Tabs, and its menu has Downloads, History and Manage Spaces.
+- Switching Spaces with the keyboard, the footer or the Spaces menu now slides the new Space in quickly, as Arc does, and the window color crossfades with it instead of jumping. The footer's Space icons fade between gray and color.
+- With the sidebar hidden, rest the pointer at the window's left edge and the sidebar slides in as a floating card over the page; it slides away when you move off it. Press ⌘S while it's showing to pin it back, and the page slides over to make room.
+- Dragging a tab is more physical: a tab you drop glides from where you let go into its new place, and tabs that move (drops, Move Earlier/Later, keeping a tab) slide to their new spots instead of jumping.
 - Change Tab Icon… (Tabs menu and command bar) now works on every tab, not only kept ones: pick an icon and a name, and they stay with the tab if you keep it later.
 - Air Traffic Control, as in Arc: Settings › Links routes links from other apps. Each route is "URL contains …" or "URL is equal to …", and opens in a chosen Space, the Space you're in, or Little Bam. Routes are checked top to bottom. Everything else goes to a default you pick (Little Bam, as before). "Try a link" shows where an address would open and which route decides. If you move the same site into the same Space three times, Settings › Links suggests a route for it.
 - New tab actions, as in Arc: Duplicate (with its back/forward history), Rename… (leave it empty to go back to the page title), Mute / Unmute for a tab playing sound and Close Tabs Below. They're in the Tabs menu and the command bar.
