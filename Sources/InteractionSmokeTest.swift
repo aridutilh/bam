@@ -190,8 +190,11 @@ import WebKit
                 @MainActor func retained(_ space: Int) async throws {
                     guard let web = pages[space], let token = tokens[space], let id = ids[space] else { throw ContentFailure(description: "Missing warm state") }
                     let state = try await js(web, "window.__arkSpaceToken==='\(token)' && document.getElementById('ark-space-state')?.value==='kept-\(space)' && performance.timeOrigin===window.__arkSpaceOrigin")
-                    try require(self.controller.browsers[id] === web && state as? Bool == true,
-                                "Space \(space) replaced/reloaded its WKWebView or lost live document state")
+                    // Say which: another view under the tab, the same view reloaded, or WebKit ending its process.
+                    try require(self.controller.browsers[id] === web,
+                                "Space \(space) replaced its WKWebView (\(self.controller.browsers[id] == nil ? "none now" : "another view"))")
+                    try require(state as? Bool == true,
+                                "Space \(space) reloaded or lost live document state (content process exits so far: \(self.controller.contentProcessTerminations))")
                 }
                 @MainActor func stillSettling(_ label: String) throws {
                     if !self.reduceMotion {
