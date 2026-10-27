@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- With more than one window open, Automatically Show Playing Videos, Sleep Idle Pages and Keep This Site Awake now change in every window at once, whether set from a menu, a site's controls or Settings.
 - Split View with New Page moves to Arc's ⌃⇧= (it was ⌥⌘=). A custom shortcut you set yourself is kept.
 - Opening a Split now shows the search bar over the new page: pick a site, search or an open tab and it loads there. Press Esc (or click outside) and the empty page closes again.
 - Little Bam windows no longer close into the archive while they're playing audio or video, holding text you're writing, downloading, or using the camera or microphone, and time your Mac spent asleep no longer counts toward "Archive Little Bams after" (waking up the next morning used to close them all).

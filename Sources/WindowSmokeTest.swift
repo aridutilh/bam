@@ -21,7 +21,7 @@ import WebKit
 
     func start() {
         Task { @MainActor in
-            do { try await run(); finish(true, "\(checks) checks: shared tabs with per-window Space and selection, live page moved between windows with a stand-in left behind, closes in either window, window close, saved and reloaded session with every tab once, restored window state, Little Bam target") }
+            do { try await run(); finish(true, "\(checks) checks: shared tabs with per-window Space and selection, live page moved between windows with a stand-in left behind, closes in either window, window close, saved and reloaded session with every tab once, restored window state, Little Bam target, shared playback/sleep/keep-awake settings incl. Settings window") }
             catch { finish(false, String(describing: error)) }
         }
     }
@@ -118,6 +118,25 @@ import WebKit
         BrowserController.frontmostNormalBrowser = { sc }
         try check(p.promotionTarget === sc, "Little Bam would open in the main window instead of the frontmost one")
         BrowserController.frontmostNormalBrowser = nil
+
+        // Playback, sleeping and keep-awake are the person's settings, not the window's: a change anywhere reaches every window.
+        let video = p.automaticallyShowsVideo, sleeping = p.automaticTabSleeping, awake = p.keepAwakeHosts
+        try check(sc.automaticallyShowsVideo == video && sc.automaticTabSleeping == sleeping && sc.keepAwakeHosts == awake,
+                  "Second window started with its own settings")
+        p.automaticallyShowsVideo = !video
+        try check(sc.automaticallyShowsVideo == !video, "Automatic Picture in Picture changed in one window only")
+        sc.automaticTabSleeping = !sleeping
+        try check(p.automaticTabSleeping == !sleeping, "Tab sleeping changed in one window only")
+        sc.keepAwakeHosts.insert("window-test.example")
+        try check(p.keepAwakeHosts.contains("window-test.example"), "Keep This Site Awake changed in one window only")
+        // The Settings window acts on the main browser; its change must reach the second window too.
+        let savedAwake = UserDefaults.standard.object(forKey: "KeepAwakeHosts")
+        p.settingsActions(showWelcome: {}).setKeepsSiteAwake("window-settings.example", true)
+        if let savedAwake { UserDefaults.standard.set(savedAwake, forKey: "KeepAwakeHosts") } else { UserDefaults.standard.removeObject(forKey: "KeepAwakeHosts") }
+        try check(sc.keepAwakeHosts.contains("window-settings.example"), "A Settings change didn't reach the second window")
+        p.automaticallyShowsVideo = video; p.automaticTabSleeping = sleeping; p.keepAwakeHosts = awake
+        try check(sc.automaticallyShowsVideo == video && sc.automaticTabSleeping == sleeping && sc.keepAwakeHosts == awake,
+                  "Restoring settings didn't reach the second window")
 
         // Auto-archive runs in the main browser only and counts every window: the tab on screen in the
         // second window is never due, a tab on screen nowhere is.

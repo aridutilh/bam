@@ -23,6 +23,14 @@ import WebKit
     private var pending: Set<ObjectIdentifier> = []
     private var flushScheduled = false
     private var spacesChanged = false
+    private var sharingPreferences = false
+    /// Automatic Picture in Picture, tab sleeping and Keep This Site Awake: one setting for every window.
+    /// (Allowing ads on a site is already global: ContentBlocking updates every window's pages.)
+    func sharePreferences(from source: BrowserController) {
+        guard !sharingPreferences else { return }
+        sharingPreferences = true; defer { sharingPreferences = false }
+        for other in browsers where other !== source { other.adoptPreferences(from: source) }
+    }
 
     var browsers: [BrowserController] { members.compactMap(\.value).filter { !$0.isShuttingDown } }
     func add(_ browser: BrowserController) {
@@ -80,6 +88,22 @@ extension BrowserController {
     }
 
     func shareSessionWithOtherWindows() { windowGroup?.share(from: self) }
+
+    /// Takes another window's playback, sleeping and keep-awake settings, with the same side effects as
+    /// changing them here (pending automatic videos stop, a sleeping pass stops or starts).
+    func adoptPreferences(from source: BrowserController) {
+        if automaticallyShowsVideo != source.automaticallyShowsVideo {
+            automaticallyShowsVideo = source.automaticallyShowsVideo
+            if !automaticallyShowsVideo { cancelAutomaticDepartures() }
+        }
+        if automaticTabSleeping != source.automaticTabSleeping {
+            automaticTabSleeping = source.automaticTabSleeping
+            if !automaticTabSleeping { sleepTask?.cancel(); sleepPassID = nil }
+            else if memoryPressure == .critical { beginAutomaticSleepPass() }
+        }
+        if keepAwakeHosts != source.keepAwakeHosts { keepAwakeHosts = source.keepAwakeHosts }
+        if isViewLoaded, !isShuttingDown { refreshSiteSettings() }
+    }
 
     /// Every normal window over this session, this one included (just this one when it is alone).
     var sessionWindows: [BrowserController] {
