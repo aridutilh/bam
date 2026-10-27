@@ -24,7 +24,13 @@ typealias PreviewNavigationReadiness = @MainActor (@escaping @MainActor () -> Vo
     var onDownload: ((WKDownload) -> Void)? { didSet { content?.onDownload = onDownload } }
     var onVisit: ((String, String) -> Void)? { didSet { content?.onVisit = onVisit } }
     var shouldHandleEscape: (() -> Bool)?
+    /// The page's address or title changed; the sidebar's address field shows the Peek's page while it is up.
+    var onPageChange: (() -> Void)?
     var isPresented: Bool { backdrop != nil }
+    /// Shown and not hidden behind another tab.
+    var isShowing: Bool { backdrop?.isHidden == false }
+    /// What the address field shows while the Peek is up.
+    var pageURL: URL? { webView?.url ?? (webView as? PreviewWKWebView)?.requestedURL }
     var webView: WKWebView? { content?.webView }
 
     private var content: PreviewWebContent?
@@ -51,11 +57,13 @@ typealias PreviewNavigationReadiness = @MainActor (@escaping @MainActor () -> Vo
         self.content = content
         content.onDownload = onDownload
         content.onVisit = onVisit
-        let backdrop = PeekBackdrop(frame: hostView.bounds)
+        // Over the whole window, like the reference: the card may run past the page's own edges,
+        // while only the page dims and the sidebar stays live.
+        let overlayHost = hostView.window?.contentView ?? hostView
+        let backdrop = PeekBackdrop(frame: overlayHost.bounds, page: hostView)
         backdrop.autoresizingMask = [.width, .height]
         backdrop.onOutsideClick = { [weak self] in self?.dismiss() }
         backdrop.closeButton.target = self; backdrop.closeButton.action = #selector(closeAction)
-        backdrop.copyButton.target = self; backdrop.copyButton.action = #selector(copyAction)
         backdrop.tabButton.target = self; backdrop.tabButton.action = #selector(tabAction)
         backdrop.splitButton.target = self; backdrop.splitButton.action = #selector(splitAction)
         backdrop.littleButton.target = self; backdrop.littleButton.action = #selector(littleAction)
@@ -77,7 +85,7 @@ typealias PreviewNavigationReadiness = @MainActor (@escaping @MainActor () -> Vo
             if let surface = PeekOrigin.surface(in: hostView, excluding: browser) { browser.underPageBackgroundColor = surface }
         }
         if animate { backdrop.prepareEntrance() }
-        hostView.addSubview(backdrop, positioned: .above, relativeTo: nil)
+        overlayHost.addSubview(backdrop, positioned: .above, relativeTo: nil)
         backdrop.layoutSubtreeIfNeeded()
         installKeyboardHandling()
         if let window = hostWindow {
@@ -92,7 +100,7 @@ typealias PreviewNavigationReadiness = @MainActor (@escaping @MainActor () -> Vo
         if animate {
             PeekOrigin.resolve(in: hostView, excluding: browser) { [weak backdrop] link, label in
                 guard let backdrop, backdrop.superview != nil else { return }
-                backdrop.animateEntrance(from: link, label: label)
+                backdrop.animateEntrance(from: link.map { backdrop.convert($0, from: hostView) }, label: label)
             }
         } else if !PeekMotion.reduceMotion {
             backdrop.alphaValue = 0
@@ -136,12 +144,14 @@ typealias PreviewNavigationReadiness = @MainActor (@escaping @MainActor () -> Vo
         // The closing motion runs on a still of the card, so the page can be handed off right away.
         if exit != .none, wasVisible, let backdrop, let host = backdrop.superview, backdrop.alphaValue > 0.5 {
             let image = backdrop.cardSnapshot()
-            let style: PeekExitGhost.Style = exit == .expand ? .expand : .collapse(backdrop.origin)
+            let style: PeekExitGhost.Style = exit == .expand ? .expand(backdrop.pageRect) : .collapse(backdrop.origin, backdrop.originLabel)
             backdrop.stopEntrance()
             let dim = backdrop.dimColor
             let frame = backdrop.convert(backdrop.card.frame, to: host)
+            let dimFrame = backdrop.convert(backdrop.dim.frame, to: host)
+            let radius = backdrop.dim.layer?.cornerRadius ?? 0
             backdrop.removeFromSuperview()
-            PeekExitGhost.run(in: host, image: image, cardFrame: frame, dim: dim, style: style)
+            PeekExitGhost.run(in: host, image: image, cardFrame: frame, dimFrame: dimFrame, dimRadius: radius, dim: dim, style: style)
         }
         if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
         keyMonitor = nil
@@ -187,13 +197,11 @@ typealias PreviewNavigationReadiness = @MainActor (@escaping @MainActor () -> Vo
         }
     }
 
+    private var lastPageKey = ""
     private func refresh() {
-        guard let content, let web = content.webView, let backdrop else { return }
-        let host = (web.url ?? (web as? PreviewWKWebView)?.requestedURL)?.host?
-            .replacingOccurrences(of: "www.", with: "", options: .anchored) ?? "Loading…"
-        backdrop.setTitle(host: host, page: content.status ?? web.title ?? "")
-        backdrop.title.toolTip = web.url?.absoluteString
-        backdrop.copyButton.isEnabled = web.url != nil
+        guard let content, let web = content.webView, backdrop != nil else { return }
+        let key = "\(pageURL?.absoluteString ?? "")|\(content.status ?? "")"
+        if key != lastPageKey { lastPageKey = key; onPageChange?() }
         let committed = web.url != nil && (web as? PreviewWKWebView)?.isProvisionalNavigation != true
         if awaitingFirstPaint, committed || content.status != nil || (!web.isLoading && (web as? PreviewWKWebView)?.pendingReadyURL == nil) {
             awaitingFirstPaint = false
@@ -207,20 +215,16 @@ typealias PreviewNavigationReadiness = @MainActor (@escaping @MainActor () -> Vo
                 }
             }
         }
-        backdrop.progress.doubleValue = web.estimatedProgress
-        backdrop.progress.isHidden = !web.isLoading
     }
 
     @objc private func closeAction() { dismiss() }
-    @objc private func copyAction() { copyLink() }
-    /// Copies the Peek's address (⇧⌘C) and flashes the button to say so.
+    /// Copies the Peek's address (⇧⌘C).
     func copyLink() {
-        guard let backdrop, let url = webView?.url ?? (webView as? PreviewWKWebView)?.requestedURL else { NSSound.beep(); return }
+        guard let url = webView?.url ?? (webView as? PreviewWKWebView)?.requestedURL else { NSSound.beep(); return }
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.writeObjects([url as NSURL])
         pasteboard.setString(url.absoluteString, forType: .string)
-        backdrop.copyButton.flash(symbol: "checkmark", toolTip: "Copied")
     }
     @objc private func tabAction() { promoteToTab() }
     @objc private func splitAction() { openInSplitView() }
@@ -301,45 +305,39 @@ typealias PreviewNavigationReadiness = @MainActor (@escaping @MainActor () -> Vo
     }
 }
 
-/// Peek's motion, tuned against frame-by-frame recordings of the reference: the card grows out
-/// of the clicked link on a critically damped spring (about 85% of the way in 0.1 s, settled by
-/// 0.25 s) while the page behind dims, and closes by shrinking back into the link while fading.
-/// Original Bam tuning; no recovered constants.
+/// Peek's motion and geometry, measured frame by frame (60 fps) against the reference: the link
+/// turns into a dark pill for two frames, then a white card springs out of it (critically damped,
+/// ~45% in 33 ms, ~87% in 100 ms, settled by ~0.17 s) while only the page dims. Closing shrinks
+/// the card back into a pale pill around the link, which then fades. Original Bam tuning.
 enum PeekMotion {
-    static let stiffness: CGFloat = 900
-    static let damping: CGFloat = 60
-    static let dimDuration: CFTimeInterval = 0.22
-    static let closeDuration: CFTimeInterval = 0.19
+    static let stiffness: CGFloat = 1600          // ω = 40 rad/s
+    static let chipLead: CFTimeInterval = 0.022    // the dark pill before the card appears
+    static let dimDuration: CFTimeInterval = 0.2
+    static let closeDuration: CFTimeInterval = 0.18
+    static let chipFade: CFTimeInterval = 0.14
     static let expandDuration: CFTimeInterval = 0.22
-    static let cardRadius: CGFloat = 12
-    static let headerHeight: CGFloat = 38
-    static let edgeInset: CGFloat = 10
-    /// Room beside the card for the round action buttons.
-    static let sideRoom: CGFloat = 64
+    static let cardRadius: CGFloat = 10
+    /// The card runs this far past the page's top and bottom edges.
+    static let overhang: CGFloat = 7
     static let buttonSize: CGFloat = 34
+    static let buttonGap: CGFloat = 10
 
     @MainActor static var reduceMotion: Bool { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }
 
-    static func spring(_ keyPath: String, from: Any?, to: Any?) -> CASpringAnimation {
-        let animation = CASpringAnimation(keyPath: keyPath)
-        animation.mass = 1; animation.stiffness = stiffness; animation.damping = damping; animation.initialVelocity = 0
-        animation.fromValue = from; animation.toValue = to
-        animation.duration = min(0.6, animation.settlingDuration)
-        return animation
+    /// The card's resting frame for a page at `page`, inside an overlay of `bounds` (flipped).
+    static func cardFrame(page: NSRect, in bounds: NSRect) -> NSRect {
+        // About 81% of the page's width, centered on it, leaving room for the buttons.
+        let side = min(140, max(56, (page.width * 0.093).rounded()))
+        let width = max(0, page.width - 2 * side)
+        let top = max(bounds.minY + 10, page.minY - overhang)
+        let bottom = min(bounds.maxY - 10, page.maxY + overhang)
+        return NSRect(x: (page.midX - width / 2).rounded(), y: top, width: width, height: max(0, bottom - top))
     }
 
-    /// The card's resting frame inside a host of `bounds` (flipped coordinates).
-    static func cardFrame(in bounds: NSRect) -> NSRect {
-        let side = bounds.width > 760 ? sideRoom : 52
-        let width = max(0, min(1180, bounds.width - 2 * side))
-        let height = max(0, bounds.height - 2 * edgeInset)
-        return NSRect(x: ((bounds.width - width) / 2).rounded(), y: edgeInset, width: width, height: height)
-    }
-
-    /// Where a link-sized origin starts: the link itself, padded like a pressed button and kept on screen.
+    /// Where the card starts: the link itself, padded like a pressed pill and kept inside the page.
     static func originFrame(link: NSRect, in bounds: NSRect) -> NSRect {
-        var rect = link.insetBy(dx: -10, dy: -7)
-        rect.size.width = max(rect.width, 44); rect.size.height = max(rect.height, 30)
+        var rect = link.insetBy(dx: -6, dy: -4)
+        rect.size.width = max(rect.width, 40); rect.size.height = max(rect.height, 24)
         rect.origin.x = min(max(rect.minX, bounds.minX), max(bounds.minX, bounds.maxX - rect.width))
         rect.origin.y = min(max(rect.minY, bounds.minY), max(bounds.minY, bounds.maxY - rect.height))
         return rect.integral
@@ -350,66 +348,74 @@ enum PeekMotion {
     var onOutsideClick: (() -> Void)?
     let cardShadow = NSView()
     let card = PeekCard()
-    let header = PeekCard()
     let browserHost = PeekCard()
-    let title = NSTextField(labelWithString: "Peek")
-    let copyButton = LittleBamIconButton(symbol: "link", label: "Copy link")
     let closeButton = PeekRoundButton(symbol: "xmark", label: "Close Peek", toolTip: "Close (Esc)")
-    let tabButton = PeekRoundButton(symbol: "arrow.up.left.and.arrow.down.right", label: "Open in Tab", toolTip: "Keep as a tab (⌘O)")
+    let tabButton = PeekRoundButton(symbol: "arrow.up.left.and.arrow.down.right", label: "Open in Tab", toolTip: "Open as a tab (⌘O)")
     let splitButton = PeekRoundButton(symbol: "rectangle.split.2x1", label: "Split View", toolTip: "Open beside the page (⇧⌘O)")
     let littleButton = PeekRoundButton(symbol: "macwindow", label: "Little Bam", toolTip: "Move to Little Bam")
-    let progress = PeekProgressLine()
     let dim = PeekDim()
-    private let divider = NSView()
-    /// The link the card grew from, kept so closing can shrink back into it.
+    /// The page the Peek opens over; the dim covers exactly it.
+    private weak var page: NSView?
+    /// The link the card grew from (and its words), kept so closing can shrink back into it.
     private(set) var origin: NSRect?
+    private(set) var originLabel: String?
     private var entering = false
     override var isFlipped: Bool { true }
     var buttons: [PeekRoundButton] { [closeButton, tabButton, splitButton, littleButton] }
+    var pageRect: NSRect {
+        guard let page, page.window === window, window != nil else { return bounds }
+        return convert(page.bounds, from: page)
+    }
 
-    override init(frame: NSRect) {
+    init(frame: NSRect, page: NSView) {
+        self.page = page
         super.init(frame: frame)
         wantsLayer = true
+        dim.wantsLayer = true
+        dim.layer?.masksToBounds = true
         cardShadow.wantsLayer = true
-        cardShadow.layer?.shadowOpacity = 1; cardShadow.layer?.shadowRadius = 22; cardShadow.layer?.shadowOffset = CGSize(width: 0, height: -8)
+        cardShadow.layer?.shadowOpacity = 1; cardShadow.layer?.shadowRadius = 18; cardShadow.layer?.shadowOffset = CGSize(width: 0, height: -6)
         card.wantsLayer = true
         card.layer?.cornerRadius = PeekMotion.cardRadius; card.layer?.masksToBounds = true
-        card.layer?.borderWidth = 1
-        header.wantsLayer = true
-        divider.wantsLayer = true
-        dim.wantsLayer = true
+        card.layer?.borderWidth = 0.5
         addSubview(dim)
         addSubview(cardShadow)
         addSubview(card)
-        addSubview(linkLabel)
-        [browserHost, header, divider, progress].forEach(card.addSubview)
-        [title, copyButton].forEach(header.addSubview)
+        card.addSubview(browserHost)
         buttons.forEach(addSubview)
-        title.lineBreakMode = .byTruncatingTail; title.alignment = .center
-        title.cell?.truncatesLastVisibleLine = true
-        copyButton.toolTip = "Copy link (⇧⌘C)"
+        addSubview(chip)
         applyAppearanceColors()
         setAccessibilityElement(false); card.setAccessibilityLabel("Peek preview")
+        page.postsFrameChangedNotifications = true
+        pageObserver = NotificationCenter.default.addObserver(forName: NSView.frameDidChangeNotification, object: page, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.needsLayout = true }
+        }
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+    private var pageObserver: NSObjectProtocol?
+    deinit { if let pageObserver { NotificationCenter.default.removeObserver(pageObserver) } }
 
-    /// A soft dim, like the reference's: lighter on light chrome, deeper on dark.
+    /// Only the page, the card and its buttons take clicks; the sidebar and titlebar stay live.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard !isHidden, let superview else { return nil }
+        let local = convert(point, from: superview)
+        let interactive = dim.frame.contains(local) || card.frame.contains(local) || buttons.contains { !$0.isHidden && $0.frame.contains(local) }
+        return interactive ? super.hitTest(point) : nil
+    }
+
     var dimColor: CGColor {
-        NSColor.black.withAlphaComponent(effectiveAppearance.isDarkChrome ? 0.42 : 0.2).cgColor
+        NSColor.black.withAlphaComponent(effectiveAppearance.isDarkChrome ? 0.5 : 0.42).cgColor
     }
     private func applyAppearanceColors() {
         let dark = effectiveAppearance.isDarkChrome
         dim.layer?.backgroundColor = dimColor
         card.layer?.backgroundColor = resolvedCGColor(BrowserChrome.pageSurface, for: card)
-        card.layer?.borderColor = (dark ? NSColor.white.withAlphaComponent(0.12) : NSColor.black.withAlphaComponent(0.08)).cgColor
-        header.layer?.backgroundColor = resolvedCGColor(.chrome(light: NSColor(white: 0.955, alpha: 1), dark: NSColor(white: 0.155, alpha: 1)), for: header)
-        divider.layer?.backgroundColor = resolvedCGColor(.chrome(light: NSColor(white: 0, alpha: 0.08), dark: NSColor(white: 1, alpha: 0.08)), for: divider)
-        cardShadow.layer?.shadowColor = NSColor.black.withAlphaComponent(dark ? 0.55 : 0.22).cgColor
+        card.layer?.borderColor = (dark ? NSColor.white.withAlphaComponent(0.1) : NSColor.black.withAlphaComponent(0.06)).cgColor
+        cardShadow.layer?.shadowColor = NSColor.black.withAlphaComponent(dark ? 0.5 : 0.28).cgColor
     }
-    override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); applyAppearanceColors(); paintTitle() }
+    override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); applyAppearanceColors() }
     override func mouseDown(with event: NSEvent) { onOutsideClick?() }
 
-    private var host = "", pageTitle = ""
     /// The page's own background while it loads (the source page's), so a light page never flashes dark.
     func setSurface(_ color: NSColor?) {
         guard let color else { return }
@@ -418,43 +424,24 @@ enum PeekMotion {
         browserHost.layer?.backgroundColor = resolvedCGColor(color, for: card)
     }
 
-    func setTitle(host: String, page: String) {
-        guard host != self.host || page != pageTitle else { return }
-        self.host = host; pageTitle = page; paintTitle()
-    }
-    private func paintTitle() {
-        let text = NSMutableAttributedString(string: host, attributes: [
-            .font: BamType.sans(12.5, weight: .semibold), .foregroundColor: LittleBamTone.tone(0.9)])
-        if !pageTitle.isEmpty && pageTitle != host {
-            text.append(NSAttributedString(string: "  " + pageTitle, attributes: [
-                .font: BamType.sans(12.5, weight: .regular), .foregroundColor: LittleBamTone.tone(0.5)]))
-        }
-        title.attributedStringValue = text
-    }
-
     override func layout() {
         super.layout()
-        dim.frame = bounds
-        let frame = PeekMotion.cardFrame(in: bounds)
+        let page = pageRect
+        dim.frame = page
+        dim.layer?.cornerRadius = self.page?.layer?.cornerRadius ?? 0
+        let frame = PeekMotion.cardFrame(page: page, in: bounds)
         // While growing, the card is a window onto content laid out at its final size.
         let shown = reveal ?? frame
         card.frame = shown
         cardShadow.frame = shown
         cardShadow.layer?.shadowPath = CGPath(roundedRect: CGRect(origin: .zero, size: shown.size), cornerWidth: PeekMotion.cardRadius,
                                               cornerHeight: PeekMotion.cardRadius, transform: nil)
-        let dx = frame.minX - shown.minX, dy = frame.minY - shown.minY
-        let width = frame.width, headerHeight = PeekMotion.headerHeight
-        header.frame = NSRect(x: dx, y: dy, width: width, height: headerHeight)
-        copyButton.frame = NSRect(x: width - 6 - 28, y: (headerHeight - 28) / 2, width: 28, height: 28)
-        title.frame = NSRect(x: 44, y: (headerHeight - 17) / 2, width: max(0, width - 88), height: 17)
-        divider.frame = NSRect(x: dx, y: dy + headerHeight - 1, width: width, height: 1)
-        progress.frame = NSRect(x: dx, y: dy + headerHeight - 2, width: width, height: 2)
-        browserHost.frame = NSRect(x: dx, y: dy + headerHeight, width: width, height: max(0, frame.height - headerHeight))
-        var y = frame.minY
-        let x = frame.maxX + (PeekMotion.sideRoom - PeekMotion.buttonSize) / 2 - 2
+        browserHost.frame = NSRect(x: frame.minX - shown.minX, y: frame.minY - shown.minY, width: frame.width, height: frame.height)
+        var y = frame.minY + 6
+        let x = frame.maxX + 13
         for button in buttons where !button.isHidden {
             button.frame = NSRect(x: x, y: y, width: PeekMotion.buttonSize, height: PeekMotion.buttonSize)
-            y += PeekMotion.buttonSize + 10
+            y += PeekMotion.buttonSize + PeekMotion.buttonGap
         }
     }
 
@@ -466,79 +453,76 @@ enum PeekMotion {
         alphaValue = 0
     }
 
-    /// Grows the card out of `link` (or a slightly smaller card when there is no link) on a spring.
-    /// Driven per display frame on view frames: the card's edges are a moving window onto content
-    /// already laid out at full size, so the address bar and page never stretch or re-lay out.
+    /// The pressed link: a dark pill with the link's words, shown for an instant before the card.
+    let chip = PeekChip()
+
+    /// The link turns into a dark pill, then the card springs out of it. Driven per display frame on
+    /// view frames, so the page is laid out once at full size and never re-lays out mid-grow.
     func animateEntrance(from link: NSRect?, label: String?) {
         guard entering else { alphaValue = 1; return }
         entering = false
         layoutSubtreeIfNeeded()
         alphaValue = 1
-        let final = PeekMotion.cardFrame(in: bounds)
+        let final = PeekMotion.cardFrame(page: pageRect, in: bounds)
         guard final.width > 40, final.height > 40, !PeekMotion.reduceMotion else {
             alphaValue = 0
             NSAnimationContext.runAnimationGroup { $0.duration = 0.12; animator().alphaValue = 1 }
             return
         }
-        let start = link.map { PeekMotion.originFrame(link: $0, in: bounds) }
+        let start = link.map { PeekMotion.originFrame(link: $0, in: pageRect) }
             ?? final.insetBy(dx: final.width * 0.04, dy: final.height * 0.04)
         origin = link.map { _ in start }
-        if let label, !label.isEmpty, link != nil {
-            linkLabel.attributedStringValue = NSAttributedString(string: label, attributes: [
-                .font: BamType.sans(13, weight: .medium), .foregroundColor: LittleBamTone.tone(0.7)])
-            linkLabel.frame = NSRect(x: start.minX + 8, y: start.midY - 9, width: max(0, start.width - 16), height: 18)
-            linkLabel.isHidden = false; linkLabel.alphaValue = 1
+        originLabel = label
+        if link != nil {
+            chip.show(label ?? "", in: start, dark: true)
+            card.alphaValue = 0; cardShadow.alphaValue = 0
         }
+        chipLead = link == nil ? 0 : PeekMotion.chipLead
         for button in buttons { button.alphaValue = 0 }
         dim.alphaValue = 0
         reveal = start
         revealStart = start
         revealBegan = CACurrentMediaTime()
         needsLayout = true; layoutSubtreeIfNeeded()
-        let link = displayLink(target: self, selector: #selector(entranceFrame(_:)))
-        link.add(to: .main, forMode: .common)
-        entranceLink = link
+        let displayLink = displayLink(target: self, selector: #selector(entranceFrame(_:)))
+        displayLink.add(to: .main, forMode: .common)
+        entranceLink = displayLink
     }
 
     private var reveal: NSRect?
     private var revealStart = NSRect.zero
     private var revealBegan: CFTimeInterval = 0
+    private var chipLead: CFTimeInterval = 0
     private var entranceLink: CADisplayLink?
-    let linkLabel: NSTextField = {
-        let field = NSTextField(labelWithString: "")
-        field.alignment = .center; field.lineBreakMode = .byTruncatingTail; field.isHidden = true
-        return field
-    }()
 
-    @objc private func entranceFrame(_ link: CADisplayLink) {
-        let t = CACurrentMediaTime() - revealBegan
+    @objc private func entranceFrame(_ displayLink: CADisplayLink) {
+        let elapsed = CACurrentMediaTime() - revealBegan
+        let t = max(0, elapsed - chipLead)
         let omega = Double(PeekMotion.stiffness).squareRoot()
         // Critically damped spring from 0 to 1.
         let p = CGFloat(1 - (1 + omega * t) * exp(-omega * t))
-        let final = PeekMotion.cardFrame(in: bounds)
+        let final = PeekMotion.cardFrame(page: pageRect, in: bounds)
         let s = revealStart
         reveal = NSRect(x: s.minX + (final.minX - s.minX) * p, y: s.minY + (final.minY - s.minY) * p,
                         width: s.width + (final.width - s.width) * p, height: s.height + (final.height - s.height) * p)
-        dim.alphaValue = CGFloat(min(1, 1 - pow(1 - min(1, t / PeekMotion.dimDuration), 3)))
-        linkLabel.alphaValue = CGFloat(max(0, 1 - t / 0.1))
+        dim.alphaValue = CGFloat(min(1, 1 - pow(1 - min(1, elapsed / PeekMotion.dimDuration), 3)))
+        if elapsed >= chipLead { card.alphaValue = 1; cardShadow.alphaValue = 1 }
+        chip.alphaValue = CGFloat(max(0, 1 - max(0, elapsed - chipLead) / 0.05))
         for (index, button) in buttons.enumerated() {
-            let local = (t - 0.09 - 0.025 * Double(index)) / 0.16
+            let local = (t - 0.08 - 0.025 * Double(index)) / 0.14
             button.alphaValue = CGFloat(min(1, max(0, local)))
         }
-        let done = p > 0.998 && t > 0.24 + 0.025 * Double(buttons.count)
-        if done {
-            link.invalidate(); entranceLink = nil
-            reveal = nil; linkLabel.isHidden = true; dim.alphaValue = 1
-            buttons.forEach { $0.alphaValue = 1 }
-        }
+        if p > 0.998 && t > 0.22 + 0.025 * Double(buttons.count) { stopEntrance() }
         needsLayout = true
         layoutSubtreeIfNeeded()
     }
 
     func stopEntrance() {
         entranceLink?.invalidate(); entranceLink = nil
-        reveal = nil; linkLabel.isHidden = true; dim.alphaValue = 1
+        reveal = nil; chip.isHidden = true
+        dim.alphaValue = 1; card.alphaValue = 1; cardShadow.alphaValue = 1
         buttons.forEach { $0.alphaValue = 1 }
+        needsLayout = true
     }
 
     /// A still of the card for the closing motion; nil when it can't be captured.
@@ -552,14 +536,40 @@ enum PeekMotion {
     }
 }
 
+/// The link as a pill: dark (pressed) as a Peek opens, pale as it closes back into it.
+@MainActor final class PeekChip: NSView {
+    private let label = NSTextField(labelWithString: "")
+    override var isFlipped: Bool { true }
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        layer?.cornerRadius = 6
+        label.lineBreakMode = .byTruncatingTail
+        addSubview(label)
+        isHidden = true
+        setAccessibilityElement(false)
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+    func show(_ text: String, in rect: NSRect, dark: Bool) {
+        frame = rect
+        layer?.backgroundColor = (dark ? NSColor(white: 0.18, alpha: 0.92) : NSColor(white: 0.86, alpha: 0.95)).cgColor
+        label.attributedStringValue = NSAttributedString(string: text, attributes: [
+            .font: BamType.sans(13, weight: .medium), .foregroundColor: dark ? NSColor.white : NSColor(white: 0.12, alpha: 1)])
+        let height = ceil(label.attributedStringValue.size().height)
+        label.frame = NSRect(x: 6, y: (rect.height - height) / 2, width: max(0, rect.width - 12), height: height)
+        alphaValue = 1; isHidden = false
+    }
+}
+
 /// The closing card: a still of the Peek that shrinks into its link (or expands into the tab) and
 /// fades, while the dim lifts. Inert to clicks, removed when done.
 @MainActor final class PeekExitGhost: NSView {
-    enum Style { case collapse(NSRect?), expand }
+    enum Style { case collapse(NSRect?, String?), expand(NSRect) }
     override var isFlipped: Bool { true }
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
-    static func run(in host: NSView, image: CGImage?, cardFrame: NSRect, dim: CGColor, style: Style) {
+    static func run(in host: NSView, image: CGImage?, cardFrame: NSRect, dimFrame: NSRect, dimRadius: CGFloat, dim: CGColor, style: Style) {
         let ghost = PeekExitGhost(frame: host.bounds)
         ghost.wantsLayer = true
         ghost.autoresizingMask = [.width, .height]
@@ -572,7 +582,8 @@ enum PeekMotion {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         let dimLayer = CALayer()
-        dimLayer.frame = root.bounds; dimLayer.backgroundColor = dim
+        dimLayer.frame = layerRect(dimFrame); dimLayer.backgroundColor = dim
+        dimLayer.cornerRadius = dimRadius; dimLayer.masksToBounds = true
         root.addSublayer(dimLayer)
         let still = CALayer()
         still.contents = image
@@ -584,40 +595,64 @@ enum PeekMotion {
         root.addSublayer(still)
         var target = from
         var duration = PeekMotion.closeDuration
-        var curve = CAMediaTimingFunction(controlPoints: 0.45, 0, 0.85, 0.25)
+        var curve = CAMediaTimingFunction(controlPoints: 0.35, 0, 0.25, 1)
         var radius = PeekMotion.cardRadius
+        var pill: (CGRect, String)?
+        var stillFade: (times: [NSNumber], values: [Float]) = ([0, 0.6, 1], [1, 0.9, 0])
         switch style {
-        case .collapse(let link):
-            if let link, !reduce { target = layerRect(link); radius = 8 }
-            else { target = from.insetBy(dx: from.width * 0.03, dy: from.height * 0.03) }
-        case .expand:
-            target = reduce ? from : root.bounds; radius = 10
+        case .collapse(let link, let label):
+            if let link, !reduce {
+                target = layerRect(link); radius = 6
+                pill = (target, label ?? "")
+            } else { target = from.insetBy(dx: from.width * 0.03, dy: from.height * 0.03) }
+        case .expand(let page):
+            target = reduce ? from : layerRect(page); radius = dimRadius
             duration = PeekMotion.expandDuration
             curve = CAMediaTimingFunction(controlPoints: 0.2, 0.8, 0.2, 1)
+            // The live page underneath is the same page, so the still gives way early.
+            stillFade = ([0, 0.55, 1], [1, 0, 0])
         }
-        if reduce { duration = 0.12 }
-        CATransaction.setAnimationDuration(duration)
-        CATransaction.setAnimationTimingFunction(curve)
+        if reduce { duration = 0.12; stillFade = ([0, 1], [1, 0]) }
+        let total = duration + (pill == nil ? 0 : PeekMotion.chipFade)
         CATransaction.setCompletionBlock { ghost.removeFromSuperview() }
-        let pairs: [(CALayer, String, Any?, Any?)] = [
-            (still, "bounds", NSValue(rect: CGRect(origin: .zero, size: from.size)), NSValue(rect: CGRect(origin: .zero, size: target.size))),
-            (still, "position", NSValue(point: CGPoint(x: from.midX, y: from.midY)), NSValue(point: CGPoint(x: target.midX, y: target.midY))),
-            (still, "cornerRadius", PeekMotion.cardRadius, radius),
-            (still, "opacity", 1, 0),
-            (dimLayer, "opacity", 1, 0)
-        ]
-        for (layer, key, start, end) in pairs {
+        func add(_ layer: CALayer, _ key: String, _ start: Any?, _ end: Any?) {
             let animation = CABasicAnimation(keyPath: key)
             animation.fromValue = start; animation.toValue = end
             animation.duration = duration; animation.timingFunction = curve
-            if key == "opacity", layer === still, case .expand = style {
-                // Expanding into the tab: the live page underneath is the same page, so the still
-                // gives way early instead of doubling up with it.
-                animation.duration = duration * 0.55
-                animation.timingFunction = CAMediaTimingFunction(name: .easeOut)
-            }
             layer.add(animation, forKey: "peek.exit.\(key)")
         }
+        add(still, "bounds", NSValue(rect: CGRect(origin: .zero, size: from.size)), NSValue(rect: CGRect(origin: .zero, size: target.size)))
+        add(still, "position", NSValue(point: CGPoint(x: from.midX, y: from.midY)), NSValue(point: CGPoint(x: target.midX, y: target.midY)))
+        add(still, "cornerRadius", PeekMotion.cardRadius, radius)
+        let fade = CAKeyframeAnimation(keyPath: "opacity")
+        fade.values = stillFade.values; fade.keyTimes = stillFade.times; fade.duration = duration
+        still.add(fade, forKey: "peek.exit.opacity")
+        let lift = CABasicAnimation(keyPath: "opacity")
+        lift.fromValue = 1; lift.toValue = 0; lift.duration = duration
+        lift.timingFunction = CAMediaTimingFunction(name: .easeIn)
+        dimLayer.add(lift, forKey: "peek.exit.dim")
+        // Closing into the link ends as a pale pill around its words, which then fades.
+        if let (rect, label) = pill {
+            let chip = CALayer()
+            chip.frame = rect; chip.cornerRadius = 6
+            chip.backgroundColor = NSColor(white: 0.86, alpha: 0.95).cgColor
+            let text = CATextLayer()
+            text.string = NSAttributedString(string: label, attributes: [.font: BamType.sans(13, weight: .medium), .foregroundColor: NSColor(white: 0.12, alpha: 1)])
+            text.contentsScale = host.window?.backingScaleFactor ?? 2
+            text.truncationMode = .end
+            text.frame = CGRect(x: 6, y: (rect.height - 17) / 2, width: max(0, rect.width - 12), height: 17)
+            chip.addSublayer(text)
+            root.addSublayer(chip)
+            let show = CAKeyframeAnimation(keyPath: "opacity")
+            let cut = duration / total
+            show.values = [0, 0, 1, 0]; show.keyTimes = [0, NSNumber(value: cut * 0.6), NSNumber(value: cut), 1]
+            show.duration = total
+            chip.add(show, forKey: "peek.exit.pill")
+            chip.opacity = 0
+        }
+        // Keep the ghost until the pill has faded.
+        let keep = CABasicAnimation(keyPath: "opacity"); keep.fromValue = 1; keep.toValue = 1; keep.duration = total
+        root.add(keep, forKey: "peek.exit.keep")
         still.frame = target; still.cornerRadius = radius; still.opacity = 0; dimLayer.opacity = 0
         CATransaction.commit()
     }
@@ -630,7 +665,7 @@ enum PeekWindowCapture {
     }
 }
 
-/// Peek's round actions beside the card: dark glass with a white symbol, like a floating control.
+/// Peek's round actions beside the card: near-black circles with a white symbol.
 @MainActor final class PeekRoundButton: NSButton {
     private var hovering = false
     init(symbol: String, label: String, toolTip: String) {
@@ -649,8 +684,8 @@ enum PeekWindowCapture {
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
     private func paint() {
-        let base: CGFloat = isEnabled ? (hovering ? 0.30 : 0.2) : 0.2
-        layer?.backgroundColor = NSColor(white: base, alpha: isEnabled ? 0.92 : 0.5).cgColor
+        let base: CGFloat = isEnabled ? (hovering ? 0.24 : 0.08) : 0.08
+        layer?.backgroundColor = NSColor(white: base, alpha: isEnabled ? 0.94 : 0.5).cgColor
         contentTintColor = .white.withAlphaComponent(isEnabled ? 1 : 0.4)
     }
     override func layout() { super.layout(); layer?.cornerRadius = bounds.height / 2 }
@@ -664,31 +699,6 @@ enum PeekWindowCapture {
     override func mouseEntered(with event: NSEvent) { hovering = true; paint() }
     override func mouseExited(with event: NSEvent) { hovering = false; paint() }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
-}
-
-/// A 2-point loading line along the foot of the Peek's address bar.
-@MainActor final class PeekProgressLine: NSView {
-    private let fill = NSView()
-    var doubleValue: Double = 0 { didSet { if doubleValue != oldValue { needsLayout = true } } }
-    override var isFlipped: Bool { true }
-    override init(frame: NSRect) {
-        super.init(frame: frame)
-        fill.wantsLayer = true
-        addSubview(fill)
-        setAccessibilityElement(false)
-    }
-    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
-    override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); needsLayout = true }
-    override func layout() {
-        super.layout()
-        fill.layer?.backgroundColor = resolvedCGColor(BrowserChrome.progress, for: self)
-        let value = CGFloat(min(1, max(0.08, doubleValue)))
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = PeekMotion.reduceMotion ? 0 : 0.18
-            context.allowsImplicitAnimation = true
-            fill.frame = NSRect(x: 0, y: 0, width: bounds.width * value, height: bounds.height)
-        }
-    }
 }
 
 /// The soft dim behind the card; clicks fall through to the backdrop, which closes the Peek.
