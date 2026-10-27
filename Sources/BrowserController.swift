@@ -1595,8 +1595,10 @@ import QuartzCore
         guard (error as NSError).code != NSURLErrorCancelled else { return }
         // WebKit hands audio/video files to its own player and reports that as "Plug-in handled load" (204):
         // the page is playing, not failed.
-        if (error as NSError).domain == "WebKitErrorDomain", (error as NSError).code == 204 { return }
+        let handedToPlayer = (error as NSError).domain == "WebKitErrorDomain" && (error as NSError).code == 204
         if let id = browsers.first(where: { $0.value === web })?.key {
+            // The load did finish (no didFinish follows): settle it so the tab stops reading as loading.
+            if handedToPlayer { pendingLoads.remove(id); pendingNonGetDocuments.removeValue(forKey: id); tabErrors.removeValue(forKey: id); refresh(); return }
             pendingLoads.remove(id); pendingNonGetDocuments.removeValue(forKey: id); historyTitleFollowUps.removeValue(forKey: id)
             if let failed = (error as NSError).userInfo[NSURLErrorFailingURLStringErrorKey] as? String, URLInput.directURL(failed) != nil { requestedAddresses[id] = failed }
             tabErrors[id] = ContentBlocking.stoppedPage(error) ? "Page blocked by Bam’s filter lists" : "Couldn’t load page — ⌘R to retry"; refresh()
