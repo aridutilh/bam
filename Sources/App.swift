@@ -370,7 +370,8 @@ import WebKit
         item(edit, "Find in Page…", #selector(BrowserController.findInPage(_:)), "f", .command, controller)
         item(edit, "Find Next", #selector(BrowserController.findNext(_:)), "g", .command, controller)
         item(edit, "Find Previous", #selector(BrowserController.findPrevious(_:)), "g", [.command, .shift], controller)
-        item(edit, "Copy Current URL", #selector(BrowserController.copyCurrentURL(_:)), "c", [.command, .shift], controller)
+        item(edit, "Copy Link", #selector(BrowserController.copyCurrentURL(_:)), "c", [.command, .shift], controller)
+        item(edit, "Copy Markdown Link", #selector(BrowserController.copyMarkdownLink(_:)), "c", [.command, .shift, .option], controller)
         let view = menu("View")
         let appearanceItem = NSMenuItem(title: "Appearance", action: nil, keyEquivalent: "")
         let appearanceMenu = NSMenu(title: "Appearance")
@@ -395,6 +396,10 @@ import WebKit
         item(view, "Zoom Out", #selector(BrowserController.zoomOut(_:)), "-", .command, controller)
         item(view, "Actual Size", #selector(BrowserController.actualSize(_:)), "0", .command, controller)
         item(view, "Enter Full Screen", #selector(NSWindow.toggleFullScreen(_:)), "f", [.command, .control])
+        view.addItem(.separator())
+        item(view, "Show Reading Mode", #selector(BrowserController.toggleReadingMode(_:)), "r", [.command, .option], controller)
+        item(view, "Hide Elements", #selector(BrowserController.hideElements(_:)), "h", [.command, .shift], controller)
+        item(view, "Restore Hidden Elements on This Site", #selector(BrowserController.restoreHiddenElements(_:)), "", .command, controller)
         view.addItem(.separator())
         item(view, "Automatically Show Playing Videos", #selector(BrowserController.toggleAutomaticVideo(_:)), "", .command, controller)
         view.items.last?.state = controller.automaticallyShowsVideo ? .on : .off
@@ -428,6 +433,10 @@ import WebKit
         spacesMenu = submenu; rebuildSpacesMenu()
         let extensions = menu("Extensions"); extensions.delegate = self; extensionsMenu = extensions
         controller.updateExtensionsMenu(extensions)
+        let develop = menu("Develop")
+        item(develop, "Show Web Inspector", #selector(BrowserController.showWebInspector(_:)), "i", [.command, .option], controller)
+        item(develop, "Show JavaScript Console", #selector(BrowserController.showJavaScriptConsole(_:)), "j", [.command, .option], controller)
+        item(develop, "Inspect Element", #selector(BrowserController.inspectElement(_:)), "c", [.command, .option], controller)
         let windowMenu = menu("Window"); NSApp.windowsMenu = windowMenu
         item(windowMenu, "Minimize", #selector(NSWindow.performMiniaturize(_:)), "m")
         item(windowMenu, "Zoom", #selector(NSWindow.performZoom(_:)))

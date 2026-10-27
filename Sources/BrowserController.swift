@@ -220,6 +220,7 @@ import QuartzCore
     let pictureInPicture = PictureInPictureCoordinator()
     let findBar = FindBarCoordinator()
     let pageFeedback = PageFeedbackCoordinator()
+    let pageTools = PageToolsCoordinator()
     var pageCommandPasteboard: NSPasteboard = .general
     let downloads: DownloadCoordinator
     let profileStores: WebsiteProfileStore
@@ -548,6 +549,7 @@ import QuartzCore
         browser.navigationDelegate = self; browser.uiDelegate = self
         browser.allowsBackForwardNavigationGestures = true
         BrowserPageGestures.configure(browser)
+        preparePageTools(browser)
         browser.autoresizingMask = [.width, .height]
         browser.setAccessibilityLabel("Web content")
         browsers[id] = browser
@@ -1314,10 +1316,10 @@ import QuartzCore
             self_.showExtensionSiteAccess(id)
         }
         actions.copyLink = {
-            guard let (self_, web) = current(), let url = self_.copyableURL(for: web) else { return }
+            guard let (self_, web) = current(), let url = self_.cleanLink(for: web) else { return }
             self_.pageCommandPasteboard.clearContents()
             if self_.pageCommandPasteboard.setString(url.absoluteString, forType: .string), let host = web.superview {
-                self_.pageFeedback.show("Page copied", symbol: "link", in: host)
+                self_.pageFeedback.show("Link copied", symbol: "link", in: host)
             }
             self_.siteSettings.close()
         }
