@@ -148,6 +148,7 @@ typealias PreviewNavigationReadiness = @MainActor (@escaping @MainActor () -> Vo
         if let windowCloseObserver { NotificationCenter.default.removeObserver(windowCloseObserver) }
         windowCloseObserver = nil
         let web = content?.takeWebView()
+        if awaitingFirstPaint { web?.underPageBackgroundColor = nil }
         awaitingFirstPaint = false
         web?.alphaValue = 1
         if stop { web?.stopLoading() }
@@ -196,6 +197,8 @@ typealias PreviewNavigationReadiness = @MainActor (@escaping @MainActor () -> Vo
         let committed = web.url != nil && (web as? PreviewWKWebView)?.isProvisionalNavigation != true
         if awaitingFirstPaint, committed || content.status != nil || (!web.isLoading && (web as? PreviewWKWebView)?.pendingReadyURL == nil) {
             awaitingFirstPaint = false
+            // The borrowed color only covers the blank card; the page's own takes over (nil resets it).
+            web.underPageBackgroundColor = nil
             // A beat for the first paint after commit (WebKit has no paint callback), then the page fades in.
             DispatchQueue.main.asyncAfter(deadline: .now() + (web.isLoading ? 0.3 : 0.02)) { [weak web] in
                 NSAnimationContext.runAnimationGroup { context in
@@ -562,9 +565,9 @@ enum PeekMotion {
         ghost.autoresizingMask = [.width, .height]
         host.addSubview(ghost, positioned: .above, relativeTo: nil)
         guard let root = ghost.layer else { ghost.removeFromSuperview(); return }
-        func layerRect(_ r: NSRect) -> CGRect {
-            root.isGeometryFlipped ? r : CGRect(x: r.minX, y: ghost.bounds.height - r.maxY, width: r.width, height: r.height)
-        }
+        // AppKit gives a layer-backed view's sublayers the view's own coordinates, so in this
+        // flipped view a sublayer at y = 0 sits at the top, whatever `isGeometryFlipped` reports.
+        func layerRect(_ r: NSRect) -> CGRect { r }
         let reduce = PeekMotion.reduceMotion
         CATransaction.begin()
         CATransaction.setDisableActions(true)
