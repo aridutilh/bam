@@ -55,9 +55,11 @@ struct SidebarTabItem: Equatable {
     var importedFromArc: Bool = false
     /// A better-known title (from history) for a row whose own title is only its address. Display only.
     var knownTitle: String? = nil
+    /// The title is the name the person gave a kept tab: shown exactly as typed.
+    var hasCustomTitle: Bool = false
     /// What the row shows: the best-known title without its trailing site name (SidebarDisplayPolicy.rowTitle).
     var displayTitle: String {
-        if isFolder || isSplit { return title }
+        if isFolder || isSplit || hasCustomTitle { return title }
         return SidebarDisplayPolicy.rowTitle(title, address: subtitle, knownTitle: knownTitle)
     }
 }
@@ -2279,7 +2281,7 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted, Ar
             // Reused for another row mid-press: abandon that press and any drag it began.
             dragOrigin = nil; pressedID = nil; didDrag = false
         }
-        if first || old.title != item.title || old.isFolder != item.isFolder || old.subtitle != item.subtitle || old.knownTitle != item.knownTitle {
+        if first || old.title != item.title || old.isFolder != item.isFolder || old.subtitle != item.subtitle || old.knownTitle != item.knownTitle || old.hasCustomTitle != item.hasCustomTitle {
             // Assistive tech hears exactly what the row shows, including the blank-title fallback.
             let shown = item.displayTitle
             titleLabel.stringValue = shown.isEmpty ? (item.isFolder ? "Folder" : "New Tab") : shown

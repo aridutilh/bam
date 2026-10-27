@@ -17,7 +17,9 @@ struct ClosedRecord: Codable, Identifiable, Equatable {
 /// Metadata only. The caller chooses the file; nil keeps an ephemeral library.
 /// No browser profiles, cookies, downloads, or account data are consulted.
 @MainActor final class BrowserLibrary {
-    private(set) var history: [BrowserHistoryEntry] = []
+    private(set) var history: [BrowserHistoryEntry] = [] { didSet { realTitles = nil } }
+    /// Address → the latest real title history has for it (see `knownTitle(forAddress:)`), built on first use after a change.
+    private var realTitles: [String: String]?
     private(set) var closedRecords: [ClosedRecord] = []
     private(set) var lastStorageError: String?
     var onOpenURL: ((String) -> Void)?
@@ -101,6 +103,20 @@ struct ClosedRecord: Codable, Identifiable, Equatable {
         lastStorageError = loadFailure; onStorageError?(loadFailure); return false
     }
     private func reloadWindows() { historyWindow?.reload(); archiveWindow?.reload() }
+
+    /// The latest title history recorded for `address` that is a real title, not the address written out. One
+    /// dictionary lookup per sidebar row; the index is rebuilt at most once per history change.
+    func knownTitle(forAddress address: String) -> String? {
+        if realTitles == nil {
+            var index: [String: String] = [:]
+            for entry in history where index[entry.address] == nil && !entry.title.isEmpty
+                && !SidebarDisplayPolicy.looksLikeAddress(entry.title, address: entry.address) {
+                index[entry.address] = entry.title
+            }
+            realTitles = index
+        }
+        return realTitles?[address]
+    }
 
     @discardableResult func recordVisit(title: String, address: String) -> VisitToken? {
         guard let url = Self.webURL(address) else { return nil }

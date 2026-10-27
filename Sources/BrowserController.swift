@@ -952,11 +952,10 @@ import QuartzCore
     /// a real title. Reads only a profile library that is already loaded; nil otherwise (the row shows the host).
     func knownTitle(for tab: BrowserTab, in snapshot: BrowserSession) -> String? {
         let address = tab.isUnloaded ? (tab.saved?.address ?? tab.address) : tab.address
-        guard tab.displayTitle.isEmpty || SidebarDisplayPolicy.looksLikeAddress(tab.displayTitle, address: address),
+        guard tab.saved?.customTitle == nil,
+              tab.displayTitle.isEmpty || SidebarDisplayPolicy.looksLikeAddress(tab.displayTitle, address: address),
               let library = profileLibraries[snapshot.profileID(for: tab)] else { return nil }
-        return library.history.first {
-            $0.address == address && !$0.title.isEmpty && !SidebarDisplayPolicy.looksLikeAddress($0.title, address: address)
-        }?.title
+        return library.knownTitle(forAddress: address)
     }
     func sidebarItems(for space: Int) -> [SidebarTabItem] {
         var preview = session; preview.changeSpace(space)
