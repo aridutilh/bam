@@ -2637,7 +2637,13 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted, Ar
         hoverLifecycle.watch(window) { [weak self] in self?.resyncHover() }
         resyncHover()
     }
-    override func viewDidHide() { super.viewDidHide(); resyncHover() }
+    override func viewDidHide() { super.viewDidHide(); endRename(commit: false); resyncHover() }
+    /// A row leaving the window (Space paging, list reloads, closing) abandons an open rename: only Return or a
+    /// click elsewhere in the sidebar's own window keeps a typed name.
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        if newWindow == nil { endRename(commit: false) }
+        super.viewWillMove(toWindow: newWindow)
+    }
     override func viewDidUnhide() { super.viewDidUnhide(); resyncHover() }
     func resyncHover() { setHovered(ArkHover.isUnderPointer(self)) }
     private func setHovered(_ value: Bool) {
@@ -2832,6 +2838,9 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted, Ar
     // MARK: Rename in place
     private var renameField: NSTextField?
     private var renameCancelled = false
+    /// The title when editing began. The row's title can change underneath (a page still loading), so a
+    /// rename commits only text the person actually changed.
+    private var renameOriginal = ""
     /// The title becomes an edit field over the same spot: Return keeps the new name (empty restores the page's
     /// own title), Esc or clicking away without changes leaves it as it was.
     func beginRename() {
@@ -2848,7 +2857,7 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted, Ar
         let end = bounds.width - ArkMetrics.trailingGap
         field.frame = NSRect(x: titleLabel.frame.minX - 1, y: titleLabel.frame.minY - 1, width: max(40, end - titleLabel.frame.minX + 1), height: titleLabel.frame.height + 2)
         field.wantsLayer = true; field.layer?.cornerRadius = 4
-        renameCancelled = false
+        renameCancelled = false; renameOriginal = field.stringValue
         titleLabel.isHidden = true
         addSubview(field); renameField = field
         window?.makeFirstResponder(field)
@@ -2859,7 +2868,11 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted, Ar
         if commandSelector == #selector(NSResponder.insertNewline(_:)) { endRename(commit: true); return true }
         return false
     }
-    func controlTextDidEndEditing(_ obj: Notification) { endRename(commit: !renameCancelled) }
+    func controlTextDidEndEditing(_ obj: Notification) {
+        // Focus moving elsewhere in this window keeps a typed name (as Finder and Arc do); anything tearing the
+        // row down was handled before it got here.
+        endRename(commit: !renameCancelled && window != nil && !isHiddenOrHasHiddenAncestor)
+    }
     private func endRename(commit: Bool) {
         guard let field = renameField else { return }
         renameField = nil
@@ -2868,7 +2881,7 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted, Ar
         if window?.firstResponder === field.currentEditor() { window?.makeFirstResponder(self) }
         field.removeFromSuperview()
         titleLabel.isHidden = false
-        if commit, value != titleLabel.stringValue { renameTab?(value) }
+        if commit, value != renameOriginal { renameTab?(value) }
     }
     @objc private func newFolderFromMenu() { newFolder?() }
     @objc private func ungroupFromMenu() { ungroupFolder?() }
