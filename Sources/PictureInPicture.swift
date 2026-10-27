@@ -28,6 +28,8 @@ import QuartzCore
     private var snapshotToken: UUID?
     private var lastSnapshotTime: TimeInterval = 0
     private var presentationDeadline: DispatchWorkItem?
+    private var presentationOrigin: NSRect?
+    private var flight: NSPanel?
     private(set) var presentationReady = false
     private var originalAlpha: CGFloat = 1
     private var restoreView: ((WKWebView) -> Void)?
@@ -111,6 +113,8 @@ import QuartzCore
                             return
                         }
                         self.videoSnapshot = PiPVideoGeometry(info["geometry"])?.crop(from: image)
+                        // Where the video sits in the page now, so the floating video can fly out of it.
+                        self.presentationOrigin = PiPVideoGeometry(info["geometry"])?.screenRect(in: web)
                         self.pendingWebView = nil
                         self.pendingTabID = nil
                         let completion = self.pendingCompletion
@@ -187,6 +191,7 @@ import QuartzCore
             removeIsolation(from: pending, token: oldToken)
         }
         sourceCover?.removeFromSuperview(); sourceCover = nil
+        flight?.orderOut(nil); flight?.close(); flight = nil; presentationOrigin = nil
         guard let web = webView else { complete(completion, presented: false); return }
         let callback = restoreView
         let oldPanel = panel
@@ -298,15 +303,28 @@ import QuartzCore
         guard restorations[transfer.identity] === transfer else { return }
         let target = rendered ? geometry?.screenRect(in: web) : nil
         let reduce = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        // Drawn back into the page: the still flies home at full strength and only melts into the
+        // live page over the last stretch, so the eye follows it to where the video now plays.
+        let flies = target != nil && transfer.panel?.isVisible == true && (transfer.panel?.alphaValue ?? 0) > 0
+        let duration = reduce ? 0 : (flies ? 0.32 : 0.20)
+        if flies, !reduce, let panel = transfer.panel {
+            DispatchQueue.main.asyncAfter(deadline: .now() + duration * 0.55) { [weak panel] in
+                NSAnimationContext.runAnimationGroup { context in
+                    context.duration = duration * 0.45
+                    context.timingFunction = CAMediaTimingFunction(name: .easeIn)
+                    panel?.animator().alphaValue = 0
+                }
+            }
+        }
         NSAnimationContext.runAnimationGroup { context in
-            context.duration = reduce ? 0 : 0.20
-            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            context.duration = duration
+            context.timingFunction = flies ? CAMediaTimingFunction(controlPoints: 0.45, 0, 0.2, 1) : CAMediaTimingFunction(name: .easeInEaseOut)
             transfer.cover.animator().alphaValue = 0
             // Only the inert snapshot window changes size, never live WebKit.
-            if let target, let panel = transfer.panel, panel.isVisible, panel.alphaValue > 0 {
+            if let target, flies, let panel = transfer.panel {
                 panel.animator().setFrame(target, display: true)
             }
-            transfer.panel?.animator().alphaValue = 0
+            if !flies || reduce { transfer.panel?.animator().alphaValue = 0 }
         } completionHandler: { [weak self, weak transfer] in
             Task { @MainActor [weak self, weak transfer] in
                 guard let self, let transfer, self.restorations[transfer.identity] === transfer else { return }
@@ -447,17 +465,52 @@ import QuartzCore
                     self.presentationReady = true
                     self.presentationDeadline?.cancel(); self.presentationDeadline = nil
                     self.lastSnapshotTime = ProcessInfo.processInfo.systemUptime
-                    NSAnimationContext.runAnimationGroup { context in
-                        context.duration = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 0 : 0.16
-                        context.timingFunction = CAMediaTimingFunction(name: .easeOut)
-                        self.panel?.animator().alphaValue = 1
-                    } completionHandler: { [weak self] in
-                        Task { @MainActor [weak self] in
-                            guard let self, self.requestID == token else { return }
-                            self.presentationCover?.removeFromSuperview(); self.presentationCover = nil
+                    let reveal: () -> Void = { [weak self] in
+                        guard let self else { return }
+                        NSAnimationContext.runAnimationGroup { context in
+                            context.duration = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 0 : (self.flight == nil ? 0.16 : 0)
+                            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                            self.panel?.animator().alphaValue = 1
+                        } completionHandler: { [weak self] in
+                            Task { @MainActor [weak self] in
+                                guard let self, self.requestID == token else { return }
+                                self.presentationCover?.removeFromSuperview(); self.presentationCover = nil
+                                self.flight?.orderOut(nil); self.flight?.close(); self.flight = nil
+                            }
                         }
                     }
+                    self.flyOut(image: image, token: token, then: reveal)
                 }
+        }
+    }
+
+    /// Floats the video out of its place in the page: a still of it glides from there to the
+    /// floating video's corner, then the live panel (already at final size) takes its place.
+    private func flyOut(image: NSImage, token: UUID, then reveal: @escaping () -> Void) {
+        let origin = presentationOrigin; presentationOrigin = nil
+        guard let origin, let panel, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion,
+              origin.width > 24, origin.height > 24 else { reveal(); return }
+        let target = panel.frame
+        let still = NSPanel(contentRect: origin, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        still.isOpaque = false; still.backgroundColor = .clear; still.hasShadow = true
+        still.level = panel.level; still.ignoresMouseEvents = true; still.isReleasedWhenClosed = false
+        still.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
+        let view = PiPTransitionImage(image: image, frame: NSRect(origin: .zero, size: origin.size), identifier: "pip.flight")
+        view.layer?.cornerRadius = 14; view.layer?.masksToBounds = true; view.layer?.backgroundColor = NSColor.black.cgColor
+        still.contentView = view
+        still.orderFront(nil)
+        flight = still
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.3
+            context.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0.85, 0.25, 1)
+            still.animator().setFrame(target, display: true)
+        } completionHandler: { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self, self.requestID == token, self.flight === still else {
+                    still.orderOut(nil); still.close(); return
+                }
+                reveal()
+            }
         }
     }
 

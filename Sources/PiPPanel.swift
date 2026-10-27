@@ -12,6 +12,13 @@ import QuartzCore
     private(set) var isScrollDragging = false
     private(set) var isPositionSnapRunning = false
     private var positionGeneration: UInt = 0
+    /// Which screen edge the video is tucked behind, if any (only a blurred sliver shows).
+    private(set) var tuckedSide: PiPPositioning.TuckSide? {
+        didSet { if tuckedSide != oldValue { tuckPeeking = false; overlay?.setTucked(tuckedSide) } }
+    }
+    private var tuckPeeking = false
+    /// A tucked panel ignores the rest of the two-finger gesture that pulled it back out.
+    private var swallowingScroll = false
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
     override func performClose(_ sender: Any?) { cancelPositioning(); onEscape?() }
@@ -34,6 +41,16 @@ import QuartzCore
         guard event.type == .scrollWheel, event.window === self else { return false }
         let phase = event.phase
         guard event.hasPreciseScrollingDeltas || !phase.isEmpty || !event.momentumPhase.isEmpty else { return false }
+        if swallowingScroll {
+            if phase.contains(.ended) || phase.contains(.cancelled) || (phase.isEmpty && event.momentumPhase.contains(.ended)) { swallowingScroll = false }
+            return true
+        }
+        if tuckedSide != nil, phase.contains(.began) || phase.contains(.mayBegin) || (phase.isEmpty && event.momentumPhase.isEmpty) {
+            // Two fingers on the sliver bring the video back; this gesture moves it no further.
+            untuck()
+            swallowingScroll = !phase.isEmpty
+            return true
+        }
         if phase.contains(.cancelled) {
             cancelPositioning()
             setFrame(PiPPositioning.releaseFrame(frame, screens: positionScreenFrames(), magnet: false), display: true)
@@ -108,6 +125,7 @@ import QuartzCore
     }
 
     func cancelPositioning() {
+        pointerFollow?.invalidate(); pointerFollow = nil
         isPinching = false
         scrollEndWork?.cancel(); scrollEndWork = nil
         isScrollDragging = false
@@ -127,11 +145,75 @@ import QuartzCore
     func finishPointerDrag(animated: Bool = true) {
         finishPositioning(velocity: .zero, animated: animated)
     }
+
+    /// `performDrag` can hand the move to the window server and return while the button is still
+    /// down. Follow the window until the button comes up, sampling where it goes so a thrown
+    /// window keeps its speed, then place it (corner, tuck, or where it was left).
+    func followPointerDrag(from start: NSPoint, completion: @escaping (_ moved: Bool) -> Void) {
+        pointerFollow?.invalidate()
+        var samples: [(time: TimeInterval, origin: NSPoint)] = [(ProcessInfo.processInfo.systemUptime, frame.origin)]
+        let finish: () -> Void = { [weak self] in
+            guard let self else { return }
+            self.pointerFollow?.invalidate(); self.pointerFollow = nil
+            let now = ProcessInfo.processInfo.systemUptime
+            samples.append((now, self.frame.origin))
+            let moved = hypot(self.frame.minX - start.x, self.frame.minY - start.y) >= 4
+            // Velocity over the last 80 ms of movement; a pause before letting go means no throw.
+            let recent = samples.filter { now - $0.time <= 0.08 }
+            var velocity = CGPoint.zero
+            if let first = recent.first, let last = recent.last, last.time - first.time >= 1.0 / 120 {
+                velocity = CGPoint(x: (last.origin.x - first.origin.x) / (last.time - first.time),
+                                   y: (last.origin.y - first.origin.y) / (last.time - first.time))
+            }
+            completion(moved)
+            if moved { self.finishPositioning(velocity: velocity, animated: true) }
+        }
+        guard NSEvent.pressedMouseButtons & 1 != 0 else { finish(); return }
+        let timer = Timer(timeInterval: 1.0 / 120, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                samples.append((ProcessInfo.processInfo.systemUptime, self.frame.origin))
+                if samples.count > 64 { samples.removeFirst(samples.count - 64) }
+                if NSEvent.pressedMouseButtons & 1 == 0 { finish() }
+            }
+        }
+        pointerFollow = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+    private var pointerFollow: Timer?
     private func finishPositioning(velocity: CGPoint, animated: Bool) {
         cancelPositioning()
         let start = frame
         let plan = PiPPositioning.releasePlan(start, velocity: velocity, screens: positionScreenFrames())
-        let target = plan.frame
+        tuckedSide = plan.tuck
+        glide(to: plan.frame, duration: plan.duration, animated: animated)
+    }
+
+    /// Brings a tucked video back out against the same edge (click, two fingers, or a key).
+    func untuck(animated: Bool = true) {
+        guard let side = tuckedSide else { return }
+        cancelPositioning()
+        let target = PiPPositioning.untuckedFrame(frame, side: side, screens: positionScreenFrames())
+        tuckedSide = nil
+        glide(to: target, duration: 0.32, animated: animated)
+    }
+
+    /// Pointing at the sliver slides a little more of the video out, like pulling a tab.
+    func setTuckPeek(_ peeking: Bool) {
+        guard let side = tuckedSide, peeking != tuckPeeking, !isScrollDragging, !isPinching else { return }
+        tuckPeeking = peeking
+        let target = PiPPositioning.tuckedFrame(frame, side: side, screens: positionScreenFrames(), peek: peeking)
+        cancelPositioningMotionOnly()
+        glide(to: target, duration: 0.2, animated: true)
+    }
+    private func cancelPositioningMotionOnly() {
+        positionGeneration &+= 1
+        isPositionSnapRunning = false
+        positionAnimator.stop()
+    }
+
+    private func glide(to target: NSRect, duration: TimeInterval, animated: Bool) {
+        let start = frame
         guard target != start else { return }
         guard animated, !positionReduceMotion() else {
             setFrame(target, display: true); return
@@ -139,7 +221,7 @@ import QuartzCore
         let generation = positionGeneration
         isPositionSnapRunning = true
         positionAnimator.animationView = contentView
-        positionAnimator.animate(from: 0, to: 1, duration: plan.duration, controlPoints: (0.22, 0.61, 0.36, 1), update: { [weak self] progress in
+        positionAnimator.animate(from: 0, to: 1, duration: duration, controlPoints: (0.22, 0.61, 0.36, 1), update: { [weak self] progress in
             guard let self, self.positionGeneration == generation else { return }
             self.setFrame(NSRect(x: start.minX + (target.minX - start.minX) * progress,
                                  y: start.minY + (target.minY - start.minY) * progress,
@@ -169,6 +251,10 @@ import QuartzCore
     private let volume = NSSlider(value: 1, minValue: 0, maxValue: 1, target: nil, action: nil)
     private let time = NSTextField(labelWithString: "0:00")
     private let resizeGrip = PiPResizeGrip()
+    /// Over a tucked video: the picture blurred, with a chevron pointing back on screen.
+    private let tuckBlur = NSVisualEffectView()
+    private let tuckChevron = NSImageView()
+    private(set) var tuckedSide: PiPPositioning.TuckSide?
     private var tracking: NSTrackingArea?
     private var hideWork: DispatchWorkItem?
     override var acceptsFirstResponder: Bool { true }
@@ -177,6 +263,13 @@ import QuartzCore
     override init(frame: NSRect) {
         super.init(frame: frame)
         appearance = NSAppearance(named: .darkAqua)
+        tuckBlur.material = .hudWindow; tuckBlur.blendingMode = .withinWindow; tuckBlur.state = .active
+        tuckBlur.frame = bounds; tuckBlur.autoresizingMask = [.width, .height]
+        tuckBlur.alphaValue = 0; tuckBlur.isHidden = true
+        tuckChevron.imageScaling = .scaleNone
+        tuckChevron.contentTintColor = .white
+        tuckBlur.addSubview(tuckChevron)
+        addSubview(tuckBlur)
         controls.frame = bounds; controls.autoresizingMask = [.width, .height]
         addSubview(controls)
         for control in [returnButton, closeButton, backward, play, forward, mute, volume, time, resizeGrip] as [NSView] { controls.addSubview(control) }
@@ -194,7 +287,7 @@ import QuartzCore
         time.font = .monospacedDigitSystemFont(ofSize: 11, weight: .medium)
         time.textColor = .white; time.alignment = .right
         time.setAccessibilityElement(false)
-        setAccessibilityLabel("Floating video. Drag or scroll with two fingers to move; flick to glide, or release near a corner to snap. Pinch to resize. Tab to navigate controls.")
+        setAccessibilityLabel(Self.defaultAccessibilityLabel)
         returnButton.nextKeyView = closeButton; closeButton.nextKeyView = backward
         backward.nextKeyView = play; play.nextKeyView = forward; forward.nextKeyView = mute
         mute.nextKeyView = volume; volume.nextKeyView = resizeGrip; resizeGrip.nextKeyView = returnButton
@@ -213,7 +306,39 @@ import QuartzCore
         time.frame = NSRect(x: w - 120, y: 17, width: 86, height: 16)
         time.isHidden = w < 300
         resizeGrip.frame = NSRect(x: w - 25, y: 2, width: 23, height: 23)
+        layoutTuckChevron()
     }
+    private func layoutTuckChevron() {
+        // The chevron sits in the part still on screen.
+        let sliver = PiPPositioning.tuckSliver
+        let x = tuckedSide == .left ? bounds.width - sliver : 0
+        tuckChevron.frame = NSRect(x: x, y: 0, width: sliver, height: bounds.height)
+    }
+    /// Shows or clears the tucked look: blurred picture, a chevron, no controls.
+    func setTucked(_ side: PiPPositioning.TuckSide?) {
+        tuckedSide = side
+        if let side {
+            tuckChevron.image = NSImage(systemSymbolName: side == .right ? "chevron.compact.left" : "chevron.compact.right",
+                                        accessibilityDescription: nil)?.withSymbolConfiguration(.init(pointSize: 20, weight: .semibold))
+            layoutTuckChevron()
+            tuckBlur.isHidden = false
+            stop(); setControlsVisible(false)
+            setAccessibilityLabel("Floating video, tucked at the \(side == .right ? "right" : "left") edge of the screen. Click to bring it back.")
+        } else {
+            setAccessibilityLabel(Self.defaultAccessibilityLabel)
+        }
+        let reduce = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = reduce ? 0 : 0.22
+            tuckBlur.animator().alphaValue = side == nil ? 0 : 1
+        } completionHandler: { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self, self.tuckedSide == nil else { return }
+                self.tuckBlur.isHidden = true
+            }
+        }
+    }
+    static let defaultAccessibilityLabel = "Floating video. Drag or scroll with two fingers to move; flick to glide, release near a corner to snap, or throw it past the left or right edge of the screen to tuck it away. Pinch to resize. Tab to navigate controls."
     func update(_ state: [String: Any]) {
         let paused = state["paused"] as? Bool ?? true
         let muted = state["muted"] as? Bool ?? false
@@ -236,6 +361,7 @@ import QuartzCore
     func stop() { hideWork?.cancel(); hideWork = nil }
     func revealControls() {
         stop()
+        guard tuckedSide == nil else { return }
         setControlsVisible(true)
         let work = DispatchWorkItem { [weak self] in
             guard let self else { return }
@@ -257,29 +383,40 @@ import QuartzCore
         let area = NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways, .inVisibleRect], owner: self, userInfo: nil)
         addTrackingArea(area); tracking = area
     }
-    override func mouseEntered(with event: NSEvent) { revealControls() }
+    override func mouseEntered(with event: NSEvent) {
+        if tuckedSide != nil { (window as? ArkVideoPanel)?.setTuckPeek(true) }
+        revealControls()
+    }
     override func mouseMoved(with event: NSEvent) { revealControls() }
     override func mouseExited(with event: NSEvent) {
+        if tuckedSide != nil { (window as? ArkVideoPanel)?.setTuckPeek(false) }
         stop()
         if let focused = window?.firstResponder as? NSView, focused !== self, focused.isDescendant(of: controls) { return }
         setControlsVisible(false)
     }
     override func hitTest(_ point: NSPoint) -> NSView? {
         guard let hit = super.hitTest(point) else { return nil }
+        if tuckedSide != nil { return self }
         return hit === controls || controls.alphaValue < 0.1 ? self : hit
     }
     override func mouseDown(with event: NSEvent) {
         revealControls(); window?.makeFirstResponder(self)
-        if event.clickCount == 2 { onReturn?() }
+        if event.clickCount == 2, tuckedSide == nil { onReturn?() }
         else if let panel = window as? ArkVideoPanel {
             panel.cancelPositioning()
+            let before = panel.frame.origin
             panel.performDrag(with: event)
-            if panel.isVisible { panel.finishPointerDrag() }
+            guard panel.isVisible else { return }
+            // A click on a tucked sliver brings it back; a drag decides again where it lands.
+            panel.followPointerDrag(from: before) { [weak panel] moved in
+                if !moved, panel?.tuckedSide != nil { panel?.untuck() }
+            }
         } else { window?.performDrag(with: event) }
     }
     func handleKey(_ event: NSEvent) -> Bool {
         guard !event.modifierFlags.contains(.command), !event.modifierFlags.contains(.control),
               !(window?.firstResponder is NSControl), window?.firstResponder !== resizeGrip else { return false }
+        if tuckedSide != nil, event.keyCode == 36 || event.keyCode == 76 { (window as? ArkVideoPanel)?.untuck(); return true }
         switch event.keyCode {
         case 49: onCommand?("play", 0)
         case 123: onCommand?("seek", -10)

@@ -112,6 +112,40 @@ import AppKit
                     && (0.35...0.55).contains(shortTravel.duration),
                   "far corner travel did not receive a longer bounded settling duration")
 
+        // Tucking behind a screen edge.
+        let hanging = CGRect(x: 1050, y: 300, width: 320, height: 180)   // 170 of 320 past the right edge
+        let tuck = PiPPositioning.releasePlan(hanging, velocity: .zero, screens: [display])
+        try check(tuck.tuck == .right && tuck.frame.minX == display.maxX - PiPPositioning.tuckSliver
+                    && tuck.frame.minY == 300 && tuck.frame.size == size,
+                  "a panel hanging well past the right edge did not tuck behind it with a sliver showing")
+        let hangingLeft = CGRect(x: -150, y: 300, width: 320, height: 180)
+        try check(PiPPositioning.releasePlan(hangingLeft, velocity: .zero, screens: [display]).tuck == .left,
+                  "a panel hanging past the left edge did not tuck left")
+        let barelyOver = CGRect(x: 960, y: 300, width: 320, height: 180)   // 80 of 320 over: under the threshold
+        try check(PiPPositioning.releasePlan(barelyOver, velocity: .zero, screens: [display]).tuck == nil,
+                  "a small overhang tucked instead of fitting back on screen")
+        let rightCorner = CGRect(x: 872, y: 32, width: 320, height: 180)
+        try check(PiPPositioning.releasePlan(rightCorner, velocity: CGPoint(x: 1400, y: 100), screens: [display]).tuck == .right,
+                  "a sideways throw from against the right edge did not tuck")
+        try check(PiPPositioning.releasePlan(leftInterior, velocity: CGPoint(x: 1400, y: 0), screens: [display]).tuck == nil,
+                  "a throw from the middle tucked instead of going to its corner")
+        try check(PiPPositioning.releasePlan(crossing, velocity: CGPoint(x: 2200, y: 0), screens: [display, right]).tuck == nil
+                    && PiPPositioning.releasePlan(CGRect(x: 1000, y: 300, width: 320, height: 180), velocity: .zero,
+                                                  screens: [display, right]).tuck == nil,
+                  "an edge shared with another display tucked instead of crossing")
+        try check(PiPPositioning.releasePlan(oversized, velocity: CGPoint(x: 3000, y: 0), screens: [display]).tuck == nil,
+                  "a video too large for a sliver tucked")
+        let peeked = PiPPositioning.tuckedFrame(tuck.frame, side: .right, screens: [display], peek: true)
+        try check(peeked.minX == display.maxX - PiPPositioning.tuckSliver - PiPPositioning.tuckPeek,
+                  "pointing at the sliver did not slide a little more out")
+        let back = PiPPositioning.untuckedFrame(tuck.frame, side: .right, screens: [display])
+        try check(display.contains(back) && back.maxX == display.maxX - PiPPositioning.cornerInset,
+                  "bringing it back did not land against the same edge")
+        try check(PiPPositioning.untuckedFrame(CGRect(x: 1172, y: 40, width: 320, height: 180), side: .right, screens: [display]).origin
+                    == CGPoint(x: 872, y: 32), "a video tucked near a corner did not come back into that corner")
+        try check(PiPPositioning.releasePlan(tuck.frame, velocity: .zero, screens: [display]).tuck == .right,
+                  "a tucked video released in place (pinch, click) left its tuck")
+
         var velocity = PiPPhysicalVelocity()
         velocity.begin(at: 1)
         velocity.record(.zero, at: 1)
