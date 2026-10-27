@@ -1021,7 +1021,14 @@ struct BrowserSession: Codable {
         let today = tabs.filter { $0.space == closing.space && !$0.isSaved && !splitSecondaryIDs.contains($0.id) }
         let successor = !closing.isSaved && members.contains(activeID)
             ? TabOrdering.successor(closing: id, today: today.map(\.id), openers: openers,
-                                    eligible: { candidate in today.first { $0.id == candidate }.map { !$0.isHome && !$0.isUnloaded } ?? false })
+                                    eligible: { candidate in
+                                        // Any live tab in this Space (a kept opener too, or a Favorite of this profile),
+                                        // never one that moved to another Space: landing there would switch Spaces.
+                                        tabs.first { $0.id == candidate }.map { tab in
+                                            !tab.isHome && !tab.isUnloaded && !splitSecondaryIDs.contains(tab.id)
+                                                && (tab.isFavorite ? profileID(for: tab) == currentProfileID : tab.space == closing.space)
+                                        } ?? false
+                                    })
             : nil
         for member in members {
             guard let tab = tabs.first(where: { $0.id == member }), !tab.isSaved else { continue }
@@ -1656,7 +1663,7 @@ enum TabOrdering {
         let above = today[..<index].reversed().filter(eligible)
         if let opener = openers[closing] {
             if let sibling = below.first(where: { openers[$0] == opener }) ?? above.first(where: { openers[$0] == opener }) { return sibling }
-            if today.contains(opener) ? eligible(opener) : true { return opener }
+            if eligible(opener) { return opener }
         }
         return below.first ?? above.first
     }
