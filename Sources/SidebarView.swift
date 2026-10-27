@@ -57,11 +57,24 @@ struct SidebarTabItem: Equatable {
     var knownTitle: String? = nil
     /// The title is the name the person gave a kept tab: shown exactly as typed.
     var hasCustomTitle: Bool = false
+    /// The page is making sound (Arc's speaker after the icon); muted shows the slashed speaker instead.
+    var isPlayingAudio: Bool = false
+    var isMuted: Bool = false
     /// What the row shows: the best-known title without its trailing site name (SidebarDisplayPolicy.rowTitle).
     var displayTitle: String {
         if isFolder || isSplit || hasCustomTitle { return title }
         return SidebarDisplayPolicy.rowTitle(title, address: subtitle, knownTitle: knownTitle)
     }
+}
+
+/// What the sidebar's player shows (Arc's media controls above the footer).
+struct SidebarMediaState: Equatable {
+    let tabID: UUID
+    let title: String
+    let isPlaying: Bool
+    let isMuted: Bool
+    let canPrevious: Bool
+    let canNext: Bool
 }
 
 /// A destination offered by Move to Folder menus.
@@ -90,6 +103,8 @@ struct SidebarExtensionItem {
     var onCloseTab: ((UUID) -> Void)?
     /// The cross on an unloaded kept tab: remove that row.
     var onRemoveSavedTab: ((UUID) -> Void)?
+    /// A row's speaker was clicked: mute or unmute that tab.
+    var onToggleTabMute: ((UUID) -> Void)?
     var onPinTab: ((UUID) -> Void)?
     var onFavoriteTab: ((UUID) -> Void)?
     var onEditSavedTab: ((UUID) -> Void)?
@@ -192,6 +207,34 @@ struct SidebarExtensionItem {
     private var favorites: [ArkFavoriteButton] = []
     private var favoriteItems: [SidebarTabItem] = []
     private let clip = ArkFlippedView()
+    /// Arc's media controls above the footer (nil: none showing).
+    private let mediaPlayer = ArkMediaPlayerView()
+    private(set) var mediaState: SidebarMediaState?
+    var onMediaPlayPause: (() -> Void)?
+    var onMediaPrevious: (() -> Void)?
+    var onMediaNext: (() -> Void)?
+    var onMediaMute: (() -> Void)?
+    var onMediaSelect: (() -> Void)?
+    /// Shows, updates or hides the player; showing and hiding slide the list's end with it.
+    func setMediaPlayer(_ state: SidebarMediaState?) {
+        guard state != mediaState else { return }
+        let appearing = (state == nil) != (mediaState == nil)
+        mediaState = state
+        if let state { mediaPlayer.configure(state, icon: faviconProvider?(state.tabID)) }
+        guard appearing else { return }
+        mediaPlayer.isHidden = false
+        guard window != nil, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
+            mediaPlayer.alphaValue = state == nil ? 0 : 1; mediaPlayer.isHidden = state == nil; needsLayout = true; return
+        }
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = 0.2; context.allowsImplicitAnimation = true
+            context.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0.8, 0.2, 1)
+            mediaPlayer.animator().alphaValue = state == nil ? 0 : 1
+            needsLayout = true; layoutSubtreeIfNeeded()
+        }, completionHandler: { [weak self] in
+            MainActor.assumeIsolated { if self?.mediaState == nil { self?.mediaPlayer.isHidden = true } }
+        })
+    }
     /// Arc's hairline over the footer, shown only while tabs continue below it.
     private let footerRule = ArkFlippedView()
     private var page = SidebarPage() { didSet { onTabListChange?() } }
@@ -248,6 +291,12 @@ struct SidebarExtensionItem {
         for button in [toggle, back, forward, reload, plus, spaceOverflow] { button.tone = ArkPalette.chromeIcon }
         clip.addSubview(page); connect(page); cachedPages[0] = page
         addSubview(footerRule); footerRule.wantsLayer = true; footerRule.alphaValue = 0
+        addSubview(mediaPlayer); mediaPlayer.isHidden = true; mediaPlayer.alphaValue = 0
+        mediaPlayer.onPlayPause = { [weak self] in self?.onMediaPlayPause?() }
+        mediaPlayer.onPrevious = { [weak self] in self?.onMediaPrevious?() }
+        mediaPlayer.onNext = { [weak self] in self?.onMediaNext?() }
+        mediaPlayer.onMute = { [weak self] in self?.onMediaMute?() }
+        mediaPlayer.onSelect = { [weak self] in self?.onMediaSelect?() }
         back.handler = { [weak self] in self?.onBack?() }
         forward.handler = { [weak self] in self?.onForward?() }
         reload.handler = { [weak self] in self?.onReload?() }
@@ -377,6 +426,7 @@ struct SidebarExtensionItem {
         page.select = { [weak self] in self?.onSelectTab?($0) }
         page.close = { [weak self] in self?.onCloseTab?($0) }
         page.remove = { [weak self] in self?.onRemoveSavedTab?($0) }
+        page.toggleMute = { [weak self] in self?.onToggleTabMute?($0) }
         page.pin = { [weak self] in self?.onPinTab?($0) }
         page.favorite = { [weak self] in self?.onFavoriteTab?($0) }
         page.editSaved = { [weak self] in self?.onEditSavedTab?($0) }
@@ -640,7 +690,12 @@ struct SidebarExtensionItem {
         favoriteGrid = (leading, tileWidth, columns)
         favoritesHost.showPlaceholder(gapSlot.map(slotFrame) ?? (dropZone ? slotFrame(0) : nil), strong: gapSlot != nil)
         let pageTop: CGFloat = gridTop + favoriteHeight + (favoriteRows == 0 ? 0 : 10)
-        clip.frame = NSRect(x: 0, y: pageTop, width: w, height: max(0, bounds.height - pageTop - 45))
+        // The player sits above the footer (Arc), and the list ends above it.
+        let playerHeight = ArkMetrics.mediaPlayerHeight
+        let playerY = bounds.height - 46 - playerHeight
+        mediaPlayer.frame = NSRect(x: leading, y: mediaState == nil ? playerY + 12 : playerY, width: contentWidth, height: playerHeight)
+        let listBottom = mediaState == nil ? bounds.height - 45 : playerY - 6
+        clip.frame = NSRect(x: 0, y: pageTop, width: w, height: max(0, listBottom - pageTop))
         footerRule.frame = NSRect(x: leading + 10, y: clip.frame.maxY, width: max(0, contentWidth - 20), height: 1)
         updateFooterRule()
         setPagingOffset(offset)
@@ -669,6 +724,7 @@ struct SidebarExtensionItem {
     var faviconProvider: ((UUID) -> NSImage?)?
     var select: ((UUID)->Void)?; var close: ((UUID)->Void)?; var pin: ((UUID)->Void)?; var newTab: (()->Void)?
     var remove: ((UUID)->Void)?
+    var toggleMute: ((UUID)->Void)?
     var manageSpaces: (() -> Void)?
     /// The context menu for this page's Space (by Space ID).
     var spaceMenu: ((Int) -> NSMenu?)?
@@ -996,6 +1052,7 @@ struct SidebarExtensionItem {
         row.select = { [weak self, weak row] in if let id = row?.item.id { self?.select?(id) } }
         row.close = { [weak self, weak row] in if let id = row?.item.id { self?.close?(id) } }
         row.remove = { [weak self, weak row] in if let id = row?.item.id { self?.remove?(id) } }
+        row.toggleMute = { [weak self, weak row] in if let id = row?.item.id { self?.toggleMute?(id) } }
         row.pin = { [weak self, weak row] in if let id = row?.item.id { self?.pin?(id) } }
         row.move = { [weak self, weak row] destination in if let id = row?.item.id { self?.move?(id, destination) } }
         row.favorite = { [weak self, weak row] in if let id = row?.item.id { self?.favorite?(id) } }
@@ -1326,6 +1383,8 @@ final class ArkCenteredFieldCell: NSTextFieldCell {
     static let scrollThumbMinLength: CGFloat = 24
     /// How far rows fade as they scroll under the heading (top) and the footer (bottom).
     static let listFadeTop: CGFloat = 18
+    /// Arc's sidebar player card above the footer.
+    static let mediaPlayerHeight: CGFloat = 33
     static let listFadeBottom: CGFloat = 14
     static func sidebarContentWidth(_ width: CGFloat) -> CGFloat { max(0, width - sidebarLeading - sidebarTrailing) }
     /// The window controls' row: the traffic lights, sidebar toggle, back, forward and reload share this vertical
@@ -2091,6 +2150,73 @@ private final class ArkFavoriteButton: ArkHoverButton {
     }
 }
 
+/// Arc's sidebar player: one rounded card with the page's icon (click to go to the tab), previous, play/pause,
+/// next and the speaker, spread evenly. Previous/next dim when the page has none.
+@MainActor private final class ArkMediaPlayerView: ArkFlippedView {
+    var onPlayPause: (() -> Void)?, onPrevious: (() -> Void)?, onNext: (() -> Void)?, onMute: (() -> Void)?, onSelect: (() -> Void)?
+    private let art = ArkMediaArtButton()
+    private let previous = ArkIconButton(symbol: "backward.end.fill", label: "Previous", glyphSize: 13)
+    private let playPause = ArkIconButton(symbol: "pause.fill", label: "Pause", glyphSize: 14)
+    private let next = ArkIconButton(symbol: "forward.end.fill", label: "Next", glyphSize: 13)
+    private let mute = ArkIconButton(symbol: "speaker.wave.2.fill", label: "Mute", glyphSize: 15)
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        identifier = NSUserInterfaceItemIdentifier("sidebar-media-player")
+        setAccessibilityElement(true); setAccessibilityRole(.group); setAccessibilityLabel("Now playing")
+        for view in [art, previous, playPause, next, mute] as [NSView] { addSubview(view) }
+        art.handler = { [weak self] in self?.onSelect?() }
+        previous.handler = { [weak self] in self?.onPrevious?() }
+        playPause.handler = { [weak self] in self?.onPlayPause?() }
+        next.handler = { [weak self] in self?.onNext?() }
+        mute.handler = { [weak self] in self?.onMute?() }
+        for button in [previous, next, mute] { button.tone = ArkPalette.secondary }
+        playPause.tone = ArkPalette.ink
+    }
+    required init?(coder: NSCoder) { fatalError() }
+    func configure(_ state: SidebarMediaState, icon: NSImage?) {
+        art.setIcon(icon); art.toolTip = state.title; art.setAccessibilityLabel("Go to \(state.title)")
+        toolTip = state.title
+        setAccessibilityValue(state.isPlaying ? "Playing \(state.title)" : "Paused \(state.title)")
+        playPause.setSymbol(state.isPlaying ? "pause.fill" : "play.fill", label: state.isPlaying ? "Pause" : "Play", animated: true)
+        previous.isEnabled = state.canPrevious; next.isEnabled = state.canNext
+        mute.setSymbol(state.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill", label: state.isMuted ? "Unmute" : "Mute")
+    }
+    override func layout() {
+        super.layout()
+        // Five equal slots across the card, as Arc spaces them.
+        let slot = bounds.width / 5, side: CGFloat = 28
+        for (index, view) in ([art, previous, playPause, next, mute] as [NSView]).enumerated() {
+            view.frame = NSRect(x: (slot * (CGFloat(index) + 0.5) - side / 2).rounded(), y: (bounds.height - side) / 2, width: side, height: side)
+        }
+    }
+    override func draw(_ dirtyRect: NSRect) {
+        let light = !effectiveAppearance.isDarkChrome
+        NSGraphicsContext.saveGraphicsState()
+        if light {
+            let shadow = NSShadow(); shadow.shadowColor = NSColor(white: 0, alpha: 0.08); shadow.shadowBlurRadius = 2; shadow.shadowOffset = NSSize(width: 0, height: -0.5); shadow.set()
+        }
+        ArkPalette.selection.setFill()
+        NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: ArkMetrics.rowRadius, yRadius: ArkMetrics.rowRadius).fill()
+        NSGraphicsContext.restoreGraphicsState()
+    }
+    override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); needsDisplay = true }
+}
+
+/// The player's leading square: the playing page's icon on a soft tile (a plain tile when it has none).
+@MainActor private final class ArkMediaArtButton: ArkHoverButton {
+    private var icon: NSImage?
+    func setIcon(_ image: NSImage?) { icon = image; needsDisplay = true }
+    override func draw(_ dirtyRect: NSRect) {
+        let tile = NSRect(x: (bounds.width - 20) / 2, y: (bounds.height - 20) / 2, width: 20, height: 20)
+        (hovered ? ArkPalette.tileHover : ArkPalette.tile).setFill()
+        NSBezierPath(roundedRect: tile, xRadius: 4, yRadius: 4).fill()
+        if let icon {
+            icon.draw(in: tile.insetBy(dx: 2, dy: 2), from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
+        }
+    }
+}
+
 @MainActor
 private final class ArkNewTabButton: ArkHoverButton {
     init() {
@@ -2327,6 +2453,9 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted, Ar
     private let chevronView = NSImageView()
     private var favicon: NSImage?
     private let closeButton = ArkRowActionButton()
+    /// Arc's speaker after the icon while the page plays; clicking it mutes or unmutes the tab.
+    private let speakerButton = ArkIconButton(symbol: "speaker.wave.2", label: "Mute tab", glyphSize: 13)
+    var toggleMute: (() -> Void)?
     var remove: (() -> Void)?
     private var hovered = false
     private var area: NSTrackingArea?
@@ -2349,7 +2478,10 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted, Ar
         iconView.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 16, weight: .regular)
         iconView.imageScaling = .scaleProportionallyUpOrDown
         iconView.contentTintColor = item.isActive ? spaceTint : ArkPalette.secondary
-        for view in [titleLabel, subtitleLabel, iconView, chevronView, closeButton] as [NSView] { addSubview(view) }
+        for view in [titleLabel, subtitleLabel, iconView, chevronView, closeButton, speakerButton] as [NSView] { addSubview(view) }
+        speakerButton.isHidden = true; speakerButton.tone = ArkPalette.secondary
+        speakerButton.identifier = NSUserInterfaceItemIdentifier("tab-speaker")
+        speakerButton.handler = { [weak self] in self?.toggleMute?() }
         closeButton.isHidden = true
         closeButton.handler = { [weak self] in
             guard let self else { return }
@@ -2427,6 +2559,11 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted, Ar
             setAccessibilityCustomActions(item.isFolder ? nil : [NSAccessibilityCustomAction(name: label) { [weak self] in
                 self?.performTrailingAction(); return true
             }])
+        }
+        if first || old.isPlayingAudio != item.isPlayingAudio || old.isMuted != item.isMuted || old.isFolder != item.isFolder {
+            let shows = !item.isFolder && (item.isPlayingAudio || item.isMuted)
+            speakerButton.setSymbol(item.isMuted ? "speaker.slash" : "speaker.wave.2", label: item.isMuted ? "Unmute tab" : "Mute tab")
+            if speakerButton.isHidden == shows { speakerButton.isHidden = !shows; needsLayout = true }
         }
         updateTrailingControls()
         if item.isFolder, first || !old.isFolder || old.isExpanded != item.isExpanded {
@@ -2567,7 +2704,11 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted, Ar
                                   isFolder: item.isFolder, showsClose: !closeButton.isHidden)
         iconView.frame = frames.icon
         // The title's start never moves; only where it ends (and so its ellipsis) follows the button.
-        titleLabel.frame = NSRect(x: frames.title.minX, y: frames.title.minY, width: max(0, frames.visibleTitleEnd - frames.title.minX), height: frames.title.height)
+        // A playing page's speaker sits between the icon and the title (Arc), pushing the title over.
+        let speakerRoom: CGFloat = speakerButton.isHidden ? 0 : 20
+        let titleX = frames.title.minX + speakerRoom
+        titleLabel.frame = NSRect(x: titleX, y: frames.title.minY, width: max(0, frames.visibleTitleEnd - titleX), height: frames.title.height)
+        speakerButton.frame = NSRect(x: frames.icon.maxX + 5, y: (bounds.height - 20) / 2, width: 20, height: 20)
         subtitleLabel.frame = NSRect(x: frames.title.minX + 1, y: 23, width: frames.title.width, height: 12)
         subtitleLabel.isHidden = true
         closeButton.frame = frames.close
@@ -2643,7 +2784,7 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted, Ar
         if let renameField, hit === renameField || hit.isDescendant(of: renameField) { return hit }
         // Labels and symbols belong to the row's selection target; the close
         // button keeps its own native control hit target.
-        return hit === closeButton ? closeButton : self
+        return hit === closeButton ? closeButton : hit === speakerButton ? speakerButton : self
     }
     private func activate() { if item.isFolder { toggleFolder?() } else { select?() } }
     override func mouseDown(with event: NSEvent) {

@@ -314,6 +314,11 @@ import QuartzCore
     var displayedWidth: CGFloat
     var browsers: [UUID: WKWebView] = [:] { didSet { invalidateExtensionSurfaceTopology() } }
     var observations: [UUID: [NSKeyValueObservation]] = [:]
+    /// The sidebar player (MediaPlayer.swift): per-page sound observers, the tab it controls, and its state.
+    var audioObservers: [UUID: PageAudioObserver] = [:]
+    var mediaTabID: UUID?
+    var mediaPausedFromPlayer = false
+    var mediaControls: [UUID: (previous: Bool, next: Bool)] = [:]
     var addressOverlay: DismissView?
     var addressField: PaletteField?
     var addressCard: NSView?
@@ -412,6 +417,7 @@ import QuartzCore
         // The sidebar draws above the card so it can float over the page when hidden (docked, they never overlap).
         [card, floatingShell, sidebar, handle, listScrollThumb, edgeZone].forEach(root.addSubview)
         configureFloatingSidebar()
+        connectMediaPlayer()
         sidebar.onTabListChange = { [weak self] in self?.refreshListScrollThumb() }
         listScrollThumb.onInteractionChange = { [weak self] active in self?.handle.isIndicatorSuppressed = active }
         card.wantsLayer = true
@@ -425,6 +431,7 @@ import QuartzCore
         sidebar.onSelectTab = { [weak self] id in self?.select(id) }
         sidebar.onCloseTab = { [weak self] id in self?.close(id) }
         sidebar.onRemoveSavedTab = { [weak self] id in self?.removeSavedTab(id) }
+        sidebar.onToggleTabMute = { [weak self] id in guard let self else { return }; self.setTab(id, muted: !self.isTabMuted(id)) }
         sidebar.tabActionItems = { [weak self] id in
             (self?.tabActionMenuItems(for: id) ?? [], self?.moveToMenuItem(for: id), self?.closeTabsBelowMenuItem(for: id))
         }
@@ -636,6 +643,7 @@ import QuartzCore
         browser.setAccessibilityLabel("Web content")
         browsers[id] = browser
         tabLastUsed[id] = ProcessInfo.processInfo.systemUptime
+        watchAudio(of: browser, id: id)
         observations[id] = [
             browser.observe(\.title, options: [.new]) { [weak self] web, _ in DispatchQueue.main.async { self?.updateMetadata(web) } },
             browser.observe(\.url, options: [.new]) { [weak self] web, _ in DispatchQueue.main.async { self?.updateMetadata(web) } },
@@ -912,6 +920,7 @@ import QuartzCore
         sidebar.configureSpaces(session.spaces)
         let tabs = sidebarItems(in: session)
         sidebar.update(tabs: tabs, space: session.space, canGoBack: activeWebView?.canGoBack ?? false, canGoForward: activeWebView?.canGoForward ?? false, isLoading: activeWebView?.isLoading ?? false)
+        refreshMediaPlayer()
         if let target = pagingTarget, target != session.space {
             sidebar.beginPaging(tabs: sidebarItems(for: target), space: target, direction: spaceDirection(to: target))
         }
@@ -962,6 +971,7 @@ import QuartzCore
         invalidateFaviconDocument(id); historyTitleFollowUps.removeValue(forKey: id)
         peeks[id]?.dismiss()
         observations.removeValue(forKey: id)
+        stopWatchingAudio(id); mediaControls.removeValue(forKey: id)
         let web = browsers.removeValue(forKey: id)
         if let web { tabActivityProbe.invalidate(web) }
         tabLastUsed.removeValue(forKey: id); sleepRestores.removeValue(forKey: id); nonGetDocuments.remove(id); pendingNonGetDocuments.removeValue(forKey: id)
@@ -1568,6 +1578,9 @@ import QuartzCore
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) { showError(error, web: webView) }
     func showError(_ error: Error, web: WKWebView) {
         guard (error as NSError).code != NSURLErrorCancelled else { return }
+        // WebKit hands audio/video files to its own player and reports that as "Plug-in handled load" (204):
+        // the page is playing, not failed.
+        if (error as NSError).domain == "WebKitErrorDomain", (error as NSError).code == 204 { return }
         if let id = browsers.first(where: { $0.value === web })?.key {
             pendingLoads.remove(id); pendingNonGetDocuments.removeValue(forKey: id); historyTitleFollowUps.removeValue(forKey: id)
             if let failed = (error as NSError).userInfo[NSURLErrorFailingURLStringErrorKey] as? String, URLInput.directURL(failed) != nil { requestedAddresses[id] = failed }

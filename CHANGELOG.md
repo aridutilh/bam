@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- When a tab you're not looking at plays sound, a small player appears at the bottom of the sidebar, as in Arc: the page's icon (click it to go to the tab), previous and next when the site has them, play/pause and mute. It steps aside while that tab is on screen or its video floats in Picture in Picture.
+- Tabs playing sound show a speaker after their icon; click it to mute or unmute the tab.
+- Audio and video files opened directly (an .mp3 link, for example) no longer say "Couldn't load page" while they play.
 - Right-clicking a tab follows Arc's order: Copy Link, Share, Change Icon…, Rename…, Mute, Duplicate and, for Today tabs, Move to (with New Space…), with Close Tab and Close Tabs Below last.
 - Double-click a tab's title to rename it in place; Return keeps the name, Esc cancels, and an empty name goes back to the page's own title.
 - The footer's bottom-left button is now Arc's archive box: it opens Archived Tabs, and its menu has Downloads, History and Manage Spaces.
