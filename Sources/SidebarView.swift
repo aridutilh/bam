@@ -176,6 +176,8 @@ struct SidebarExtensionItem {
     private var favorites: [ArkFavoriteButton] = []
     private var favoriteItems: [SidebarTabItem] = []
     private let clip = ArkFlippedView()
+    /// Arc's hairline over the footer, shown only while tabs continue below it.
+    private let footerRule = ArkFlippedView()
     private var page = SidebarPage() { didSet { onTabListChange?() } }
     /// Called when the visible tab list scrolls, re-lays out or changes page, so the scroll thumb can follow.
     var onTabListChange: (() -> Void)?
@@ -229,6 +231,7 @@ struct SidebarExtensionItem {
         // The window controls' row and the footer's + read a step softer than the address text, as in Yab.
         for button in [toggle, back, forward, reload, plus, spaceOverflow] { button.tone = ArkPalette.chromeIcon }
         clip.addSubview(page); connect(page); cachedPages[0] = page
+        addSubview(footerRule); footerRule.wantsLayer = true; footerRule.alphaValue = 0
         back.handler = { [weak self] in self?.onBack?() }
         forward.handler = { [weak self] in self?.onForward?() }
         reload.handler = { [weak self] in self?.onReload?() }
@@ -334,6 +337,7 @@ struct SidebarExtensionItem {
         super.viewDidChangeEffectiveAppearance()
         func invalidate(_ view: NSView) { view.needsDisplay = true; view.subviews.forEach(invalidate) }
         invalidate(self)
+        updateFooterRule()
     }
 
     // A vertical tab list is always at its horizontal edge. Ask AppKit to
@@ -350,6 +354,7 @@ struct SidebarExtensionItem {
         page.scroll.onSpaceScroll = { [weak self] in self?.onSpaceScroll?($0, .tabList) ?? false }
         page.scroll.onScroll = { [weak self, weak page] in
             guard let self, let page, page === self.page else { return }
+            self.updateFooterRule()
             self.onTabListChange?()
         }
         page.select = { [weak self] in self?.onSelectTab?($0) }
@@ -530,6 +535,15 @@ struct SidebarExtensionItem {
         setPagingOffset(0)
         scheduleHoverResync()
     }
+    /// The rule fades in with the rows hidden below the list (over the list's last few points of travel).
+    var footerRuleOpacity: CGFloat { footerRule.alphaValue }
+    private func updateFooterRule() {
+        let list = page.scroll, content = list.documentView?.frame.height ?? 0
+        let below = content - list.contentView.bounds.maxY
+        let alpha = isPaging ? 0 : min(1, max(0, below / ArkMetrics.listFadeBottom))
+        footerRule.layer?.backgroundColor = effectiveAppearance.isDarkChrome ? NSColor(white: 1, alpha: 0.10).cgColor : NSColor(white: 0, alpha: 0.08).cgColor
+        if footerRule.alphaValue != alpha { footerRule.alphaValue = alpha }
+    }
     private var hoverResyncScheduled = false
     /// After a Space switch, paging settle or list rebuild, once rows have their final frames: whatever the
     /// still pointer is over hovers, and nothing else (a row hovered on a page that left keeps no gray).
@@ -607,21 +621,23 @@ struct SidebarExtensionItem {
         favoritesHost.showPlaceholder(gapSlot.map(slotFrame) ?? (dropZone ? slotFrame(0) : nil), strong: gapSlot != nil)
         let pageTop: CGFloat = gridTop + favoriteHeight + (favoriteRows == 0 ? 0 : 10)
         clip.frame = NSRect(x: 0, y: pageTop, width: w, height: max(0, bounds.height - pageTop - 45))
+        footerRule.frame = NSRect(x: leading + 10, y: clip.frame.maxY, width: max(0, contentWidth - 20), height: 1)
+        updateFooterRule()
         setPagingOffset(offset)
         let y = bounds.height-36
         let footer = ArkFooterLayout(width: w, spaceCount: spaces.count,
                                      selectedIndex: spaces.firstIndex { $0.index == selectedSpace } ?? 0)
         downloads.frame = footer.downloads
         let overflowing = footer.overflowing, visibleCount = footer.visibleCount, startIndex = footer.startIndex
-        let x = footer.spacesX
+        let x = footer.spacesX, step = footer.step
         for (index, button) in spaces.enumerated() {
             button.isHidden = index < startIndex || index >= startIndex + visibleCount
             if !button.isHidden {
-                button.frame = NSRect(x: x + CGFloat(index - startIndex) * ArkFooterLayout.step, y: y, width: ArkFooterLayout.step - 1, height: 28)
+                button.frame = NSRect(x: x + CGFloat(index - startIndex) * step, y: y, width: min(28, step - 1), height: 28)
             }
         }
         spaceOverflow.isHidden = !overflowing
-        spaceOverflow.frame = NSRect(x: x + CGFloat(visibleCount) * ArkFooterLayout.step, y: y, width: ArkFooterLayout.step - 1, height: 28)
+        spaceOverflow.frame = NSRect(x: x + CGFloat(visibleCount) * step, y: y, width: min(28, step - 1), height: 28)
         plus.frame = NSRect(x: footer.plus.minX, y: y, width: 28, height: 28)
         downloads.frame.origin.y = y
     }
@@ -1128,6 +1144,9 @@ enum ArkPalette {
     /// beige Space). The selected row, and anything under the pointer, uses full `ink`.
     static let rowInk = NSColor.chrome(light: NSColor(srgbRed: BamInk.lightPrimary, green: BamInk.lightPrimary, blue: BamInk.lightPrimary, alpha: 0.76),
                                        dark: NSColor(srgbRed: BamInk.darkPrimary, green: BamInk.darkPrimary, blue: BamInk.darkPrimary, alpha: 0.84))
+    /// The sidebar's address: Arc shows it a step quieter than the tab titles.
+    static let addressInk = NSColor.chrome(light: NSColor(srgbRed: BamInk.lightPrimary, green: BamInk.lightPrimary, blue: BamInk.lightPrimary, alpha: 0.82),
+                                           dark: NSColor(srgbRed: BamInk.darkPrimary, green: BamInk.darkPrimary, blue: BamInk.darkPrimary, alpha: 0.74))
     /// Toolbar and footer glyphs: nearly full ink (thin strokes read lighter than text at the same color).
     static let chromeIcon = NSColor.chrome(light: NSColor(srgbRed: BamInk.lightPrimary, green: BamInk.lightPrimary, blue: BamInk.lightPrimary, alpha: 0.88),
                                            dark: NSColor(srgbRed: BamInk.darkPrimary, green: BamInk.darkPrimary, blue: BamInk.darkPrimary, alpha: 0.9))
@@ -1239,15 +1258,15 @@ final class ArkCenteredFieldCell: NSTextFieldCell {
     static let listFadeBottom: CGFloat = 14
     static func sidebarContentWidth(_ width: CGFloat) -> CGFloat { max(0, width - sidebarLeading - sidebarTrailing) }
     /// The window controls' row: the traffic lights, sidebar toggle, back, forward and reload share this vertical
-    /// center (Yab/Arc), and the first light is centered `trafficLightLeading` from the window's edge.
-    static let toolbarCenterY: CGFloat = 26
+    /// center (Arc), and the first light is centered `trafficLightLeading` from the window's edge.
+    static let toolbarCenterY: CGFloat = 24
     static let trafficLightLeading: CGFloat = 20
     static let toolbarButtonSize: CGFloat = 28
-    static let addressTop: CGFloat = 49
-    static let addressHeight: CGFloat = 36
+    static let addressTop: CGFloat = 46
+    static let addressHeight: CGFloat = 35
     static let addressRadius: CGFloat = 10
     static let addressTextSize: CGFloat = 13
-    static let favoriteHeight: CGFloat = 44
+    static let favoriteHeight: CGFloat = 45
     static let favoriteGap: CGFloat = 8
     /// Narrowest Favorite tile before the grid drops a column (Arc fits four in a ~230pt sidebar).
     static let favoriteMinimumWidth: CGFloat = 44
@@ -1294,8 +1313,8 @@ final class ArkCenteredFieldCell: NSTextFieldCell {
         return context.convertToUserSpace(snapped)
     }
     static let rowRadius: CGFloat = 10
-    /// Leading icon column and the trailing gap a row always keeps (titles start 6pt after the 16pt icon, as in Yab).
-    static let leadingInset: CGFloat = 30
+    /// Leading icon column and the trailing gap a row always keeps (titles start 10pt after the 16pt icon, as in Arc).
+    static let leadingInset: CGFloat = 35
     static let trailingGap: CGFloat = 10
     /// Room the close button (or folder chevron) takes when it is showing.
     static let trailingControl: CGFloat = 24
@@ -1313,23 +1332,34 @@ final class ArkCenteredFieldCell: NSTextFieldCell {
 /// The footer, as in Arc: Downloads at the leading edge, the Space buttons centered in the footer (an overflow
 /// menu after them only when they don't fit), New Tab at the trailing edge. Pure geometry.
 struct ArkFooterLayout {
-    /// Yab's footer: one 16pt emoji every 25 points.
-    static let step: CGFloat = 25
+    /// Arc spaces its footer icons about 32 points apart; with more Spaces they close up to 25 before an overflow
+    /// menu takes the rest.
+    static let maximumStep: CGFloat = 32
+    static let minimumStep: CGFloat = 22
     let downloads: NSRect, plus: NSRect
     let visibleCount: Int, startIndex: Int, overflowing: Bool
+    /// Distance between the visible Space buttons.
+    let step: CGFloat
     /// Leading x of the first visible Space button.
     let spacesX: CGFloat
     init(width w: CGFloat, spaceCount: Int, selectedIndex: Int) {
-        // Yab's footer: Downloads centered 21pt in, + 21pt from the trailing edge, the Spaces between them.
-        downloads = NSRect(x: 7, y: 0, width: 28, height: 28)
-        plus = NSRect(x: w - 35, y: 0, width: 28, height: 28)
-        let start: CGFloat = 39, end = w - 39
+        // Arc: Downloads (Library) at the leading edge, + at the trailing edge, the Spaces centered between them.
+        downloads = NSRect(x: 9, y: 0, width: 28, height: 28)
+        plus = NSRect(x: w - 36, y: 0, width: 28, height: 28)
+        let start: CGFloat = 41, end = w - 40
         let room = max(0, end - start)
-        let capacity = max(1, Int(room / Self.step))
-        overflowing = spaceCount > capacity
-        visibleCount = min(spaceCount, max(1, capacity - (overflowing ? 1 : 0)))
+        let count = max(1, spaceCount)
+        let fitted = ((room + 2) / CGFloat(count)).rounded(.down)
+        if fitted >= Self.minimumStep {
+            step = min(Self.maximumStep, fitted); overflowing = false; visibleCount = spaceCount
+        } else {
+            step = Self.minimumStep
+            let capacity = max(1, Int((room + 2) / step))
+            overflowing = spaceCount > capacity
+            visibleCount = min(spaceCount, max(1, capacity - (overflowing ? 1 : 0)))
+        }
         startIndex = max(0, min(selectedIndex - visibleCount / 2, spaceCount - visibleCount))
-        let total = CGFloat(visibleCount + (overflowing ? 1 : 0)) * Self.step - 2
+        let total = CGFloat(visibleCount + (overflowing ? 1 : 0)) * step - 2
         // Centered in the whole footer, as Arc does, but never over the edge buttons.
         spacesX = min(max(start, ((w - total) / 2).rounded()), max(start, end - total))
     }
@@ -1410,12 +1440,10 @@ enum ArkTitleFade {
 /// freshly imported row) reads at full contrast; only a page Bam put to sleep
 /// to save memory is quieted, and only slightly.
 @MainActor enum ArkRowInk {
-    static func title(sleeping: Bool) -> NSColor { sleeping ? ArkPalette.secondary : ArkPalette.rowInk }
-    /// Selected rows read at full ink; folders a step above tabs; memory-slept pages a step below.
+    static func title(sleeping: Bool) -> NSColor { sleeping ? ArkPalette.secondary : ArkPalette.ink }
+    /// Arc: every title reads at full ink (the selection card does the emphasis); memory-slept pages a step below.
     static func title(sleeping: Bool, selected: Bool, folder: Bool) -> NSColor {
-        if selected { return ArkPalette.ink }
-        if folder { return ArkPalette.folderInk }
-        return title(sleeping: sleeping)
+        selected || folder ? ArkPalette.ink : title(sleeping: sleeping)
     }
     static func iconAlpha(sleeping: Bool) -> CGFloat { sleeping ? 0.8 : 1 }
 }
@@ -1816,9 +1844,9 @@ private final class ArkIconButton: ArkHoverButton {
         // A lifted, translucent field like Arc/Yab rather than a dark well.
         fill(hovered || isHighlighted ? ArkPalette.fieldHover : ArkPalette.field, radius: ArkMetrics.addressRadius)
         let font = NSFont.systemFont(ofSize: ArkMetrics.addressTextSize)
-        let attributes: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: ArkPalette.ink]
+        let attributes: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: ArkPalette.addressInk]
         let line = ceil(font.ascender - font.descender + font.leading)
-        let rect = NSRect(x: 10, y: ((bounds.height - line) / 2).rounded(), width: max(0, bounds.width - 10 - trailingInset), height: line)
+        let rect = NSRect(x: 13, y: ((bounds.height - line) / 2).rounded(), width: max(0, bounds.width - 13 - trailingInset), height: line)
         let width = (address as NSString).size(withAttributes: attributes).width
         guard let context = NSGraphicsContext.current?.cgContext else { return }
         // The address reads from its start and fades out at the end when it doesn't fit (no ellipsis), as in Arc/Yab.
@@ -2015,68 +2043,43 @@ enum ArkTabRowChevron {
     static let emphasized: CGFloat = 0.85
 }
 
-/// Bam's own folder glyph, drawn as vectors at whatever scale it lands on: an outline folder in the row's ink with
-/// the stroke weight of the 16pt SF Symbols around it (Yab: "folder outlines match tab icons"). Opening tilts the
-/// front panel forward, so open and closed read apart at a glance. Original geometry; no system or third-party artwork.
+/// Bam's own folder glyph, drawn as vectors at whatever scale it lands on: a filled folder in the Space's
+/// tint (the back panel and tab lighter), with the front flap tilted forward when open. Original geometry;
+/// no system or third-party artwork.
 @MainActor enum ArkFolderGlyph {
     static let side: CGFloat = 16
-    /// SF Symbols' regular weight at 16pt.
-    static let lineWidth: CGFloat = 1.3
     /// How long the front panel takes to tilt open or settle closed.
     static let toggleDuration: TimeInterval = 0.16
-    /// The front panel's corners (bottom-left, bottom-right, top-right, top-left) at `openness` 0 (closed: the pocket
-    /// line across the folder) through 1 (open: tilted forward, a parallelogram), interpolated corner by corner.
+    /// The front panel's corners (bottom-left, bottom-right, top-right, top-left) at `openness` 0 (closed: a flat
+    /// face) through 1 (open: tilted forward, a parallelogram). Bam's own glyph, interpolated corner by corner.
     static func frontCorners(openness raw: CGFloat) -> [NSPoint] {
         let t = min(1, max(0, raw))
-        let closed = [NSPoint(x: 1.4, y: 2.6), NSPoint(x: 14.6, y: 2.6), NSPoint(x: 14.6, y: 9.9), NSPoint(x: 1.4, y: 9.9)]
-        let open = [NSPoint(x: 1.4, y: 2.6), NSPoint(x: 12.9, y: 2.6), NSPoint(x: 15.4, y: 8.7), NSPoint(x: 3.7, y: 8.7)]
+        let closed = [NSPoint(x: 1, y: 2.5), NSPoint(x: 15, y: 2.5), NSPoint(x: 15, y: 11.1), NSPoint(x: 1, y: 11.1)]
+        let open = [NSPoint(x: 1.2, y: 2.5), NSPoint(x: 13.4, y: 2.5), NSPoint(x: 15.6, y: 9.4), NSPoint(x: 3.6, y: 9.4)]
         return zip(closed, open).map { NSPoint(x: $0.x + ($1.x - $0.x) * t, y: $0.y + ($1.y - $0.y) * t) }
     }
-    /// The back of the folder with its tab: one rounded silhouette.
-    private static func backPath() -> NSBezierPath {
-        let r: CGFloat = 1.9, left: CGFloat = 1.4, right: CGFloat = 14.6, bottom: CGFloat = 2.6, top: CGFloat = 11.6, tabTop: CGFloat = 13.4
-        let path = NSBezierPath()
-        path.move(to: NSPoint(x: left + r, y: bottom))
-        path.line(to: NSPoint(x: right - r, y: bottom))
-        path.curve(to: NSPoint(x: right, y: bottom + r), controlPoint1: NSPoint(x: right - r * 0.45, y: bottom), controlPoint2: NSPoint(x: right, y: bottom + r * 0.45))
-        path.line(to: NSPoint(x: right, y: top - r))
-        path.curve(to: NSPoint(x: right - r, y: top), controlPoint1: NSPoint(x: right, y: top - r * 0.45), controlPoint2: NSPoint(x: right - r * 0.45, y: top))
-        path.line(to: NSPoint(x: 7.7, y: top))
-        path.line(to: NSPoint(x: 6.3, y: tabTop))
-        path.line(to: NSPoint(x: left + r, y: tabTop))
-        path.curve(to: NSPoint(x: left, y: tabTop - r), controlPoint1: NSPoint(x: left + r * 0.45, y: tabTop), controlPoint2: NSPoint(x: left, y: tabTop - r * 0.45))
-        path.line(to: NSPoint(x: left, y: bottom + r))
-        path.curve(to: NSPoint(x: left + r, y: bottom), controlPoint1: NSPoint(x: left, y: bottom + r * 0.45), controlPoint2: NSPoint(x: left + r * 0.45, y: bottom))
-        path.close()
-        path.lineJoinStyle = .round
-        return path
-    }
     static func image(open: Bool, tint: NSColor) -> NSImage { image(openness: open ? 1 : 0, tint: tint) }
-    /// `tint` is the stroke color (the row's ink).
     static func image(openness raw: CGFloat, tint: NSColor) -> NSImage {
         let openness = min(1, max(0, raw))
         let image = NSImage(size: NSSize(width: side, height: side), flipped: false) { _ in
-            guard let context = NSGraphicsContext.current else { return false }
-            context.saveGraphicsState()
-            tint.setStroke()
-            let back = backPath(); back.lineWidth = lineWidth; back.stroke()
-            let corners = frontCorners(openness: openness)
+            // Back panel with its tab (top-left), lighter than the front.
+            let back = NSBezierPath(roundedRect: NSRect(x: 1, y: 2.5, width: 14, height: 10.5), xRadius: 2.2, yRadius: 2.2)
+            back.append(NSBezierPath(roundedRect: NSRect(x: 1, y: 10.5, width: 6.2, height: 3.6), xRadius: 1.6, yRadius: 1.6))
+            tint.withAlphaComponent(0.55).setFill(); back.fill()
+            // Front: a flat face when closed; tilted forward (a parallelogram) when open; in between while toggling.
             let front = NSBezierPath()
-            front.move(to: corners[0]); for corner in corners.dropFirst() { front.line(to: corner) }; front.close()
-            front.lineJoinStyle = .round; front.lineWidth = lineWidth
-            if openness > 0 {
-                // The tilted panel hides the back's lines behind it.
-                context.compositingOperation = .clear
-                front.fill()
-                context.compositingOperation = .sourceOver
-                front.stroke()
+            if openness == 0 {
+                front.append(NSBezierPath(roundedRect: NSRect(x: 1, y: 2.5, width: 14, height: 8.6), xRadius: 2.2, yRadius: 2.2))
             } else {
-                // Closed: only the pocket line shows; the rest of the panel is the silhouette itself.
-                let pocket = NSBezierPath()
-                pocket.move(to: corners[3]); pocket.line(to: corners[2])
-                pocket.lineWidth = lineWidth; pocket.stroke()
+                let corners = frontCorners(openness: openness)
+                front.move(to: corners[0]); for corner in corners.dropFirst() { front.line(to: corner) }; front.close()
+                front.lineJoinStyle = .round
             }
-            context.restoreGraphicsState()
+            tint.setFill(); front.fill()
+            // A hairline edge keeps a pale tint readable on a pale sidebar.
+            NSColor.black.withAlphaComponent(0.16).setStroke()
+            back.lineWidth = 0.6; back.stroke()
+            front.lineWidth = 0.6; front.stroke()
             return true
         }
         image.isTemplate = false
@@ -2172,9 +2175,10 @@ private final class ArkSpaceHeading: ArkHoverButton, SpaceTinted {
     override func draw(_ dirtyRect: NSRect) {
         if hovered { fill(ArkPalette.hover, radius: 7) }
         let iconSize: CGFloat = emoji == nil ? 15 : 14
-        ArkSpaceIcon.draw((emoji, symbolName, tint), in: NSRect(x: 2, y: (bounds.height - iconSize) / 2, width: iconSize, height: iconSize))
-        text(name, rect: NSRect(x: 28, y: (bounds.height - 18) / 2, width: max(0, bounds.width - 46), height: 18),
-             size: ArkType.headingSize, weight: .medium, color: ArkPalette.rowInk)
+        // Arc: the icon sits in the rows' icon column and the name starts with the row titles.
+        ArkSpaceIcon.draw((emoji, symbolName, tint), in: NSRect(x: 6 + (16 - iconSize) / 2, y: (bounds.height - iconSize) / 2, width: iconSize, height: iconSize))
+        text(name, rect: NSRect(x: ArkMetrics.leadingInset - 2, y: (bounds.height - 18) / 2, width: max(0, bounds.width - ArkMetrics.leadingInset - 16), height: 18),
+             size: ArkType.headingSize, weight: .semibold, color: ArkPalette.secondary)
         if hovered { symbol("chevron.down", rect: NSRect(x: bounds.width - 15, y: (bounds.height - 10) / 2, width: 10, height: 10), color: ArkPalette.secondary, size: 10) }
     }
 }
@@ -2233,8 +2237,8 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted, Ar
     init(item: SidebarTabItem) {
         self.item = item
         titleLabel = arkLabel(item.title.isEmpty ? "New Tab" : item.displayTitle, size: ArkType.rowSize, weight: .regular)
-        // Long titles clip under a soft trailing fade (updateTitleFade), not an ellipsis.
-        titleLabel.lineBreakMode = .byClipping; titleLabel.wantsLayer = true
+        // Arc: a long title ends in an ellipsis just before the trailing button (or the row's end).
+        titleLabel.lineBreakMode = .byTruncatingTail
         subtitleLabel = arkLabel(item.subtitle, size: 9, weight: .regular)
         super.init(frame: .zero)
         wantsLayer = true
@@ -2374,7 +2378,7 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted, Ar
         guard animated, window != nil, folderOpenness != target,
               !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
             folderOpenness = target
-            iconView.image = ArkFolderGlyph.image(openness: target, tint: ArkPalette.folderInk)
+            iconView.image = ArkFolderGlyph.image(openness: target, tint: spaceTint)
             return
         }
         let start = folderOpenness, began = ProcessInfo.processInfo.systemUptime, folderID = item.id
@@ -2385,7 +2389,7 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted, Ar
                 let progress = min(1, (ProcessInfo.processInfo.systemUptime - began) / ArkFolderGlyph.toggleDuration)
                 let eased = 1 - pow(1 - progress, 3)   // ease out: quick start, gentle landing
                 self.folderOpenness = progress >= 1 ? target : start + (target - start) * CGFloat(eased)
-                self.iconView.image = ArkFolderGlyph.image(openness: self.folderOpenness, tint: ArkPalette.folderInk)
+                self.iconView.image = ArkFolderGlyph.image(openness: self.folderOpenness, tint: self.spaceTint)
                 if progress >= 1 { timer.invalidate(); self.folderToggle = nil }
             }
         }
@@ -2453,8 +2457,8 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted, Ar
         let frames = ArkRowLayout(width: bounds.width, height: bounds.height, depth: item.depth, listMaxDepth: listMaxDepth,
                                   isFolder: item.isFolder, showsClose: !closeButton.isHidden)
         iconView.frame = frames.icon
-        titleLabel.frame = frames.title
-        updateTitleFade(visibleWidth: frames.visibleTitleEnd - frames.title.minX)
+        // The title's start never moves; only where it ends (and so its ellipsis) follows the button.
+        titleLabel.frame = NSRect(x: frames.title.minX, y: frames.title.minY, width: max(0, frames.visibleTitleEnd - frames.title.minX), height: frames.title.height)
         subtitleLabel.frame = NSRect(x: frames.title.minX + 1, y: 23, width: frames.title.width, height: 12)
         subtitleLabel.isHidden = true
         closeButton.frame = frames.close
@@ -2471,26 +2475,6 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted, Ar
         if chevronView.isHidden != !item.isFolder { chevronView.isHidden = !item.isFolder; needsLayout = true }
         updateChevronEmphasis(focused: window?.firstResponder === self && showsFocusRing)
     }
-    /// Trailing fade: a horizontal gradient mask on the title's layer. Only the
-    /// mask moves (to clear the close button on hover); the text never shifts.
-    /// The full title stays in the tooltip and the row's accessibility label.
-    private func updateTitleFade(visibleWidth: CGFloat) {
-        let bounds = titleLabel.bounds
-        let textWidth = ceil(titleLabel.attributedStringValue.size().width) + 2
-        CATransaction.begin(); CATransaction.setDisableActions(true)
-        defer { CATransaction.commit() }
-        guard let stops = ArkTitleFade.stops(textWidth: textWidth, frameWidth: bounds.width, visibleWidth: visibleWidth),
-              let layer = titleLabel.layer else { titleLabel.layer?.mask = nil; titleFadeStops = nil; return }
-        let mask = (layer.mask as? CAGradientLayer) ?? CAGradientLayer()
-        mask.frame = bounds
-        mask.startPoint = CGPoint(x: 0, y: 0.5); mask.endPoint = CGPoint(x: 1, y: 0.5)
-        mask.colors = [NSColor.black.cgColor, NSColor.black.cgColor, NSColor.clear.cgColor, NSColor.clear.cgColor]
-        mask.locations = [0, NSNumber(value: Double(stops.start)), NSNumber(value: Double(stops.end)), 1]
-        if layer.mask !== mask { layer.mask = mask }
-        titleFadeStops = stops
-    }
-    /// The current fade (title-frame fractions), for tests; nil when the title fits.
-    private(set) var titleFadeStops: (start: CGFloat, end: CGFloat)?
     /// Folders recede at rest: the chevron is quieter until the row is hovered
     /// or focused, so open/closed state stays visible without a gray column.
     private func updateChevronEmphasis(focused: Bool) {

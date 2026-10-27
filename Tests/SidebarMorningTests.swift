@@ -314,7 +314,7 @@ import AppKit
         require(Set(shown.map(glyph)).count == 1, "No late frame of the old folder lands afterwards")
         withExtendedLifetime(focusWindow) {}
 
-        // MARK: Folder glyph: Bam's own vector outline folder, distinct open and closed.
+        // MARK: Folder glyph: Bam's own vector folder, tinted, distinct open and closed.
         @MainActor func glyphPixels(_ open: Bool, scale: Int) -> NSBitmapImageRep {
             let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 16 * scale, pixelsHigh: 16 * scale, bitsPerSample: 8, samplesPerPixel: 4,
                                        hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
@@ -331,30 +331,26 @@ import AppKit
             guard let c = closedGlyph.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB), c.alphaComponent > 0.5 else { continue }
             covered += 1; if c.blueComponent > c.redComponent + 0.4 { tinted += 1 }
         } }
-        // Yab: folder outlines match the tab icons. A stroked outline in the given ink, not a filled tile.
-        require(covered > 32 * 32 / 12 && covered < 32 * 32 / 2 && tinted > covered / 2,
-                "The folder is an outline in the given ink, not a filled shape (\(tinted)/\(covered))")
-        let middle = closedGlyph.colorAt(x: 16, y: 22)?.alphaComponent ?? 1
-        require(middle < 0.2, "The folder's face is open, as an outline (\(middle))")
+        require(covered > 32 * 32 / 3 && tinted > covered / 2, "The folder is a filled shape in the Space's tint, not a thin outline (\(tinted)/\(covered))")
         require(glyphPixels(false, scale: 3).pixelsWide == 48, "Vector glyph renders at any scale")
         // Toggling tilts the front panel through Bam's own in-between shapes, ending exactly on the closed or open face.
         let closedFront = ArkFolderGlyph.frontCorners(openness: 0), openFront = ArkFolderGlyph.frontCorners(openness: 1)
         let halfway = ArkFolderGlyph.frontCorners(openness: 0.5)
-        require(closedFront[2] == NSPoint(x: 14.6, y: 9.9) && openFront[2] == NSPoint(x: 15.4, y: 8.7)
+        require(closedFront[2] == NSPoint(x: 15, y: 11.1) && openFront[2] == NSPoint(x: 15.6, y: 9.4)
                     && halfway[2].x > closedFront[2].x && halfway[2].x < openFront[2].x && halfway[2].y < closedFront[2].y && halfway[2].y > openFront[2].y,
                 "The front panel's top edge moves between the closed and open faces (\(halfway[2]))")
         require(ArkFolderGlyph.frontCorners(openness: -1) == closedFront && ArkFolderGlyph.frontCorners(openness: 2) == openFront, "Openness is clamped")
 
         // MARK: Footer, as in Arc: Downloads left, Spaces centered, + right.
         let footer = ArkFooterLayout(width: 240, spaceCount: 3, selectedIndex: 1)
-        let groupWidth = 3 * ArkFooterLayout.step - 2
-        require(footer.downloads.minX == 7 && footer.plus.maxX == 240 - 7 && !footer.overflowing && footer.visibleCount == 3,
+        let groupWidth = 3 * footer.step - 2
+        require(footer.downloads.minX == 9 && footer.plus.maxX == 240 - 8 && !footer.overflowing && footer.visibleCount == 3,
                 "Downloads at the leading edge, + at the trailing edge, three Spaces all shown")
         require(abs((footer.spacesX + groupWidth / 2) - 120) <= 1, "The Space group is centered in the footer")
         for width in stride(from: CGFloat(164), through: 420, by: 13) {
             for count in 1...12 {
                 let layout = ArkFooterLayout(width: width, spaceCount: count, selectedIndex: count - 1)
-                let end = layout.spacesX + CGFloat(layout.visibleCount + (layout.overflowing ? 1 : 0)) * ArkFooterLayout.step - 2
+                let end = layout.spacesX + CGFloat(layout.visibleCount + (layout.overflowing ? 1 : 0)) * layout.step - 2
                 require(layout.spacesX >= layout.downloads.maxX + 4 && end <= layout.plus.minX - 4,
                         "Spaces never overlap Downloads or + (\(count) at \(width))")
                 require(layout.visibleCount >= 1 && (layout.overflowing == (layout.visibleCount < count)), "Overflow only when Spaces don't fit")
@@ -393,7 +389,7 @@ import AppKit
         require(abs(spacesMid - footerSidebar.bounds.midX) <= 1, "Space buttons are centered")
         let plusButton = descendants(footerSidebar).first { $0.accessibilityLabel() == "New tab" && $0.frame.minY >= footerSidebar.bounds.height - 40 } as! NSButton
         plusButton.performClick(nil)
-        require(opened.last == "new-tab" && plusButton.frame.maxX == footerSidebar.bounds.width - 7, "+ at the trailing edge opens a new tab")
+        require(opened.last == "new-tab" && plusButton.frame.maxX == footerSidebar.bounds.width - 8, "+ at the trailing edge opens a new tab")
         let rightClick = NSEvent.mouseEvent(with: .rightMouseDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: footerWindow.windowNumber,
                                             context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
         require(spaceButtons.allSatisfy { $0.menu(for: rightClick)?.items.map(\.title) == ["Manage Spaces…"] },
@@ -627,8 +623,10 @@ import AppKit
         require(descendants(chrome).contains { $0.accessibilityLabel() == "Stop loading" }, "Reload becomes Stop while loading")
         chrome.update(tabs: chromeItems, space: 0, canGoBack: false, canGoForward: false, isLoading: false)
         // Footer: all six emoji Spaces fit at the default width, as in Yab.
-        require(ArkFooterLayout.step == 25 && !ArkFooterLayout(width: 228, spaceCount: 6, selectedIndex: 0).overflowing,
-                "Six Spaces fit in a 228pt footer")
+        let twoSpaces = ArkFooterLayout(width: 228, spaceCount: 2, selectedIndex: 0), sixSpaces = ArkFooterLayout(width: 228, spaceCount: 6, selectedIndex: 0)
+        require(twoSpaces.step == ArkFooterLayout.maximumStep && !sixSpaces.overflowing && sixSpaces.step >= ArkFooterLayout.minimumStep && sixSpaces.step < twoSpaces.step,
+                "Arc's spacing for a few Spaces; six still fit a 228pt footer by closing up (\(sixSpaces.step))")
+        require(ArkFooterLayout(width: 228, spaceCount: 12, selectedIndex: 11).overflowing, "Many Spaces overflow into a menu")
         // List edges: rows fade under the heading only once scrolled, and above the footer while more rows lie below.
         let chromeList = chrome.tabListScrollView
         chrome.layoutSubtreeIfNeeded(); spin()
@@ -642,6 +640,9 @@ import AppKit
         let listEnd = (chromeList.documentView?.frame.height ?? 0) - chromeList.contentView.bounds.height
         chromeList.contentView.scroll(to: NSPoint(x: 0, y: listEnd)); chromeList.reflectScrolledClipView(chromeList.contentView)
         require(edgeAlphas().map { $0.top == 0 && $0.bottom == 1 } == true, "At the end only the top edge fades")
+        require(chrome.footerRuleOpacity == 0, "At the end of the list the footer's hairline is gone")
+        chromeList.contentView.scroll(to: .zero); chromeList.reflectScrolledClipView(chromeList.contentView)
+        require(chrome.footerRuleOpacity == 1, "With tabs continuing below, Arc's hairline sits over the footer")
         withExtendedLifetime(chromeWindow) {}
 
         print("PASS: \(checks) sidebar morning checks")
