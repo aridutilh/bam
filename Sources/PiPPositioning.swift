@@ -38,12 +38,7 @@ enum PiPPositioning {
     static func tuckSide(for frame: CGRect, velocity: CGPoint, screens: [CGRect]) -> TuckSide? {
         guard valid(frame), let screen = destinationScreen(for: frame, screens: screens),
               frame.width <= screen.width * 0.6 else { return nil }
-        let usable = screens.filter(valid)
-        func outer(_ side: TuckSide) -> Bool {
-            let probe = CGPoint(x: side == .right ? screen.maxX + 2 : screen.minX - 2,
-                                y: min(max(frame.midY, screen.minY + 1), screen.maxY - 1))
-            return !usable.contains { $0 != screen && $0.contains(probe) }
-        }
+        func outer(_ side: TuckSide) -> Bool { canTuck(frame, side: side, screens: screens) }
         let overLeft = screen.minX - frame.minX, overRight = frame.maxX - screen.maxX
         if overRight > frame.width * tuckOverhang, outer(.right) { return .right }
         if overLeft > frame.width * tuckOverhang, outer(.left) { return .left }
@@ -53,6 +48,17 @@ enum PiPPositioning {
         if v.x > 0, overRight >= -(cornerInset + 2), outer(.right) { return .right }
         if v.x < 0, overLeft >= -(cornerInset + 2), outer(.left) { return .left }
         return nil
+    }
+
+    /// Whether `side` of the frame's display is an outer edge for this video: no other display
+    /// takes any part of the video once tucked there (a display offset up or down still counts).
+    static func canTuck(_ frame: CGRect, side: TuckSide, screens: [CGRect]) -> Bool {
+        guard valid(frame), let screen = destinationScreen(for: frame, screens: screens) else { return false }
+        let tucked = tuckedFrame(frame, side: side, screens: screens)
+        let hidden = side == .right
+            ? CGRect(x: screen.maxX, y: tucked.minY, width: max(1, tucked.maxX - screen.maxX), height: tucked.height)
+            : CGRect(x: tucked.minX, y: tucked.minY, width: max(1, screen.minX - tucked.minX), height: tucked.height)
+        return !screens.filter(valid).contains { $0 != screen && $0.intersects(hidden.insetBy(dx: 0, dy: 1)) }
     }
 
     /// The tucked frame: behind `side` of the frame's display with only the sliver showing.

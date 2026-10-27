@@ -149,7 +149,7 @@ struct LittleBamDestination: Equatable {
     }
     func windowWillClose(_ notification: Notification) { cleanup() }
     func windowDidResize(_ notification: Notification) { (window as? LittleOrbitWindow)?.centerTrafficLights() }
-    func windowDidBecomeKey(_ notification: Notification) { (window as? LittleOrbitWindow)?.centerTrafficLights() }
+    func windowDidBecomeKey(_ notification: Notification) { (window as? LittleOrbitWindow)?.centerTrafficLights(); refreshSpaces() }
     func windowDidResignKey(_ notification: Notification) { (window as? LittleOrbitWindow)?.centerTrafficLights() }
 
     private func cleanup() {
@@ -251,13 +251,19 @@ struct LittleBamDestination: Equatable {
         root.reload.symbol = web.isLoading ? "xmark" : "arrow.clockwise"
         root.reload.toolTip = web.isLoading ? "Stop loading" : "Reload (⌘R)"
         root.progress.doubleValue = web.estimatedProgress; root.progress.isHidden = !web.isLoading
+        refreshSpaces()
+        root.copyLink.isEnabled = web.url != nil
+        root.needsLayout = true
+    }
+    /// The frame color and the Open label follow the Space a plain ⌘O lands in. Also called by the
+    /// browser when the Spaces change, since that changes nothing in this window's page.
+    func refreshSpaces() {
+        guard content?.webView != nil else { return }
         let targets = destinations?() ?? []
         root.tint = targets.first(where: \.isDefault)?.colorIndex
         let landing = targets.first(where: \.isDefault)?.name ?? "Bam"
-        if root.promote.spaceName != landing { root.promote.spaceName = landing }
+        if root.promote.spaceName != landing { root.promote.spaceName = landing; root.needsLayout = true }
         root.promote.hasChoices = targets.count > 1
-        root.copyLink.isEnabled = web.url != nil
-        root.needsLayout = true
     }
 }
 
@@ -271,11 +277,13 @@ struct LittleBamDestination: Equatable {
     var onCopyLink: (() -> Void)?
     /// The traffic lights sit centered in Little Bam's 44-point bar, not the system's shorter titlebar.
     func centerTrafficLights() {
-        guard let content = contentView else { return }
+        // In full screen the buttons live in the separate titlebar window AppKit reveals at the top
+        // of the screen; this window's bar height means nothing there, so AppKit keeps them.
+        guard let content = contentView, !styleMask.contains(.fullScreen) else { return }
         let buttons: [NSWindow.ButtonType] = [.closeButton, .miniaturizeButton, .zoomButton]
         let centerInWindow = NSPoint(x: 0, y: content.frame.height - LittleBamMetrics.barHeight / 2)
         for (index, type) in buttons.enumerated() {
-            guard let button = standardWindowButton(type), let container = button.superview else { continue }
+            guard let button = standardWindowButton(type), button.window === self, let container = button.superview else { continue }
             let center = container.convert(centerInWindow, from: nil)
             let origin = NSPoint(x: LittleBamMetrics.lightsInset + CGFloat(index) * 20, y: (center.y - button.frame.height / 2).rounded())
             if button.frame.origin != origin { button.setFrameOrigin(origin) }

@@ -133,6 +133,15 @@ import AppKit
                     && PiPPositioning.releasePlan(CGRect(x: 1000, y: 300, width: 320, height: 180), velocity: .zero,
                                                   screens: [display, right]).tuck == nil,
                   "an edge shared with another display tucked instead of crossing")
+        // A display beside the edge but offset upward: the probe at the video's middle misses it,
+        // yet the video's top would hang onto it, so this edge is crossed, not tucked into.
+        let raised = CGRect(x: 1200, y: 470, width: 1200, height: 800)
+        try check(PiPPositioning.releasePlan(CGRect(x: 1050, y: 300, width: 320, height: 180), velocity: .zero,
+                                             screens: [display, raised]).tuck == nil,
+                  "a video tucked into an edge where part of it would show on an offset display")
+        try check(PiPPositioning.releasePlan(CGRect(x: 1050, y: 100, width: 320, height: 180), velocity: .zero,
+                                             screens: [display, raised]).tuck == .right,
+                  "an edge clear of an offset display at the video's height did not tuck")
         try check(PiPPositioning.releasePlan(oversized, velocity: CGPoint(x: 3000, y: 0), screens: [display]).tuck == nil,
                   "a video too large for a sliver tucked")
         let peeked = PiPPositioning.tuckedFrame(tuck.frame, side: .right, screens: [display], peek: true)

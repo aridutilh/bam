@@ -14,7 +14,33 @@ import QuartzCore
     private var positionGeneration: UInt = 0
     /// Which screen edge the video is tucked behind, if any (only a blurred sliver shows).
     private(set) var tuckedSide: PiPPositioning.TuckSide? {
-        didSet { if tuckedSide != oldValue { tuckPeeking = false; overlay?.setTucked(tuckedSide) } }
+        didSet {
+            guard tuckedSide != oldValue else { return }
+            tuckPeeking = false; overlay?.setTucked(tuckedSide)
+            watchScreensWhileTucked(tuckedSide != nil)
+        }
+    }
+    private var screenObserver: NSObjectProtocol?
+    /// Displays can be added, removed or rearranged while the video hides behind an edge: keep it
+    /// tucked against the same side of whichever display now holds it, or bring it back out when
+    /// that side now leads onto another display (the hidden part would show there).
+    private func watchScreensWhileTucked(_ watch: Bool) {
+        if watch, screenObserver == nil {
+            screenObserver = NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification,
+                                                                    object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.refitTuck() }
+            }
+        } else if !watch, let screenObserver {
+            NotificationCenter.default.removeObserver(screenObserver); self.screenObserver = nil
+        }
+    }
+    func refitTuck() {
+        guard let side = tuckedSide else { return }
+        let screens = positionScreenFrames()
+        guard PiPPositioning.canTuck(frame, side: side, screens: screens) else { untuck(animated: false); return }
+        cancelPositioningMotionOnly()
+        tuckPeeking = false
+        setFrame(PiPPositioning.tuckedFrame(frame, side: side, screens: screens), display: true)
     }
     private var tuckPeeking = false
     /// A tucked panel ignores the rest of the two-finger gesture that pulled it back out.
@@ -232,7 +258,10 @@ import QuartzCore
             self.isPositionSnapRunning = false
         })
     }
-    deinit { scrollEndWork?.cancel() }
+    deinit {
+        scrollEndWork?.cancel()
+        if let screenObserver { NotificationCenter.default.removeObserver(screenObserver) }
+    }
 }
 
 /// AppKit controls stay above the rehosted page; no player cloning or custom
