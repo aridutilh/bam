@@ -325,6 +325,7 @@ import QuartzCore
     var mediaTabID: UUID?
     var mediaPausedFromPlayer = false
     var mediaControls: [UUID: (previous: Bool, next: Bool)] = [:]
+    var mediaProbeTimes: [UUID: TimeInterval] = [:]
     var addressOverlay: DismissView?
     var addressField: PaletteField?
     var addressCard: NSView?

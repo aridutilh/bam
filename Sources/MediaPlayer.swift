@@ -29,7 +29,14 @@ final class PageAudioObserver: NSObject {
     }
     func stopWatchingAudio(_ id: UUID) {
         audioObservers.removeValue(forKey: id)?.invalidate()
-        if mediaTabID == id { mediaTabID = nil; mediaPausedFromPlayer = false; refreshMediaPlayer() }
+        mediaProbeTimes.removeValue(forKey: id)
+        if mediaTabID == id { adoptPlayingTab(excluding: id); refreshMediaPlayer() }
+    }
+    /// The player passes to another tab still making sound (the most recently used), or goes away.
+    private func adoptPlayingTab(excluding id: UUID) {
+        mediaPausedFromPlayer = false
+        mediaTabID = browsers.keys.filter { $0 != id && isTabPlayingAudio($0) }
+            .max { (tabLastUsed[$0] ?? 0) < (tabLastUsed[$1] ?? 0) }
     }
 
     private func audioStateChanged(_ id: UUID) {
@@ -42,7 +49,7 @@ final class PageAudioObserver: NSObject {
             browsers[id]?.requestMediaPlaybackState { [weak self] state in
                 MainActor.assumeIsolated {
                     guard let self, self.mediaTabID == id, !self.isTabPlayingAudio(id) else { return }
-                    if state == .none { self.mediaTabID = nil }
+                    if state == .none { self.adoptPlayingTab(excluding: id) }
                     self.refreshMediaPlayer()
                 }
             }
@@ -64,7 +71,9 @@ final class PageAudioObserver: NSObject {
         let controls = mediaControls[id] ?? (previous: false, next: false)
         sidebar.setMediaPlayer(SidebarMediaState(tabID: id, title: tab.displayTitle, isPlaying: playing,
                                                  isMuted: isTabMuted(id), canPrevious: controls.previous, canNext: controls.next))
-        probeMediaControls(id)
+        // Previous/next availability: read from the page at most once a second, not on every chrome refresh.
+        let now = ProcessInfo.processInfo.systemUptime
+        if now - (mediaProbeTimes[id] ?? -.infinity) >= 1 { mediaProbeTimes[id] = now; probeMediaControls(id) }
     }
 
     func connectMediaPlayer() {
@@ -81,29 +90,25 @@ final class PageAudioObserver: NSObject {
         sidebar.onMediaNext = { [weak self] in self?.pressMediaControl(next: true) }
     }
 
-    /// Pause suspends the page's media (WebKit's public suspend/resume), so play resumes exactly where it was;
-    /// media the page paused itself is played again from the page.
+    /// Pause is a real pause (as the page's own button would do, so its controls agree and nothing is left
+    /// suspended when the tab is shown, closed, moved or hands the player on); play resumes the paused media.
     func toggleMediaPlayback() {
-        guard let id = mediaTabID, let web = browsers[id] else { return }
+        guard let id = mediaTabID else { return }
+        let members = session.split(for: id).map { [$0.primaryID, $0.secondaryID] } ?? [id]
+        let pages = members.compactMap { browsers[$0] }
+        guard !pages.isEmpty else { return }
         if isTabPlayingAudio(id) && !mediaPausedFromPlayer {
             mediaPausedFromPlayer = true
-            web.setAllMediaPlaybackSuspended(true) { }
-            refreshMediaPlayer()
+            for web in pages { web.pauseAllMediaPlayback(completionHandler: nil) }
         } else {
             mediaPausedFromPlayer = false
-            web.setAllMediaPlaybackSuspended(false) { [weak self, weak web] in
-                MainActor.assumeIsolated {
-                    guard let self, let web else { return }
-                    // Paused by the page itself: ask the page's paused media to play again.
-                    web.evaluateJavaScript(Self.resumeMediaScript, in: nil, in: .defaultClient) { _ in }
-                    self.refreshMediaPlayer()
-                }
-            }
-            refreshMediaPlayer()
+            for web in pages { web.evaluateJavaScript(Self.resumeMediaScript, in: nil, in: .defaultClient) { _ in } }
         }
+        refreshMediaPlayer()
     }
 
-    /// Previous/next: the page's own controls (YouTube, Spotify, SoundCloud and players that label them).
+    /// Previous/next: the page's own controls on known players (YouTube, Spotify, SoundCloud) and buttons labelled as
+    /// track controls. Never a bare "Next"/"Previous": on a page you can't see, that is as likely a form or checkout step.
     private func pressMediaControl(next: Bool) {
         guard let id = mediaTabID, let web = browsers[id] else { return }
         web.evaluateJavaScript(Self.controlScript(next: next, press: true), in: nil, in: .defaultClient) { _ in }
@@ -123,9 +128,9 @@ final class PageAudioObserver: NSObject {
     }
 
     private static let previousSelectors = [".ytp-prev-button", "[data-testid=\"control-button-skip-back\"]", ".skipControl__previous",
-                                            "button[aria-label=\"Previous\"]", "button[aria-label=\"Previous track\"]", "button[title=\"Previous\"]"]
+                                            "button[aria-label=\"Previous track\"]"]
     private static let nextSelectors = [".ytp-next-button", "[data-testid=\"control-button-skip-forward\"]", ".skipControl__next",
-                                        "button[aria-label=\"Next\"]", "button[aria-label=\"Next track\"]", "button[title=\"Next\"]"]
+                                        "button[aria-label=\"Next track\"]"]
     private static func selectorList(_ list: [String]) -> String {
         "[" + list.map { "'" + $0.replacingOccurrences(of: "'", with: "\\'") + "'" }.joined(separator: ",") + "]"
     }

@@ -191,6 +191,7 @@ import WebKit
             retiringViews.removeValue(forKey: ObjectIdentifier(split.view))
         }
         navigationTokens.removeValue(forKey: id); browserExtensionOrigins.removeValue(forKey: id)
+        stopWatchingAudio(id); mediaControls.removeValue(forKey: id)
         observations.removeValue(forKey: id)
         let web = browsers.removeValue(forKey: id)
         if let web {

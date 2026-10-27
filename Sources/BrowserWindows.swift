@@ -154,6 +154,7 @@ extension BrowserController {
             split.detach(); split.view.removeFromSuperview(); retiringViews.removeValue(forKey: ObjectIdentifier(split.view))
         }
         invalidateFaviconDocument(id); historyTitleFollowUps.removeValue(forKey: id)
+        stopWatchingAudio(id); mediaControls.removeValue(forKey: id)
         observations.removeValue(forKey: id); browsers.removeValue(forKey: id)
         tabActivityProbe.invalidate(web)
         web.navigationDelegate = nil; web.uiDelegate = nil
