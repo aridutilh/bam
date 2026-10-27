@@ -2,8 +2,8 @@ import Foundation
 
 /// Settings › Links toggles, as in Arc's Links pane. Saved in preferences for normal launches;
 /// fresh previews and fixtures keep them in memory. Everything defaults on, as in Arc, except the
-/// global ⌥⌘N in a disposable launch: a fresh preview never grabs a system-wide key unless someone
-/// turns it on in that session.
+/// global ⌥⌘N: it starts off everywhere, because Arc and Yab answer the same system-wide key and
+/// people switching from them would get two windows per press. Turning it on is one switch.
 enum LinkBehavior {
     enum Toggle: String, CaseIterable {
         /// ⌥⌘N opens Little Bam from any app.
@@ -32,7 +32,7 @@ enum LinkBehavior {
         arguments.contains { $0 == "--fresh-preview" || $0 == "--vendor-extension-probe" || ($0.hasPrefix("--") && $0.hasSuffix("-test")) }
     }
     static func isOn(_ toggle: Toggle) -> Bool {
-        if let defaults { return defaults.object(forKey: toggle.rawValue) == nil ? true : defaults.bool(forKey: toggle.rawValue) }
+        if let defaults { return defaults.object(forKey: toggle.rawValue) == nil ? toggle != .globalLittleBamKey : defaults.bool(forKey: toggle.rawValue) }
         return memory[toggle] ?? (toggle != .globalLittleBamKey)
     }
     static func set(_ toggle: Toggle, _ on: Bool) {

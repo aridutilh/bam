@@ -35,7 +35,7 @@ import Foundation
         let suite = "bam.linkbehavior.tests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
         LinkBehavior.defaults = defaults
-        require(LinkBehavior.Toggle.allCases.allSatisfy(LinkBehavior.isOn), "a real profile starts with every toggle on, as in Arc")
+        require(LinkBehavior.Toggle.allCases.filter { $0 != .globalLittleBamKey }.allSatisfy(LinkBehavior.isOn) && !LinkBehavior.isOn(.globalLittleBamKey), "a real profile starts with the click toggles on, as in Arc, and the system-wide ⌥⌘N off")
         LinkBehavior.set(.shiftClickPeek, false)
         require(!LinkBehavior.isOn(.shiftClickPeek) && defaults.object(forKey: "ShiftClickPeek") as? Bool == false, "a toggle is saved")
         require(LinkBehavior.littleBamArchive == .sixHours && LinkBehavior.LittleBamArchive.allCases.map(\.title) == ["1 hour", "6 hours", "12 hours"],
