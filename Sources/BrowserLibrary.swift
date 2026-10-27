@@ -59,7 +59,8 @@ struct ClosedRecord: Codable, Identifiable, Equatable {
     private var historyWindow: BrowserLibraryWindowController?
     private var archiveWindow: BrowserLibraryWindowController?
     private static let historyLimit = 5_000
-    private static let closedLimit = 200
+    /// Hand closes and auto-archive share this list; a large sidebar archiving at once must fit.
+    static let closedLimit = 1_000
 
     init(storageURL: URL?, write: @escaping LibraryWriter.Write = { try LibraryWriter.writeFile($0, to: $1) }) {
         self.storageURL = storageURL
@@ -161,6 +162,20 @@ struct ClosedRecord: Codable, Identifiable, Equatable {
         guard Self.validClosed(record) else { return }
         _ = commit {
             closedRecords.insert(record, at: 0)
+            if closedRecords.count > Self.closedLimit { closedRecords.removeLast(closedRecords.count - Self.closedLimit) }
+        }
+    }
+
+    /// Whether the archive can hold these tabs (one, or a Split's two). Auto-archive leaves the rest open.
+    static func canArchive(_ tabs: [BrowserTab]) -> Bool { validClosed(ClosedRecord(tabs: tabs, split: tabs.count == 2)) }
+
+    /// Auto-archive's tabs (each one tab or a Split), oldest first, in one write. False when nothing could be
+    /// saved (unreadable library, disk error, or an invalid group), so the caller keeps every tab open.
+    func recordArchived(_ groups: [[BrowserTab]], at date: Date = Date()) -> Bool {
+        let records = groups.map { ClosedRecord(closedAt: date, tabs: $0, split: $0.count == 2, reason: .archived) }
+        guard !records.isEmpty, records.allSatisfy(Self.validClosed) else { return false }
+        return commit {
+            for record in records { closedRecords.insert(record, at: 0) }
             if closedRecords.count > Self.closedLimit { closedRecords.removeLast(closedRecords.count - Self.closedLimit) }
         }
     }
