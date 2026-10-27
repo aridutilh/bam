@@ -131,11 +131,10 @@ import AppKit
         results.update(tabs: [kept, favorite], query: "", activeID: UUID(), canCreate: false, spaces: renamedSpaces)
         require(labels(in: results).contains("Project Atlas") && labels(in: results).contains("Lab"),
                 "A kept result uses its custom title and current Space name")
-        require(labels(in: results).filter { $0 == "Favorite" }.count == 1
-                    && labels(in: results).contains("Global Inbox")
-                    && labels(in: results).contains("favorite.example/home")
+        require(labels(in: results).filter { $0 == "Global Inbox" }.count == 1
+                    && labels(in: results).contains("— favorite.example/home")
                     && !labels(in: results).contains { $0.hasPrefix("Sleeping") },
-                "A sleeping Favorite shows one calm result with its saved address")
+                "A sleeping Favorite shows one result, \"Title — saved address\" as Arc writes it")
         results.moveSelection(delta: 1)
         require(results.activateSelection() && chosen == favorite.id,
                 "Opening a sleeping search result passes the existing saved-tab identity to the controller")
@@ -159,8 +158,8 @@ import AppKit
         require(originalRows.allSatisfy { icon($0).contentTintColor == nil },
                 "Selected and unselected favicons retain full color")
         originalRows.forEach { $0.layoutSubtreeIfNeeded() }
-        require(icon(originalRows[0]).imageScaling == .scaleProportionallyUpOrDown && icon(originalRows[0]).frame.size == NSSize(width: 16, height: 16),
-                "Non-square and retina images fit the existing 16-point slot proportionally")
+        require(icon(originalRows[0]).imageScaling == .scaleProportionallyUpOrDown && icon(originalRows[0]).frame.size == NSSize(width: 18, height: 18),
+                "Non-square and retina images fit the 18-point icon slot proportionally")
         cached[kept.id] = blue; cached[favorite.id] = nil
         results.refreshFavicons()
         require(zip(originalRows, resultRows()).allSatisfy { $0 === $1 } && results.selectedIndex == selectedBefore,
@@ -241,24 +240,29 @@ import AppKit
             require(PaletteCommandCatalog.matches(query).contains { $0.command.id == id }, "\(query) finds \(id)")
         }
         require(Set(PaletteCommandCatalog.commands.map(\.id)).count == PaletteCommandCatalog.commands.count, "Command IDs are unique")
-        // The card keeps one height while typing and never extends past the window: a full card sits a little
-        // above center; a short window lifts it to the margin and its rows scroll.
-        for height in [CGFloat(300), 400, 540, 700, 949, 1400] {
-            let fit = PaletteGeometry.fit(windowHeight: height)
+        // The palette never extends past the window: ten rows at the 540pt minimum rise and scroll; a short list
+        // keeps the stable centered top, and the card's height follows its rows (Arc's).
+        for (height, rows) in [(CGFloat(540), 10), (540, 3), (900, 10), (300, 10)] {
+            let resultsHeight = CGFloat(rows) * PaletteGeometry.rowHeight
+            let fit = PaletteGeometry.fit(windowHeight: height, resultsHeight: resultsHeight)
             let bottom = fit.top + PaletteGeometry.chromeHeight + fit.visibleResultsHeight
-            require(fit.top >= 0 && (bottom <= height - PaletteGeometry.margin + 0.001 || height < 2 * PaletteGeometry.margin + PaletteGeometry.chromeHeight),
-                    "The palette fits a \(height)pt window (top \(fit.top), bottom \(bottom))")
+            require(fit.top >= 0 && bottom <= height - PaletteGeometry.margin + 0.001 || height < 2 * PaletteGeometry.margin + PaletteGeometry.chromeHeight,
+                    "The palette fits a \(height)pt window with \(rows) rows (top \(fit.top), bottom \(bottom))")
         }
-        require(PaletteGeometry.fit(windowHeight: 949).visibleResultsHeight == PaletteGeometry.designResultsHeight
-                    && PaletteGeometry.fit(windowHeight: 949).top == PaletteGeometry.top(forWindowHeight: 949)
-                    && PaletteGeometry.fit(windowHeight: 949, resultsHeight: 40).top == PaletteGeometry.fit(windowHeight: 949, resultsHeight: 600).top,
-                "A full-size card has one top and height whatever the rows")
-        let short = PaletteGeometry.fit(windowHeight: 400)
-        require(short.visibleResultsHeight < PaletteGeometry.designResultsHeight && short.top == PaletteGeometry.margin,
-                "In a 400pt window the card rises to the margin and its rows scroll")
-        require(PaletteGeometry.width(forWindowWidth: 1512) == 748 && PaletteGeometry.width(forWindowWidth: 800) == 520
-                    && PaletteGeometry.width(forWindowWidth: 500) == 460 && PaletteGeometry.width(forWindowWidth: 3000) == 760,
-                "Width is about half the window, 520–760pt, and never wider than the window allows")
+        let sixRows = 6 * PaletteGeometry.rowHeight
+        let atMinimum = PaletteGeometry.fit(windowHeight: 540, resultsHeight: sixRows)
+        require(atMinimum.visibleResultsHeight == sixRows && atMinimum.top <= PaletteGeometry.top(forWindowHeight: 540),
+                "Six rows at the 540pt minimum show unclipped")
+        let tenRows = 10 * PaletteGeometry.rowHeight
+        let short = PaletteGeometry.fit(windowHeight: 400, resultsHeight: tenRows)
+        require(short.visibleResultsHeight < tenRows && short.top == PaletteGeometry.margin,
+                "Ten rows in a 400pt window: the card rises to the margin and its rows scroll")
+        require(PaletteGeometry.fit(windowHeight: 900, resultsHeight: 3 * PaletteGeometry.rowHeight).top == PaletteGeometry.top(forWindowHeight: 900)
+                    && PaletteGeometry.fit(windowHeight: 900, resultsHeight: 1 * PaletteGeometry.rowHeight).top == PaletteGeometry.top(forWindowHeight: 900),
+                "Short lists keep the stable centered top")
+        require(PaletteGeometry.width(forWindowWidth: 1512) == 764 && PaletteGeometry.width(forWindowWidth: 800) == 540
+                    && PaletteGeometry.width(forWindowWidth: 500) == 460 && PaletteGeometry.width(forWindowWidth: 3000) == 820,
+                "Width is about half the window, 540–820pt, as Arc's, and never wider than the window allows")
         // Scrolling results keep the keyboard selection in view.
         let scroller = NSScrollView(frame: NSRect(x: 0, y: 0, width: 540, height: 120))
         let scrolled = TabSearchResultsView(frame: NSRect(x: 0, y: 0, width: 540, height: 400))
@@ -287,12 +291,12 @@ import AppKit
         require(results.selectedIndex == 0, "A held Up arrow stops at the first row")
         results.moveSelection(delta: -1)
         require(results.selectedIndex == lastRow, "A discrete Up press at the top still wraps to the last row")
-        // Calm rows: no per-row action buttons; the footer reads what Return does from the selection.
+        // Trailing actions, as Arc: other tabs say Switch to Tab; the current one says it is current.
         let current = held[0], other = held[1]
         results.update(tabs: [current, other], query: "held", activeID: current.id, canCreate: false)
         let actionLabels = labels(in: results)
-        require(!actionLabels.contains("Switch to Tab") && actionLabels.contains("Current Tab") && results.returnTitle == "Switch to Tab",
-                "Rows carry no action text; the current tab says so and the footer says Switch to Tab: \(actionLabels)")
+        require(actionLabels.filter { $0 == "Switch to Tab" }.count == 1 && actionLabels.contains("Current Tab"),
+                "Only the non-current tab offers Switch to Tab; the current one says so: \(actionLabels)")
         PaletteFieldChecks.run(require, labels: labels)
         print("PASS: \(checks) tab search ranking, command, favicon and selection checks")
     }
@@ -356,7 +360,7 @@ enum PaletteFieldChecks {
                     && PaletteQuickActionCatalog.matches("do").isEmpty,
                 "Titles lead, partial aliases trail, two letters never match")
 
-        // The results view: an empty field lists Recent Tabs (previous tab first), Favorites and Quick Actions.
+        // The results view, as Arc's: an empty field lists recent tabs, no headings, the previous tab first.
         let results = TabSearchResultsView(frame: NSRect(x: 0, y: 0, width: 600, height: 400))
         let a = BrowserTab(title: "Alpha", address: "https://alpha.example/", space: 0)
         let b = BrowserTab(title: "Beta", address: "https://beta.example/", space: 0)
@@ -368,40 +372,42 @@ enum PaletteFieldChecks {
         results.onSelect = { chosen = $0 }
         results.onOpenAddress = { opened.append(($0, $1)) }
         results.onCopy = { copied = $0 }
-        results.update(tabs: [a, b, c, d, blank, fav], query: "", activeID: a.id, canCreate: true, recentTabIDs: [a.id, blank.id, c.id, d.id, b.id])
+        results.update(tabs: [a, b, c, d, blank, fav], query: "", activeID: a.id, canCreate: true, recentTabIDs: [a.id, blank.id, c.id, d.id, b.id, fav.id])
         let empty = labels(results)
-        require(empty.contains("Recent Tabs") && empty.contains("Favorites") && empty.contains("Quick Actions") && !empty.contains("New tab")
-                    && !empty.contains("Alpha") && empty.contains("docs.new"),
-                "Empty field: headings, no current or blank tab: \(empty)")
+        require(empty.first == "Gamma" && empty.contains("Mail") && !empty.contains("New tab") && !empty.contains("Alpha")
+                    && !empty.contains("Recent Tabs") && !empty.contains("docs.new"),
+                "Empty field: recent tabs only, no current or blank tab, no headings: \(empty)")
         require(results.activateSelection() && chosen == c.id, "⌘T Return jumps back to the previous tab")
         if case .tab(let id, _) = results.selectedTarget { require(id == c.id, "The selected target is that tab") } else { require(false, "Selected target is a tab") }
-        require(results.preferredHeight > 3 * PaletteGeometry.rowHeight + 3 * PaletteGeometry.headerHeight,
-                "Headings take their own height above rows")
+        require(results.preferredHeight == 4 * PaletteGeometry.rowHeight, "Four roomy rows (Gamma, Delta, Beta, Mail), nothing else")
+        // ⌘L before any edit: this page first (its title alone), then recent tabs.
+        results.update(tabs: [a, b, c], query: a.address, activeID: a.id, canCreate: true, recentTabIDs: [a.id, c.id, b.id], editingAddress: true)
+        let editing = labels(results)
+        require(editing.first == "Alpha" && editing.dropFirst().first == "Gamma" && !editing.contains("— alpha.example"),
+                "⌘L lists this page, then recent tabs: \(editing)")
 
         // Typed: the completed site leads, then the search, then pages; an open tab wins over its visited page.
         let hub = BrowserTab(title: "Bam repo", address: "https://github.com/aridutilh/bam", space: 0)
         let siteCompletion = PaletteAutocomplete.complete("git", candidates: candidates)
         results.update(tabs: [a, hub], query: "git", activeID: a.id, canCreate: true,
                        history: index.matches("git", excluding: [PaletteAddressKey.key(hub.address)], limit: 3),
-                       completion: siteCompletion, searchEngineName: "Google")
+                       completion: siteCompletion)
         let typed = labels(results)
-        require(typed.first == "github.com" && typed.contains("Google") && typed.contains("Bam repo") && typed.contains("GitLab")
-                    && !typed.contains("aridutilh/bam") && typed.filter({ $0 == "github.com" }).count == 1,
-                "Completion row, search row with engine, open tab, visited pages without duplicates: \(typed)")
-        require(results.returnTitle == "Open" && results.activateSelection() && opened.last?.0 == "https://github.com/" && opened.last?.1 == false,
+        require(typed.first == "GitHub" && typed.dropFirst().first == "— github.com" && typed.contains("git") && typed.contains("Bam repo")
+                    && typed.contains("GitLab") && !typed.contains("aridutilh/bam") && typed.filter({ $0 == "— github.com" }).count == 1,
+                "\"GitHub — github.com\", the search, the open tab, visited pages, without duplicates: \(typed)")
+        require(results.activateSelection() && opened.last?.0 == "https://github.com/" && opened.last?.1 == false,
                 "Return on the completed site opens it")
-        results.opensInNewTab = true
-        results.update(tabs: [a, hub], query: "git", activeID: a.id, canCreate: true, completion: siteCompletion)
-        require(results.returnTitle == "Open in New Tab", "After ⌘T the footer says Open in New Tab")
         // A completion whose page is already open shows that tab, and Return switches to it.
         let open = PaletteAutocomplete.complete("github.com/ar", candidates: candidates)
         results.update(tabs: [a, hub], query: "github.com/ar", activeID: a.id, canCreate: true, completion: open)
-        require(results.activateSelection() && chosen == hub.id && results.returnTitle == "Switch to Tab", "An open completion switches to its tab")
+        require(results.activateSelection() && chosen == hub.id && labels(results).contains("Switch to Tab"), "An open completion switches to its tab")
 
         // Calculator and Quick Action rows.
         let sum = PaletteCalculator.evaluate("6*7")
         results.update(tabs: [], query: "6*7", activeID: UUID(), canCreate: true, calculation: sum)
-        require(labels(results).first == "= 42" && results.returnTitle == "Copy Answer" && results.activateSelection() && copied == "42",
+        require(labels(results).first == "42" && labels(results).contains("— 6*7") && labels(results).contains("Copy")
+                    && results.activateSelection() && copied == "42",
                 "An answer leads and Return copies it")
         results.update(tabs: [], query: "doc", activeID: UUID(), canCreate: true, quickActions: PaletteQuickActionCatalog.matches("doc"))
         require(labels(results).first == "New document" && results.activateSelection() && opened.last?.0 == "https://docs.new" && opened.last?.1 == true,

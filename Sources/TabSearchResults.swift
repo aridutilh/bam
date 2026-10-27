@@ -91,39 +91,37 @@ enum TabSearchMatcher {
     }
 }
 
-/// Palette geometry, after Yab's field: about half the window wide (520–760pt), a 20pt corner, a 56pt input row
-/// with large type, 38pt rows, section headings, and a footer saying what Return does. The card keeps one height
-/// while you type (rows scroll inside it), so nothing jumps; it shrinks only when the window is too short.
+/// Palette geometry, as Arc's command bar: about half the window wide (540–820pt), a 10pt corner, a 63pt input row
+/// over a hairline, and roomy 50pt rows. The top stays put while results come and go (sized for a typical five
+/// rows, centered), so the field never jumps; the card's height follows its rows. When a long list wouldn't fit the
+/// window, the card rises only as far as needed and its rows scroll.
 enum PaletteGeometry {
-    static let cornerRadius: CGFloat = 20
-    static let inputHeight: CGFloat = 56
-    /// Where the result list starts, below the input row.
-    static let resultsTop: CGFloat = 62
-    static let rowHeight: CGFloat = 38
-    static let headerHeight: CGFloat = 28
-    static let sectionGap: CGFloat = 6
-    static let footerHeight: CGFloat = 48
-    /// Rows area of a full-size card: nine and a half rows, as Yab shows.
-    static let designResultsHeight: CGFloat = 362
-    static let typicalRows = 9
+    static let cornerRadius: CGFloat = 10
+    static let inputHeight: CGFloat = 63
+    static let rowHeight: CGFloat = 50
+    /// The selected row's fill inside its 50pt slot.
+    static let highlightInset: CGFloat = 2.5
+    static let typicalRows = 5
     /// Space kept clear above and below the card.
     static let margin: CGFloat = 20
-    /// Everything but the rows: the input row and the footer.
-    static let chromeHeight: CGFloat = resultsTop + footerHeight
+    /// The gap between the input's hairline and the first row, and below the last row.
+    static let listPadding: CGFloat = 8
+    /// The input row, the gap under its hairline and the bottom padding around the rows.
+    static let chromeHeight: CGFloat = inputHeight + 2 * listPadding
     static func width(forWindowWidth w: CGFloat) -> CGFloat {
-        min(max(0, w - 40), max(520, min(760, (w * 0.495).rounded())))
+        min(max(0, w - 40), max(540, min(820, (w * 0.505).rounded())))
     }
     static func top(forWindowHeight h: CGFloat) -> CGFloat {
-        let card = chromeHeight + designResultsHeight
-        return max(margin, ((h - card) * 0.42).rounded())
+        let typical = chromeHeight + CGFloat(typicalRows) * rowHeight
+        return max(margin, ((h - typical) / 2).rounded())
     }
-    /// Where the card goes and how tall its rows area is. A full card sits a little above center; in a short window
-    /// it rises to the margin and its rows area shrinks to the room left (rows scroll).
-    static func fit(windowHeight h: CGFloat, resultsHeight: CGFloat = 0) -> (top: CGFloat, visibleResultsHeight: CGFloat) {
+    /// Where the card goes and how much of its rows show. The centered top holds while the card fits; otherwise
+    /// it rises toward the top margin, and past that the rows are cut to the room left (they scroll).
+    static func fit(windowHeight h: CGFloat, resultsHeight: CGFloat) -> (top: CGFloat, visibleResultsHeight: CGFloat) {
         let room = max(0, h - 2 * margin - chromeHeight)
-        let visible = min(designResultsHeight, room)
-        let card = chromeHeight + visible
-        return (max(min(margin, h), ((h - card) * 0.42).rounded()), visible)
+        let visible = min(resultsHeight, room)
+        let bottomLimit = h - margin - (chromeHeight + visible)
+        return (max(min(margin, h), min(top(forWindowHeight: h), bottomLimit)), visible)
     }
 }
 
@@ -140,10 +138,10 @@ enum PaletteTarget: Equatable {
     case calculation(PaletteCalculation)
 }
 
-/// The palette's result list, below the field. The parent keeps first responder in the field and forwards arrow
-/// keys, Return and Tab here. An empty field lists Recent Tabs, Favorites and Quick Actions under headings;
-/// typed text lists, in order: an answer, the completed site, the search, open and visited pages, suggestions
-/// and commands.
+/// The palette's result list, below the field, as Arc's: one list, no headings. An empty field lists your most
+/// recent tabs (the previous one first, so ⌘T Return jumps back). Typed text lists, in order: an answer, the
+/// completed site, the search, open and visited pages, suggestions and commands. The parent keeps first
+/// responder in the field and forwards arrow keys, Return and Tab here.
 @MainActor final class TabSearchResultsView: NSView {
     var faviconProvider: ((UUID) -> NSImage?)? { didSet { refreshFavicons() } }
     /// Unsubmitted URL text may consult the cache, but must not start a fetch.
@@ -159,11 +157,7 @@ enum PaletteTarget: Equatable {
     var onOpenAddress: ((String, Bool) -> Void)?
     /// A calculator answer to put on the clipboard.
     var onCopy: ((String) -> Void)?
-    /// The selection moved or the rows changed: the footer re-reads `returnTitle`.
-    var onSelectionChange: (() -> Void)?
-    /// After ⌘T Return opens a new tab; after ⌘L it replaces this page. Only the footer wording depends on it.
-    var opensInNewTab = false
-    var preferredHeight: CGFloat { max(44, contentHeight) }
+    var preferredHeight: CGFloat { max(44, CGFloat(rows.count) * Self.rowHeight) }
     private(set) var selectedIndex = 0
     private static let rowHeight = PaletteGeometry.rowHeight
     private enum Entry {
@@ -191,14 +185,10 @@ enum PaletteTarget: Equatable {
     private var entries: [Entry] = []
     private var searchIndex = TabSearchMatcher.Index()
     private var rows: [TabSearchResultRow] = []
-    private var rowOrigins: [CGFloat] = []
-    private var headers: [(label: NSTextField, y: CGFloat)] = []
-    private var contentHeight: CGFloat = 0
     private var engineURL: URL?
-    private var scoped = false
     private var lastQuery = ""
     private var accent: NSColor = .controlAccentColor
-    private var accentText: NSColor = .labelColor
+    private var accentText: NSColor = .white
     private var selectionFlip: DispatchWorkItem?
     // One shared highlight glides between rows instead of each row repainting.
     private let highlight = NSView()
@@ -209,7 +199,7 @@ enum PaletteTarget: Equatable {
         super.init(frame: frame)
         setAccessibilityElement(false)
         highlight.wantsLayer = true
-        highlight.layer?.cornerRadius = 9
+        highlight.layer?.cornerRadius = 7
         highlight.layer?.cornerCurve = .continuous
         highlight.setAccessibilityElement(false)
         addSubview(highlight)
@@ -223,7 +213,8 @@ enum PaletteTarget: Equatable {
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
 
-    // swiftlint:disable:next function_parameter_count
+    /// `selectionTint` is the Space's color: the selected row is filled with it, as Arc does. `editingAddress`
+    /// marks ⌘L's untouched address: the current page leads, then recent tabs.
     func update(tabs: [BrowserTab], query: String, activeID: UUID, canCreate: Bool,
                 spaces: [BrowserSpace] = BrowserSpace.legacyDefaults, profiles: [BrowserProfile] = BrowserProfile.defaults,
                 engine: SiteSearchEngine? = nil, suggestions: [String] = [],
@@ -231,96 +222,74 @@ enum PaletteTarget: Equatable {
                 history: [PaletteHistoryHit] = [], completion: PaletteCompletion? = nil,
                 recentTabIDs: [UUID]? = nil, calculation: PaletteCalculation? = nil,
                 quickActions: [(action: PaletteQuickAction, leading: Bool)] = [],
-                folderNames: [UUID: String] = [:], searchEngineName: String? = nil) {
+                folderNames: [UUID: String] = [:], editingAddress: Bool = false) {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         let previousIdentity = entries.indices.contains(selectedIndex) ? entries[selectedIndex].identity : nil
-        scoped = engine != nil
         if let engine {
-            // Scoped to one site: its own color, as Arc does.
+            // Scoped to one site: its own color.
             accent = engine.color; accentText = engine.accentTextColor
         } else {
-            // A quiet neutral fill with normal text, as Yab's field.
-            accent = .labelColor.withAlphaComponent(0.075); accentText = .labelColor
+            // Arc fills the selected row with the Space's color and white text.
+            accent = PaletteSelection.fill(for: selectionTint ?? .controlAccentColor, in: effectiveAppearance); accentText = .white
         }
         engineURL = engine.flatMap { URL(string: "https://\($0.host)") }
-        var sections: [(title: String?, entries: [Entry])] = []
         // A blank untitled tab is never worth a row.
         let listable = tabs.filter { !($0.isHome && $0.displayTitle == "New tab") }
+        let byID = Dictionary(listable.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        func recentTabs(limit: Int) -> [BrowserTab] {
+            var recent: [BrowserTab] = []
+            for id in recentTabIDs ?? listable.map(\.id) where id != activeID {
+                guard let tab = byID[id], !recent.contains(where: { $0.id == id }) else { continue }
+                recent.append(tab)
+                if recent.count == limit { break }
+            }
+            return recent
+        }
+        entries = []
         if engine != nil {
             searchIndex = TabSearchMatcher.Index()
             // Scoped to one site: the typed text searches it, suggestions refine it.
-            var scopedEntries: [Entry] = []
-            if !trimmed.isEmpty { scopedEntries.append(.search(trimmed)) }
-            scopedEntries += suggestions.filter { $0.caseInsensitiveCompare(trimmed) != .orderedSame }
-                .prefix(6).map(Entry.search)
-            sections = [(nil, scopedEntries)]
+            if !trimmed.isEmpty { entries.append(.search(trimmed)) }
+            entries += suggestions.filter { $0.caseInsensitiveCompare(trimmed) != .orderedSame }
+                .prefix(5).map(Entry.search)
         } else if trimmed.isEmpty {
-            // Yab's empty field: the last tabs you were on (the first one preselected, so ⌘T Return jumps back),
-            // Favorites, and Quick Actions.
-            let byID = Dictionary(listable.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
-            let order = recentTabIDs ?? listable.map(\.id)
-            var recent: [BrowserTab] = []
-            for id in order where id != activeID {
-                guard let tab = byID[id], !recent.contains(where: { $0.id == id }) else { continue }
-                recent.append(tab)
-                if recent.count == 3 { break }
-            }
+            // Arc's empty field: the tabs you were just on, the previous one first.
+            var recent = recentTabs(limit: 5)
             // A lone current tab still shows, so the list is never blank while tabs exist.
             if recent.isEmpty, let active = byID[activeID] { recent = [active] }
-            if !recent.isEmpty { sections.append(("Recent Tabs", recent.map(Entry.tab))) }
-            let favorites = listable.filter { tab in tab.isFavorite && tab.id != activeID && !recent.contains { $0.id == tab.id } }
-            if !favorites.isEmpty { sections.append(("Favorites", favorites.prefix(4).map(Entry.tab))) }
-            if canCreate { sections.append(("Quick Actions", PaletteQuickActionCatalog.suggested.map(Entry.quickAction))) }
+            entries = recent.map(Entry.tab)
+        } else if editingAddress, let current = byID[activeID] {
+            // ⌘L, before any edit: this page, then where you were before.
+            entries = [.tab(current)] + recentTabs(limit: 4).map(Entry.tab)
         } else {
-            var lead: [Entry] = []
-            if let calculation { lead.append(.calculation(calculation)) }
-            var matchedTabs = searchIndex.matches(tabs: listable, query: trimmed, activeID: activeID, limit: 5)
+            if let calculation { entries.append(.calculation(calculation)) }
+            var matchedTabs = searchIndex.matches(tabs: listable, query: trimmed, activeID: activeID)
             // The completed site leads; when it is already open, its tab takes the row and Return switches to it.
             if let completion {
                 let key = PaletteAddressKey.key(completion.address)
                 if let open = listable.first(where: { PaletteAddressKey.key($0.address) == key && $0.id != activeID }) {
-                    lead.append(.tab(open)); matchedTabs.removeAll { $0.id == open.id }
-                } else { lead.append(.site(completion)) }
+                    entries.append(.tab(open)); matchedTabs.removeAll { $0.id == open.id }
+                } else { entries.append(.site(completion)) }
             }
-            lead += quickActions.filter(\.leading).map { Entry.quickAction($0.action) }
-            lead += commands.filter(\.leading).map { Entry.command($0.command) }
-            if canCreate { lead.append(.query(trimmed)) }
+            entries += quickActions.filter(\.leading).map { Entry.quickAction($0.action) }
+            // A command the text names outright leads; looser matches follow the pages.
+            entries += commands.filter(\.leading).map { Entry.command($0.command) }
+            if canCreate { entries.append(.query(trimmed)) }
+            entries += matchedTabs.map(Entry.tab)
             let completedKey = completion.map { PaletteAddressKey.key($0.address) }
-            let pages = matchedTabs.map(Entry.tab)
-                + history.filter { PaletteAddressKey.key($0.address) != completedKey }.prefix(max(0, 5 - matchedTabs.count)).map(Entry.history)
-            let room = max(0, 12 - lead.count - pages.count)
-            let suggested = suggestions.filter { $0.caseInsensitiveCompare(trimmed) != .orderedSame }
-                .prefix(min(4, room)).map(Entry.search)
-            let trailing = quickActions.filter { !$0.leading }.map { Entry.quickAction($0.action) }
-                + commands.filter { !$0.leading }.map { Entry.command($0.command) }
-            sections = [(nil, lead + pages + suggested + trailing)]
+            entries += history.filter { PaletteAddressKey.key($0.address) != completedKey }
+                .prefix(max(0, 3 - max(0, matchedTabs.count - 3))).map(Entry.history)
+            // Arc keeps the list short: suggestions only fill what's left of about eight rows.
+            let room = max(0, 8 - entries.count)
+            entries += suggestions.filter { $0.caseInsensitiveCompare(trimmed) != .orderedSame }
+                .prefix(min(3, room)).map(Entry.search)
+            entries += quickActions.filter { !$0.leading }.map { Entry.quickAction($0.action) }
+            entries += commands.filter { !$0.leading }.map { Entry.command($0.command) }
         }
-        sections = sections.filter { !$0.entries.isEmpty }
-        entries = sections.flatMap(\.entries)
         if trimmed == lastQuery, let previousIdentity, let index = entries.firstIndex(where: { $0.identity == previousIdentity }) {
             selectedIndex = index
         } else { selectedIndex = 0 }
         lastQuery = trimmed
-
-        // Rows and headings, top to bottom.
-        headers.forEach { $0.label.removeFromSuperview() }
-        headers = []
-        rowOrigins = []
-        var y: CGFloat = 0
-        for (index, section) in sections.enumerated() {
-            if let title = section.title {
-                if index > 0 { y += PaletteGeometry.sectionGap }
-                let label = NSTextField(labelWithString: title)
-                label.font = .systemFont(ofSize: 12, weight: .medium)
-                label.textColor = .secondaryLabelColor
-                label.setAccessibilityRole(.staticText)
-                addSubview(label)
-                headers.append((label, y))
-                y += PaletteGeometry.headerHeight
-            }
-            for _ in section.entries { rowOrigins.append(y); y += Self.rowHeight }
-        }
-        contentHeight = entries.isEmpty ? 0 : y + 6
 
         let activeSpace = tabs.first { $0.id == activeID }?.space
         rows.forEach { $0.removeFromSuperview() }
@@ -329,42 +298,47 @@ enum PaletteTarget: Equatable {
             row.selectedTextColor = accentText
             switch entry {
             case .query(let text):
-                let addressLike = Self.looksLikeAddress(text)
-                row.configure(title: text, detail: addressLike ? "" : (searchEngineName ?? "Search"), badge: "",
-                              symbol: addressLike ? "globe" : "magnifyingglass", boxed: true)
+                row.configure(title: text, detail: "", badge: "", symbol: Self.looksLikeAddress(text) ? "globe" : "magnifyingglass")
             case .search(let text):
-                let detail = (engine != nil && index == 0) ? (engine?.name ?? "") : ""
-                row.configure(title: text, detail: detail, badge: "", symbol: "magnifyingglass", boxed: true)
+                row.configure(title: text, detail: "", badge: "", symbol: "magnifyingglass",
+                              action: (engine != nil && index == 0) ? "Search \(engine?.name ?? "")" : nil)
             case .tab(let tab):
-                // Quiet context only: where the tab lives. The footer says what Return does.
+                // Quiet context where it helps (another Space, a folder); the trailing label says what Return does.
+                let current = tab.id == activeID
                 let context: String
-                if tab.id == activeID { context = "Current Tab" }
-                else if let folder = tab.folderID.flatMap({ folderNames[$0] }) { context = "In \(folder)" }
-                else if tab.isFavorite { context = "Favorite" }
-                else if tab.space != activeSpace {
+                if current { context = editingAddress ? "" : "Current Tab" }
+                else if let folder = tab.folderID.flatMap({ folderNames[$0] }) { context = folder }
+                else if tab.space != activeSpace && !tab.isFavorite {
                     // IDs remain stable when Spaces are renamed, reordered or deleted.
                     context = spaces.first(where: { $0.id == tab.space })?.name ?? "Unknown Space"
                 } else { context = "" }
                 let address = tab.isHome ? "" : tab.isVideoDemo ? "Picture in Picture demo"
                     : PaletteAddressKey.display(tab.isUnloaded ? (tab.saved?.address ?? tab.address) : tab.address)
                 let title = tab.displayTitle.isEmpty ? address : tab.displayTitle
-                row.configure(title: title, detail: title == address ? "" : address, badge: context, symbol: tab.symbol)
+                // ⌘L's own page reads as Arc's: its title alone.
+                let detail = (current && editingAddress) || title == address ? "" : address
+                row.configure(title: title, detail: detail, badge: context, symbol: tab.symbol,
+                              action: current ? nil : "Switch to Tab")
             case .command(let command):
                 let live = ShortcutCommand(paletteID: command.id).map { ShortcutStore.shared.combo(for: $0).compact }
                 row.configure(title: command.title, detail: command.detail,
-                              badge: live ?? command.shortcut ?? "", symbol: command.symbol, boxed: true)
+                              badge: live ?? command.shortcut ?? "", symbol: command.symbol)
             case .site(let completion):
                 let shown = PaletteAddressKey.display(completion.text)
-                row.configure(title: shown, detail: completion.title == shown ? "" : completion.title, badge: "", symbol: "globe")
+                if completion.title.isEmpty || completion.title == shown {
+                    row.configure(title: shown, detail: "", badge: "", symbol: "globe")
+                } else {
+                    row.configure(title: completion.title, detail: shown, badge: "", symbol: "globe")
+                }
             case .history(let hit):
                 let address = PaletteAddressKey.display(hit.address)
                 row.configure(title: hit.title.isEmpty ? address : hit.title, detail: hit.title.isEmpty ? "" : address,
                               badge: "", symbol: "clock")
             case .quickAction(let action):
                 let look = Self.quickActionLook(action.id)
-                row.configure(title: action.title, detail: action.host, badge: "", symbol: look.symbol, boxed: true, tint: look.color)
+                row.configure(title: action.title, detail: action.host, badge: "", symbol: look.symbol, tint: look.color)
             case .calculation(let calculation):
-                row.configure(title: "= " + calculation.display, detail: calculation.expression, badge: "", symbol: "equal", boxed: true)
+                row.configure(title: calculation.display, detail: calculation.expression, badge: "", symbol: "equal", action: "Copy")
             }
             row.setFavicon(favicon(for: entry))
             row.isSelected = index == selectedIndex
@@ -381,7 +355,8 @@ enum PaletteTarget: Equatable {
             addSubview(row)
             return row
         }
-        paintHighlight()
+        highlight.layer?.backgroundColor = accent.cgColor
+        for row in rows { row.accent = accent }
         moveHighlight(animated: false)
         emptyLabel.isHidden = !entries.isEmpty
         if engine != nil {
@@ -391,18 +366,27 @@ enum PaletteTarget: Equatable {
         }
         needsLayout = true
         invalidateIntrinsicContentSize()
-        onSelectionChange?()
     }
 
-    private func paintHighlight() {
-        effectiveAppearance.performAsCurrentDrawingAppearance {
-            let fill = scoped ? accent : (effectiveAppearance.isDarkPalette ? NSColor(white: 1, alpha: 0.09) : NSColor(white: 0, alpha: 0.068))
-            highlight.layer?.backgroundColor = fill.cgColor
+    /// A Quick Action's own glyph and color, drawn by Bam (no service artwork).
+    static func quickActionLook(_ id: String) -> (symbol: String, color: NSColor) {
+        switch id {
+        case "doc": return ("doc.text.fill", NSColor(srgbRed: 0.26, green: 0.52, blue: 0.96, alpha: 1))
+        case "meet": return ("video.fill", NSColor(srgbRed: 0.0, green: 0.62, blue: 0.47, alpha: 1))
+        case "sheet": return ("tablecells.fill", NSColor(srgbRed: 0.06, green: 0.62, blue: 0.35, alpha: 1))
+        case "slides": return ("rectangle.on.rectangle", NSColor(srgbRed: 0.96, green: 0.65, blue: 0.0, alpha: 1))
+        case "cal": return ("calendar", NSColor(srgbRed: 0.26, green: 0.52, blue: 0.96, alpha: 1))
+        case "form": return ("list.bullet.rectangle.fill", NSColor(srgbRed: 0.45, green: 0.28, blue: 0.75, alpha: 1))
+        case "figma": return ("pencil.and.outline", NSColor(srgbRed: 0.64, green: 0.35, blue: 1.0, alpha: 1))
+        case "linear": return ("circle.lefthalf.filled", NSColor(srgbRed: 0.37, green: 0.42, blue: 0.82, alpha: 1))
+        default: return ("plus", .secondaryLabelColor)
         }
     }
-    override func viewDidChangeEffectiveAppearance() {
-        super.viewDidChangeEffectiveAppearance()
-        paintHighlight()
+    /// "example.com/path", "localhost:3000" or a full URL, not words or sums.
+    static func looksLikeAddress(_ text: String) -> Bool {
+        if URLInput.directURL(text) != nil { return true }
+        let pattern = #"^(localhost|\[::1\]|[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*\.[A-Za-z][A-Za-z0-9-]*|\d{1,3}(\.\d{1,3}){3})(:\d+)?([/?#].*)?$"#
+        return text.range(of: pattern, options: .regularExpression) != nil
     }
 
     /// Images can arrive while the palette is open without replacing rows,
@@ -413,11 +397,10 @@ enum PaletteTarget: Equatable {
     private func favicon(for entry: Entry) -> NSImage? {
         switch entry {
         case .tab(let tab): return faviconProvider?(tab.id)
-        case .command, .calculation: return nil
+        case .command, .calculation, .quickAction: return nil
         case .search: return engineURL.flatMap { siteFaviconProvider?($0, true) }
         case .site(let completion): return URL(string: completion.address).flatMap { siteFaviconProvider?($0, false) }
         case .history(let hit): return URL(string: hit.address).flatMap { siteFaviconProvider?($0, false) }
-        case .quickAction: return nil
         case .query(let text):
             let url: URL?
             if let direct = URLInput.directURL(text) { url = direct }
@@ -443,40 +426,8 @@ enum PaletteTarget: Equatable {
         case .calculation(let calculation): return .calculation(calculation)
         }
     }
-    /// A Quick Action's own glyph and color, drawn by Bam (no service artwork).
-    static func quickActionLook(_ id: String) -> (symbol: String, color: NSColor) {
-        switch id {
-        case "doc": return ("doc.text.fill", NSColor(srgbRed: 0.26, green: 0.52, blue: 0.96, alpha: 1))
-        case "meet": return ("video.fill", NSColor(srgbRed: 0.0, green: 0.62, blue: 0.47, alpha: 1))
-        case "sheet": return ("tablecells.fill", NSColor(srgbRed: 0.06, green: 0.62, blue: 0.35, alpha: 1))
-        case "slides": return ("rectangle.on.rectangle", NSColor(srgbRed: 0.96, green: 0.65, blue: 0.0, alpha: 1))
-        case "cal": return ("calendar", NSColor(srgbRed: 0.26, green: 0.52, blue: 0.96, alpha: 1))
-        case "form": return ("list.bullet.rectangle.fill", NSColor(srgbRed: 0.45, green: 0.28, blue: 0.75, alpha: 1))
-        case "figma": return ("pencil.and.outline", NSColor(srgbRed: 0.64, green: 0.35, blue: 1.0, alpha: 1))
-        case "linear": return ("circle.lefthalf.filled", NSColor(srgbRed: 0.37, green: 0.42, blue: 0.82, alpha: 1))
-        default: return ("plus", .secondaryLabelColor)
-        }
-    }
-    /// "example.com/path", "localhost:3000" or a full URL, not words or sums.
-    static func looksLikeAddress(_ text: String) -> Bool {
-        if URLInput.directURL(text) != nil { return true }
-        let pattern = #"^(localhost|\[::1\]|[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*\.[A-Za-z][A-Za-z0-9-]*|\d{1,3}(\.\d{1,3}){3})(:\d+)?([/?#].*)?$"#
-        return text.range(of: pattern, options: .regularExpression) != nil
-    }
-    /// The footer's "what Return does" for the selected row.
-    var returnTitle: String {
-        switch selectedTarget {
-        case .tab: return "Switch to Tab"
-        case .command: return "Run Command"
-        case .calculation: return "Copy Answer"
-        case .address(_, let alwaysNewTab): return alwaysNewTab || opensInNewTab ? "Open in New Tab" : "Open"
-        case .search: return opensInNewTab ? "Search in New Tab" : "Search"
-        case .query(let text):
-            if Self.looksLikeAddress(text) { return opensInNewTab ? "Open in New Tab" : "Open" }
-            return opensInNewTab ? "Search in New Tab" : "Search"
-        case nil: return opensInNewTab ? "Open in New Tab" : "Open"
-        }
-    }
+    /// The selected row's view, for anchoring the ⌘K actions menu beside it.
+    var selectedRowView: NSView? { rows.indices.contains(selectedIndex) ? rows[selectedIndex] : nil }
 
     /// A discrete press wraps at the ends and glides. A held key (auto-repeat) steps instantly, applies colors at
     /// once and stops at the first or last row, so selection never flickers or jumps back to the top mid-hold.
@@ -534,8 +485,9 @@ enum PaletteTarget: Equatable {
             for (index, row) in self.rows.enumerated() { row.isSelected = index == self.selectedIndex }
         }
         moveHighlight(animated: animated)
-        if animated && scoped && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
-            // Over a saturated engine color, flip text colors mid-glide so neither row shows the wrong contrast.
+        if animated && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            // Flip text colors mid-glide so neither row shows selected-on-clear
+            // or clear-on-selected for the whole highlight travel.
             let work = DispatchWorkItem(block: applyColors)
             selectionFlip = work
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.06, execute: work)
@@ -546,15 +498,11 @@ enum PaletteTarget: Equatable {
             NSAccessibility.post(element: rows[selectedIndex], notification: .selectedChildrenChanged)
         }
         revealSelection()
-        onSelectionChange?()
     }
-    /// When the results scroll, keeps the selected row in view (and its section heading, for the first row).
+    /// When the results scroll (a long list in a short window), keeps the selected row in view, without animation.
     func revealSelection() {
         guard rows.indices.contains(selectedIndex), let clip = enclosingScrollView?.contentView else { return }
-        var target = rowFrame(at: selectedIndex)
-        if let header = headers.last(where: { $0.y < target.minY }), target.minY - header.y <= PaletteGeometry.headerHeight + 0.5 {
-            target = target.union(NSRect(x: 0, y: header.y, width: 1, height: 1))
-        }
+        let target = rowFrame(at: selectedIndex)
         let visible = clip.documentVisibleRect
         guard target.minY < visible.minY || target.maxY > visible.maxY else { return }
         let y = target.minY < visible.minY ? target.minY : target.maxY - visible.height
@@ -562,15 +510,15 @@ enum PaletteTarget: Equatable {
         enclosingScrollView?.reflectScrolledClipView(clip)
     }
     private func rowFrame(at index: Int) -> NSRect {
-        let y = rowOrigins.indices.contains(index) ? rowOrigins[index] : CGFloat(index) * Self.rowHeight
-        return NSRect(x: 0, y: y, width: bounds.width, height: Self.rowHeight - 1)
+        NSRect(x: 0, y: CGFloat(index) * Self.rowHeight, width: bounds.width, height: Self.rowHeight)
     }
     /// Glides the shared highlight to the selected row; a held arrow key
     /// retargets the in-flight animation instead of snapping row to row.
     private func moveHighlight(animated: Bool) {
         guard rows.indices.contains(selectedIndex) else { highlight.isHidden = true; return }
         highlight.isHidden = false
-        let destination = rowFrame(at: selectedIndex)
+        let inset = PaletteGeometry.highlightInset
+        let destination = rowFrame(at: selectedIndex).insetBy(dx: 0, dy: inset)
         if animated && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
             NSAnimationContext.runAnimationGroup { context in
                 context.duration = 0.12
@@ -582,17 +530,36 @@ enum PaletteTarget: Equatable {
             highlight.frame = destination
         }
     }
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        highlight.layer?.backgroundColor = accent.cgColor
+    }
     override var intrinsicContentSize: NSSize { NSSize(width: NSView.noIntrinsicMetric, height: preferredHeight) }
     override func layout() {
         super.layout()
         for (index, row) in rows.enumerated() { row.frame = rowFrame(at: index) }
-        for header in headers {
-            header.label.frame = NSRect(x: 12, y: header.y + 7, width: max(0, bounds.width - 24), height: 16)
-        }
         moveHighlight(animated: false)
         // The label always shows its full text, centered.
         let emptyWidth = emptyLabel.measuredTextWidth + 8
         emptyLabel.frame = NSRect(x: (bounds.width - emptyWidth) / 2, y: 14, width: emptyWidth, height: 18)
+    }
+}
+
+/// The selected row's fill: the Space's color at full strength, as Arc. A pale Space color (Bam's dark-mode tints
+/// are pastels) is deepened so white text stays readable; an imported Arc accent is used as it is.
+enum PaletteSelection {
+    @MainActor static func fill(for tint: NSColor, in appearance: NSAppearance) -> NSColor {
+        var resolved: NSColor?
+        appearance.performAsCurrentDrawingAppearance { resolved = tint.usingColorSpace(.deviceRGB) }
+        guard let rgb = resolved else { return tint }
+        var hue: CGFloat = 0, saturation: CGFloat = 0, brightness: CGFloat = 0, alpha: CGFloat = 0
+        rgb.getHue(&hue, saturation: &saturation, brightness: &brightness, alpha: &alpha)
+        let dark = appearance.isDarkPalette
+        // Grays stay gray (a neutral Space); everything else keeps its hue.
+        if saturation < 0.08 { return NSColor(white: dark ? 0.36 : 0.30, alpha: 1) }
+        let s = min(0.82, max(saturation, 0.5))
+        let b = max(0.42, min(brightness, dark ? 0.80 : 0.72))
+        return NSColor(deviceHue: hue, saturation: s, brightness: b, alpha: 1)
     }
 }
 
@@ -609,24 +576,26 @@ extension NSTextField {
     }
 }
 
-/// One calm single-line result, as Yab's: icon, title, the dimmed address after it, and one quiet piece of context
-/// on the right (a folder, a Space, a shortcut). What Return does lives in the palette's footer, not on rows.
+/// One Arc-style result: icon, title, " — address" dimmed after it, quiet context, and a trailing action
+/// ("Switch to Tab" with an arrow) that brightens on the selected row, where the arrow sits in a white key.
 @MainActor private final class TabSearchResultRow: NSView {
     var onActivate: (() -> Void)?
     var onHover: (() -> Void)?
-    var selectedTextColor: NSColor = .labelColor
+    var selectedTextColor: NSColor = .white
+    /// The selection fill; the selected row's arrow takes it over a white key.
+    var accent: NSColor = .controlAccentColor { didSet { applySelection() } }
     var isSelected = false { didSet { applySelection(); setAccessibilitySelected(isSelected) } }
     private let icon = NSImageView()
-    /// A hairline rounded square behind symbol icons (search, commands), as Yab draws them.
-    private let iconBox = NSView()
-    private var boxed = false
-    /// A Quick Action's color: its glyph takes it and its box a soft wash of it.
-    private var tint: NSColor?
     private var favicon: NSImage?
     private var symbol = "magnifyingglass"
+    /// A Quick Action's own color for its glyph.
+    private var tint: NSColor?
     private let title = NSTextField(labelWithString: "")
     private let detail = NSTextField(labelWithString: "")
     private let badge = NSTextField(labelWithString: "")
+    private let action = NSTextField(labelWithString: "")
+    private let arrowBox = NSView()
+    private let arrow = NSImageView()
     private var hoverArea: NSTrackingArea?
     override var isFlipped: Bool { true }
 
@@ -635,39 +604,42 @@ extension NSTextField {
         wantsLayer = true
         setAccessibilityElement(true)
         setAccessibilityRole(.button)
-        iconBox.wantsLayer = true
-        iconBox.layer?.cornerRadius = 5.5
-        iconBox.layer?.cornerCurve = .continuous
-        iconBox.layer?.borderWidth = 1
-        for child in [iconBox, icon, title, detail, badge] { child.setAccessibilityElement(false); addSubview(child) }
-        title.font = .systemFont(ofSize: 14)
-        detail.font = .systemFont(ofSize: 14)
-        badge.font = .systemFont(ofSize: 13)
+        arrowBox.wantsLayer = true; arrowBox.layer?.cornerRadius = 5; arrowBox.layer?.cornerCurve = .continuous
+        for child in [icon, title, detail, badge, action, arrowBox, arrow] { child.setAccessibilityElement(false); addSubview(child) }
+        title.font = .systemFont(ofSize: 14, weight: .semibold)
+        detail.font = .systemFont(ofSize: 14, weight: .medium)
+        badge.font = .systemFont(ofSize: 13, weight: .medium)
         badge.alignment = .right
-        for label in [title, detail, badge] { label.lineBreakMode = .byTruncatingTail; label.maximumNumberOfLines = 1 }
-        // The title gives way last: the address truncates first.
+        action.font = .systemFont(ofSize: 14, weight: .semibold)
+        action.alignment = .right
+        for label in [title, detail, badge, action] { label.lineBreakMode = .byTruncatingTail; label.maximumNumberOfLines = 1 }
+        detail.lineBreakMode = .byTruncatingMiddle
         icon.imageScaling = .scaleProportionallyUpOrDown
+        arrow.imageScaling = .scaleProportionallyDown
+        arrow.image = NSImage(systemSymbolName: "arrow.right", accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: 12, weight: .bold))
         applySelection()
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
-    func configure(title: String, detail: String, badge: String, symbol: String, boxed: Bool = false, tint: NSColor? = nil) {
-        self.tint = tint
+    func configure(title: String, detail: String, badge: String, symbol: String, action: String? = nil, tint: NSColor? = nil) {
         self.title.stringValue = title
-        self.detail.stringValue = detail
+        // Arc's "Title — address".
+        self.detail.stringValue = detail.isEmpty ? "" : "— " + detail
         self.badge.stringValue = badge
+        self.action.stringValue = action ?? ""
         self.symbol = symbol
-        self.boxed = boxed
+        self.tint = tint
         favicon = nil
         icon.image = symbolImage()
         icon.identifier = nil
-        setAccessibilityLabel([title, detail, badge].filter { !$0.isEmpty }.joined(separator: ", "))
+        setAccessibilityLabel([title, detail, badge, action ?? ""].filter { !$0.isEmpty }.joined(separator: ", "))
         toolTip = detail.isEmpty ? title : detail
         applySelection()
         needsLayout = true
     }
     private func symbolImage() -> NSImage? {
-        let configuration = NSImage.SymbolConfiguration(pointSize: boxed ? 11 : 13, weight: boxed ? .semibold : .regular)
-        return NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?.withSymbolConfiguration(configuration)
+        NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: 14, weight: .medium))
     }
     func setFavicon(_ image: NSImage?) {
         guard favicon !== image else { return }
@@ -679,20 +651,18 @@ extension NSTextField {
     private func applySelection() {
         // The parent's shared highlight view paints the selection background.
         let primary: NSColor = isSelected ? selectedTextColor : .labelColor
-        let secondary: NSColor = isSelected && selectedTextColor != .labelColor ? selectedTextColor.withAlphaComponent(0.75) : .secondaryLabelColor
+        let secondary: NSColor = isSelected ? selectedTextColor.withAlphaComponent(0.62) : .tertiaryLabelColor
         title.textColor = primary
         detail.textColor = secondary
         badge.textColor = secondary
-        icon.contentTintColor = favicon == nil ? (isSelected && selectedTextColor != .labelColor ? selectedTextColor : (tint ?? .secondaryLabelColor)) : nil
-        iconBox.isHidden = !(boxed && favicon == nil)
+        icon.contentTintColor = favicon == nil ? (isSelected ? selectedTextColor : (tint ?? .secondaryLabelColor)) : nil
+        let hasAction = !action.stringValue.isEmpty
+        action.isHidden = !hasAction; arrow.isHidden = !hasAction; arrowBox.isHidden = !hasAction || !isSelected
+        action.textColor = isSelected ? primary : .tertiaryLabelColor
+        // Selected: the arrow sits in a white key, colored like the fill. Otherwise a quiet bare arrow.
+        arrow.contentTintColor = isSelected ? accent : .tertiaryLabelColor
         effectiveAppearance.performAsCurrentDrawingAppearance {
-            if let tint {
-                iconBox.layer?.borderColor = NSColor.clear.cgColor
-                iconBox.layer?.backgroundColor = tint.withAlphaComponent(0.15).cgColor
-            } else {
-                iconBox.layer?.borderColor = NSColor.labelColor.withAlphaComponent(isSelected ? 0.16 : 0.12).cgColor
-                iconBox.layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(0.02).cgColor
-            }
+            arrowBox.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.95).cgColor
         }
         needsLayout = true
     }
@@ -703,24 +673,30 @@ extension NSTextField {
     override func layout() {
         super.layout()
         let middle = bounds.height / 2
-        // Icons center on the field's magnifier; text starts under the typed text.
-        iconBox.frame = NSRect(x: 9, y: middle - 10, width: 20, height: 20)
-        icon.frame = favicon == nil && boxed ? NSRect(x: 12, y: middle - 7, width: 14, height: 14)
-                                             : NSRect(x: 11, y: middle - 8, width: 16, height: 16)
+        // The icon centers under the field's own icon; text starts under the typed text.
+        icon.frame = NSRect(x: 13, y: middle - 9, width: 18, height: 18)
         let textX: CGFloat = 42
         var trailing = bounds.width - 12
-        let badgeWidth = badge.stringValue.isEmpty ? 0 : min(200, badge.measuredTextWidth + 4)
+        if !action.isHidden {
+            arrowBox.frame = NSRect(x: trailing - 24, y: middle - 12, width: 24, height: 24)
+            arrow.frame = arrowBox.frame.insetBy(dx: 5, dy: 5)
+            trailing = arrowBox.frame.minX - 10
+            let actionWidth = min(160, action.measuredTextWidth + 4)
+            action.frame = NSRect(x: trailing - actionWidth, y: middle - 9, width: actionWidth, height: 18)
+            trailing = action.frame.minX - 14
+        }
+        let badgeWidth = badge.stringValue.isEmpty ? 0 : min(180, badge.measuredTextWidth + 4)
         if badgeWidth > 0 {
-            badge.frame = NSRect(x: trailing - badgeWidth, y: middle - 9, width: badgeWidth, height: 17)
-            trailing = badge.frame.minX - 16
+            badge.frame = NSRect(x: trailing - badgeWidth, y: middle - 8.5, width: badgeWidth, height: 17)
+            trailing = badge.frame.minX - 14
         } else { badge.frame = .zero }
         let available = max(0, trailing - textX)
         let detailNatural = detail.stringValue.isEmpty ? 0 : detail.measuredTextWidth + 4
         // The title keeps at least 60% when both are long; the address takes what is left.
-        let titleWidth = min(title.measuredTextWidth + 4, detailNatural == 0 ? available : max(available * 0.6, available - detailNatural - 10))
-        title.frame = NSRect(x: textX, y: middle - 9.5, width: titleWidth, height: 18)
-        let detailX = textX + titleWidth + 8
-        detail.frame = NSRect(x: detailX, y: middle - 9.5, width: max(0, min(detailNatural, trailing - detailX)), height: 18)
+        let titleWidth = min(title.measuredTextWidth + 4, detailNatural == 0 ? available : max(available * 0.6, available - detailNatural - 6))
+        title.frame = NSRect(x: textX, y: middle - 9, width: titleWidth, height: 18)
+        let detailX = textX + titleWidth + 4
+        detail.frame = NSRect(x: detailX, y: middle - 9, width: max(0, min(detailNatural, trailing - detailX)), height: 18)
     }
     override func updateTrackingAreas() {
         if let hoverArea { removeTrackingArea(hoverArea) }

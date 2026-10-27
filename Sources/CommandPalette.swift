@@ -38,7 +38,7 @@ import WebKit
 enum PaletteOpenMode { case standard, newTab, background, split }
 
 /// The command palette ("the field"): open and search, inline completion, open and visited pages, Quick Actions,
-/// calculator, Tab-to-search site scoping, remote suggestions, the footer and its actions, layout and dismissal.
+/// calculator, Tab-to-search site scoping, remote suggestions, ⌘K actions, layout and dismissal.
 extension BrowserController {
     /// The chosen default engine supplies suggestions when it has an endpoint;
     /// otherwise DuckDuckGo keeps autocomplete alive.
@@ -50,10 +50,10 @@ extension BrowserController {
     private var reduceMotion: Bool { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }
 
     func openAddress(newTab: Bool, empty: Bool) {
-        cancelPaging(); dismissAddress(animated: false); view.window?.makeKeyAndOrderFront(nil); newTabOnSubmit = newTab
+        cancelPaging(); dismissAddress(); view.window?.makeKeyAndOrderFront(nil); newTabOnSubmit = newTab
         let state = paletteState
         prepareSuggestionSources(state)
-        // No dimming: the page stays as it is, as in Yab. A click outside still closes.
+        // No dimming: the page stays as it is, as in Arc. A click outside still closes.
         let overlay = DismissView(); overlay.wantsLayer = true
         overlay.dismiss = { [weak self] in self?.dismissAddress() }
         let shadow = PaletteShadowView()
@@ -64,24 +64,25 @@ extension BrowserController {
         glow.layer?.shadowOpacity = 0; glow.layer?.shadowOffset = .zero
         overlay.addSubview(glow)
         let box = PaletteCard()
+        box.spaceTint = session.spaces.first { $0.id == session.space }.map { ArkPalette.spaceTint(for: $0) }
         let tint = NSView(); tint.wantsLayer = true
         tint.alphaValue = 0
         tint.setAccessibilityElement(false)
         box.addSubview(tint)
         let icon = NSImageView()
         icon.image = NSImage(systemSymbolName: "magnifyingglass", accessibilityDescription: nil)?
-            .withSymbolConfiguration(.init(pointSize: 16, weight: .medium))
+            .withSymbolConfiguration(.init(pointSize: 15, weight: .semibold))
         icon.imageScaling = .scaleProportionallyDown
         icon.contentTintColor = .secondaryLabelColor
         icon.setAccessibilityElement(false)
         box.addSubview(icon)
-        let field = PaletteField(); field.font = .systemFont(ofSize: 20, weight: .regular)
+        let field = PaletteField(); field.font = .systemFont(ofSize: 20, weight: .medium)
         field.isBordered = false; field.drawsBackground = false; field.focusRingType = .none
         field.cell?.usesSingleLineMode = false; field.maximumNumberOfLines = 1; field.lineBreakMode = .byClipping
         field.cell?.isScrollable = true
-        field.placeholderString = "Search or enter address"; field.stringValue = empty ? "" : session.active?.address ?? ""
+        field.placeholderString = "Search or Enter URL…"; field.stringValue = empty ? "" : session.active?.address ?? ""
         field.target = self; field.action = #selector(submitAddress); field.delegate = self
-        field.escape = { [weak self] in self?.paletteEscape() }; field.setAccessibilityLabel("Search or enter address")
+        field.escape = { [weak self] in self?.paletteEscape() }; field.setAccessibilityLabel("Search or enter URL")
         box.addSubview(field)
         // Kept for compatibility with callers that read the hint's text; the visible hint is the keycap view.
         let hint = NSTextField(labelWithString: ""); hint.isHidden = true
@@ -89,7 +90,6 @@ extension BrowserController {
         let tabHint = PaletteTabHint(); tabHint.text = ""
         box.addSubview(tabHint)
         let results = TabSearchResultsView(frame: .zero)
-        results.opensInNewTab = newTab
         let resultsScroll = NSScrollView()
         resultsScroll.drawsBackground = false; resultsScroll.hasVerticalScroller = true
         resultsScroll.autohidesScrollers = true; resultsScroll.scrollerStyle = .overlay
@@ -106,24 +106,16 @@ extension BrowserController {
         results.onOpenAddress = { [weak self] address, newTab in self?.openPaletteAddress(address, mode: newTab ? .newTab : .standard) }
         results.onCopy = { [weak self] text in self?.copyFromPalette(text, message: "Answer copied", symbol: "equal") }
         box.addSubview(resultsScroll)
-        let footer = PaletteFooterView()
-        footer.onReturn = { [weak self] in self?.submitAddress(nil) }
-        footer.onActions = { [weak self] anchor in self?.showPaletteActions(from: anchor) }
-        footer.onPlaces = { [weak self] anchor in self?.showPalettePlaces(from: anchor) }
-        results.onSelectionChange = { [weak footer, weak results] in
-            guard let footer, let results else { return }
-            footer.setReturnTitle(results.returnTitle)
-        }
-        box.addSubview(footer)
         overlay.addSubview(box); root.addSubview(overlay)
         addressOverlay = overlay; addressField = field; addressCard = box; tabSearchResults = results
         paletteIcon = icon; paletteHint = hint; paletteSeparator = nil
         paletteGlow = glow; paletteTint = tint
-        state.footer = footer; state.shadow = shadow; state.tabHint = tabHint
+        state.shadow = shadow; state.tabHint = tabHint
         state.typed = field.stringValue
+        state.openedAddress = empty ? nil : field.stringValue
         installPaletteKeyMonitor(state)
         refreshPaletteResults(); layoutBrowser()
-        animatePaletteIn(box, shadow: shadow)
+        animatePaletteIn(box, shadow: shadow, glow: glow)
         view.window?.makeFirstResponder(field); field.selectText(nil)
     }
 
@@ -140,24 +132,13 @@ extension BrowserController {
         state.openTabKeys = Set(session.tabs.map { PaletteAddressKey.key($0.isUnloaded ? ($0.saved?.address ?? $0.address) : $0.address) })
     }
 
-    /// A quick scale-and-fade from 97%: the card settles in about 150ms, ease-out.
-    private func animatePaletteIn(_ box: NSView, shadow: NSView) {
+    /// Arc's command bar is simply there: no scale, no slide. A two-frame fade keeps it from flashing.
+    private func animatePaletteIn(_ box: NSView, shadow: NSView, glow: NSView) {
         guard !reduceMotion else { return }
-        for view in [box, shadow] {
-            guard let layer = view.layer else { continue }
-            let w = view.bounds.width / 2, h = view.bounds.height / 2
-            var start = CATransform3DMakeTranslation(w, h, 0)
-            start = CATransform3DScale(start, 0.97, 0.97, 1)
-            start = CATransform3DTranslate(start, -w, -h, 0)
-            let scale = CABasicAnimation(keyPath: "transform")
-            scale.fromValue = start; scale.toValue = CATransform3DIdentity
+        for view in [box, shadow, glow] {
             let fade = CABasicAnimation(keyPath: "opacity")
-            fade.fromValue = 0; fade.toValue = 1
-            let group = CAAnimationGroup()
-            group.animations = [scale, fade]
-            group.duration = 0.15
-            group.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0.9, 0.3, 1)
-            layer.add(group, forKey: "paletteIn")
+            fade.fromValue = 0; fade.toValue = 1; fade.duration = 0.06
+            view.layer?.add(fade, forKey: "paletteIn")
         }
     }
 
@@ -168,38 +149,37 @@ extension BrowserController {
         let cw = PaletteGeometry.width(forWindowWidth: w)
         let inputHeight = PaletteGeometry.inputHeight
         let rowsHeight = tabSearchResults?.preferredHeight ?? 44
+        // Stable centered top; moved up, and the rows scroll, only when the whole card wouldn't fit the window.
         let fit = PaletteGeometry.fit(windowHeight: h, resultsHeight: rowsHeight)
-        let cardHeight = PaletteGeometry.resultsTop + fit.visibleResultsHeight + PaletteGeometry.footerHeight
-        content.frame = NSRect(x: ((w - cw) / 2).rounded(), y: fit.top, width: cw, height: cardHeight)
+        content.frame = NSRect(x: ((w - cw) / 2).rounded(), y: fit.top, width: cw, height: PaletteGeometry.chromeHeight + fit.visibleResultsHeight)
         state.shadow?.frame = content.frame
         paletteGlow?.frame = content.frame
         let radius = PaletteGeometry.cornerRadius
         paletteGlow?.layer?.shadowPath = CGPath(roundedRect: CGRect(origin: .zero, size: content.frame.size),
                                                 cornerWidth: radius, cornerHeight: radius, transform: nil)
         paletteTint?.frame = content.bounds
-        // The magnifier and every row icon share one center line, 26pt in; text starts 49pt in.
-        paletteIcon?.frame = NSRect(x: 17, y: (inputHeight - 18) / 2, width: 18, height: 18)
-        var fieldX: CGFloat = 46
+        // The field's icon (the site's favicon once known) and every row's icon share one center line.
+        paletteIcon?.frame = NSRect(x: 22, y: (inputHeight - 18) / 2, width: 18, height: 18)
+        var fieldX: CGFloat = 49
         if let pill = paletteEnginePill {
             // The full engine name always renders; the field absorbs the squeeze.
             let pillWidth = pill.fittingWidth
-            pill.frame = NSRect(x: 46, y: (inputHeight - 26) / 2, width: pillWidth, height: 26)
-            fieldX = 46 + pillWidth + 10
+            pill.frame = NSRect(x: 50, y: (inputHeight - 26) / 2, width: pillWidth, height: 26)
+            fieldX = 50 + pillWidth + 10
         }
         var hintWidth: CGFloat = 0
         if let tabHint = state.tabHint, !tabHint.text.isEmpty {
             hintWidth = tabHint.fittingWidth
-            tabHint.frame = NSRect(x: cw - hintWidth - 17, y: (inputHeight - 24) / 2, width: hintWidth, height: 24)
+            tabHint.frame = NSRect(x: cw - hintWidth - 18, y: (inputHeight - 26) / 2, width: hintWidth, height: 26)
             hintWidth += 12
         }
         let fieldHeight: CGFloat = 26
-        addressField?.frame = NSRect(x: fieldX, y: (inputHeight - fieldHeight) / 2, width: max(40, cw - fieldX - hintWidth - 20), height: fieldHeight)
+        addressField?.frame = NSRect(x: fieldX, y: (inputHeight - fieldHeight) / 2, width: max(40, cw - fieldX - hintWidth - 22), height: fieldHeight)
         if let results = tabSearchResults, let scroll = results.enclosingScrollView {
-            scroll.frame = NSRect(x: 7, y: PaletteGeometry.resultsTop, width: cw - 14, height: fit.visibleResultsHeight)
+            scroll.frame = NSRect(x: 9, y: inputHeight + PaletteGeometry.listPadding, width: cw - 18, height: fit.visibleResultsHeight)
             results.frame = NSRect(x: 0, y: 0, width: scroll.contentSize.width, height: max(rowsHeight, 1))
             results.revealSelection()
         }
-        state.footer?.frame = NSRect(x: 0, y: cardHeight - PaletteGeometry.footerHeight, width: cw, height: PaletteGeometry.footerHeight)
     }
 
     @objc func submitAddress(_ sender: Any?) {
@@ -315,26 +295,9 @@ extension BrowserController {
             menu.addItem(.separator())
             menu.addItem(item("Copy Link", "link", "c", [.command, .shift]) { [weak self] in self?.copyPaletteSelectionLink() })
         }
-        guard let source = anchor ?? paletteState.footer?.actionsAnchor else { return }
-        popUpAbove(menu, source, alignRight: true)
-    }
-
-    /// The footer's places button: the browser's lists you can jump into.
-    func showPalettePlaces(from anchor: NSView) {
-        let menu = NSMenu(title: "Places")
-        menu.autoenablesItems = false
-        for id in ["history", "downloads", "recently-closed", "settings"] {
-            guard let command = PaletteCommandCatalog.commands.first(where: { $0.id == id }) else { continue }
-            menu.addItem(PaletteMenuAction.item(command.title, symbol: command.symbol) { [weak self] in self?.performPaletteCommand(command) })
-        }
-        popUpAbove(menu, anchor, alignRight: false)
-    }
-    /// Footer menus open upward from their button, inside the card's edge, like Yab's.
-    private func popUpAbove(_ menu: NSMenu, _ anchor: NSView, alignRight: Bool) {
-        let size = menu.size
-        let x = alignRight ? anchor.bounds.width - size.width : 0
-        let y = anchor.isFlipped ? -size.height - 6 : anchor.bounds.height + size.height + 6
-        menu.popUp(positioning: nil, at: NSPoint(x: x, y: y), in: anchor)
+        // Quiet until asked: the menu opens beside the selected row.
+        guard let source = anchor ?? results.selectedRowView else { return }
+        menu.popUp(positioning: nil, at: NSPoint(x: source.bounds.width - menu.size.width - 8, y: source.bounds.height - 4), in: source)
     }
 
     /// What the person typed: the field's text without a completed ending.
@@ -383,12 +346,8 @@ extension BrowserController {
         let state = paletteState
         let typed = state.typed
         let scoped = paletteEngine != nil
-        var commands = scoped ? [] : PaletteCommandCatalog.matches(typed)
-        // ⌘L before any edit: the page's own link is one row away, as in Yab.
-        if !scoped, !newTabOnSubmit, let active = session.active, !active.isHome, typed == active.address,
-           let copy = PaletteCommandCatalog.commands.first(where: { $0.id == "copy-url" }) {
-            commands = [PaletteCommandMatch(command: copy, leading: false)]
-        }
+        let commands = scoped ? [] : PaletteCommandCatalog.matches(typed)
+        let editingAddress = !scoped && state.openedAddress != nil && typed == state.openedAddress
         let calculation = scoped ? nil : PaletteCalculator.evaluate(typed)
         let activeSpace = session.spaces.first { $0.id == session.space }
         let recent = session.tabs.map(\.id).enumerated()
@@ -406,7 +365,8 @@ extension BrowserController {
                                  recentTabIDs: recent,
                                  calculation: calculation,
                                  quickActions: scoped ? [] : PaletteQuickActionCatalog.matches(typed),
-                                 folderNames: folders, searchEngineName: URLInput.searchEngine.name)
+                                 folderNames: folders, editingAddress: editingAddress)
+        updatePaletteIcon(typed: typed)
         // Only the palette's own frames depend on its results: no whole-browser layout per keystroke or suggestion.
         layoutPalette(width: root.bounds.width, height: root.bounds.height)
     }
@@ -416,6 +376,24 @@ extension BrowserController {
     func performPaletteCommand(_ command: PaletteCommand) {
         dismissAddress()
         if !NSApp.sendAction(Selector(command.action), to: nil, from: self) { NSSound.beep() }
+    }
+
+    /// The field's left icon, as Arc's: the site's favicon once the text names one (completed, typed or ⌘L's own
+    /// page), else the magnifier. Only cached icons: typing never starts a fetch.
+    private func updatePaletteIcon(typed: String) {
+        guard let icon = paletteIcon else { return }
+        var image: NSImage?
+        if paletteEngine == nil {
+            let state = paletteState
+            if let openedAddress = state.openedAddress, typed == openedAddress { image = favicon(forTabID: focusedTabID) }
+            else if let completion = state.completion, let url = URL(string: completion.address) { image = favicon(forSiteURL: url, allowFetch: false) }
+            else if TabSearchResultsView.looksLikeAddress(typed), let url = URLInput.resolve(typed).flatMap(URLInput.directURL) {
+                image = favicon(forSiteURL: url, allowFetch: false)
+            }
+        }
+        icon.image = image ?? NSImage(systemSymbolName: "magnifyingglass", accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: 15, weight: .semibold))
+        icon.contentTintColor = image == nil ? .secondaryLabelColor : nil
     }
 
     // MARK: Inline completion
@@ -441,7 +419,7 @@ extension BrowserController {
                 state.savedSelectionAttributes = editor.selectedTextAttributes
                 state.styledEditor = editor
             }
-            editor.selectedTextAttributes = [.backgroundColor: NSColor.labelColor.withAlphaComponent(editor.effectiveAppearance.isDarkPalette ? 0.2 : 0.12),
+            editor.selectedTextAttributes = [.backgroundColor: NSColor.labelColor.withAlphaComponent(editor.effectiveAppearance.isDarkPalette ? 0.32 : 0.18),
                                              .foregroundColor: NSColor.labelColor]
             editor.string = completion.text
             let start = (completion.typed as NSString).length
@@ -640,27 +618,13 @@ extension BrowserController {
         }
     }
 
-    func dismissAddress() { dismissAddress(animated: true) }
-    func dismissAddress(animated: Bool) {
+    func dismissAddress() {
         suggestionFetcher.cancel()
         let overlay = addressOverlay
         if let overlay {
             overlay.dismiss = nil
-            // A quick fade of the card alone, without holding up whatever the pick does next: the click-catching
-            // overlay leaves at once, and the fading card lets clicks through.
-            if animated && !reduceMotion, let card = addressCard as? PaletteCard, let shadow = paletteState.shadow {
-                view.window?.makeFirstResponder(commandWebView)
-                card.passesThrough = true
-                card.setAccessibilityElement(false)
-                for piece in [shadow, card] as [NSView] { piece.removeFromSuperview(); root.addSubview(piece) }
-                overlay.removeFromSuperview()
-                NSAnimationContext.runAnimationGroup({ context in
-                    context.duration = 0.1
-                    context.timingFunction = CAMediaTimingFunction(name: .easeIn)
-                    card.animator().alphaValue = 0
-                    shadow.animator().alphaValue = 0
-                }, completionHandler: { card.removeFromSuperview(); shadow.removeFromSuperview() })
-            } else { overlay.removeFromSuperview() }
+            // Arc's bar leaves at once.
+            overlay.removeFromSuperview()
         }
         addressOverlay = nil; addressField = nil; addressCard = nil; tabSearchResults = nil
         paletteIcon = nil; paletteHint = nil; paletteSeparator = nil; paletteEnginePill = nil

@@ -8,13 +8,14 @@
 - Reading Mode (⌥⌘R): the article alone in one clean column over the page, opening at the paragraph you were reading. Choose text size (⌘+ / ⌘-), serif or sans, and a Light, Sepia, Dark or matching theme. ⌘F finds words in the article, and Esc or ⌥⌘R returns to the page exactly as you left it.
 - Hide Elements (⇧⌘H): point at a cookie banner, ad or sidebar and click to make it crumble away. ⌘Z brings back the last, Esc finishes. What you hide stays hidden on that site from the first frame of every page; View › Restore Hidden Elements on This Site brings it all back.
 - A new Develop menu: Show Web Inspector (⌥⌘I), Show JavaScript Console (⌥⌘J) and Inspect Element (⌥⌘C). Pages are also inspectable from Safari's Develop menu, and right-clicking a page offers Inspect Element.
-- The ⌘T/⌘L search box finishes addresses as you type ("git" → github.com, in gray). Press → or Tab to take it, Delete to drop it.
-- Search now shows pages you visited before, below your open tabs, without listing a page twice.
-- An empty search box lists your last three tabs (the previous one is preselected, so ⌘T then Return jumps back), your Favorites, and Quick Actions for a new document, meeting or spreadsheet. Typing "doc", "meet" or "sheet" opens one in a new tab.
+- A redesigned ⌘T/⌘L search box: a dark or light card washed with your Space's color, roomy rows written "Title — address", the selected row filled with the Space's color, and "Switch to Tab →" on open tabs. It appears instantly.
+- It finishes addresses as you type ("git" → github.com, highlighted), and the site's icon replaces the magnifier. Press → or Tab to take it, Delete to drop it.
+- Pages you visited before show up with your open tabs, without listing a page twice.
+- An empty ⌘T lists your most recent tabs, the previous one first, so ⌘T then Return jumps back. ⌘L lists the current page first.
 - Typing a sum like 12*(3+4) shows the answer first. Return copies it.
-- Calmer result rows (icon, title, faded address, one quiet label like the Space or folder) and a footer that says what Return will do, plus Actions (⌘K): Open in New Tab, Open in Background, Open in Split View, Copy Link and Close Tab.
-- New keys in the search box: ⌘Return opens in a background tab, ⇧⌘Return opens in a new tab, ⇧⌘C copies the selected result's link, and Esc steps back before it closes.
-- The search box follows the window's light or dark look, sits a little above center at about half the window's width, and scales in quickly when it opens.
+- Quick aliases open a fresh document, meeting or spreadsheet in a new tab: type "doc", "meet" or "sheet" (docs.new, meet.new, sheets.new and more).
+- New keys in the search box: ⌘Return opens in a background tab, ⇧⌘Return in a new tab, ⇧⌘C copies the selected result's link, ⌘K shows actions for it (Open in Split View, Copy Link, Close Tab…), and Esc steps back before it closes.
+- The search box finds the new page tools by name: Copy Link, Copy Markdown Link, Reading Mode, Hide Elements, Restore Hidden Elements, Web Inspector, JavaScript Console and Inspect Element.
 
 ## 0.25.1 build 51 — Quit dialog and sidebar scroll bar polish
 
