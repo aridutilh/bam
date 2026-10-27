@@ -1352,6 +1352,8 @@ struct BrowserExtensionPermissionReview {
         fresh.baseURL = old.baseURL
         fresh.unsupportedAPIs = old.unsupportedAPIs
         fresh.hasAccessToPrivateData = old.hasAccessToPrivateData
+        fresh.isInspectable = old.isInspectable
+        fresh.inspectionName = old.inspectionName
         fresh.grantedPermissions = old.grantedPermissions
         fresh.deniedPermissions = old.deniedPermissions
         fresh.grantedPermissionMatchPatterns = old.grantedPermissionMatchPatterns
@@ -1578,6 +1580,10 @@ struct BrowserExtensionPermissionReview {
         context.baseURL = URL(string: "\(Self.pageScheme(for: current))://\(id.uuidString.lowercased())/")!
         context.unsupportedAPIs = Self.unsupportedAPIs
         context.hasAccessToPrivateData = isPrivate
+        // Like Bam's pages: the extension's background worker and pages are listed in Safari ▸ Develop, so their
+        // console errors can be read.
+        context.isInspectable = true
+        context.inspectionName = ext.displayName ?? current.name
         context.grantedPermissions = Dictionary(uniqueKeysWithValues: current.permissions.filter { Self.supportedPermissions.contains($0.key) }.map { (WKWebExtension.Permission(rawValue: $0.key), $0.value) })
         if current.safariBundle == nil && (ExtensionServiceWorkerPreparation.isPrepared(manifest: ext.manifest) || Self.supportsNativeCompanion(current)) {
             context.unsupportedAPIs.subtract(["browser.runtime.sendNativeMessage", "browser.runtime.connectNative"])

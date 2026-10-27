@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Extensions can be inspected like pages: each extension's background and pages appear under its name in Safari's Develop menu, so its console errors can be read.
+
 - Dark one-colour site icons, like GitHub's, now show up light on dark sidebars, in the ⌃⇥ switcher and in the search box, as in Arc.
 - Closing your last Today tab takes you back to the tab you used before it instead of opening a blank page.
 - The search box no longer lists the page you're on twice while it finishes an address, and ⌘L lists pages only, as Arc's does.
