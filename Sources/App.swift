@@ -122,7 +122,8 @@ import WebKit
         }
         ShortcutStore.shared.reservedOwner = { [weak self] combo in self?.fixedMenuItem(wearing: combo)?.title }
         externalURLs.connect { [weak self] urls in
-            for url in urls { self?.controller?.openLittleOrbit(url: url) }
+            // Air Traffic Control decides: a routed Space, the current one, or Little Bam (the default).
+            for url in urls { self?.controller?.openExternal(url) }
         }
         // Development extension tests start at the browser without importing
         // favorites or changing the default browser through first-run setup.
@@ -512,6 +513,7 @@ import WebKit
         tabs.addItem(.separator())
         item(tabs, "Duplicate Tab", #selector(BrowserController.duplicateTab(_:)), "", .command, controller)
         item(tabs, "Rename Tab…", #selector(BrowserController.renameTab(_:)), "", .command, controller)
+        item(tabs, "Change Tab Icon…", #selector(BrowserController.changeTabIcon(_:)), "", .command, controller)
         item(tabs, "Mute Tab", #selector(BrowserController.toggleMuteTab(_:)), "", .command, controller)
         item(tabs, "Close Tabs Below", #selector(BrowserController.closeTabsBelow(_:)), "", .command, controller)
         bound(tabs, "Next Space", #selector(BrowserController.nextSpace(_:)), .nextSpace, controller)

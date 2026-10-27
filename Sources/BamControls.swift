@@ -425,8 +425,8 @@ final class BamCenteredTextFieldCell: NSTextFieldCell {
         placeholderAttributedString = NSAttributedString(string: placeholder, attributes: [
             .font: BamType.sans(14, weight: .medium), .foregroundColor: BamTheme.muted
         ])
-        isBezeled = false; isBordered = false; drawsBackground = true
-        backgroundColor = BamTheme.bg
+        // The layer paints the fill, edge to edge; a cell-drawn background would only cover the centered text rect.
+        isBezeled = false; isBordered = false; drawsBackground = false
         wantsLayer = true
         layer?.cornerRadius = 10
         layer?.borderWidth = 1.5
@@ -442,7 +442,10 @@ final class BamCenteredTextFieldCell: NSTextFieldCell {
         paint()
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
-    private func paint() { layer?.borderColor = bamCG(editing ? BamTheme.red : BamTheme.line) }
+    private func paint() {
+        layer?.borderColor = bamCG(editing ? BamTheme.red : BamTheme.line)
+        layer?.backgroundColor = bamCG(BamTheme.bg)
+    }
     override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); paint() }
     override func textDidBeginEditing(_ notification: Notification) {
         super.textDidBeginEditing(notification)

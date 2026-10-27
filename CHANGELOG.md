@@ -2,17 +2,20 @@
 
 ## Unreleased
 
-- Right-clicking a tab puts Arc's tab actions first (Copy Link, Rename…, Mute, Duplicate), and Today tabs get Close Tabs Below right after Close Tab.
+- Right-clicking a tab follows Arc's order: Copy Link, Share, Change Icon…, Rename…, Mute, Duplicate and, for Today tabs, Move to (with New Space…), with Close Tab and Close Tabs Below last.
 - Double-click a tab's title to rename it in place; Return keeps the name, Esc cancels, and an empty name goes back to the page's own title.
 - The footer's bottom-left button is now Arc's archive box: it opens Archived Tabs, and its menu has Downloads, History and Manage Spaces.
 - Switching Spaces with the keyboard, the footer or the Spaces menu now slides the new Space in quickly, as Arc does, and the window color crossfades with it instead of jumping. The footer's Space icons fade between gray and color.
 - With the sidebar hidden, rest the pointer at the window's left edge and the sidebar slides in as a floating card over the page; it slides away when you move off it. Press ⌘S while it's showing to pin it back, and the page slides over to make room.
 - Dragging a tab is more physical: a tab you drop glides from where you let go into its new place, and tabs that move (drops, Move Earlier/Later, keeping a tab) slide to their new spots instead of jumping.
+- Change Tab Icon… (Tabs menu and command bar) now works on every tab, not only kept ones: pick an icon and a name, and they stay with the tab if you keep it later.
+- Air Traffic Control, as in Arc: Settings › Links routes links from other apps. Each route is "URL contains …" or "URL is equal to …", and opens in a chosen Space, the Space you're in, or Little Bam. Routes are checked top to bottom. Everything else goes to a default you pick (Little Bam, as before). "Try a link" shows where an address would open and which route decides. If you move the same site into the same Space three times, Settings › Links suggests a route for it.
 - New tab actions, as in Arc: Duplicate (with its back/forward history), Rename… (leave it empty to go back to the page title), Mute / Unmute for a tab playing sound and Close Tabs Below. They're in the Tabs menu and the command bar.
 - Point at a link and its address shows in a small capsule at the page's bottom-left corner, as in Arc.
 - Fixed: after switching or editing Spaces, typing the letter "e" could open the Emoji & Symbols palette instead of typing. Shortcuts Settings no longer lists or rewrites the hidden menu items macOS adds on its own.
 - Settings › Websites' page zoom and minimum font size now also apply in Peek and Little Bam (and minimum font size in Reading Mode), and a Peek or Little Bam page moved into a tab keeps its zoom. Site controls offer Reset only when the page is away from your default zoom.
 - The command palette shows each command's current shortcut after you change or remove it in Settings › Shortcuts.
+- Removing a kept tab with its × no longer loses it: Reopen Closed Tab (⇧⌘T) brings it back kept, with its name, icon and folder, in the same place. Right-click › Remove Tab does the same, and VoiceOver offers each row's close, unload or remove action.
 - ⌃⇥ now goes to the tab you used last, not the next one down. Keep holding ⌃ and press ⇥ again to bring up your five most recent tabs with page previews; release ⌃ to go there, ⌃⇧⇥ to step back, Esc to stay put.
 - ⌘1 to ⌘8 jump to that tab in the sidebar, Favorites first, and ⌘9 jumps to the last tab (Tabs › Go to Tab).
 - New tabs open at the top of Today. Links you open in a new tab land right below the page they came from, in the order you opened them, and closing one takes you to its neighbor from the same page, then back to that page.
@@ -58,7 +61,7 @@
 - The footer shows each Space as its emoji, the current one in color and the others in gray, spaced like Arc's and closing up when there are many.
 - Tabs fade softly as they scroll under the Space name and above the footer, and a thin line sits over the footer while more tabs continue below.
 - Reload and Stop swap with a quick scale.
-- Auto-archive, as in Arc: Today tabs you haven't looked at for 12 hours close on their own and go to the archive. Choose 12 hours, 24 hours, 7 days, 30 days or Never in Settings › General. Kept tabs and Favorites are never archived, and neither are tabs playing media, in a call, in Picture in Picture, downloading or under a Peek. A Split is archived only when both sides are due. Bam checks at launch, on wake and every few minutes, and tabs from before this update start their clock when you upgrade.
+- Auto-archive, as in Arc: Today tabs you haven't looked at for 12 hours close on their own and go to the archive. Choose 12 hours, 24 hours, 7 days, 30 days or Never in Settings › General. Only time Bam is open on an awake Mac counts, so a night asleep, days quit or a clock change never archive everything at once. Kept tabs and Favorites are never archived, and neither are tabs playing media, in a call, in Picture in Picture, downloading, under a Peek or holding text you've typed but not sent. A Split is archived only when both sides are due. Private windows never archive. A tab closes only once it's safely in the archive, which now holds 1,000 entries. Bam checks at launch, on wake and every few minutes, and tabs from before this update start their clock when you upgrade.
 - The archive has its own window (History › View Archive…, or "Archived Tabs" in the command bar). It lists tabs you closed and tabs Bam archived, grouped by day, with search, an "Archived" mark on the ones Bam closed, Restore on every row, and Clear Archive.
 
 ## 0.25.1 build 51 — Quit dialog and sidebar scroll bar polish

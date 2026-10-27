@@ -614,6 +614,26 @@ import AppKit
         require(shownButton(openRow) === morphing && morphing?.accessibilityLabel() == "Remove tab",
                 "Once down, the same button is the cross that removes it (\(String(describing: shownButton(openRow)?.accessibilityLabel())), \(String(describing: morphing?.accessibilityLabel())), same row \(chromeRow(openKeptID) === openRow))")
         hover(openRow, false)
+        // Keyboard and VoiceOver never see the hover-only button: the row carries the same action, and an unloaded
+        // kept tab's menu can remove it.
+        removed = []
+        let downRow = chromeRow(downKeptID)
+        let rowActions = downRow.accessibilityCustomActions() ?? []
+        require(rowActions.map(\.name) == ["Remove tab"] && chromeRow(todayID).accessibilityCustomActions()?.map(\.name) == ["Close tab"],
+                "Rows offer their trailing action to VoiceOver (\(rowActions.map(\.name)))")
+        _ = rowActions.first?.handler?()
+        let menuEvent = NSEvent.mouseEvent(with: .rightMouseDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: chromeWindow.windowNumber,
+                                           context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
+        let removeItem = downRow.menu(for: menuEvent)?.items.first { $0.title == "Remove Tab" }
+        require(removeItem != nil && chromeRow(todayID).menu(for: menuEvent)?.items.contains { $0.title == "Remove Tab" } == false,
+                "Only an unloaded kept tab's menu offers Remove Tab")
+        if let removeItem, let action = removeItem.action { _ = (removeItem.target as AnyObject).perform(action) }
+        require(removed == [downKeptID, downKeptID], "The VoiceOver action and the menu item both remove the kept tab")
+        // A name the person gave a kept tab is shown exactly as typed.
+        var named = SidebarTabItem(id: UUID(), title: "Plans - Notion", subtitle: "https://www.notion.so/x", symbol: "globe", isPinned: true, isActive: false)
+        require(named.displayTitle == "Plans", "A page title loses its site suffix")
+        named.hasCustomTitle = true
+        require(named.displayTitle == "Plans - Notion", "A custom name keeps every word")
         // Toolbar row: lights, toggle and navigation share one center line.
         let toggleButton = descendants(chrome).first { $0.accessibilityLabel() == "Hide sidebar" }!
         let reloadButton = descendants(chrome).first { $0.accessibilityLabel() == "Reload page" }!
@@ -645,13 +665,15 @@ import AppKit
         require(chrome.footerRuleOpacity == 1, "With tabs continuing below, Arc's hairline sits over the footer")
         // Tab actions in Arc's order: Copy Link… first, then the row's own entries, Close Tabs Below after Close Tab.
         chrome.tabActionItems = { _ in ([NSMenuItem(title: "Copy Link", action: nil, keyEquivalent: ""), NSMenuItem(title: "Rename…", action: nil, keyEquivalent: "")],
-                                        NSMenuItem(title: "Close Tabs Below", action: nil, keyEquivalent: "")) }
+                                        NSMenuItem(title: "Move to", action: nil, keyEquivalent: ""), NSMenuItem(title: "Close Tabs Below", action: nil, keyEquivalent: "")) }
         let tabMenuClick = NSEvent.mouseEvent(with: .rightMouseDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: chromeWindow.windowNumber,
                                             context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
         let todayMenu = chromeRow(todayID).menu(for: tabMenuClick)!.items.map(\.title)
-        require(Array(todayMenu.prefix(3)) == ["Copy Link", "Rename…", ""], "Tab actions lead the menu (\(todayMenu))")
+        require(Array(todayMenu.prefix(4)) == ["Copy Link", "Rename…", "Move to", ""], "Tab actions lead the menu (\(todayMenu))")
         require(todayMenu.firstIndex(of: "Close Tabs Below") == todayMenu.firstIndex(of: "Close Tab").map { $0 + 1 }, "Close Tabs Below follows Close Tab on a Today row")
         require(!chromeRow(downKeptID).menu(for: tabMenuClick)!.items.contains { $0.title == "Close Tabs Below" }, "Kept rows have no Close Tabs Below")
+        require(todayMenu.firstIndex(of: "Move to") == 2 && !todayMenu.contains("Move to Space") && todayMenu.last == "Close Tabs Below",
+                "Today rows use Arc's Move to after the actions (no second Space list), closing last (\(todayMenu))")
         // Double-click renames in place: Return keeps the name.
         var tabRenames: [(UUID, String)] = []
         chrome.onRenameTab = { tabRenames.append(($0, $1)) }

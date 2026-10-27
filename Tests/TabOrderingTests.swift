@@ -149,6 +149,20 @@ import Foundation
                "The duplicate sits just below with the same page and name, got \(today(s))")
         expect(s.tabs.first { $0.id == copy }?.address == s.tabs.first { $0.id == original }?.address, "Same address")
 
+        // Change Icon: ordinary tabs take an icon too; it follows keep/unkeep, survives a save and replaces the globe.
+        s = base()
+        let iconTab = id(s, "Three")
+        expect(s.updateTab(id: iconTab, customTitle: "Iconic", customSymbol: "heart"), "Ordinary tabs take a name and icon")
+        expect(s.tabs.first { $0.id == iconTab }?.symbol == "heart" && s.tabs.first { $0.id == iconTab }?.monogram == nil, "The icon shows instead of the monogram")
+        expect(!s.updateTab(id: iconTab, customTitle: nil, customSymbol: "not-a-symbol"), "Unknown icons are refused")
+        _ = s.setRetention(id: iconTab, kind: .kept)
+        expect(s.tabs.first { $0.id == iconTab }?.saved?.customSymbol == "heart", "Keeping carries the icon")
+        _ = s.setRetention(id: iconTab, kind: nil)
+        expect(s.tabs.first { $0.id == iconTab }?.customSymbol == "heart", "Letting go carries it back")
+        let iconTrip = try JSONDecoder().decode(BrowserSession.self, from: try JSONEncoder().encode(s))
+        expect(iconTrip.tabs.first { $0.id == iconTab }?.symbol == "heart", "Icons are saved")
+        expect(s.updateTab(id: iconTab, customTitle: nil, customSymbol: nil) && s.tabs.first { $0.id == iconTab }?.chosenSymbol == nil, "Automatic clears it")
+
         // Tabs below: Today rows under this one only.
         s = base()
         expect(s.todayTabs(below: id(s, "One")).map { title(s, $0)! } == ["Two", "Three"], "Tabs below One")

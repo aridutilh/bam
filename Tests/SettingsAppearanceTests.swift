@@ -106,6 +106,24 @@ import AppKit
         require(web.section == .shortcuts, "a shortcut result opens Shortcuts")
         let recorders = descendants(web.window.contentView!).compactMap { $0 as? BamShortcutRecorder }
         require(recorders.contains { $0.commandID == "copyCurrentURL:" } && recorders.count >= 2, "Shortcuts lists every registered command")
-        print("PASS: \(checks) Settings appearance, websites and search checks")
+        // Links: the try field names the route that wins, and New Route saves a route.
+        var savedRouting: LinkRouting?
+        var linkActions = SettingsActions()
+        linkActions.setLinkRouting = { savedRouting = $0 }
+        let design = BrowserSpace.defaults[1]
+        let links = SettingsController(snapshot: {
+            var s = SettingsSnapshot()
+            s.linkRouting = savedRouting ?? LinkRouting(routes: [LinkRoute(match: .contains, text: "figma.com", destination: .space(design.id))])
+            return s
+        }, actions: linkActions)
+        links.select(.links)
+        settle()
+        require(links.linkTestDescription("www.figma.com/file/1").hasPrefix("Opens in \(design.name), by route 1"), "Try a link names the Space and route")
+        require(links.linkTestDescription("example.com") == "Opens in Little Bam, the default. No route matches.", "and the default otherwise")
+        require(links.linkTestDescription("not a link") == "That isn’t a web address.", "and says when it isn't a link")
+        descendants(links.window.contentView!).compactMap { $0 as? BamPillButton }.first { $0.title == "New Route" }?.performClick(nil)
+        require(savedRouting?.routes.count == 2 && savedRouting?.routes.last?.destination == .mostRecentSpace, "New Route adds a route to the Space you're in")
+        require(links.search("air traffic").first?.section == .links, "search finds Air Traffic Control")
+        print("PASS: \(checks) Settings appearance, websites, links and search checks")
     }
 }

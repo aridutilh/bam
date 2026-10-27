@@ -6,7 +6,7 @@ import WebKit
     /// neither the sidebar model nor command-palette typing waits on the network.
     func favicon(forTabID id: UUID) -> NSImage? {
         guard !isShuttingDown, let tab = session.tabs.first(where: { $0.id == id }),
-              tab.saved?.customSymbol == nil else { return nil }
+              tab.chosenSymbol == nil else { return nil }
         let address = tab.isUnloaded ? (tab.saved?.address ?? tab.address) : tab.address
         // An icon carried over from Arc wins while the tab is still on that site.
         if let imported = importedTabIcons.image(for: id, address: address, profile: session.profileID(for: tab)) { return imported }
