@@ -1480,7 +1480,8 @@ import QuartzCore
             if modifiers.contains([.command, .option]) { openLittleOrbit(url: address, profileID: profileID(of: webView)); decisionHandler(.cancel); return }
             if modifiers.contains(.command) {
                 if let profile = profileID(of: webView) {
-                    _ = openProfileTab(address, profileID: profile, active: modifiers.contains(.shift))
+                    _ = openProfileTab(address, profileID: profile, active: modifiers.contains(.shift),
+                                       opener: browsers.first(where: { $0.value === webView })?.key)
                 }
                 decisionHandler(.cancel); return
             }
@@ -1515,7 +1516,7 @@ import QuartzCore
     }
     func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
         if navigationAction.targetFrame == nil, let url = navigationAction.request.url, let profile = profileID(of: webView) {
-            _ = openProfileTab(url, profileID: profile, active: true)
+            _ = openProfileTab(url, profileID: profile, active: true, opener: browsers.first(where: { $0.value === webView })?.key)
         }
         return nil
     }
