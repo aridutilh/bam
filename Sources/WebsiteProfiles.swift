@@ -86,6 +86,7 @@ import WebKit
         let url = profileID == BrowserProfile.defaultID ? directory.appendingPathComponent("library.json")
             : directory.appendingPathComponent("Profiles/\(profileID.uuidString)/library.json")
         let value = BrowserLibrary(storageURL: privateMode ? nil : url)
+        value.recordsHistory = !isPrivateWindow
         value.profileName = session.profileName(profileID)
         value.onOpenURL = { [weak self] address in
             guard let self, self.selectSpace(forProfile: profileID) else { return }

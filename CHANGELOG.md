@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Private windows: File › New Private Window (⇧⌘N) opens a dark window with a "Private" label and one set of tabs. It keeps no history, the command bar shows nothing you visited elsewhere, extensions stay off, and its cookies, logins and site data are wiped when you close it. It is never saved or reopened after a relaunch. ⌘W on its last tab closes it.
+- Menu commands and shortcuts now act on the window in front, so ⌘T, ⌘L, ⌘W and the rest work in a private window as they do in the main one.
 - Bam now blocks ads and trackers on its own, on by default. It uses uBlock Origin's standard lists (EasyList, EasyPrivacy and more), refreshed weekly in the background, and stops requests before they're made. Turn it off for one site in the site controls, or everywhere in Settings › General › Privacy. If a page keeps failing to load, Bam offers "Allow Ads Here".
 - Copy Link (⇧⌘C) now copies a clean address: tracking tags like utm_, fbclid, gclid and YouTube or Spotify share codes are removed, and everything the page needs is kept. The confirmation says "Link copied".
 - Copy Markdown Link (⌥⇧⌘C) copies [Title](address), and pastes as the page's title as a live link in Mail, Notes and Slack.

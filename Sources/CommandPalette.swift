@@ -346,7 +346,8 @@ extension BrowserController {
         let state = paletteState
         let typed = state.typed
         let scoped = paletteEngine != nil
-        let commands = scoped ? [] : PaletteCommandCatalog.matches(typed)
+        let commands = scoped ? [] : PaletteCommandCatalog.matches(typed, limit: 6)
+            .filter { !isPrivateWindow || PaletteCommandCatalog.availableInPrivateWindow($0.command) }.prefix(3).map { $0 }
         let editingAddress = !scoped && state.openedAddress != nil && typed == state.openedAddress
         let calculation = scoped ? nil : PaletteCalculator.evaluate(typed)
         let activeSpace = session.spaces.first { $0.id == session.space }

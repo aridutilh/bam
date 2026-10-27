@@ -98,6 +98,8 @@ import WebKit
         stores[profileID] = store
         return store
     }
+    /// Every store handed out so far (a private window wipes them when it closes).
+    var openedStores: [WKWebsiteDataStore] { Array(stores.values) }
     func profileID(for store: WKWebsiteDataStore) -> UUID? {
         if let match = stores.first(where: { $0.value === store })?.key { return match }
         guard let identifier = store.identifier else { return nil }

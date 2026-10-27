@@ -25,6 +25,11 @@ import WebKit
     var appearanceMenu: NSMenu?
     private let quitCoordinator = QuitCoordinator()
     private var mainWindowWasClosed = false
+    /// Open private windows (⇧⌘N). Never saved or restored.
+    var privateWindows: [PrivateWindowController] = []
+    /// Menu commands go through this to the browser in the key window.
+    let commandRouter = BrowserCommandRouter()
+    private var supportDirectory: URL?
     func applicationDidFinishLaunching(_ notification: Notification) {
         BamType.registerFonts()
         if CommandLine.arguments.contains("--favicon-test") { faviconSmoke = WebsiteFaviconSmokeTest(); faviconSmoke?.start(); return }
@@ -90,6 +95,9 @@ import WebKit
         BrowserLibrary.dress = { BamSheetStyle.dress(window: $0, root: $1) }
         BrowserLibrary.rowView = { BamTableRowView() }
         controller = BrowserController(sessionURL: support.appendingPathComponent("session.json"), ephemeral: preview)
+        supportDirectory = support
+        commandRouter.main = controller
+        commandRouter.privateWindows = { [weak self] in self?.privateWindows ?? [] }
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1260, height: 800), styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
         window.title = launch.windowTitle; window.titleVisibility = .hidden; window.titlebarAppearsTransparent = true
         window.isReleasedWhenClosed = false; window.delegate = self
@@ -132,6 +140,23 @@ import WebKit
         }
     }
     @objc func showWelcome(_ sender: Any?) { presentOnboarding() }
+    /// File ▸ New Private Window (⇧⌘N).
+    @objc func newPrivateWindow(_ sender: Any?) {
+        guard let supportDirectory, onboarding == nil else { NSSound.beep(); return }
+        let reference = NSApp.keyWindow.flatMap { key in key === window || privateWindows.contains { $0.window === key } ? key : nil } ?? window
+        let entry = PrivateWindowController(supportDirectory: supportDirectory, cascadeFrom: reference)
+        entry.onClose = { [weak self] closed in
+            // Released after AppKit finishes closing, so the window and its pages deallocate.
+            weak var released = closed.controller
+            DispatchQueue.main.async { self?.privateWindows.removeAll { $0 === closed } }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+                if released != nil { NSLog("Private window: its browser was not released after closing") }
+                else { NSLog("Private window: closed and released") }
+            }
+        }
+        privateWindows.append(entry)
+        entry.show()
+    }
     @objc func showSettings(_ sender: Any?) { presentSettings(section: settings?.window.isVisible == true ? settings!.section : .general) }
     func presentSettings(section: SettingsSection) {
         guard let controller, onboarding == nil else { return }
@@ -263,7 +288,10 @@ import WebKit
     func windowDidBecomeKey(_ notification: Notification) {
         if let selected = notification.object as? NSWindow, selected === window { mainWindowWasClosed = false }
     }
-    func applicationWillTerminate(_ notification: Notification) { controller?.prepareToClose(persistSession: false) }
+    func applicationWillTerminate(_ notification: Notification) {
+        for entry in privateWindows { entry.controller.discardPrivateWindowData() }
+        controller?.prepareToClose(persistSession: false)
+    }
     func application(_ application: NSApplication, open urls: [URL]) {
         receiveExternalURLs(urls)
     }
@@ -319,7 +347,9 @@ import WebKit
     }
     @objc func recordSpaceSwipes(_ sender: Any?) { SpaceSwipeDiagnostics.shared.start() }
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(newPrivateWindow(_:)) { return onboarding == nil && controller != nil }
         if menuItem.action == #selector(selectSpace(_:)) {
+            if commandRouter.keyPrivateWindow != nil { menuItem.state = .off; return false }
             menuItem.state = controller?.session.space == menuItem.tag ? .on : .off
             return controller?.session.spaceDefinition(menuItem.tag) != nil && window?.attachedSheet == nil
         }
@@ -339,7 +369,9 @@ import WebKit
         let main = NSMenu(); NSApp.mainMenu = main
         func menu(_ title: String) -> NSMenu { let item = NSMenuItem(title: title, action: nil, keyEquivalent: ""); main.addItem(item); let sub = NSMenu(title: title); item.submenu = sub; return sub }
         func item(_ menu: NSMenu, _ title: String, _ action: Selector, _ key: String = "", _ modifiers: NSEvent.ModifierFlags = .command, _ target: AnyObject? = nil) {
-            let item = NSMenuItem(title: title, action: action, keyEquivalent: key); item.keyEquivalentModifierMask = modifiers; item.target = target; menu.addItem(item)
+            let item = NSMenuItem(title: title, action: action, keyEquivalent: key); item.keyEquivalentModifierMask = modifiers
+            // Browser commands follow the key window (a private window or the main browser).
+            item.target = target === controller ? commandRouter : target; menu.addItem(item)
         }
         // Remappable commands read their chord from ShortcutStore; applyShortcuts re-reads it on change.
         func bound(_ menu: NSMenu, _ title: String, _ action: Selector, _ command: ShortcutCommand, _ target: AnyObject? = nil) {
@@ -356,6 +388,7 @@ import WebKit
         item(app, "Show All", #selector(NSApplication.unhideAllApplications(_:)))
         app.addItem(.separator()); item(app, "Quit Bam", #selector(NSApplication.terminate(_:)), "q")
         let file = menu("File")
+        item(file, "New Private Window", #selector(newPrivateWindow(_:)), "n", [.command, .shift], self)
         item(file, "New Little Bam Window", #selector(BrowserController.newLittleOrbit(_:)), "n", [.command, .option], controller)
         bound(file, "New Tab", #selector(BrowserController.newTab(_:)), .newTab, controller)
         bound(file, "Open Location…", #selector(BrowserController.focusAddress(_:)), .openLocation, controller)

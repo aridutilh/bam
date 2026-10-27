@@ -314,6 +314,9 @@ import QuartzCore
     let suggestionFetcher = SearchSuggestionFetcher()
     var newTabOnSubmit = false
     var privateMode: Bool
+    /// A private window (File ▸ New Private Window): its own throwaway session and stores, no history,
+    /// never saved or restored. `privateMode` is also true for it, and for the whole fresh preview.
+    let isPrivateWindow: Bool
     var spaceManager: SpaceManagementController?
     var savedTabEditor: SavedTabEditorController?
     var arcImporter: ArcImportController?
@@ -359,13 +362,14 @@ import QuartzCore
 
     /// `profileStores` is for disposable runs only (e.g. an isolated store from
     /// `WebsiteProfileStore(isolated:)`); nil keeps the standard store for `ephemeral`.
-    init(sessionURL: URL, ephemeral: Bool = false, downloadCoordinator: DownloadCoordinator? = nil,
+    init(sessionURL: URL, ephemeral: Bool = false, privateWindow: Bool = false, downloadCoordinator: DownloadCoordinator? = nil,
          profileStores: WebsiteProfileStore? = nil) {
+        let ephemeral = ephemeral || privateWindow
         self.downloads = downloadCoordinator ?? DownloadCoordinator()
-        self.sessionURL = sessionURL; self.privateMode = ephemeral
+        self.sessionURL = sessionURL; self.privateMode = ephemeral; self.isPrivateWindow = privateWindow
         self.profileStores = profileStores ?? WebsiteProfileStore(ephemeral: ephemeral)
         self.favicons = WebsiteFaviconStore(directory: ephemeral ? nil : sessionURL.deletingLastPathComponent().appendingPathComponent("Favicons", isDirectory: true))
-        session = ephemeral ? .fresh() : SessionFile.load(sessionURL)
+        session = privateWindow ? .privateWindow() : ephemeral ? .fresh() : SessionFile.load(sessionURL)
         if !ephemeral, UserDefaults.standard.object(forKey: "AutomaticallyShowPlayingVideo") != nil { automaticallyShowsVideo = UserDefaults.standard.bool(forKey: "AutomaticallyShowPlayingVideo") }
         displayedWidth = session.sidebarVisible ? CGFloat(session.sidebarWidth) : 0
         super.init(nibName: nil, bundle: nil)
@@ -1100,7 +1104,7 @@ import QuartzCore
             root.previewSpace = pagingTarget.flatMap { session.spaceDefinition($0)?.colorIndex }; root.previewProgress = abs(offset) / max(1, sidebar.bounds.width)
         }
         // Never advertise creation that the Space cap would refuse.
-        let canCreate = session.spaces.count < BrowserSession.maximumSpaces
+        let canCreate = session.spaces.count < BrowserSession.maximumSpaces && !isPrivateWindow
         if !result.finished { updateSpaceCreateIndicator(progress: canCreate ? result.createProgress : nil) }
         if phase == .ended || phase == .cancelled { trackingSwipe = false }
         if result.finished {
@@ -1219,6 +1223,8 @@ import QuartzCore
             keyWindow.performClose(sender); return
         }
         if let peek = peeks[session.activeID], peek.isPresented { peek.dismiss(); return }
+        // A private window goes away with its last tab, as Arc's does.
+        if isPrivateWindow, session.visibleTabs.count <= 1 { view.window?.performClose(sender); return }
         close(session.activeID)
     }
     @objc func reopenTab(_ sender: Any?) { if let record = library.popClosed() { restoreClosed(record) } }
