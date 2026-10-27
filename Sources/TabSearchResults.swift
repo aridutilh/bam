@@ -270,7 +270,11 @@ enum PaletteTarget: Equatable {
                 let key = PaletteAddressKey.key(completion.address)
                 if let open = listable.first(where: { PaletteAddressKey.key($0.address) == key && $0.id != activeID }) {
                     entries.append(.tab(open)); matchedTabs.removeAll { $0.id == open.id }
-                } else { entries.append(.site(completion)) }
+                } else {
+                    entries.append(.site(completion))
+                    // The completion already names this page; don't list it again as "Current Tab".
+                    matchedTabs.removeAll { $0.id == activeID && PaletteAddressKey.key($0.address) == key }
+                }
             }
             entries += quickActions.filter(\.leading).map { Entry.quickAction($0.action) }
             // A command the text names outright leads; looser matches follow the pages.

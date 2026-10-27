@@ -298,6 +298,11 @@ import AppKit
         let actionLabels = labels(in: results)
         require(actionLabels.filter { $0 == "Switch to Tab" }.count == 1 && actionLabels.contains("Current Tab"),
                 "Only the non-current tab offers Switch to Tab; the current one says so: \(actionLabels)")
+        // A completion that names the page you're on is listed once, not again as "Current Tab".
+        let here = BrowserTab(title: "Example Domain", address: "https://example.com/", space: 0)
+        results.update(tabs: [here, other], query: "exa", activeID: here.id, canCreate: true,
+                       completion: PaletteCompletion(typed: "exa", text: "example.com", address: "https://example.com/", title: "Example Domain"))
+        require(!labels(in: results).contains("Current Tab"), "The completed current page isn't listed twice: \(labels(in: results))")
         PaletteFieldChecks.run(require, labels: labels)
         print("PASS: \(checks) tab search ranking, command, favicon and selection checks")
     }
