@@ -723,6 +723,19 @@ import AppKit
         require(speaker?.isHidden == false && speaker?.accessibilityLabel() == "Unmute tab", "A muted tab keeps a slashed speaker")
         chrome.update(tabs: chromeItems, space: 0, canGoBack: false, canGoForward: false, isLoading: false); spin()
         require(speaker?.isHidden == true, "No sound, no speaker")
+        // Arc's Edit Theme… in a Space's menu (heading and footer), replacing the color-only entry.
+        var themed: [Int] = []
+        chrome.spaceContextMenu = { _ in
+            let menu = NSMenu(); menu.autoenablesItems = false
+            for title in ["Change Space Icon…", "Rename Space…", "Edit Theme Color…", "Manage Spaces…"] { menu.addItem(NSMenuItem(title: title, action: nil, keyEquivalent: "")) }
+            return menu
+        }
+        chrome.onEditTheme = { themed.append($0) }
+        let footerSpace = descendants(chrome).first { ($0.accessibilityLabel() ?? "").hasPrefix("Switch to ") && !$0.isHidden }!
+        let spaceMenu = footerSpace.menu(for: tabMenuClick)!
+        require(spaceMenu.items.map(\.title) == ["Change Space Icon…", "Rename Space…", "Edit Theme…", "Manage Spaces…"], "Edit Theme… replaces the color entry (\(spaceMenu.items.map(\.title)))")
+        let themeItem = spaceMenu.items[2]; _ = NSApp.sendAction(themeItem.action!, to: themeItem.target, from: themeItem)
+        require(themed.count == 1, "Edit Theme… reaches the controller with the Space")
         // A single row moving (drop, Move Earlier/Later) slides: the table moves that row's view rather than
         // rebuilding the list, so its view (and any state on it) survives the move.
         chromeList.contentView.scroll(to: .zero); chromeList.reflectScrolledClipView(chromeList.contentView)

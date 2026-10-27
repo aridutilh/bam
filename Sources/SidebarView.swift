@@ -120,6 +120,23 @@ struct SidebarExtensionItem {
     var onManageSpaces: (() -> Void)?
     /// Builds a Space's context menu from the browser's real Space actions (nil: Manage Spaces only).
     var spaceContextMenu: ((Int) -> NSMenu?)?
+    /// Arc's "Edit Theme…" in a Space's menu (the heading's and the footer button's); nil leaves the menu as built.
+    var onEditTheme: ((Int) -> Void)?
+    /// The Space's menu with Arc's Edit Theme… in place of the color-only entry, right after Rename.
+    private func spaceMenu(for id: Int) -> NSMenu? {
+        guard let menu = spaceContextMenu?(id) else { return nil }
+        guard onEditTheme != nil else { return menu }
+        let item = NSMenuItem(title: "Edit Theme…", action: #selector(editThemeFromMenu(_:)), keyEquivalent: "")
+        item.target = self; item.tag = id; item.identifier = NSUserInterfaceItemIdentifier("space-edit-theme")
+        if let old = menu.items.firstIndex(where: { $0.title == "Edit Theme Color…" }) {
+            item.isEnabled = menu.items[old].isEnabled
+            menu.removeItem(at: old); menu.insertItem(item, at: old)
+        } else if let rename = menu.items.firstIndex(where: { $0.title.hasPrefix("Rename") }) {
+            menu.insertItem(item, at: rename + 1)
+        } else { menu.insertItem(item, at: 0) }
+        return menu
+    }
+    @objc private func editThemeFromMenu(_ sender: NSMenuItem) { onEditTheme?(sender.tag) }
     var onMoveTab: ((UUID, Int) -> Void)?
     /// The footer's Downloads button and its menu: Bam's existing Downloads, History and Recently Closed windows.
     var onShowDownloads: (() -> Void)?
@@ -365,7 +382,7 @@ struct SidebarExtensionItem {
                 guard let button else { return }; self?.onSpaceChange?(button.index)
             }
             button.manage = { [weak self] in self?.onManageSpaces?() }
-            button.contextMenu = { [weak self, weak button] in button.flatMap { self?.spaceContextMenu?($0.index) } }
+            button.contextMenu = { [weak self, weak button] in button.flatMap { self?.spaceMenu(for: $0.index) } }
             button.acceptDrop = { [weak self, weak button] id in
                 guard let self, let button, button.index != self.selectedSpace else { return false }
                 return self.onDropOnSpace?(id, button.index) ?? false
@@ -434,7 +451,7 @@ struct SidebarExtensionItem {
         page.reorderSaved = { [weak self] in self?.onReorderSavedTab?($0, $1) }
         page.newTab = { [weak self] in self?.onNewTab?() }
         page.manageSpaces = { [weak self] in self?.onManageSpaces?() }
-        page.spaceMenu = { [weak self] in self?.spaceContextMenu?($0) }
+        page.spaceMenu = { [weak self] in self?.spaceMenu(for: $0) }
         page.move = { [weak self] in self?.onMoveTab?($0, $1) }
         page.toggleFolder = { [weak self] in self?.onToggleFolder?($0) }
         page.renameFolder = { [weak self] in self?.onRenameFolder?($0) }
