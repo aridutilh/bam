@@ -681,6 +681,8 @@ import AppKit
         let doubleClick = NSEvent.mouseEvent(with: .leftMouseDown, location: renameRow.convert(NSPoint(x: 80, y: 18), to: nil), modifierFlags: [], timestamp: 0,
                                              windowNumber: chromeWindow.windowNumber, context: nil, eventNumber: 0, clickCount: 2, pressure: 1)!
         renameRow.mouseDown(with: doubleClick)
+        // The field starts just after the click (selecting the tab first hands focus to its page).
+        RunLoop.main.run(until: Date().addingTimeInterval(0.25))
         let renameField = descendants(renameRow).first { $0.identifier?.rawValue == "tab-rename-field" } as? NSTextField
         require(renameField?.stringValue == "Today page", "Double-click turns the title into a field holding the shown name")
         renameField?.stringValue = "Morning read"
@@ -748,6 +750,40 @@ import AppKit
         chrome.update(tabs: chromeItems, space: 0, canGoBack: false, canGoForward: false, isLoading: false); spin()
         chromeWindow.orderOut(nil)
         withExtendedLifetime(chromeWindow) {}
+
+        // MARK: Drops land where the gap is (QA: a drop landed a row high and could keep a Today tab by accident).
+        do {
+            let c = BrowserTab(title: "C", address: "https://c.invalid", space: 0), b = BrowserTab(title: "B", address: "https://b.invalid", space: 0)
+            let a = BrowserTab(title: "A", address: "https://a.invalid", space: 0)
+            let kept = BrowserTab(title: "K", address: "https://k.invalid", space: 0, pinned: true)
+            var model = BrowserSession(tabs: [kept, c, b, a], activeID: c.id)
+            func today() -> [String] { model.tabs.filter { $0.space == 0 && !$0.isSaved }.map(\.title) }
+            require(model.drop(a.id, at: .today(before: b.id), space: 0) && today() == ["C", "A", "B"], "A dropped in the gap above B lands between C and B (\(today()))")
+            require(model.drop(c.id, at: .today(before: nil), space: 0) && today() == ["A", "B", "C"], "Dropped past the last row lands at the end")
+            require(model.drop(b.id, at: .today(before: a.id), space: 0) && today() == ["B", "A", "C"] && !model.tabs.contains { $0.id == b.id && $0.isSaved },
+                    "Dropped above the first Today row it stays a Today tab")
+        }
+        do {
+            // A row drag must not move the list: the empty Favorites grid's drop zone overlays the heading.
+            let dragSidebar = SidebarView(frame: NSRect(x: 0, y: 0, width: 228, height: 600))
+            let dragWindow = NSWindow(contentRect: dragSidebar.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+            dragWindow.contentView = dragSidebar
+            dragSidebar.configureSpaces([BrowserSpace(id: 0, name: "One", symbol: "sparkles", colorIndex: 0)])
+            let rows = (0..<6).map { SidebarTabItem(id: UUID(), title: "Row \($0)", subtitle: "", symbol: "globe", isPinned: false, isActive: $0 == 0) }
+            dragSidebar.update(tabs: rows, space: 0, canGoBack: false, canGoForward: false, isLoading: false)
+            dragSidebar.layoutSubtreeIfNeeded(); spin()
+            let list = dragSidebar.tabListScrollView
+            let before = list.convert(list.bounds, to: dragSidebar)
+            let dragged = descendants(dragSidebar).first { $0.identifier?.rawValue.hasPrefix("tab-row-") == true }!
+            NotificationCenter.default.post(name: .arkSidebarDragDidBegin, object: dragged)
+            dragSidebar.layoutSubtreeIfNeeded(); spin(); RunLoop.main.run(until: Date().addingTimeInterval(0.25)); dragSidebar.layoutSubtreeIfNeeded()
+            let during = list.convert(list.bounds, to: dragSidebar)
+            require(abs(during.minY - before.minY) < 0.5, "Starting a row drag leaves the rows where they are (\(before.minY) → \(during.minY))")
+            require(descendants(dragSidebar).contains { $0.accessibilityLabel() == "Favorites" && !$0.isHiddenOrHasHiddenAncestor },
+                    "The empty Favorites drop zone still shows during the drag")
+            NotificationCenter.default.post(name: .arkSidebarDragDidEnd, object: dragged)
+            withExtendedLifetime(dragWindow) {}
+        }
 
         print("PASS: \(checks) sidebar morning checks")
     }

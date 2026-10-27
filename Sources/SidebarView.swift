@@ -60,6 +60,9 @@ struct SidebarTabItem: Equatable {
     /// The page is making sound (Arc's speaker after the icon); muted shows the slashed speaker instead.
     var isPlayingAudio: Bool = false
     var isMuted: Bool = false
+    /// The tab has a live page right now. A kept tab that was never opened this session has none, so it gets
+    /// the cross (remove), not the minus (put down), as in Arc.
+    var hasLivePage: Bool = true
     /// What the row shows: the best-known title without its trailing site name (SidebarDisplayPolicy.rowTitle).
     var displayTitle: String {
         if isFolder || isSplit || hasCustomTitle { return title }
@@ -687,15 +690,19 @@ struct SidebarExtensionItem {
         let gridTop = hasActions ? actionTop + 38 : fieldTop + fieldHeight + 10 + badgeHeight
         // A drag over Favorites holds a gap open (one more slot); a sidebar drag over an empty grid opens a drop zone.
         let gapSlot = favoriteGap.map { min($0, favorites.count) }
+        // An empty grid's drop zone floats over the Space heading instead of pushing the list down: a row drag
+        // must never move the rows under the pointer (that made drops land a row high and kept tabs by accident).
         let dropZone = favorites.isEmpty && sidebarDragActive
         let slotCount = favorites.count + (gapSlot == nil ? 0 : 1)
-        let laidOutCount = max(slotCount, dropZone ? 1 : 0)
+        let laidOutCount = favorites.isEmpty ? 0 : slotCount
         let columns = max(1, ArkMetrics.favoriteColumns(count: laidOutCount, width: w))
         let gap = ArkMetrics.favoriteGap, tileHeight = ArkMetrics.favoriteHeight
         let favoriteRows = (laidOutCount + columns - 1) / columns
         let favoriteHeight = favoriteRows == 0 ? CGFloat.zero : CGFloat(favoriteRows) * tileHeight + CGFloat(favoriteRows - 1) * gap
-        favoritesHost.isHidden = favoriteRows == 0
-        favoritesHost.frame = NSRect(x: 0, y: gridTop, width: w, height: favoriteHeight)
+        let zoneHeight = ArkMetrics.emptyFavoritesDropZoneHeight
+        favoritesHost.isHidden = favoriteRows == 0 && !dropZone && !(favorites.isEmpty && sidebarDragActive)
+        favoritesHost.frame = NSRect(x: 0, y: gridTop, width: w, height: favoriteRows == 0 ? zoneHeight : favoriteHeight)
+        if favoriteRows == 0, sidebarDragActive, favoritesHost.superview === self { addSubview(favoritesHost, positioned: .above, relativeTo: clip) }
         let tileWidth = max(0, (contentWidth - CGFloat(columns - 1) * gap) / CGFloat(columns))
         func slotFrame(_ slot: Int) -> NSRect {
             NSRect(x: leading + CGFloat(slot % columns) * (tileWidth + gap), y: CGFloat(slot / columns) * (tileHeight + gap),
@@ -705,7 +712,8 @@ struct SidebarExtensionItem {
             button.frame = slotFrame(ArkMetrics.favoriteSlot(forTile: index, gap: gapSlot))
         }
         favoriteGrid = (leading, tileWidth, columns)
-        favoritesHost.showPlaceholder(gapSlot.map(slotFrame) ?? (dropZone ? slotFrame(0) : nil), strong: gapSlot != nil)
+        let zoneFrame = NSRect(x: leading, y: 0, width: contentWidth, height: zoneHeight)
+        favoritesHost.showPlaceholder(favorites.isEmpty && sidebarDragActive ? zoneFrame : gapSlot.map(slotFrame), strong: gapSlot != nil)
         let pageTop: CGFloat = gridTop + favoriteHeight + (favoriteRows == 0 ? 0 : 10)
         // The player sits above the footer (Arc), and the list ends above it.
         let playerHeight = ArkMetrics.mediaPlayerHeight
@@ -1421,6 +1429,8 @@ final class ArkCenteredFieldCell: NSTextFieldCell {
     static let addressTextSize: CGFloat = 13
     static let favoriteHeight: CGFloat = 45
     static let favoriteGap: CGFloat = 8
+    /// The empty Favorites grid's drop zone during a row drag (it overlays the Space heading).
+    static let emptyFavoritesDropZoneHeight: CGFloat = 34
     /// Narrowest Favorite tile before the grid drops a column (Arc fits four in a ~230pt sidebar).
     static let favoriteMinimumWidth: CGFloat = 44
     /// Favorite artwork, as in Arc: 16 points is exactly a 32-pixel site icon on a 2x display.
@@ -2566,11 +2576,12 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted, Ar
             }
         } else if favicon == nil, first || old.symbol != item.symbol || old.monogram != item.monogram || old.isFolder { showFallbackIcon() }
         if first || old.isActive != item.isActive || old.isFolder != item.isFolder { applyIconTint() }
-        if first || old.isSplit != item.isSplit || old.isPinned != item.isPinned || old.isFolder != item.isFolder || old.isUnloaded != item.isUnloaded {
+        if first || old.isSplit != item.isSplit || old.isPinned != item.isPinned || old.isFolder != item.isFolder || old.isUnloaded != item.isUnloaded
+            || old.hasLivePage != item.hasLivePage {
             // Kept tabs (Arc's pinned style): a minus puts an open page down and keeps the row; once down, the same
             // strokes turn into the cross that removes it. Today tabs and Splits always show the cross.
-            let removes = item.isPinned && item.isUnloaded && !item.isSplit
-            let unloads = item.isPinned && !item.isUnloaded && !item.isSplit
+            let removes = item.isPinned && (item.isUnloaded || !item.hasLivePage) && !item.isSplit
+            let unloads = item.isPinned && !item.isUnloaded && item.hasLivePage && !item.isSplit
             let label = item.isSplit ? "Close Split" : removes ? "Remove tab" : unloads ? "Unload tab" : "Close tab"
             // Only the same row changing state while its button shows animates; reuse and first display snap.
             let animate = !first && old.id == item.id && !closeButton.isHidden
@@ -2823,7 +2834,15 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted, Ar
         // captured now in case the view is reused before release.
         // Arc: double-clicking a tab's title renames it in place.
         if event.clickCount == 2, !item.isFolder, renameTab != nil {
-            dragOrigin = nil; pressedID = nil; beginRename(); return
+            dragOrigin = nil; pressedID = nil
+            // The first click selected the tab, and selecting hands keyboard focus to its page on the next turn of the
+            // run loop; starting the field now would lose focus at once and close it (QA saw "nothing happens").
+            let id = item.id
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.renameStartDelay) { [weak self] in
+                guard let self, self.item.id == id, self.window != nil else { return }
+                self.beginRename()
+            }
+            return
         }
         dragOrigin = convert(event.locationInWindow, from: nil); didDrag = false; pressedID = item.id
         // Pointer input: no row shows a keyboard ring now (also one that kept focus from earlier arrows).
@@ -2870,7 +2889,7 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted, Ar
     }
     override func accessibilityPerformPress() -> Bool { activate(); return true }
     /// An unloaded kept tab's trailing action removes it; everything else closes (a kept tab unloads, keeping it).
-    private var removesOnTrailingAction: Bool { item.isPinned && item.isUnloaded && !item.isSplit && !item.isFolder }
+    private var removesOnTrailingAction: Bool { item.isPinned && (item.isUnloaded || !item.hasLivePage) && !item.isSplit && !item.isFolder }
     private func performTrailingAction() { if removesOnTrailingAction { remove?() } else { close?() } }
     @objc private func removeFromMenu() { if removesOnTrailingAction { remove?() } }
     private func folderSubmenu() -> NSMenuItem {
@@ -2929,7 +2948,7 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted, Ar
         // Arc's order: Copy Link, Share | Change Icon…, Rename…, Mute | Duplicate, Move to; then Bam's keeping and
         // folder entries; closing last.
         let actions = tabActionItems?()
-        let arcMoveTo = item.isPinned ? nil : actions?.moveTo
+        let arcMoveTo = actions?.moveTo
         if let top = actions?.top, !top.isEmpty {
             top.forEach(menu.addItem)
             if let arcMoveTo { menu.addItem(arcMoveTo) }
@@ -2964,7 +2983,7 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted, Ar
             let out = NSMenuItem(title: "Remove from Folder", action: #selector(removeFromFolderFromMenu), keyEquivalent: "")
             out.target = self; menu.addItem(out)
         }
-        // Today rows move through Arc's "Move to" (with New Space…) above; kept rows keep their own Space list.
+        // Every tab row moves through Arc's "Move to" (with New Space…) above; the sidebar's own list is the fallback.
         if arcMoveTo == nil, destinations.count > 1 { menu.addItem(spaceSubmenu()) }
         menu.addItem(.separator())
         let closeItem = NSMenuItem(title: item.isSplit ? "Close Split" : item.isPinned ? "Unload Tab" : "Close Tab", action: #selector(closeFromMenu), keyEquivalent: "")
@@ -2994,6 +3013,7 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted, Ar
     @objc private func renameFromMenu() { renameFolder?() }
 
     // MARK: Rename in place
+    static let renameStartDelay: TimeInterval = 0.12
     private var renameField: NSTextField?
     private var renameCancelled = false
     /// The title when editing began. The row's title can change underneath (a page still loading), so a
