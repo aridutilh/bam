@@ -102,8 +102,10 @@ struct ClosedRecord: Codable, Identifiable, Equatable {
     }
     private func reloadWindows() { historyWindow?.reload(); archiveWindow?.reload() }
 
+    /// False for a private window's library: visits are never recorded, not even in memory.
+    var recordsHistory = true
     @discardableResult func recordVisit(title: String, address: String) -> VisitToken? {
-        guard let url = Self.webURL(address) else { return nil }
+        guard recordsHistory, let url = Self.webURL(address) else { return nil }
         let address = url.absoluteString
         let title = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard canMutate() else { return nil }
