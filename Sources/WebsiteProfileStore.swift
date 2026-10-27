@@ -96,8 +96,12 @@ import WebKit
             }
         }
         stores[profileID] = store
+        onStoreCreated?(store)
         return store
     }
+    /// Told about each new store. A private window registers its stores so app-wide features
+    /// (the ad blocker's per-site choices) can tell its pages apart and keep them out of preferences.
+    var onStoreCreated: ((WKWebsiteDataStore) -> Void)?
     /// Every store handed out so far (a private window wipes them when it closes).
     var openedStores: [WKWebsiteDataStore] { Array(stores.values) }
     func profileID(for store: WKWebsiteDataStore) -> UUID? {

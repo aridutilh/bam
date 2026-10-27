@@ -373,6 +373,7 @@ import QuartzCore
         self.downloads = downloadCoordinator ?? DownloadCoordinator()
         self.sessionURL = sessionURL; self.privateMode = ephemeral; self.isPrivateWindow = privateWindow
         self.profileStores = profileStores ?? WebsiteProfileStore(ephemeral: ephemeral)
+        if privateWindow { self.profileStores.onStoreCreated = { PrivateBrowsing.register($0) } }
         self.favicons = WebsiteFaviconStore(directory: ephemeral ? nil : sessionURL.deletingLastPathComponent().appendingPathComponent("Favicons", isDirectory: true))
         session = privateWindow ? .privateWindow() : ephemeral ? .fresh() : SessionFile.load(sessionURL)
         if !ephemeral, UserDefaults.standard.object(forKey: "AutomaticallyShowPlayingVideo") != nil { automaticallyShowsVideo = UserDefaults.standard.bool(forKey: "AutomaticallyShowPlayingVideo") }

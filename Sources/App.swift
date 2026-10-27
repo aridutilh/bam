@@ -148,7 +148,12 @@ import WebKit
         entry.onClose = { [weak self] closed in
             // Released after AppKit finishes closing, so the window and its pages deallocate.
             weak var released = closed.controller
-            DispatchQueue.main.async { self?.privateWindows.removeAll { $0 === closed } }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.privateWindows.removeAll { $0 === closed }
+                // Ad-blocking choices made in private windows last only while one is open.
+                if self.privateWindows.isEmpty { ContentBlockingPreference.forgetPrivateChoices() }
+            }
             DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
                 if released != nil { NSLog("Private window: its browser was not released after closing") }
                 else { NSLog("Private window: closed and released") }
@@ -303,7 +308,14 @@ import WebKit
     }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { activateMainWindow(); return true }
     func menuNeedsUpdate(_ menu: NSMenu) {
-        if menu === extensionsMenu { controller?.updateExtensionsMenu(menu) }
+        guard menu === extensionsMenu else { return }
+        // A private window runs no extensions; the main browser's actions would act on its own tabs.
+        if commandRouter.keyPrivateWindow != nil {
+            menu.removeAllItems()
+            let note = NSMenuItem(title: "Extensions Are Off in Private Windows", action: nil, keyEquivalent: ""); note.isEnabled = false
+            menu.addItem(note); return
+        }
+        controller?.updateExtensionsMenu(menu)
     }
     @objc func selectSpace(_ sender: NSMenuItem) { controller.changeSpace(sender.tag) }
     /// Every command item in the menu bar with its stable shortcut id, in menu order. The
@@ -496,7 +508,7 @@ import WebKit
         let tabNumbers = NSMenu(title: "Go to Tab"); goToTab.submenu = tabNumbers; tabs.addItem(goToTab)
         for number in 1...9 {
             let entry = NSMenuItem(title: number == 9 ? "Last Tab" : "Tab \(number)", action: #selector(BrowserController.selectTabByNumber(_:)), keyEquivalent: String(number))
-            entry.keyEquivalentModifierMask = .command; entry.tag = number; entry.target = controller; tabNumbers.addItem(entry)
+            entry.keyEquivalentModifierMask = .command; entry.tag = number; entry.target = commandRouter; tabNumbers.addItem(entry)
         }
         bound(tabs, "Next Space", #selector(BrowserController.nextSpace(_:)), .nextSpace, controller)
         bound(tabs, "Previous Space", #selector(BrowserController.previousSpace(_:)), .previousSpace, controller)

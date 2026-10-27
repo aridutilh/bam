@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- In a private window, turning the ad blocker off for a site (or "Allow Ads Here") now lasts only while private windows are open; it's no longer saved or listed in Settings. ⌘1–⌘9 and the Extensions menu now act on the private window in front, as do menu commands in a Little Bam opened from it.
 - ⌃⇥ now goes to the tab you used last, not the next one down. Keep holding ⌃ and press ⇥ again to bring up your five most recent tabs with page previews; release ⌃ to go there, ⌃⇧⇥ to step back, Esc to stay put.
 - ⌘1 to ⌘8 jump to that tab in the sidebar, Favorites first, and ⌘9 jumps to the last tab (Tabs › Go to Tab).
 - New tabs open at the top of Today. Links you open in a new tab land right below the page they came from, in the order you opened them, and closing one takes you to its neighbor from the same page, then back to that page.

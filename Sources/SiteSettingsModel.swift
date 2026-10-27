@@ -30,6 +30,8 @@ struct SiteSettingsContext: Equatable {
     var blocksAds: Bool? = nil
     /// Settings' global ad-blocker switch; when off the per-site toggle has nothing to change.
     var adBlockerOn = true
+    /// The page is in a private window: its ad-blocking switch is kept in memory only.
+    var privateWindow = false
 }
 
 /// The popover's text and which of its controls apply, free of AppKit so it can be tested.

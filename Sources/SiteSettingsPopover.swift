@@ -22,8 +22,8 @@ struct SiteSettingsActions {
                                                                      certificate: certificateSummary(web.serverTrust)),
                             pageZoom: Double(web.pageZoom), keepsAwake: keepsAwake, extensions: extensions,
                             blocksAds: ContentBlockingPreference.site(web.url) == nil || !ContentBlocking.shared.isAvailable ? nil
-                                : ContentBlockingPreference.blocks(web.url) || !ContentBlockingPreference.isEnabled,
-                            adBlockerOn: ContentBlockingPreference.isEnabled)
+                                : ContentBlockingPreference.blocks(web.url, inPrivateWindow: PrivateBrowsing.isPrivate(web)) || !ContentBlockingPreference.isEnabled,
+                            adBlockerOn: ContentBlockingPreference.isEnabled, privateWindow: PrivateBrowsing.isPrivate(web))
     }
     static func certificateSummary(_ trust: SecTrust?) -> String? {
         guard let trust, let leaf = (SecTrustCopyCertificateChain(trust) as? [SecCertificate])?.first else { return nil }
@@ -137,11 +137,11 @@ struct SiteSettingsActions {
         if let blocks = context.blocksAds {
             // Arc's site-control setting row: a round glyph, the name, and its state underneath; the row is the switch.
             let on = blocks && context.adBlockerOn
-            let url = context.url
+            let url = context.url, isPrivate = context.privateWindow
             let row = SiteSettingsSettingRow(symbol: on ? "shield.fill" : "shield.slash", title: "Block Ads & Trackers",
                                              state: SiteSettingsModel.adsState(context), isOn: on, enabled: context.adBlockerOn) {
                 // The page reloads, as it must for WebKit to load what was blocked (or stop loading it).
-                ContentBlocking.shared.setBlocks(!on, forSiteOf: url)
+                ContentBlocking.shared.setBlocks(!on, forSiteOf: url, inPrivateWindow: isPrivate)
             }
             full(row)
         }
