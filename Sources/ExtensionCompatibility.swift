@@ -35,7 +35,7 @@ enum ExtensionCompatibility {
     static let runtimeExtras: [String] = ["runtime.getBrowserInfo", "runtime.onSuspend", "runtime.requestUpdateCheck", "runtime.getContexts",
                                           "webNavigation.onCreatedNavigationTarget", "storage.managed", "commands", "action.getUserSettings",
                                           "scripting.ExecutionWorld", "runtime.onUpdateAvailable", "windows.onBoundsChanged",
-                                          "tabs.query.windowType"]
+                                          "tabs.query.windowType", "chrome.enums"]
 
     /// Computes what the layer will define for a parsed extension, from its manifest.
     static func plan(manifest: [String: Any]) -> Plan {
@@ -576,6 +576,35 @@ enum ExtensionCompatibility {
         }
         return null;
       };
+      // modifyHeaders: WebKit accepts only header names on its fixed list (_WKWebExtensionDeclarativeNetRequestRule.mm,
+      // isHeaderNameValid) and refuses the whole update for any other name. Todoist adds a session rule setting its own
+      // `Doist-Platform` request header at startup; the refusal rejected its top-level await and its worker never loaded.
+      // Bam removes only the header entries WebKit would refuse (a rule left with no header entries is dropped), warns
+      // once per update, and passes the rest through. Those headers are not modified, as WebKit could not modify them.
+      const webkitHeaderNames = new Set(["accept", "accept-charset", "accept-language", "accept-encoding", "accept-ranges", "access-control-allow-credentials", "access-control-allow-headers", "access-control-allow-methods", "access-control-allow-origin", "access-control-expose-headers", "access-control-max-age", "access-control-request-headers", "access-control-request-method", "age", "authorization", "cache-control", "connection", "content-disposition", "content-encoding", "content-language", "content-length", "content-location", "content-security-policy", "content-security-policy-report-only", "content-type", "content-range", "cookie", "cookie2", "cross-origin-embedder-policy", "cross-origin-embedder-policy-report-only", "cross-origin-opener-policy", "cross-origin-opener-policy-report-only", "cross-origin-resource-policy", "date", "dnt", "default-style", "etag", "expect", "expires", "host", "if-match", "if-modified-since", "if-none-match", "if-range", "if-unmodified-since", "keep-alive", "last-event-id", "last-modified", "link", "location", "origin", "ping-from", "ping-to", "purpose", "pragma", "proxy-authorization", "range", "referer", "referrer-policy", "refresh", "report-to", "reporting-endpoints", "sec-fetch-dest", "sec-fetch-mode", "sec-gpc", "sec-websocket-accept", "sec-websocket-extensions", "sec-websocket-key", "sec-websocket-protocol", "sec-websocket-version", "server-timing", "service-worker", "service-worker-allowed", "service-worker-navigation-preload", "set-cookie", "set-cookie2", "sourcemap", "te", "timing-allow-origin", "trailer", "transfer-encoding", "upgrade", "upgrade-insecure-requests", "user-agent", "vary", "via", "x-content-type-options", "x-frame-options", "x-sourcemap", "x-xss-protection", "x-temp-tablet", "icy-metaint", "icy-metadata"]);
+      const acceptedHeader = (entry) => !entry || typeof entry !== "object" || typeof entry.header !== "string" || webkitHeaderNames.has(entry.header.toLowerCase());
+      const withoutUnsupportedHeaders = (options) => {
+        const added = options && Array.isArray(options.addRules) ? options.addRules : null;
+        if (!added) return options;
+        const dropped = [];
+        const rules = [];
+        for (const rule of added) {
+          const action = rule && rule.action;
+          if (!action || action.type !== "modifyHeaders") { rules.push(rule); continue; }
+          const lists = ["requestHeaders", "responseHeaders"].filter((key) => Array.isArray(action[key]));
+          if (lists.every((key) => action[key].every(acceptedHeader))) { rules.push(rule); continue; }
+          const copy = { ...action };
+          for (const key of lists) {
+            for (const entry of action[key]) if (!acceptedHeader(entry)) dropped.push(entry.header);
+            copy[key] = action[key].filter(acceptedHeader);
+            if (!copy[key].length) delete copy[key];
+          }
+          if (copy.requestHeaders || copy.responseHeaders) rules.push({ ...rule, action: copy });
+        }
+        if (!dropped.length) return options;
+        try { console.warn("Bam: this browser cannot modify the header(s) " + [...new Set(dropped)].join(", ") + "; those modifyHeaders entries were left out."); } catch (error) {}
+        return { ...options, addRules: rules };
+      };
       const dnrGuardHeld = [];
       const applyDNRGuard = () => {
         for (const root of new Set([globalThis.browser, globalThis.chrome])) {
@@ -593,7 +622,7 @@ enum ExtensionCompatibility {
                 if (typeof rest[rest.length - 1] === "function") throw error;
                 return Promise.reject(error);
               }
-              return native.apply(this && typeof this === "object" ? this : holder, [options, ...rest]);
+              return native.apply(this && typeof this === "object" ? this : holder, [withoutUnsupportedHeaders(options), ...rest]);
             };
             Object.defineProperty(guarded, "__bamDNRGuard", { value: true });
             try { Object.defineProperty(holder, name, { value: guarded, writable: true, configurable: true, enumerable: true }); dnrGuardHeld.push(holder); } catch (error) {}
@@ -1080,6 +1109,58 @@ enum ExtensionCompatibility {
       // reads chrome.scripting.ExecutionWorld.ISOLATED before every injection. Only the
       // constants are supplied; what each world does stays WebKit's own executeScript.
       if (provided.has("scripting.ExecutionWorld")) extend("scripting", "ExecutionWorld", () => Object.freeze({ ISOLATED: "ISOLATED", MAIN: "MAIN" }));
+      // Chrome's enum constants that WebKit's namespaces lack. Extensions read them unconditionally at startup:
+      // Adblock Plus 4.x evaluates Object.values(webRequest.ResourceType) while its worker loads, so the missing enum
+      // stopped its background. Only constants are supplied, each only where the namespace exists and the engine has
+      // no member of that name; values are Chrome's own strings, so they mean what Chrome means where WebKit accepts them.
+      if (provided.has("chrome.enums")) {
+        // Namespaces absent now (not requested) are skipped so the re-apply loop never waits for them.
+        const has = (ns) => !!api[ns];
+        const e = (...values) => () => Object.freeze(Object.fromEntries(values.map((v) => [v.toUpperCase(), v])));
+        // Only the types this engine accepts (measured: WebKit's webRequest filters refuse "webbundle" and
+        // "webtransport", which made Adblock Plus's Object.values(ResourceType) listener fail next), as Firefox's enum lists its own.
+        const resourceTypes = ["main_frame", "sub_frame", "stylesheet", "script", "image", "font", "object", "xmlhttprequest", "ping", "csp_report", "media", "websocket", "other"];
+        if (has("webRequest")) extend("webRequest", "ResourceType", e(...resourceTypes));
+        if (has("webRequest")) extend("webRequest", "OnBeforeRequestOptions", e("blocking", "requestBody", "extraHeaders"));
+        if (has("webRequest")) extend("webRequest", "OnBeforeSendHeadersOptions", e("requestHeaders", "blocking", "extraHeaders"));
+        if (has("webRequest")) extend("webRequest", "OnSendHeadersOptions", e("requestHeaders", "extraHeaders"));
+        if (has("webRequest")) extend("webRequest", "OnHeadersReceivedOptions", e("blocking", "responseHeaders", "extraHeaders"));
+        if (has("webRequest")) extend("webRequest", "OnResponseStartedOptions", e("responseHeaders", "extraHeaders"));
+        if (has("webRequest")) extend("webRequest", "OnCompletedOptions", e("responseHeaders", "extraHeaders"));
+        if (has("webRequest")) extend("webRequest", "OnErrorOccurredOptions", e("extraHeaders"));
+        if (has("declarativeNetRequest")) extend("declarativeNetRequest", "ResourceType", e("font", "image", "main_frame", "media", "other", "ping", "script", "stylesheet", "sub_frame", "websocket", "xmlhttprequest"));
+        if (has("declarativeNetRequest")) extend("declarativeNetRequest", "RuleActionType", () => Object.freeze({ BLOCK: "block", REDIRECT: "redirect", ALLOW: "allow", UPGRADE_SCHEME: "upgradeScheme", MODIFY_HEADERS: "modifyHeaders", ALLOW_ALL_REQUESTS: "allowAllRequests" }));
+        if (has("declarativeNetRequest")) extend("declarativeNetRequest", "HeaderOperation", e("append", "set", "remove"));
+        if (has("declarativeNetRequest")) extend("declarativeNetRequest", "DomainType", () => Object.freeze({ FIRST_PARTY: "firstParty", THIRD_PARTY: "thirdParty" }));
+        if (has("declarativeNetRequest")) extend("declarativeNetRequest", "RequestMethod", e("connect", "delete", "get", "head", "options", "patch", "post", "put", "other"));
+        if (has("runtime")) extend("runtime", "PlatformOs", () => Object.freeze({ MAC: "mac", WIN: "win", ANDROID: "android", CROS: "cros", LINUX: "linux", OPENBSD: "openbsd", FUCHSIA: "fuchsia" }));
+        if (has("runtime")) extend("runtime", "PlatformArch", () => Object.freeze({ ARM: "arm", ARM64: "arm64", X86_32: "x86-32", X86_64: "x86-64", MIPS: "mips", MIPS64: "mips64" }));
+        if (has("runtime")) extend("runtime", "OnInstalledReason", () => Object.freeze({ INSTALL: "install", UPDATE: "update", CHROME_UPDATE: "chrome_update", SHARED_MODULE_UPDATE: "shared_module_update" }));
+        if (has("runtime")) extend("runtime", "OnRestartRequiredReason", e("app_update", "os_update", "periodic"));
+        if (has("tabs")) extend("tabs", "TabStatus", e("unloaded", "loading", "complete"));
+        if (has("tabs")) extend("tabs", "WindowType", e("normal", "popup", "panel", "app", "devtools"));
+        if (has("tabs")) extend("tabs", "MutedInfoReason", () => Object.freeze({ USER: "user", CAPTURE: "capture", EXTENSION: "extension" }));
+        if (has("tabs")) extend("tabs", "TAB_ID_NONE", () => -1);
+        if (has("windows")) extend("windows", "WindowType", e("normal", "popup", "panel", "app", "devtools"));
+        if (has("windows")) extend("windows", "WindowState", () => Object.freeze({ NORMAL: "normal", MINIMIZED: "minimized", MAXIMIZED: "maximized", FULLSCREEN: "fullscreen", LOCKED_FULLSCREEN: "locked-fullscreen" }));
+        if (has("windows")) extend("windows", "WINDOW_ID_NONE", () => -1);
+        if (has("windows")) extend("windows", "WINDOW_ID_CURRENT", () => -2);
+        // declarativeNetRequest limits Chrome publishes as constants, and getAvailableStaticRuleCount, which Adblock Plus
+        // calls while its worker starts. WebKit publishes no limits, so Chrome's documented values are used and the
+        // available count always answers Chrome's guaranteed minimum (30,000). WebKit may enforce its own limits.
+        if (has("declarativeNetRequest")) {
+          const limits = { GUARANTEED_MINIMUM_STATIC_RULES: 30000, MAX_NUMBER_OF_STATIC_RULESETS: 100, MAX_NUMBER_OF_ENABLED_STATIC_RULESETS: 50,
+                           MAX_NUMBER_OF_DYNAMIC_RULES: 30000, MAX_NUMBER_OF_UNSAFE_DYNAMIC_RULES: 5000, MAX_NUMBER_OF_SESSION_RULES: 5000,
+                           MAX_NUMBER_OF_UNSAFE_SESSION_RULES: 5000, MAX_NUMBER_OF_REGEX_RULES: 1000, MAX_GETMATCHEDRULES_CALLS_PER_INTERVAL: 20,
+                           GETMATCHEDRULES_QUOTA_INTERVAL: 10, DYNAMIC_RULESET_ID: "_dynamic", SESSION_RULESET_ID: "_session" };
+          for (const [name, value] of Object.entries(limits)) extend("declarativeNetRequest", name, () => value);
+          extend("declarativeNetRequest", "getAvailableStaticRuleCount", () => call(async () => 30000));
+        }
+        for (const ns of ["contextMenus", "menus"]) {
+          if (has(ns)) extend(ns, "ContextType", e("all", "page", "frame", "selection", "link", "editable", "image", "video", "audio", "launcher", "browser_action", "page_action", "action"));
+          if (has(ns)) extend(ns, "ItemType", e("normal", "checkbox", "radio", "separator"));
+        }
+      }
       if (provided.has("action.getUserSettings")) {
         for (const ns of ["action", "browserAction"]) extend(ns, "getUserSettings", () => call(async () => ({ isOnToolbar: false })));
       }
