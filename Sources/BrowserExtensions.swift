@@ -579,10 +579,11 @@ struct BrowserExtensionPermissionReview {
         try Task.checkCancellation()
         guard !stopped, mutationRevisions[id, default: 0] == initialRevision,
               runtime.contexts[id] === oldContext else { throw BrowserExtensionUpdateCancelled(name: before.name) }
-        _ = try ExtensionManifestWarnings.check(ext.errors, failure: Self.failure)
+        let manifestWarning = try ExtensionManifestWarnings.check(ext.errors, failure: Self.failure)
         var replacement = Self.retainingDeclaredPermissions(before, for: ext)
         replacement.name = ext.displayName ?? before.name; replacement.version = ext.version ?? ""
-        replacement.compatibilityNote = note; replacement.catalog = catalog
+        // The update's review and the stored note disclose ignored manifest entries, as a fresh install does.
+        replacement.compatibilityNote = ExtensionManifestWarnings.joinedNote(note, manifestWarning); replacement.catalog = catalog
         replacement.safariBundle = safariBundle
         // The new package's own static-rule audit (Safari bundles are not audited); load keeps it while current.
         if safariBundle == nil {
