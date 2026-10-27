@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Close Window (⇧⌘W) closes the window you're in, private windows included.
+- A tab's Share menu now opens as a submenu of share options (AirDrop, Mail, Messages, Notes…), and the ⌃⇥ switcher shows the same letter icon as the sidebar for pages without a favicon.
 - Split View with New Page moves to Arc's ⌃⇧= (it was ⌥⌘=). A custom shortcut you set yourself is kept.
 - Opening a Split now shows the search bar over the new page: pick a site, search or an open tab and it loads there. Press Esc (or click outside) and the empty page closes again.
 - Little Bam windows no longer close into the archive while they're playing audio or video, holding text you're writing, downloading, or using the camera or microphone, and time your Mac spent asleep no longer counts toward "Archive Little Bams after" (waking up the next morning used to close them all).
