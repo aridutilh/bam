@@ -1077,6 +1077,14 @@ struct BrowserSession: Codable {
         }
         tabs.removeAll { members.contains($0.id) && !$0.isSaved }
         if let successor, tabs.contains(where: { $0.id == successor }) { activeID = successor }
+        else if !closing.isSaved, members.contains(activeID) || !tabs.contains(where: { $0.id == activeID }) {
+            // The last Today tab closed: go back to the tab used before it (a kept tab or Favorite that's
+            // still open), as Arc does, rather than a fresh blank page.
+            let space = closing.space
+            if let previous = (recentTabIDs ?? []).first(where: { id in
+                tabs.first(where: { $0.id == id }).map { !$0.isUnloaded && selectable($0, in: space) && !$0.isHome } ?? false
+            }) { activeID = previous }
+        }
         repairRememberedSelections()
         repairActiveSelection()
         return closing

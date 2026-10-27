@@ -172,6 +172,16 @@ import Foundation
         expect(iconTrip.tabs.first { $0.id == iconTab }?.symbol == "heart", "Icons are saved")
         expect(s.updateTab(id: iconTab, customTitle: nil, customSymbol: nil) && s.tabs.first { $0.id == iconTab }?.chosenSymbol == nil, "Automatic clears it")
 
+        // Closing the last Today tab goes back to the open kept tab used before it, not to a new blank page.
+        s = base()
+        let lastKept = page("Kept open"); s.tabs.insert(lastKept, at: 0); _ = s.setRetention(id: lastKept.id, kind: .kept)
+        s.select(lastKept.id); s.noteRecent(lastKept.id)
+        for title in ["One", "Two"] { _ = s.close(id(s, title)) }
+        s.select(id(s, "Three")); s.noteRecent(s.activeID)
+        let before = s.tabs.count
+        _ = s.close(id(s, "Three"))
+        expect(s.activeID == lastKept.id && s.tabs.count == before - 1, "Closing the last Today tab returns to the recent kept tab: \(title(s, s.activeID) ?? "nil")")
+
         // Tabs below: Today rows under this one only.
         s = base()
         expect(s.todayTabs(below: id(s, "One")).map { title(s, $0)! } == ["Two", "Three"], "Tabs below One")
