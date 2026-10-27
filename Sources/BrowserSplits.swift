@@ -25,7 +25,8 @@ import WebKit
                 canWrapInFolder: !tab.isFavorite && URLInput.extensionURL(tab.address) == nil,
                 monogram: companion == nil ? tab.monogram : nil, knownTitle: companion == nil ? knownTitle(for: tab, in: snapshot) : nil,
                 hasCustomTitle: companion == nil && tab.saved?.customTitle != nil,
-                isPlayingAudio: isTabPlayingAudio(tab.id), isMuted: isTabMuted(tab.id))
+                isPlayingAudio: isTabPlayingAudio(tab.id), isMuted: isTabMuted(tab.id),
+                hasLivePage: browsers[tab.id] != nil || companion.map { browsers[$0.id] != nil } == true)
         }
         let visible = snapshot.visibleTabs
         // Stable indent: from the whole tree, so collapsing the deepest branch doesn't shift rows.

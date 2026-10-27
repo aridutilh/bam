@@ -194,11 +194,14 @@ import WebKit
         guard let event = NSEvent.mouseEvent(with: .rightMouseDown, location: .zero, modifierFlags: [], timestamp: 0,
                                             windowNumber: fixtureWindow.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 0),
               let rowMenu = descendants(browser.sidebar).filter({ $0.accessibilityLabel()?.hasPrefix(rowTitle + " · ") == true })
-                .compactMap({ $0.menu(for: event) }).first(where: { $0.items.contains(where: { $0.title == "Move to Space" }) }),
-              let moveMenu = rowMenu.items.first(where: { $0.title == "Move to Space" })?.submenu else {
-            throw Failure.assertion("Native tab row has no Move to Space submenu")
+                .compactMap({ $0.menu(for: event) }).first(where: { $0.items.contains(where: { $0.title == "Move to" }) }),
+              let moveMenu = rowMenu.items.first(where: { $0.title == "Move to" })?.submenu else {
+            throw Failure.assertion("Native tab row has no Move to submenu")
         }
-        try check(rowMenu.items.contains { $0.title == "Unkeep Left Tab" } && moveMenu.items.count == browser.session.spaces.count,
+        // Arc's "Move to ▸": every Space, then a separator and New Space….
+        let spaceEntries = moveMenu.items.filter { !$0.isSeparatorItem && $0.title != "New Space…" }
+        try check(rowMenu.items.contains { $0.title == "Unkeep Left Tab" } && spaceEntries.count == browser.session.spaces.count
+                    && moveMenu.items.last?.title == "New Space…",
                   "Move menu changed pin semantics or omitted Space destinations")
         try check(moveMenu.items.first(where: { $0.tag == 70 })?.isEnabled == false,
                   "Move menu enabled the current Space")

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Fixed: dragging a tab in the sidebar could land it one row above where you dropped it, and dropping just under New Tab could keep the tab by accident. The list no longer shifts when a drag starts.
+- Fixed: double-clicking a tab's title to rename it could close the field straight away.
+- Kept tabs' menus use the same "Move to ▸" as Today tabs (with New Space…), and a kept tab that hasn't been opened shows a cross that removes it, as in Arc.
+
 - Extensions can be inspected like pages: each extension's background and pages appear under its name in Safari's Develop menu, so its console errors can be read.
 
 - Dark one-colour site icons, like GitHub's, now show up light on dark sidebars, in the ⌃⇥ switcher and in the search box, as in Arc.
