@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Fixed: after switching or editing Spaces, typing the letter "e" could open the Emoji & Symbols palette instead of typing. Shortcuts Settings no longer lists or rewrites the hidden menu items macOS adds on its own.
+- Settings › Websites' page zoom and minimum font size now also apply in Peek and Little Bam (and minimum font size in Reading Mode), and a Peek or Little Bam page moved into a tab keeps its zoom. Site controls offer Reset only when the page is away from your default zoom.
+- The command palette shows each command's current shortcut after you change or remove it in Settings › Shortcuts.
 - ⌃⇥ now goes to the tab you used last, not the next one down. Keep holding ⌃ and press ⇥ again to bring up your five most recent tabs with page previews; release ⌃ to go there, ⌃⇧⇥ to step back, Esc to stay put.
 - ⌘1 to ⌘8 jump to that tab in the sidebar, Favorites first, and ⌘9 jumps to the last tab (Tabs › Go to Tab).
 - New tabs open at the top of Today. Links you open in a new tab land right below the page they came from, in the order you opened them, and closing one takes you to its neighbor from the same page, then back to that page.
