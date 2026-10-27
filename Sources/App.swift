@@ -512,6 +512,7 @@ import WebKit
         bound(file, "New Tab", #selector(BrowserController.newTab(_:)), .newTab, controller)
         bound(file, "Open Location…", #selector(BrowserController.focusAddress(_:)), .openLocation, controller)
         item(file, "Close Tab", #selector(BrowserController.closeTab(_:)), "w", .command, controller)
+        item(file, "Close Window", #selector(NSWindow.performClose(_:)), "w", [.command, .shift])
         item(file, "Reopen Closed Tab", #selector(BrowserController.reopenTab(_:)), "t", [.command, .shift], controller)
         file.addItem(.separator())
         item(file, "Capture…", #selector(BrowserController.capturePage(_:)), "2", [.command, .shift], controller)
