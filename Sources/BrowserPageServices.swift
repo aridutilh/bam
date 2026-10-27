@@ -4,7 +4,7 @@ import WebKit
 @MainActor extension BrowserController {
     @objc func showDownloads(_ sender: Any?) { downloads.showWindow(relativeTo: view.window) }
     @objc func showHistory(_ sender: Any?) { library.showHistory(relativeTo: view.window) }
-    @objc func showArchive(_ sender: Any?) { library.showArchive(relativeTo: view.window) }
+    @objc func showArchive(_ sender: Any?) { presentArchive() }
     func restoreClosed(_ record: ClosedRecord, profileID: UUID? = nil) {
         let profileID = profileID ?? session.currentProfileID
         guard selectSpace(forProfile: profileID) else { return }

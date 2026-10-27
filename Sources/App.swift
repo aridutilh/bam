@@ -498,7 +498,7 @@ import WebKit
         item(history, "Forward", #selector(BrowserController.goForward(_:)), "]", .command, controller)
         history.addItem(.separator())
         item(history, "Show History…", #selector(BrowserController.showHistory(_:)), "y", .command, controller)
-        item(history, "Recently Closed…", #selector(BrowserController.showArchive(_:)), "", .command, controller)
+        item(history, "View Archive…", #selector(BrowserController.showArchive(_:)), "", .command, controller)
         item(view, "Downloads…", #selector(BrowserController.showDownloads(_:)), "j", .command, controller)
         let tabs = menu("Tabs")
         item(tabs, "Next Tab", #selector(BrowserController.nextTab(_:)), "\t", .control, controller)
