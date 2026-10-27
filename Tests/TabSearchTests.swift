@@ -412,7 +412,7 @@ enum PaletteFieldChecks {
                        recentTabIDs: [a.id, c.id, b.id], editingAddress: true)
         let editing = labels(results)
         require(editing.first == "Alpha" && editing.dropFirst().first == "Gamma" && !editing.contains("— alpha.example")
-                    && editing.contains("Copy Link") && editing.firstIndex(of: "Copy Link")! > editing.firstIndex(of: "Beta")!,
+                    && editing.contains("Copy URL") && editing.firstIndex(of: "Copy URL")! > editing.firstIndex(of: "Beta")!,
                 "⌘L lists this page, then recent tabs, then Copy Link last: \(editing)")
 
         // Typed: the completed site leads, then the search, then pages; an open tab wins over its visited page.
