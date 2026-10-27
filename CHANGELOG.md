@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- The window's close, minimize and zoom buttons now sit on the same line as the sidebar, back, forward and reload buttons.
+- Tabs that never got a real title (often restored or imported ones) show the page's last known title, or its site name, instead of a long raw address. Titles also drop a trailing site name like "– Vercel" or "- YouTube".
+- Sidebar rows match Yab's comfortable size: 14-point titles, 16-point icons, a softer ink for tabs you aren't on and full ink for the one you are, and a lighter hover.
+- Every tab shows its close button when you point at it. Kept tabs that are open show a minus that puts the page to sleep and keeps the row; once it's asleep, the minus turns into a cross that removes the row (Reopen Closed Tab brings it back).
+- Folders use a clean outline icon that matches the other sidebar icons, and still tip open when expanded.
+- The address at the top of the sidebar is a little taller, and a long address fades out at its end instead of ending in "…".
+- The footer shows each Space as its emoji, the current one in color and the others in gray, with Downloads on the left and + on the right.
+- Tabs fade softly as they scroll under the Space name and above the footer.
+- Reload and Stop swap with a quick scale.
+
 ## 0.25.1 build 51 — Quit dialog and sidebar scroll bar polish
 
 - The quit dialog is lighter and tidier: a cleaner heading, flat buttons, clearer Esc and Return keys, and everything lined up on one edge.

@@ -269,6 +269,12 @@ import AppKit
                 "A long title fades over 16–20pt ending exactly at the readable end")
         let leafNow = row(table(in: 0), 12)
         let leafTitle = descendants(leafNow).compactMap { $0 as? NSTextField }.first { $0.stringValue == "Deep leaf page title" }!
+        // Yab/Arc: even the selected row shows its button only under the pointer.
+        require(descendants(leafNow).first { !$0.isHidden && ["Close tab", "Unload tab"].contains($0.accessibilityLabel() ?? "") } == nil,
+                "The selected row shows no close button at rest")
+        leafNow.mouseEntered(with: NSEvent.enterExitEvent(with: .mouseEntered, location: .zero, modifierFlags: [], timestamp: 0,
+                                                        windowNumber: window.windowNumber, context: nil, eventNumber: 0, trackingNumber: 0, userData: nil)!)
+        leafNow.layoutSubtreeIfNeeded()
         let closeShown = descendants(leafNow).first { !$0.isHidden && ["Close tab", "Unload tab"].contains($0.accessibilityLabel() ?? "") }
         let leafMask = leafTitle.layer?.mask as? CAGradientLayer
         let fadeEndX = leafMask.flatMap { $0.locations?[2] }.map { leafTitle.frame.minX + CGFloat($0.doubleValue) * leafTitle.bounds.width }
@@ -276,6 +282,8 @@ import AppKit
                 "On the selected row the long title has faded out before its close button (no ellipsis, no overlap)")
         require(leafNow.accessibilityLabel() == "Deep leaf page title" && leafNow.toolTip?.hasPrefix("Deep leaf page title") == true,
                 "The full title stays in the accessibility label and tooltip")
+        leafNow.mouseExited(with: NSEvent.enterExitEvent(with: .mouseExited, location: .zero, modifierFlags: [], timestamp: 0,
+                                                       windowNumber: window.windowNumber, context: nil, eventNumber: 0, trackingNumber: 0, userData: nil)!)
         // Hover on a long unselected title: glyphs stay put; only the fade moves.
         let hoverRow = row(table(in: 0), 11)
         let hoverTitle = descendants(hoverRow).compactMap { $0 as? NSTextField }.first { $0.stringValue.hasPrefix("Folder level 11") }!
@@ -313,7 +321,8 @@ import AppKit
 
         // Saved rows that haven't been opened (every fresh import) read at full
         // contrast; only memory-slept pages are quieted, and only slightly.
-        require(ArkRowInk.title(sleeping: false) == ArkPalette.ink && ArkRowInk.iconAlpha(sleeping: false) == 1
+        require(ArkRowInk.title(sleeping: false) == ArkPalette.rowInk && ArkRowInk.title(sleeping: false, selected: true, folder: false) == ArkPalette.ink
+                && ArkRowInk.iconAlpha(sleeping: false) == 1
                 && ArkRowInk.iconAlpha(sleeping: true) >= 0.75, "Dormant saved rows are not dimmed")
         let dormantItems = Array(nested.dropLast()) + [SidebarTabItem(id: leaf, title: "Deep leaf page title", subtitle: "https://deep.invalid", symbol: "globe",
                                                                          isPinned: true, isActive: false, isUnloaded: true, depth: 12, parentFolderID: folderIDs.last)]
@@ -321,7 +330,7 @@ import AppKit
         let dormantRow = row(table(in: 0), 12)
         let dormantTitle = descendants(dormantRow).compactMap { $0 as? NSTextField }.first { $0.stringValue == "Deep leaf page title" }!
         let dormantIcon = descendants(dormantRow).compactMap { $0 as? NSImageView }.first { $0.identifier?.rawValue != "folder-chevron" }!
-        require(dormantTitle.textColor == ArkPalette.ink && dormantIcon.alphaValue == 1, "An unloaded saved row keeps full ink and icon")
+        require(dormantTitle.textColor == ArkPalette.rowInk && dormantIcon.alphaValue == 1, "An unloaded saved row keeps the same ink and icon as an open one")
         update(0, nested)
 
         let folderRow = row(deepTable, 0)
@@ -338,7 +347,7 @@ import AppKit
         require(abs(weight(folderTitle) - NSFont.Weight.medium.rawValue) < 0.01, "Folder titles are medium, not semibold")
         let folderGlyph = descendants(folderRow).compactMap { $0 as? NSImageView }.first { $0.identifier?.rawValue != "folder-chevron" }!
         require(folderGlyph.identifier?.rawValue.hasPrefix("folder-glyph") == true && folderGlyph.contentTintColor == nil
-                && chevron?.contentTintColor === ArkPalette.ink, "Folders show Bam's own tinted folder glyph; chevrons use Bam's ink")
+                && chevron?.contentTintColor === ArkPalette.ink, "Folders show Bam's own outline folder glyph; chevrons use Bam's ink")
         require(chevron?.alphaValue == ArkTabRowChevron.rest && ArkTabRowChevron.rest == 0, "At rest the glyph shows open/closed; no chevron")
         window.makeFirstResponder(folderRow)
         require(chevron?.alphaValue == ArkTabRowChevron.emphasized, "Keyboard focus brings the chevron up")

@@ -314,7 +314,7 @@ import AppKit
         require(Set(shown.map(glyph)).count == 1, "No late frame of the old folder lands afterwards")
         withExtendedLifetime(focusWindow) {}
 
-        // MARK: Folder glyph: Bam's own vector folder, tinted, distinct open and closed.
+        // MARK: Folder glyph: Bam's own vector outline folder, distinct open and closed.
         @MainActor func glyphPixels(_ open: Bool, scale: Int) -> NSBitmapImageRep {
             let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 16 * scale, pixelsHigh: 16 * scale, bitsPerSample: 8, samplesPerPixel: 4,
                                        hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
@@ -331,12 +331,16 @@ import AppKit
             guard let c = closedGlyph.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB), c.alphaComponent > 0.5 else { continue }
             covered += 1; if c.blueComponent > c.redComponent + 0.4 { tinted += 1 }
         } }
-        require(covered > 32 * 32 / 3 && tinted > covered / 2, "The folder is a filled shape in the Space's tint, not a thin outline (\(tinted)/\(covered))")
+        // Yab: folder outlines match the tab icons. A stroked outline in the given ink, not a filled tile.
+        require(covered > 32 * 32 / 12 && covered < 32 * 32 / 2 && tinted > covered / 2,
+                "The folder is an outline in the given ink, not a filled shape (\(tinted)/\(covered))")
+        let middle = closedGlyph.colorAt(x: 16, y: 22)?.alphaComponent ?? 1
+        require(middle < 0.2, "The folder's face is open, as an outline (\(middle))")
         require(glyphPixels(false, scale: 3).pixelsWide == 48, "Vector glyph renders at any scale")
         // Toggling tilts the front panel through Bam's own in-between shapes, ending exactly on the closed or open face.
         let closedFront = ArkFolderGlyph.frontCorners(openness: 0), openFront = ArkFolderGlyph.frontCorners(openness: 1)
         let halfway = ArkFolderGlyph.frontCorners(openness: 0.5)
-        require(closedFront[2] == NSPoint(x: 15, y: 11.1) && openFront[2] == NSPoint(x: 15.6, y: 9.4)
+        require(closedFront[2] == NSPoint(x: 14.6, y: 9.9) && openFront[2] == NSPoint(x: 15.4, y: 8.7)
                     && halfway[2].x > closedFront[2].x && halfway[2].x < openFront[2].x && halfway[2].y < closedFront[2].y && halfway[2].y > openFront[2].y,
                 "The front panel's top edge moves between the closed and open faces (\(halfway[2]))")
         require(ArkFolderGlyph.frontCorners(openness: -1) == closedFront && ArkFolderGlyph.frontCorners(openness: 2) == openFront, "Openness is clamped")
@@ -344,7 +348,7 @@ import AppKit
         // MARK: Footer, as in Arc: Downloads left, Spaces centered, + right.
         let footer = ArkFooterLayout(width: 240, spaceCount: 3, selectedIndex: 1)
         let groupWidth = 3 * ArkFooterLayout.step - 2
-        require(footer.downloads.minX == 9 && footer.plus.maxX == 240 - 8 && !footer.overflowing && footer.visibleCount == 3,
+        require(footer.downloads.minX == 7 && footer.plus.maxX == 240 - 7 && !footer.overflowing && footer.visibleCount == 3,
                 "Downloads at the leading edge, + at the trailing edge, three Spaces all shown")
         require(abs((footer.spacesX + groupWidth / 2) - 120) <= 1, "The Space group is centered in the footer")
         for width in stride(from: CGFloat(164), through: 420, by: 13) {
@@ -389,7 +393,7 @@ import AppKit
         require(abs(spacesMid - footerSidebar.bounds.midX) <= 1, "Space buttons are centered")
         let plusButton = descendants(footerSidebar).first { $0.accessibilityLabel() == "New tab" && $0.frame.minY >= footerSidebar.bounds.height - 40 } as! NSButton
         plusButton.performClick(nil)
-        require(opened.last == "new-tab" && plusButton.frame.maxX == footerSidebar.bounds.width - 8, "+ at the trailing edge opens a new tab")
+        require(opened.last == "new-tab" && plusButton.frame.maxX == footerSidebar.bounds.width - 7, "+ at the trailing edge opens a new tab")
         let rightClick = NSEvent.mouseEvent(with: .rightMouseDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: footerWindow.windowNumber,
                                             context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
         require(spaceButtons.allSatisfy { $0.menu(for: rightClick)?.items.map(\.title) == ["Manage Spaces…"] },
@@ -543,6 +547,102 @@ import AppKit
         thumb.isSuppressed = true
         require(thumb.hitTest(NSPoint(x: thumb.frame.midX, y: thumb.frame.midY)) == nil, "A suppressed thumb never takes the pointer")
         withExtendedLifetime(thumbWindow) {}
+
+        // MARK: Yab-grade chrome (0.26 night): titles, the trailing minus/cross, toolbar row, footer, list edge fades.
+        require(SidebarDisplayPolicy.rowTitle("ariport – Deployments – Vercel", address: "https://vercel.com/team/ariport") == "ariport – Deployments",
+                "A trailing site name that matches the host is dropped")
+        require(SidebarDisplayPolicy.rowTitle("Steve Jobs at 27 - YouTube", address: "https://www.youtube.com/watch?v=1") == "Steve Jobs at 27"
+                && SidebarDisplayPolicy.rowTitle("Portfolio | Notion", address: "https://www.notion.so/x") == "Portfolio"
+                && SidebarDisplayPolicy.rowTitle("serafim on X: \"Arc\" / X", address: "https://x.com/serafim/status/1") == "serafim on X: \"Arc\""
+                && SidebarDisplayPolicy.rowTitle("1115 8th Ave W - Google Maps", address: "https://www.google.com/maps/place/1") == "1115 8th Ave W",
+                "YouTube, Notion, X and Google Maps suffixes go")
+        require(SidebarDisplayPolicy.rowTitle("Bam — a fast, native browser", address: "https://bambrowser.com/") == "Bam — a fast, native browser"
+                && SidebarDisplayPolicy.rowTitle("Pull requests · aridutilh/bam", address: "https://github.com/aridutilh/bam/pulls") == "Pull requests · aridutilh/bam"
+                && SidebarDisplayPolicy.rowTitle("Linear – Inbox", address: "https://linear.app/inbox") == "Linear – Inbox"
+                && SidebarDisplayPolicy.rowTitle("A - Vercel", address: "https://vercel.com") == "A - Vercel",
+                "Suffixes that aren't the site's name, and titles that would be left too short, stay whole")
+        let rawAddress = "https://open.substack.com/pub/notboring/p/more-intelligence"
+        require(SidebarDisplayPolicy.rowTitle("open.substack.com/pub/notboring/p/more-intelligence", address: rawAddress) == "open.substack.com"
+                && SidebarDisplayPolicy.rowTitle(rawAddress, address: rawAddress, knownTitle: "More intelligence") == "More intelligence"
+                && SidebarDisplayPolicy.rowTitle("", address: "https://www.example.com/a/b") == "example.com",
+                "A title that is only an address shows the best-known title, then the host; never a raw path")
+        require(!SidebarDisplayPolicy.looksLikeAddress("Dashboard", address: "https://dashboard.render.com/")
+                && !SidebarDisplayPolicy.looksLikeAddress("Node.js docs", address: "https://nodejs.org/docs")
+                && SidebarDisplayPolicy.looksLikeAddress("github.com", address: "https://github.com/"), "Only address-like titles count as addresses")
+        require(SidebarDisplayPolicy.rowTitle("New tab", address: "orbit://newtab") == "New tab", "Bam's own pages keep their names")
+
+        ArkHover.pointerLocation = { _ in pointer }
+        defer { ArkHover.pointerLocation = { _ in nil } }
+        let chrome = SidebarView(frame: NSRect(x: 0, y: 0, width: 228, height: 520))
+        let chromeWindow = NSWindow(contentRect: chrome.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        chromeWindow.contentView = chrome
+        chrome.configureSpaces((0..<6).map { BrowserSpace(id: $0, name: "S\($0)", symbol: "globe", colorIndex: $0 % 6, emoji: ["🫠", "🏠", "🎒", "💼", "🌱", "🧪"][$0]) })
+        let todayID = UUID(), openKeptID = UUID(), downKeptID = UUID()
+        var chromeItems = [
+            SidebarTabItem(id: openKeptID, title: "Open kept", subtitle: "https://a.invalid", symbol: "globe", isPinned: true, isActive: false),
+            SidebarTabItem(id: downKeptID, title: "Down kept", subtitle: "https://b.invalid", symbol: "globe", isPinned: true, isActive: false, isUnloaded: true),
+            SidebarTabItem(id: todayID, title: "Today page - YouTube", subtitle: "https://www.youtube.com/watch", symbol: "globe", isPinned: false, isActive: true)
+        ] + (0..<40).map { SidebarTabItem(id: UUID(), title: "Filler \($0)", subtitle: "", symbol: "globe", isPinned: false, isActive: false) }
+        chrome.update(tabs: chromeItems, space: 0, canGoBack: false, canGoForward: false, isLoading: false)
+        chrome.layoutSubtreeIfNeeded(); spin()
+        @MainActor func chromeRow(_ id: UUID) -> NSView { descendants(chrome).first { $0.identifier?.rawValue == "tab-row-\(id.uuidString)" }! }
+        @MainActor func shownButton(_ row: NSView) -> NSView? {
+            descendants(row).first { !$0.isHiddenOrHasHiddenAncestor && ["Close tab", "Unload tab", "Remove tab"].contains($0.accessibilityLabel() ?? "") }
+        }
+        @MainActor func hover(_ row: NSView, _ on: Bool) {
+            let event = NSEvent.enterExitEvent(with: on ? .mouseEntered : .mouseExited, location: .zero, modifierFlags: [], timestamp: 0,
+                                               windowNumber: chromeWindow.windowNumber, context: nil, eventNumber: 0, trackingNumber: 0, userData: nil)!
+            // Hover resyncs (after an update) read the pointer; keep it where the hover is.
+            pointer = on ? row.convert(NSPoint(x: row.bounds.midX, y: row.bounds.midY), to: nil) : nil
+            if on { row.mouseEntered(with: event) } else { row.mouseExited(with: event) }
+            row.layoutSubtreeIfNeeded()
+        }
+        require(descendants(chromeRow(todayID)).compactMap { $0 as? NSTextField }.contains { $0.stringValue == "Today page" }
+                && chromeRow(todayID).accessibilityLabel() == "Today page", "Rows show (and speak) the cleaned title")
+        require([todayID, openKeptID, downKeptID].allSatisfy { shownButton(chromeRow($0)) == nil }, "No row, selected included, shows a button at rest")
+        var removed: [UUID] = [], closedIDs: [UUID] = []
+        chrome.onRemoveSavedTab = { removed.append($0) }; chrome.onCloseTab = { closedIDs.append($0) }
+        for (id, label) in [(todayID, "Close tab"), (openKeptID, "Unload tab"), (downKeptID, "Remove tab")] {
+            let row = chromeRow(id); hover(row, true)
+            let button = shownButton(row) as? NSButton
+            require(button?.accessibilityLabel() == label, "Hovering shows \(label) (\(button?.accessibilityLabel() ?? "none"))")
+            button?.performClick(nil); hover(row, false)
+        }
+        require(closedIDs == [todayID, openKeptID] && removed == [downKeptID],
+                "The cross closes a Today tab, the minus unloads an open kept tab, and an unloaded kept tab's cross removes it")
+        // The kept tab goes down under the pointer: its minus becomes the cross in place.
+        let openRow = chromeRow(openKeptID); hover(openRow, true)
+        let morphing = shownButton(openRow)
+        chromeItems[0].isUnloaded = true
+        chrome.update(tabs: chromeItems, space: 0, canGoBack: false, canGoForward: false, isLoading: false); spin()
+        require(shownButton(openRow) === morphing && morphing?.accessibilityLabel() == "Remove tab",
+                "Once down, the same button is the cross that removes it (\(String(describing: shownButton(openRow)?.accessibilityLabel())), \(String(describing: morphing?.accessibilityLabel())), same row \(chromeRow(openKeptID) === openRow))")
+        hover(openRow, false)
+        // Toolbar row: lights, toggle and navigation share one center line.
+        let toggleButton = descendants(chrome).first { $0.accessibilityLabel() == "Hide sidebar" }!
+        let reloadButton = descendants(chrome).first { $0.accessibilityLabel() == "Reload page" }!
+        require(toggleButton.frame.midY == ArkMetrics.toolbarCenterY && reloadButton.frame.midY == ArkMetrics.toolbarCenterY,
+                "The sidebar toggle and reload sit on the traffic lights' row (center \(ArkMetrics.toolbarCenterY))")
+        chrome.update(tabs: chromeItems, space: 0, canGoBack: false, canGoForward: false, isLoading: true)
+        require(descendants(chrome).contains { $0.accessibilityLabel() == "Stop loading" }, "Reload becomes Stop while loading")
+        chrome.update(tabs: chromeItems, space: 0, canGoBack: false, canGoForward: false, isLoading: false)
+        // Footer: all six emoji Spaces fit at the default width, as in Yab.
+        require(ArkFooterLayout.step == 25 && !ArkFooterLayout(width: 228, spaceCount: 6, selectedIndex: 0).overflowing,
+                "Six Spaces fit in a 228pt footer")
+        // List edges: rows fade under the heading only once scrolled, and above the footer while more rows lie below.
+        let chromeList = chrome.tabListScrollView
+        chrome.layoutSubtreeIfNeeded(); spin()
+        @MainActor func edgeAlphas() -> (top: CGFloat, bottom: CGFloat)? {
+            guard let mask = chromeList.layer?.mask as? CAGradientLayer, let colors = mask.colors as? [CGColor] else { return nil }
+            return (colors.first?.alpha ?? 1, colors.last?.alpha ?? 1)
+        }
+        require(edgeAlphas().map { $0.top == 1 && $0.bottom == 0 } == true, "At the top only the bottom edge fades (\(String(describing: edgeAlphas())))")
+        chromeList.contentView.scroll(to: NSPoint(x: 0, y: 60)); chromeList.reflectScrolledClipView(chromeList.contentView)
+        require(edgeAlphas().map { $0.top == 0 && $0.bottom == 0 } == true, "Mid-list both edges fade")
+        let listEnd = (chromeList.documentView?.frame.height ?? 0) - chromeList.contentView.bounds.height
+        chromeList.contentView.scroll(to: NSPoint(x: 0, y: listEnd)); chromeList.reflectScrolledClipView(chromeList.contentView)
+        require(edgeAlphas().map { $0.top == 0 && $0.bottom == 1 } == true, "At the end only the top edge fades")
+        withExtendedLifetime(chromeWindow) {}
 
         print("PASS: \(checks) sidebar morning checks")
     }

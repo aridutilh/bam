@@ -238,6 +238,9 @@ import QuartzCore
         }
     }
     var profileLibraries: [UUID: BrowserLibrary] = [:]
+    /// Frame observers that keep the traffic lights in the sidebar's toolbar row (placeWindowButtons).
+    var windowButtonObservers: [NSObjectProtocol] = []
+    var placingWindowButtons = false
     var library: BrowserLibrary { library(for: commandProfileID) }
     var confirmProfileChange: ((String) -> Bool)?
     var isApplyingProfileChange = false { didSet { invalidateExtensionSurfaceTopology() } }
@@ -398,6 +401,7 @@ import QuartzCore
         configureFavicons()
         sidebar.onSelectTab = { [weak self] id in self?.select(id) }
         sidebar.onCloseTab = { [weak self] id in self?.close(id) }
+        sidebar.onRemoveSavedTab = { [weak self] id in self?.removeSavedTab(id) }
         sidebar.onPinTab = { [weak self] id in self?.pinTab(id) }
         sidebar.onFavoriteTab = { [weak self] id in self?.favoriteTab(id) }
         sidebar.onEditSavedTab = { [weak self] id in self?.editSavedTab(id) }
@@ -467,10 +471,45 @@ import QuartzCore
     }
     func applyWindowButtons(collapse: CGFloat) {
         guard let window = view.window else { return }
+        placeWindowButtons()
         for kind in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
             guard let button = window.standardWindowButton(kind) else { continue }
             button.alphaValue = 1 - collapse
             button.isHidden = collapse >= 1
+        }
+    }
+    /// The traffic lights share one row with the sidebar's toggle and navigation buttons, as in Yab and Arc:
+    /// centered `ArkMetrics.toolbarCenterY` from the top, the first light centered `trafficLightLeading` in.
+    /// AppKit re-tiles the titlebar (resize, full screen, key changes), so the lights are put back whenever
+    /// their frame changes. Full screen keeps the system's own placement in the revealed menu bar.
+    func placeWindowButtons() {
+        guard let window = view.window, let close = window.standardWindowButton(.closeButton),
+              let titlebar = close.superview, let container = titlebar.superview else { return }
+        if windowButtonObservers.isEmpty {
+            for observed in [close, container] {
+                observed.postsFrameChangedNotifications = true
+                windowButtonObservers.append(NotificationCenter.default.addObserver(forName: NSView.frameDidChangeNotification,
+                                                                                    object: observed, queue: nil) { [weak self] _ in
+                    MainActor.assumeIsolated { self?.placeWindowButtons() }
+                })
+            }
+        }
+        guard !placingWindowButtons, !window.styleMask.contains(.fullScreen) else { return }
+        placingWindowButtons = true; defer { placingWindowButtons = false }
+        let height = ArkMetrics.toolbarCenterY * 2
+        let frame = NSRect(x: 0, y: window.frame.height - height, width: window.frame.width, height: height)
+        if container.frame != frame { container.frame = frame }
+        let kinds: [NSWindow.ButtonType] = [.closeButton, .miniaturizeButton, .zoomButton]
+        let buttons = kinds.compactMap { window.standardWindowButton($0) }
+        // Keep the system's own spacing between the lights; only the group moves.
+        let spacing = buttons.count > 1 ? buttons[1].frame.minX - buttons[0].frame.minX : 23
+        for (index, button) in buttons.enumerated() {
+            guard let parent = button.superview else { continue }
+            let size = button.frame.size
+            let center = NSPoint(x: ArkMetrics.trafficLightLeading + CGFloat(index) * spacing,
+                                 y: parent.isFlipped ? ArkMetrics.toolbarCenterY : parent.bounds.height - ArkMetrics.toolbarCenterY)
+            let origin = NSPoint(x: (center.x - size.width / 2).rounded(), y: (center.y - size.height / 2).rounded())
+            if button.frame.origin != origin { button.setFrameOrigin(origin) }
         }
     }
 
@@ -879,11 +918,29 @@ import QuartzCore
         navigationTokens.removeValue(forKey: id); browserExtensionOrigins.removeValue(forKey: id)
         pendingHome.remove(id); tabErrors.removeValue(forKey: id); pendingLoads.remove(id); requestedAddresses.removeValue(forKey: id)
     }
+    /// The cross on an unloaded kept tab removes it, as in Arc and Yab. It leaves as an ordinary closed tab, so
+    /// Reopen Closed Tab (⇧⌘T) and Recently Closed can bring the page back.
+    func removeSavedTab(_ id: UUID) {
+        cancelPaging()
+        guard let tab = session.tabs.first(where: { $0.id == id }), tab.saved?.kind == .kept, session.split(for: id) == nil,
+              session.setRetention(id: id, kind: nil) else { return }
+        close(id)
+    }
     func pinTab(_ id: UUID) {
         cancelPaging()
         guard let tab = session.tabs.first(where: { $0.id == id }),
               session.setRetention(id: id, kind: tab.saved?.kind == .kept ? nil : .kept) else { return }
         refresh(); refreshPaletteResults(); save()
+    }
+    /// A better title for a row whose own title is only its address: the latest history visit to that address with
+    /// a real title. Reads only a profile library that is already loaded; nil otherwise (the row shows the host).
+    func knownTitle(for tab: BrowserTab, in snapshot: BrowserSession) -> String? {
+        let address = tab.isUnloaded ? (tab.saved?.address ?? tab.address) : tab.address
+        guard tab.displayTitle.isEmpty || SidebarDisplayPolicy.looksLikeAddress(tab.displayTitle, address: address),
+              let library = profileLibraries[snapshot.profileID(for: tab)] else { return nil }
+        return library.history.first {
+            $0.address == address && !$0.title.isEmpty && !SidebarDisplayPolicy.looksLikeAddress($0.title, address: address)
+        }?.title
     }
     func sidebarItems(for space: Int) -> [SidebarTabItem] {
         var preview = session; preview.changeSpace(space)
