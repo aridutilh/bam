@@ -71,6 +71,13 @@ struct BrowserExtensionRecord: Codable, Identifiable {
     var compatibilityGrants: [String: Date]? = nil
     /// Where the package came from and how it was verified; nil for folder imports.
     var catalog: ExtensionCatalogRecord? = nil
+    /// The URL scheme of this install's own pages. nil (every install before 0.26 and every folder import) keeps
+    /// WebKit's `webkit-extension`, so existing extensions keep their origin and the website data stored under it.
+    /// Store installs since 0.26 use Safari's `safari-web-extension`: vendor services allow that origin in CORS
+    /// (they already serve their Safari builds) but refuse `webkit-extension`. Measured: api.raindrop.io answers
+    /// `chrome-extension://…` and `safari-web-extension://…` with Access-Control-Allow-Origin and omits it for
+    /// `webkit-extension://…`, so Raindrop.io's popup stayed blank. Never changed after install.
+    var urlScheme: String? = nil
     /// Signed Safari WebExtension provenance; its private .appex remains unmodified.
     var safariBundle: SafariExtensionBundle? = nil
     /// Separately reviewed desktop host, scoped by this record's extension/profile.
@@ -308,6 +315,19 @@ struct BrowserExtensionPermissionReview {
         configuration?.websiteDataStore = runtime.dataStore
         return configuration
     }
+    /// Every scheme Bam's extension pages can use (see `BrowserExtensionRecord.urlScheme`).
+    nonisolated static let pageSchemes: Set<String> = ["webkit-extension", "safari-web-extension"]
+    nonisolated static let storeInstallScheme = "safari-web-extension"
+    nonisolated static func pageScheme(for record: BrowserExtensionRecord) -> String {
+        record.urlScheme.flatMap { pageSchemes.contains($0) ? $0 : nil } ?? "webkit-extension"
+    }
+    /// WebKit must know Safari's scheme as an extension scheme before a context uses it. Idempotent.
+    nonisolated(unsafe) private static var registeredSchemes = false
+    static func registerPageSchemes() {
+        guard !registeredSchemes else { return }
+        registeredSchemes = true
+        WKWebExtension.MatchPattern.registerCustomURLScheme(storeInstallScheme)
+    }
     static func isExtensionURL(_ url: URL, ownedBy context: WKWebExtensionContext) -> Bool {
         url.scheme == context.baseURL.scheme && url.host == context.baseURL.host && url.port == context.baseURL.port && url.user == nil && url.password == nil
     }
@@ -430,6 +450,7 @@ struct BrowserExtensionPermissionReview {
                 throw Self.failure("This extension is already installed in this profile.")
             }
             var record = BrowserExtensionRecord(id: id, profileID: profileID, name: ext.displayName ?? "Unnamed extension", version: ext.version ?? "", packageName: name, compatibilityNote: ExtensionManifestWarnings.joinedNote(compatibilityNote, manifestWarning), catalog: catalog)
+            if catalog != nil { record.urlScheme = Self.storeInstallScheme }
             record.runtimeIdentifier = runtimeIdentifier
             record.awaitingFirstReview = true
             records.append(record)
@@ -1551,7 +1572,7 @@ struct BrowserExtensionPermissionReview {
         let current = records[index]
         let context = WKWebExtensionContext(for: ext)
         context.uniqueIdentifier = current.contextIdentifier
-        context.baseURL = URL(string: "webkit-extension://\(id.uuidString.lowercased())/")!
+        context.baseURL = URL(string: "\(Self.pageScheme(for: current))://\(id.uuidString.lowercased())/")!
         context.unsupportedAPIs = Self.unsupportedAPIs
         context.hasAccessToPrivateData = isPrivate
         context.grantedPermissions = Dictionary(uniqueKeysWithValues: current.permissions.filter { Self.supportedPermissions.contains($0.key) }.map { (WKWebExtension.Permission(rawValue: $0.key), $0.value) })
@@ -1947,6 +1968,7 @@ struct BrowserExtensionPermissionReview {
 
     init(owner: BrowserExtensions, profileID: UUID, dataStore: WKWebsiteDataStore) {
         self.owner = owner; self.profileID = profileID; self.dataStore = dataStore
+        BrowserExtensions.registerPageSchemes()
         let configuration: WKWebExtensionController.Configuration
         if BrowserExtensions.usesNonPersistentController(isPrivate: owner.isPrivate, storage: owner.controllerStorage) { configuration = .nonPersistent() }
         else if case .ownedPersistent(let identifier) = owner.controllerStorage { configuration = WKWebExtensionController.Configuration(identifier: identifier) }

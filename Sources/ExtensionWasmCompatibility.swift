@@ -13,7 +13,7 @@ enum ExtensionWasmCompatibility {
       const here = globalThis.location;
       if (!wasm || typeof ResponseClass !== "function" || typeof URLClass !== "function" || !here) return;
       const protocol = here.protocol, host = here.host;
-      if (!["webkit-extension:", "moz-extension:", "chrome-extension:"].includes(protocol) || !host) return;
+      if (!["webkit-extension:", "safari-web-extension:", "moz-extension:", "chrome-extension:"].includes(protocol) || !host) return;
       const marker = Symbol.for("com.ari.bam.wasm-streaming.v1");
       const resolve = Promise.resolve.bind(Promise);
       const reject = Promise.reject.bind(Promise);

@@ -1474,7 +1474,7 @@ import QuartzCore
         }
         if scheme == "file" {
             guard let resources = Bundle.main.resourceURL, url.standardizedFileURL.path.hasPrefix(resources.standardizedFileURL.path + "/") else { decisionHandler(.cancel); return }
-        } else if scheme == "webkit-extension" {
+        } else if ["webkit-extension", "safari-web-extension"].contains(scheme) {
             guard let profile = profileID(of: webView), allowsExtensionPage(url, profileID: profile) else { decisionHandler(.cancel); return }
         } else if !["http", "https", "about"].contains(scheme) { decisionHandler(.cancel); return }
         if navigationAction.navigationType == .linkActivated, let address = URLInput.directURL(url.absoluteString) {
@@ -1498,7 +1498,7 @@ import QuartzCore
         }
         if navigationAction.targetFrame?.isMainFrame == true, let id = browsers.first(where: { $0.value === webView })?.key {
             invalidateFaviconDocument(id)
-            let newOrigin = scheme == "webkit-extension" ? url.host?.lowercased() : nil
+            let newOrigin = ["webkit-extension", "safari-web-extension"].contains(scheme) ? url.host?.lowercased() : nil
             if browserExtensionOrigins[id] != newOrigin {
                 // Do not replay a form submission across renderer configurations.
                 guard navigationAction.request.httpMethod?.uppercased() == "GET" else { decisionHandler(.cancel); return }
