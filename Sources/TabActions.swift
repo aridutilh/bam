@@ -263,6 +263,8 @@ import WebKit
             return session.tabs.contains { $0.id == id } && view.window?.attachedSheet == nil
         case #selector(closeTabsBelow(_:)):
             return !session.todayTabs(below: id).isEmpty
+        case #selector(capturePage(_:)), #selector(captureFullPage(_:)):
+            return pageCommandSurface != nil && !isCapturing
         case #selector(changeTabIcon(_:)):
             return session.tabs.contains { $0.id == id } && view.window?.attachedSheet == nil && savedTabEditor == nil
         case #selector(copyTabLink(_:)):
