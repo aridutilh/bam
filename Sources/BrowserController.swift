@@ -217,6 +217,17 @@ import QuartzCore
     let progress = NSView()
     let animator = CubicAnimator()
     let pagingAnimator = SpringAnimator()
+    /// Arc's hidden-sidebar reveal: pointing at the window's left edge floats the sidebar over the page as a card.
+    let floatingShell = FloatingSidebarShell()
+    let edgeZone = SidebarEdgeZone()
+    let floatingAnimator = CubicAnimator()
+    /// 0: away; 1: the floating sidebar fully in. Only meaningful while the sidebar is hidden.
+    var floatingProgress: CGFloat = 0
+    /// True while ⌘S pins a floating sidebar back: it stays put at the window edge while the page slides over.
+    var pinningFromFloat = false
+    /// Where the traffic lights' row is moved by a floating sidebar card (they ride inside its corner).
+    var windowButtonOffset = CGPoint.zero
+    var floatingRevealWork: DispatchWorkItem?
     let pictureInPicture = PictureInPictureCoordinator()
     let findBar = FindBarCoordinator()
     let pageFeedback = PageFeedbackCoordinator()
@@ -391,7 +402,9 @@ import QuartzCore
         root.onLayout = { [weak self] in self?.layoutBrowser() }
         root.onTranslucencyChange = { [weak self] clear in self?.windowTranslucent = clear }
         root.onAppearanceChange = { [weak self] in self?.applyChromeColors() }
-        [sidebar, card, handle, listScrollThumb].forEach(root.addSubview)
+        // The sidebar draws above the card so it can float over the page when hidden (docked, they never overlap).
+        [card, floatingShell, sidebar, handle, listScrollThumb, edgeZone].forEach(root.addSubview)
+        configureFloatingSidebar()
         sidebar.onTabListChange = { [weak self] in self?.refreshListScrollThumb() }
         listScrollThumb.onInteractionChange = { [weak self] active in self?.handle.isIndicatorSuppressed = active }
         card.wantsLayer = true
@@ -499,7 +512,7 @@ import QuartzCore
         }
         guard !placingWindowButtons, !window.styleMask.contains(.fullScreen) else { return }
         placingWindowButtons = true; defer { placingWindowButtons = false }
-        let height = ArkMetrics.toolbarCenterY * 2
+        let height = ArkMetrics.toolbarCenterY * 2 + BrowserController.floatingInset
         let frame = NSRect(x: 0, y: window.frame.height - height, width: window.frame.width, height: height)
         if container.frame != frame { container.frame = frame }
         let kinds: [NSWindow.ButtonType] = [.closeButton, .miniaturizeButton, .zoomButton]
@@ -509,8 +522,9 @@ import QuartzCore
         for (index, button) in buttons.enumerated() {
             guard let parent = button.superview else { continue }
             let size = button.frame.size
-            let center = NSPoint(x: ArkMetrics.trafficLightLeading + CGFloat(index) * spacing,
-                                 y: parent.isFlipped ? ArkMetrics.toolbarCenterY : parent.bounds.height - ArkMetrics.toolbarCenterY)
+            let rowY = ArkMetrics.toolbarCenterY + windowButtonOffset.y
+            let center = NSPoint(x: ArkMetrics.trafficLightLeading + windowButtonOffset.x + CGFloat(index) * spacing,
+                                 y: parent.isFlipped ? rowY : parent.bounds.height - rowY)
             let origin = NSPoint(x: (center.x - size.width / 2).rounded(), y: (center.y - size.height / 2).rounded())
             if button.frame.origin != origin { button.setFrameOrigin(origin) }
         }
@@ -540,10 +554,10 @@ import QuartzCore
         guard w > 0 && h > 0 else { return }
         let targetWidth = CGFloat(session.sidebarWidth)
         let width = min(max(0, displayedWidth), max(164, w - 360))
-        sidebar.frame = NSRect(x: width - targetWidth, y: 0, width: targetWidth, height: h)
+        sidebar.frame = NSRect(x: pinningFromFloat ? 0 : width - targetWidth, y: 0, width: targetWidth, height: h)
         sidebar.layer?.transform = CATransform3DIdentity
         sidebar.alphaValue = 1
-        sidebar.isHidden = width < 0.5 || spaceCreationPanel != nil
+        sidebar.isHidden = (width < 0.5 && !pinningFromFloat) || spaceCreationPanel != nil
         // With the sidebar away the page owns the whole window, like Arc: the
         // card's margin, corner and border fade out continuously over the last
         // 80 points so nothing jumps, and no toolbar strip appears.
@@ -554,6 +568,7 @@ import QuartzCore
         card.layer?.cornerRadius = 10 * (1 - collapse)
         card.layer?.borderColor = resolvedCGColor(BrowserChrome.cardEdge, for: card).copy(alpha: (root.isDark ? 0.09 : 0.10) * (1 - collapse))
         applyWindowButtons(collapse: collapse)
+        layoutFloatingSidebar(dockedWidth: width, targetWidth: targetWidth, height: h)
         webHost.frame = card.bounds
         if let web = activeWebView, web.superview === webHost { web.frame = webHost.bounds }
         for child in webHost.subviews where !(child is WKWebView) { child.frame = webHost.bounds }
@@ -1000,7 +1015,7 @@ import QuartzCore
         let direction = spaceDirection(to: space)
         sidebar.beginPaging(tabs: sidebarItems(for: space), space: space, direction: direction)
         pagingTarget = space
-        finishPaging(commit: space, initialVelocity: velocity)
+        finishPaging(commit: space, initialVelocity: velocity, response: BrowserController.discreteSpaceResponse)
     }
     func handleSpaceScroll(_ event: NSEvent, source: SpaceScrollSource = .monitor) -> NSEvent? {
         guard !suspendsChromeInteraction else { return event }
@@ -1178,23 +1193,36 @@ import QuartzCore
         }
         return result.shouldConsume
     }
-    func finishPaging(commit: Int?, initialVelocity: CGFloat? = nil) {
+    /// Arc's discrete Space switch (keys, footer, menu): the incoming Space slides in and the window color
+    /// crossfades with it in well under a quarter second. A released swipe settles a little softer.
+    static let discreteSpaceResponse = 0.17
+    static let releasedSpaceResponse = 0.30
+    func finishPaging(commit: Int?, initialVelocity: CGFloat? = nil, response: Double = BrowserController.releasedSpaceResponse) {
         SpaceSwipeDiagnostics.shared.record(["kind": "settle", "space": session.space,
             "target": commit ?? -1, "offset": pagingOffset, "releaseVelocity": initialVelocity ?? 0])
         pagingCommit = commit
+        // The Space being left: its color fades out as the incoming page settles (Arc crossfades the window with the slide).
+        let departing = commit.flatMap { $0 == session.space ? nil : session.spaceDefinition(session.space) }
+        func crossfade(_ offset: CGFloat) {
+            guard let departing, spaceCreationPanel == nil else { return }
+            root.previewTheme = departing.theme; root.previewSpace = departing.colorIndex
+            root.previewProgress = min(1, abs(offset) / max(1, sidebar.bounds.width))
+        }
         if let commit {
             // Navigation is not an animation completion. Publish the selection
             // and attach the live destination before the next display frame.
             pagingOffset = sidebar.commitPaging(to: commit, preservingOffset: true)
             session.changeSpace(commit)
             showActive(); scheduleSave()
+            crossfade(pagingOffset)
             SpaceSwipeDiagnostics.shared.record(["kind": "commit", "space": session.space,
                 "target": commit, "offset": pagingOffset])
         }
-        pagingAnimator.animate(from: pagingOffset, to: 0, response: 0.30, dampingRatio: 0.99,
+        pagingAnimator.animate(from: pagingOffset, to: 0, response: response, dampingRatio: 0.99,
             initialVelocity: initialVelocity, update: { [weak self] offset in
             guard let self else { return }
             self.pagingOffset = offset; self.sidebar.setPagingOffset(offset)
+            crossfade(offset)
             // The creation panel owns the gradient preview while it is open.
             if commit == nil, self.spaceCreationPanel == nil {
                 self.root.previewTheme = self.pagingTarget.flatMap { self.session.spaceDefinition($0)?.theme }
@@ -1236,11 +1264,19 @@ import QuartzCore
         refresh()
     }
     func setSidebar(_ visible: Bool) {
-        cancelPaging(); session.sidebarVisible = visible
+        cancelPaging()
+        // A floating sidebar pinned back stays where it is; only the page slides over (Arc).
+        pinningFromFloat = visible && floatingProgress > 0
+        floatingAnimator.stop(); floatingProgress = 0; floatingRevealWork?.cancel(); floatingRevealWork = nil
+        session.sidebarVisible = visible
         // Three concrete presentation-transition callbacks use this recovered curve.
         animator.animate(from: displayedWidth, to: visible ? CGFloat(session.sidebarWidth) : 0, duration: 0.08, controlPoints: (0.25, 0.46, 0.45, 0.94), update: { [weak self] value in
             guard let self else { return }; self.displayedWidth = value; self.layoutBrowser()
-        }, completion: { [weak self] in self?.save() })
+        }, completion: { [weak self] in
+            guard let self else { return }
+            if self.pinningFromFloat { self.pinningFromFloat = false; self.layoutBrowser() }
+            self.save()
+        })
     }
     @objc func togglePictureInPicture(_ sender: Any?) {
         if pictureInPicture.activeTabID != nil, view.window?.isKeyWindow == false { pictureInPicture.restore(); return }

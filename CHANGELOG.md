@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Switching Spaces with the keyboard, the footer or the Spaces menu now slides the new Space in quickly, as Arc does, and the window color crossfades with it instead of jumping. The footer's Space icons fade between gray and color.
+- With the sidebar hidden, rest the pointer at the window's left edge and the sidebar slides in as a floating card over the page; it slides away when you move off it. Press ⌘S while it's showing to pin it back, and the page slides over to make room.
+- Dragging a tab is more physical: a tab you drop glides from where you let go into its new place, and tabs that move (drops, Move Earlier/Later, keeping a tab) slide to their new spots instead of jumping.
 - ⌃⇥ now goes to the tab you used last, not the next one down. Keep holding ⌃ and press ⇥ again to bring up your five most recent tabs with page previews; release ⌃ to go there, ⌃⇧⇥ to step back, Esc to stay put.
 - ⌘1 to ⌘8 jump to that tab in the sidebar, Favorites first, and ⌘9 jumps to the last tab (Tabs › Go to Tab).
 - New tabs open at the top of Today. Links you open in a new tab land right below the page they came from, in the order you opened them, and closing one takes you to its neighbor from the same page, then back to that page.

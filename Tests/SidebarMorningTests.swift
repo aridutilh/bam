@@ -643,6 +643,17 @@ import AppKit
         require(chrome.footerRuleOpacity == 0, "At the end of the list the footer's hairline is gone")
         chromeList.contentView.scroll(to: .zero); chromeList.reflectScrolledClipView(chromeList.contentView)
         require(chrome.footerRuleOpacity == 1, "With tabs continuing below, Arc's hairline sits over the footer")
+        // A single row moving (drop, Move Earlier/Later) slides: the table moves that row's view rather than
+        // rebuilding the list, so its view (and any state on it) survives the move.
+        chromeList.contentView.scroll(to: .zero); chromeList.reflectScrolledClipView(chromeList.contentView)
+        // Animated list changes only run in a visible window: show this one, off screen.
+        chromeWindow.setFrameOrigin(NSPoint(x: -6000, y: 200)); chromeWindow.orderBack(nil); spin()
+        let movedID = chromeItems[3].id, movedView = chromeRow(movedID)
+        var reordered = chromeItems; let moved = reordered.remove(at: 3); reordered.insert(moved, at: 5)
+        chrome.update(tabs: reordered, space: 0, canGoBack: false, canGoForward: false, isLoading: false); spin()
+        require(chromeRow(movedID) === movedView, "A moved row keeps its view and slides to its new place")
+        chrome.update(tabs: chromeItems, space: 0, canGoBack: false, canGoForward: false, isLoading: false); spin()
+        chromeWindow.orderOut(nil)
         withExtendedLifetime(chromeWindow) {}
 
         print("PASS: \(checks) sidebar morning checks")

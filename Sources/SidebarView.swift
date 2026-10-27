@@ -908,6 +908,27 @@ struct SidebarExtensionItem {
         while suffix < min(oldKeys.count, newKeys.count) - prefix,
               oldKeys[oldKeys.count - 1 - suffix] == newKeys[newKeys.count - 1 - suffix] { suffix += 1 }
         let removed = oldKeys.count - prefix - suffix, inserted = newKeys.count - prefix - suffix
+        // One row moved (a reorder, a drop, Keep/Unkeep): it slides to its new place and the rows between make room.
+        if removed == inserted, removed >= 2, removed <= 300 {
+            let i = prefix, j = prefix + removed - 1
+            let from: Int?, to: Int?
+            if Array(oldKeys[(i + 1)...j]) == Array(newKeys[i..<j]) && oldKeys[i] == newKeys[j] { from = i; to = j }
+            else if Array(oldKeys[i..<j]) == Array(newKeys[(i + 1)...j]) && oldKeys[j] == newKeys[i] { from = j; to = i }
+            else { from = nil; to = nil }
+            if let from, let to {
+                NSAnimationContext.runAnimationGroup { context in
+                    context.duration = 0.22
+                    context.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0.8, 0.2, 1)
+                    table.beginUpdates(); table.moveRow(at: from, to: to); table.endUpdates()
+                }
+                table.enumerateAvailableRowViews { [weak self] _, row in
+                    guard let self, self.entries.indices.contains(row), case .tab(let index) = self.entries[row],
+                          let cell = self.table.view(atColumn: 0, row: row, makeIfNecessary: false) as? SidebarTabCell else { return }
+                    self.configure(cell, item: self.tabs[index])
+                }
+                return true
+            }
+        }
         guard (removed == 0) != (inserted == 0), max(removed, inserted) <= 300 else { return false }
         NSAnimationContext.runAnimationGroup { context in
             context.duration = 0.18
@@ -1048,8 +1069,30 @@ struct SidebarExtensionItem {
     func tableView(_ tableView: NSTableView, acceptDrop info: NSDraggingInfo, row: Int, dropOperation: NSTableView.DropOperation) -> Bool {
         guard let raw = info.draggingPasteboard.string(forType: .bamSidebarRow), let id = UUID(uuidString: raw),
               let space = spaceAppearance?.id else { return false }
-        return drop?(id, dropTarget(row: row, operation: dropOperation).target, space) ?? false
+        guard drop?(id, dropTarget(row: row, operation: dropOperation).target, space) ?? false else { return false }
+        glideDrop(info, to: id)
+        return true
     }
+    /// Arc: a dropped row glides from where it was let go into its new place. The list has already been rebuilt
+    /// with the row in place; the row starts where the drag image was and slides home.
+    private func glideDrop(_ info: NSDraggingInfo, to id: UUID) {
+        guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion, let row = rowByID[id], window != nil else { return }
+        table.layoutSubtreeIfNeeded()
+        guard let cell = table.view(atColumn: 0, row: row, makeIfNecessary: false), let layer = cell.layer else { return }
+        // The drag image's top-left, in the table (the image is the row's own snapshot, so its top is the row's top).
+        let imageBottom = table.convert(info.draggedImageLocation, from: nil)
+        let imageTop = table.isFlipped ? imageBottom.y - (info.draggedImage?.size.height ?? cell.bounds.height) : imageBottom.y
+        let target = cell.convert(NSPoint.zero, to: table)
+        let dy = imageTop - target.y, dx = imageBottom.x - target.x
+        guard abs(dy) > 2 || abs(dx) > 2, abs(dy) < 2000 else { return }
+        let start = CATransform3DMakeTranslation(dx, layer.isGeometryFlipped == cell.isFlipped ? dy : -dy, 0)
+        let glide = CABasicAnimation(keyPath: "transform")
+        glide.fromValue = NSValue(caTransform3D: start); glide.toValue = NSValue(caTransform3D: CATransform3DIdentity)
+        glide.duration = Self.dropGlideDuration
+        glide.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0.8, 0.2, 1)
+        layer.add(glide, forKey: "bam.dropGlide")
+    }
+    static let dropGlideDuration: TimeInterval = 0.24
 
     override func layout() {
         super.layout(); let w = bounds.width
@@ -2105,7 +2148,35 @@ private final class ArkSpaceButton: ArkHoverButton, SpaceTinted {
     /// A dragged tab or folder dropped here moves to this Space.
     var acceptDrop: ((UUID) -> Bool)?
     private var dropHovered = false { didSet { if oldValue != dropHovered { needsDisplay = true } } }
-    var selected = false { didSet { needsDisplay = true; setAccessibilityValue(selected ? "Selected" : "Not selected") } }
+    var selected = false {
+        didSet {
+            setAccessibilityValue(selected ? "Selected" : "Not selected")
+            guard oldValue != selected else { return }
+            animateLit(to: selected ? 1 : 0)
+        }
+    }
+    /// 0: a gray, receded icon; 1: the Space's own colors. Changes fade over `litDuration` (Arc's footer).
+    private(set) var lit: CGFloat = 0
+    private var litTimer: Timer?
+    static let litDuration: TimeInterval = 0.16
+    private func animateLit(to target: CGFloat) {
+        litTimer?.invalidate(); litTimer = nil
+        guard window != nil, !isHiddenOrHasHiddenAncestor, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
+            lit = target; needsDisplay = true; return
+        }
+        let start = lit, began = ProcessInfo.processInfo.systemUptime
+        let timer = Timer(timeInterval: 1.0 / 60, repeats: true) { [weak self] timer in
+            MainActor.assumeIsolated {
+                guard let self, self.litTimer === timer else { timer.invalidate(); return }
+                let t = min(1, (ProcessInfo.processInfo.systemUptime - began) / Self.litDuration)
+                self.lit = start + (target - start) * CGFloat(1 - pow(1 - t, 2))
+                self.needsDisplay = true
+                if t >= 1 { self.lit = target; timer.invalidate(); self.litTimer = nil }
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        litTimer = timer
+    }
     init(space: BrowserSpace) {
         index = space.id
         super.init(frame: .zero)
@@ -2139,10 +2210,11 @@ private final class ArkSpaceButton: ArkHoverButton, SpaceTinted {
             let ring = NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: 7, yRadius: 7); ring.lineWidth = 1.5; ring.stroke()
         }
         let size: CGFloat = 16
-        let lit = selected || hovered || dropHovered
-        ArkSpaceIcon.draw((emoji, symbolName, lit ? tint : ArkPalette.secondary),
-                          in: NSRect(x: (bounds.width - size) / 2, y: (bounds.height - size) / 2, width: size, height: size),
-                          opacity: lit ? 1 : 0.55, grayscale: !lit)
+        let rect = NSRect(x: (bounds.width - size) / 2, y: (bounds.height - size) / 2, width: size, height: size)
+        let amount = hovered || dropHovered ? 1 : lit
+        // Crossfade the receded gray icon into the colored one.
+        if amount < 1 { ArkSpaceIcon.draw((emoji, symbolName, ArkPalette.secondary), in: rect, opacity: 0.55 * (1 - amount), grayscale: true) }
+        if amount > 0 { ArkSpaceIcon.draw((emoji, symbolName, tint), in: rect, opacity: amount) }
     }
     override func menu(for event: NSEvent) -> NSMenu? {
         if let menu = contextMenu?() { return menu }

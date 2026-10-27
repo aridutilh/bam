@@ -215,6 +215,7 @@ final class CubicAnimator {
     private var updateValue: ((CGFloat) -> Void)?
     private var didComplete: (() -> Void)?
     private(set) var value: CGFloat = 0
+    var isRunning: Bool { updateValue != nil }
 
     func animate(from: CGFloat, to: CGFloat, duration: Double,
                  controlPoints: (Double, Double, Double, Double),
