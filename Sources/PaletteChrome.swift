@@ -172,6 +172,9 @@ enum PaletteStyle {
     /// The field editor's selection look before the completion style.
     var savedSelectionAttributes: [NSAttributedString.Key: Any]?
     weak var styledEditor: NSTextView?
+    /// Set when the bar opened over a new, empty Split pane: what it opens loads there, and dismissing it
+    /// with Esc or a click outside closes that pane again while it is still empty.
+    var splitPaneID: UUID?
 }
 
 private nonisolated(unsafe) var paletteStateKey: UInt8 = 0
@@ -184,6 +187,8 @@ extension BrowserController {
         objc_setAssociatedObject(self, &paletteStateKey, state, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
         return state
     }
+    /// The empty Split pane the open bar belongs to, without creating palette state.
+    var paletteSplitPaneID: UUID? { (objc_getAssociatedObject(self, &paletteStateKey) as? PaletteState)?.splitPaneID }
     func resetPaletteState() {
         guard let state = objc_getAssociatedObject(self, &paletteStateKey) as? PaletteState else { return }
         if let monitor = state.keyMonitor { NSEvent.removeMonitor(monitor) }

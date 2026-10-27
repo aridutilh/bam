@@ -144,7 +144,24 @@ import WebKit
             return
         }
         session = draft; showActive(); save()
-        splitCoordinators[primary]?.focusAddress(.right)
+        // As in the reference: the command bar opens over the new pane; what you pick loads there,
+        // and Esc (or a click outside) closes the pane again while it is still empty.
+        splitCoordinators[primary]?.setFocusedSide(.right)
+        openAddress(newTab: false, empty: true, overSplitPane: id)
+    }
+    /// Where the command bar centres while it belongs to a new Split pane.
+    func splitPaneFrameForPalette() -> NSRect? {
+        guard let pane = paletteSplitPaneID, let group = session.split(for: pane),
+              let split = splitCoordinators[group.primaryID], split.view.window != nil else { return nil }
+        return split.paneFrame(pane == group.secondaryID ? .right : .left, in: root)
+    }
+    /// Esc or a click outside the bar: closes it, and the new Split pane it belonged to if nothing was opened there.
+    func dismissAddressClosingEmptyPane() {
+        let pane = paletteSplitPaneID
+        dismissAddress()
+        guard let pane, session.split(for: pane) != nil,
+              session.tabs.first(where: { $0.id == pane })?.address == "orbit://newtab" else { return }
+        closeSplitPane(pane)
     }
     /// Whether the page area is showing a Split right now (its panes are their own cards).
     var isShowingSplit: Bool {
