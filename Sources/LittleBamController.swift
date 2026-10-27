@@ -527,7 +527,7 @@ enum LittleBamMetrics {
     private func paint() {
         image = NSImage(systemSymbolName: symbol, accessibilityDescription: accessibilityLabel())?
             .withSymbolConfiguration(.init(pointSize: 13, weight: .semibold))
-        contentTintColor = LittleBamTone.tone(isEnabled ? 0.85 : 0.35)
+        contentTintColor = LittleBamTone.tone(isEnabled ? 0.6 : 0.3)
         layer?.backgroundColor = hovering && isEnabled ? resolvedCGColor(LittleBamTone.tone(0.12), for: self) : NSColor.clear.cgColor
     }
     override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); paint() }
@@ -581,7 +581,7 @@ enum LittleBamMetrics {
     override var title: String {
         didSet {
             attributedTitle = NSAttributedString(string: title, attributes: [
-                .font: BamType.sans(12.5, weight: .semibold), .foregroundColor: LittleBamTone.tone(0.8)
+                .font: BamType.sans(12, weight: .medium), .foregroundColor: LittleBamTone.tone(0.8)
             ])
             contentTintColor = LittleBamTone.tone(0.7)
         }
@@ -605,7 +605,7 @@ enum LittleBamMetrics {
     override var title: String {
         didSet {
             attributedTitle = NSAttributedString(string: title, attributes: [
-                .font: BamType.sans(13, weight: .medium), .foregroundColor: LittleBamTone.tone(0.9)
+                .font: BamType.sans(13, weight: .regular), .foregroundColor: LittleBamTone.tone(0.82)
             ])
         }
     }
