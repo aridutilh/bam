@@ -61,8 +61,8 @@ import WebKit
     }
     /// Share on the copy confirmation, as in Arc: the system share menu for this address.
     func shareAction(for url: URL) -> PageFeedbackAction {
-        PageFeedbackAction(symbol: "square.and.arrow.up", label: "Share") { anchor in
-            NSSharingServicePicker(items: [url]).show(relativeTo: anchor.bounds, of: anchor, preferredEdge: .minY)
+        PageFeedbackAction(symbol: "square.and.arrow.up", label: "Share") { anchor, closed in
+            SharePickerSession.show(url, from: anchor, closed: closed)
         }
     }
     /// "[Title](address)" as text, and as a live link for apps that paste rich text.
@@ -249,5 +249,33 @@ extension BrowserController: NSMenuItemValidation {
             return NSApp.keyWindow === view.window && session.active?.isFavorite != true && session.split(for: session.activeID) == nil
         default: return true
         }
+    }
+}
+
+/// Keeps the share picker (and the call that releases the confirmation it hangs
+/// from) alive until the person picks a service or dismisses it.
+@MainActor final class SharePickerSession: NSObject, NSSharingServicePickerDelegate {
+    private static var current: SharePickerSession?
+    private let picker: NSSharingServicePicker
+    private var closed: (@MainActor () -> Void)?
+
+    private init(_ url: URL, closed: @escaping @MainActor () -> Void) {
+        picker = NSSharingServicePicker(items: [url]); self.closed = closed
+        super.init()
+        picker.delegate = self
+    }
+    static func show(_ url: URL, from anchor: NSView, closed: @escaping @MainActor () -> Void) {
+        current?.finish()
+        let session = SharePickerSession(url, closed: closed)
+        current = session
+        session.picker.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: .minY)
+    }
+    nonisolated func sharingServicePicker(_ sharingServicePicker: NSSharingServicePicker, didChoose service: NSSharingService?) {
+        MainActor.assumeIsolated { finish() }
+    }
+    private func finish() {
+        let done = closed; closed = nil
+        if Self.current === self { Self.current = nil }
+        done?()
     }
 }

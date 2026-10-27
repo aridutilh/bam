@@ -5,7 +5,9 @@ import QuartzCore
 struct PageFeedbackAction {
     var symbol: String
     var label: String
-    var perform: @MainActor (NSView) -> Void
+    /// Gets the button to anchor UI to, and a call to make once that UI has closed:
+    /// the confirmation stays up until then, so what is anchored to it is not orphaned.
+    var perform: @MainActor (NSView, @escaping @MainActor () -> Void) -> Void
 }
 
 /// A transient confirmation in the page's top-right corner, without changing
@@ -43,10 +45,10 @@ struct PageFeedbackAction {
         }
         self.message = message
         overlay.configure(message: message, action: action.map { action in
-            PageFeedbackAction(symbol: action.symbol, label: action.label) { [weak self] anchor in
-                // Using the action keeps the confirmation up a little longer.
-                self?.schedule(request: request, after: 2)
-                action.perform(anchor)
+            PageFeedbackAction(symbol: action.symbol, label: action.label) { [weak self] anchor, _ in
+                // Held while the action's UI is open, then a little longer.
+                self?.dismissal?.cancel(); self?.dismissal = nil
+                action.perform(anchor) { self?.schedule(request: request, after: 2) }
             }
         })
         overlay.isHidden = false
@@ -156,7 +158,7 @@ struct PageFeedbackAction {
         }
     }
 
-    @objc private func performAction() { action?.perform(button) }
+    @objc private func performAction() { action?.perform(button, {}) }
 
     override func layout() {
         super.layout()
