@@ -558,8 +558,17 @@ enum PaletteSelection {
         // Grays stay gray (a neutral Space); everything else keeps its hue.
         if saturation < 0.08 { return NSColor(white: dark ? 0.36 : 0.30, alpha: 1) }
         let s = min(0.82, max(saturation, 0.5))
-        let b = max(0.42, min(brightness, dark ? 0.80 : 0.72))
+        var b = max(0.42, min(brightness, dark ? 0.80 : 0.72))
+        // The selected row's text is white: yellow, lime and cyan Spaces darken until it reads at 4.5:1.
+        while b > 0.3, whiteContrast(on: NSColor(deviceHue: hue, saturation: s, brightness: b, alpha: 1)) < 4.5 { b -= 0.02 }
         return NSColor(deviceHue: hue, saturation: s, brightness: b, alpha: 1)
+    }
+    /// WCAG contrast of white text on an opaque color.
+    static func whiteContrast(on color: NSColor) -> CGFloat {
+        guard let rgb = color.usingColorSpace(.sRGB) else { return 21 }
+        func linear(_ v: CGFloat) -> CGFloat { v <= 0.03928 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4) }
+        let luminance = 0.2126 * linear(rgb.redComponent) + 0.7152 * linear(rgb.greenComponent) + 0.0722 * linear(rgb.blueComponent)
+        return 1.05 / (luminance + 0.05)
     }
 }
 

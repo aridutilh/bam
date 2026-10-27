@@ -159,6 +159,8 @@ enum PaletteStyle {
     var completion: PaletteCompletion?
     /// Set by a delete key so the next text change doesn't complete again.
     var suppressCompletion = false
+    /// The field's text after the last change, to tell a typed letter from a paste.
+    var lastFieldText = ""
     var history = PaletteHistoryIndex(visits: [])
     var candidates: [PaletteCompletionCandidate] = []
     var openTabKeys: Set<String> = []

@@ -341,6 +341,13 @@ enum PaletteFieldChecks {
                     && PaletteAutocomplete.complete("zz", candidates: candidates) == nil && PaletteAutocomplete.complete("", candidates: candidates) == nil,
                 "Words, schemes and unknown text never complete")
         require(PaletteAutocomplete.complete("github.com", candidates: candidates)?.tail == "", "An exact host stays a completion with no ending")
+        let dev = [PaletteCompletionCandidate(address: "http://localhost:3000/dashboard", title: "Dev", weight: 5),
+                   PaletteCompletionCandidate(address: "http://192.168.1.10:8080/", title: "Router", weight: 1)]
+        let local = PaletteAutocomplete.complete("localh", candidates: dev)
+        require(local?.text == "localhost:3000" && local?.address == "http://localhost:3000",
+                "A host completion keeps its port and an http-only site's scheme: \(String(describing: local))")
+        require(PaletteAutocomplete.complete("192", candidates: dev)?.address == "http://192.168.1.10:8080/",
+                "An IP with a port completes to the visited root")
 
         // Calculator.
         require(PaletteCalculator.evaluate("2*21+0.5")?.display == "42.5" && PaletteCalculator.evaluate("= (1+2)^2 × 3")?.value == 27
@@ -348,11 +355,29 @@ enum PaletteFieldChecks {
                     && PaletteCalculator.evaluate("50%")?.value == 0.5 && PaletteCalculator.evaluate("10 / 4")?.display == "2.5"
                     && PaletteCalculator.evaluate("-3 - -3")?.display == "0",
                 "Arithmetic with precedence, powers, percent, grouping and unicode operators")
-        for text in ["42", "3.14", "-5", "2026-10-27", "555-1234", "10/27/2026", "1.2.3", "1/0", "abc", "2+", "github.com", "(1+2"] {
+        require(PaletteCalculator.evaluate("1,000,000*2")?.plain == "2000000" && PaletteCalculator.evaluate("2x4")?.value == 8,
+                "Thousands grouping and x as times")
+        for text in ["42", "3.14", "-5", "2026-10-27", "555-1234", "10/27/2026", "1.2.3", "1/0", "abc", "2+", "github.com", "(1+2",
+                     "0x10", "0x1F+1", "1,5+1", "3,5", "2**999", "9^9^9^9", "(-8)^0.5", String(repeating: "(", count: 60) + "1"] {
             require(PaletteCalculator.evaluate(text) == nil, "\(text) is not a sum")
         }
 
+        // The selected row's white text stays readable on every Space hue, light and dark.
+        for appearanceName in [NSAppearance.Name.aqua, .darkAqua] {
+            guard let appearance = NSAppearance(named: appearanceName) else { continue }
+            for step in 0..<36 {
+                let tint = NSColor(deviceHue: CGFloat(step) / 36, saturation: 0.6, brightness: 1, alpha: 1)
+                let contrast = PaletteSelection.whiteContrast(on: PaletteSelection.fill(for: tint, in: appearance))
+                require(contrast >= 4.5, "White on the \(appearanceName.rawValue) selection fill for hue \(step * 10)° reads at \(contrast):1")
+            }
+        }
+
         // Quick Actions.
+        for name in ["figma", "notion", "linear", "docs", "repo"] {
+            require(PaletteQuickActionCatalog.matches(name).allSatisfy { !$0.leading }, "Typing the site name \(name) never makes Return create something")
+        }
+        require(PaletteQuickActionCatalog.matches("figma.new").first?.leading == true && PaletteQuickActionCatalog.matches("new notion").first?.leading == true,
+                "The *.new host or the action's name still leads")
         let doc = PaletteQuickActionCatalog.matches("doc")
         require(doc.first?.action.host == "docs.new" && doc.first?.leading == true, "An alias names a Quick Action outright")
         require(PaletteQuickActionCatalog.matches("new meeting").first?.action.host == "meet.new"

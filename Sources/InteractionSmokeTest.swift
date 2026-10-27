@@ -358,9 +358,31 @@ import WebKit
             self.after(0.8) {
                 guard self.check(self.controller.session.space == 2 && self.controller.session.activeID == committedID && self.pagingIsClear, "Cancelling sidebar motion rolled back or later replaced committed content") else { return }
                 self.controller.dismissAddress()
+                guard self.testPaletteCompletionTyping() else { return }
                 self.testSelectionInterrupt()
             }
         }
+    }
+
+    /// Inline completion through the real field editor: typed letters complete (keeping a dev server's port and
+    /// http), Backspace removes the gray ending, and text that lands all at once (a paste or drop) never completes.
+    private func testPaletteCompletionTyping() -> Bool {
+        controller.library.recordVisit(title: "Dev server", address: "http://localhost:3000/dashboard")
+        controller.openAddress(newTab: false, empty: true)
+        defer { controller.dismissAddress() }
+        guard let field = controller.addressField, let editor = field.currentEditor() as? NSTextView else {
+            return check(false, "The palette field has no field editor")
+        }
+        for letter in "localh" { editor.insertText(String(letter), replacementRange: editor.selectedRange()) }
+        guard check(field.stringValue == "localhost:3000" && controller.paletteQueryText == "localh"
+                        && controller.tabSearchResults?.selectedTarget == .address("http://localhost:3000", alwaysNewTab: false),
+                    "Typing did not complete to the dev server with its port: field=\(field.stringValue) target=\(String(describing: controller.tabSearchResults?.selectedTarget))") else { return false }
+        editor.doCommand(by: #selector(NSResponder.deleteBackward(_:)))
+        guard check(field.stringValue == "localh", "Backspace did not remove only the gray ending: \(field.stringValue)") else { return false }
+        editor.selectAll(nil)
+        editor.insertText("localhost:3000/dash", replacementRange: editor.selectedRange())
+        return check(field.stringValue == "localhost:3000/dash" && controller.paletteQueryText == "localhost:3000/dash",
+                     "Text pasted in one go was completed: \(field.stringValue)")
     }
 
     private func testSelectionInterrupt() {

@@ -22,6 +22,7 @@
 - Quick aliases open a fresh document, meeting or spreadsheet in a new tab: type "doc", "meet" or "sheet" (docs.new, meet.new, sheets.new and more).
 - New keys in the search box: ⌘Return opens in a background tab, ⇧⌘Return in a new tab, ⇧⌘C copies the selected result's link, ⌘K shows actions for it (Open in Split View, Copy Link, Close Tab…), and Esc steps back before it closes.
 - The search box finds the new page tools by name: Copy Link, Copy Markdown Link, Reading Mode, Hide Elements, Restore Hidden Elements, Web Inspector, JavaScript Console and Inspect Element.
+- Search box fixes: address completion keeps a site's port and http (typing "localh" now finishes to localhost:3000), and pasted text is never completed. Typing a site's name such as "figma" or "notion" and pressing Return goes to the site instead of creating a new file. The selected row stays readable on yellow and green Spaces, sums like "0x10" or "1,5+1" no longer show a wrong answer, and typing stays quick with a full history.
 
 ## 0.25.1 build 51 — Quit dialog and sidebar scroll bar polish
 
