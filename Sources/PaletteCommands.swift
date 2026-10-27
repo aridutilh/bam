@@ -146,7 +146,13 @@ enum PaletteCommandCatalog {
                        symbol: "sparkles", shortcut: nil, action: "showWelcome:"),
         PaletteCommand(id: "about", title: "About Bam", detail: "Version and credits",
                        keywords: ["version", "about", "credits"],
-                       symbol: "info.circle", shortcut: nil, action: "showAbout:")
+                       symbol: "info.circle", shortcut: nil, action: "showAbout:"),
+        PaletteCommand(id: "capture", title: "Capture", detail: "Click a block or drag an area of the page to copy a picture of it",
+                       keywords: ["screenshot", "capture", "snapshot", "screen shot"],
+                       symbol: "camera.viewfinder", shortcut: "⇧⌘2", action: "capturePage:"),
+        PaletteCommand(id: "capture-full-page", title: "Capture Full Page", detail: "A picture of the whole page, top to bottom",
+                       keywords: ["full page screenshot", "whole page", "long screenshot", "scrolling screenshot"],
+                       symbol: "doc.viewfinder", shortcut: nil, action: "captureFullPage:"),
     ]
 
     /// Ranks: 0 — the whole query starts a title or keyword ("sett" → Settings);

@@ -21,6 +21,8 @@ import WebKit
     var mutedTabs: Set<UUID> = []
     /// A tab waiting for the Space being created ("Move to ▸ New Space…").
     var pendingMoveToNewSpace: UUID?
+    /// Capture (⇧⌘2), PageCapture.swift.
+    lazy var capture = PageCaptureCoordinator()
     /// The hovered-link address at the page's corner (LinkStatus.swift).
     lazy var linkStatus = LinkStatusController()
     /// A quick ⌃⇥ tap lands without the overlay ever drawing.
