@@ -423,6 +423,14 @@ enum ArcImport {
             session.spaces[index].theme = nil
         }
         session.importLinks = previous.importLinks
+        // The import selected its own blank landing tab, which is gone now. Go back to what was selected
+        // before rather than letting the session pick a fallback: that may be an imported page (a real page
+        // beats a blank tab there), and selecting it would load it, when imported tabs must stay dormant.
+        if !session.tabs.contains(where: { $0.id == session.activeID }),
+           let earlier = session.tabs.first(where: { $0.id == previous.activeID }) {
+            session.activeID = earlier.id
+            if !earlier.isFavorite, session.spaceDefinition(earlier.space) != nil { session.space = earlier.space }
+        }
         if session.spaceDefinition(session.space) == nil, let first = session.spaces.first { session.space = first.id }
         session.sanitize()
         return session
