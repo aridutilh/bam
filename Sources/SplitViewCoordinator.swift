@@ -222,12 +222,12 @@ import WebKit
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
     func configure(symbol: String, label: String) {
-        image = NSImage(systemSymbolName: symbol, accessibilityDescription: label)?.withSymbolConfiguration(.init(pointSize: 12, weight: .medium))
+        image = NSImage(systemSymbolName: symbol, accessibilityDescription: label)?.withSymbolConfiguration(.init(pointSize: 13, weight: .regular))
         toolTip = label; setAccessibilityLabel(label)
         paint()
     }
     private func paint() {
-        contentTintColor = SplitTone.ink(!isEnabled ? 0.22 : (dimmed ? 0.35 : 0.62))
+        contentTintColor = SplitTone.ink(!isEnabled ? 0.22 : (dimmed ? 0.5 : 0.7))
         layer?.backgroundColor = hovering && isEnabled ? resolvedCGColor(SplitTone.ink(0.08), for: self) : NSColor.clear.cgColor
     }
     override var isEnabled: Bool { didSet { paint() } }
@@ -340,7 +340,7 @@ import WebKit
         bar.layer?.backgroundColor = resolvedCGColor(SplitTone.bar, for: self)
         line.layer?.backgroundColor = resolvedCGColor(SplitTone.line, for: self)
         content.layer?.backgroundColor = resolvedCGColor(BrowserChrome.pageSurface, for: self)
-        ring.layer?.borderColor = isFocused ? resolvedCGColor(accent, for: self) : resolvedCGColor(SplitTone.edge, for: self)
+        ring.layer?.borderColor = isFocused ? resolvedCGColor(accent.withAlphaComponent(0.7), for: self) : resolvedCGColor(SplitTone.edge, for: self)
         ring.layer?.borderWidth = isFocused ? 1.5 : 1
     }
     override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); applyColors() }
