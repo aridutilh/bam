@@ -1554,18 +1554,22 @@ import QuartzCore
         } else if !["http", "https", "about"].contains(scheme) { decisionHandler(.cancel); return }
         if navigationAction.navigationType == .linkActivated, let address = URLInput.directURL(url.absoluteString) {
             let modifiers = navigationAction.modifierFlags
-            if modifiers.contains([.command, .option]) { openLittleOrbit(url: address, profileID: profileID(of: webView)); decisionHandler(.cancel); return }
-            if modifiers.contains(.command) {
+            let sourceID = browsers.first(where: { $0.value === webView })?.key
+            let sourceTab = sourceID.flatMap { id in session.tabs.first(where: { $0.id == id }) }
+            let crossesPinnedOrigin = sourceTab?.pinned == true && address.host?.lowercased() != webView.url?.host?.lowercased()
+            // Settings › Links decides what ⌥⌘-click, Shift-click and kept-tab links to other sites do.
+            let click = LinkBehavior.click(command: modifiers.contains(.command), option: modifiers.contains(.option),
+                                           shift: modifiers.contains(.shift), fromSavedToOtherSite: crossesPinnedOrigin,
+                                           sourceVisible: sourceID.map { visibleMemberIDs.contains($0) } ?? false)
+            if click == .littleBam { openLittleOrbit(url: address, profileID: profileID(of: webView)); decisionHandler(.cancel); return }
+            if click == .newTab {
                 if let profile = profileID(of: webView) {
                     _ = openProfileTab(address, profileID: profile, active: modifiers.contains(.shift),
                                        opener: browsers.first(where: { $0.value === webView })?.key)
                 }
                 decisionHandler(.cancel); return
             }
-            let sourceID = browsers.first(where: { $0.value === webView })?.key
-            let sourceTab = sourceID.flatMap { id in session.tabs.first(where: { $0.id == id }) }
-            let crossesPinnedOrigin = sourceTab?.pinned == true && address.host?.lowercased() != webView.url?.host?.lowercased()
-            if let sourceID, visibleMemberIDs.contains(sourceID), modifiers.contains(.shift) || crossesPinnedOrigin {
+            if click == .peek, let sourceID {
                 if let group = session.split(for: sourceID) {
                     splitCoordinators[group.primaryID]?.setFocusedSide(sourceID == group.secondaryID ? .right : .left)
                 }
