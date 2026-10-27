@@ -1674,6 +1674,12 @@ import QuartzCore
                 // Do not replay a form submission across renderer configurations.
                 guard navigationAction.request.httpMethod?.uppercased() == "GET" else { decisionHandler(.cancel); return }
                 decisionHandler(.cancel)
+                // Bam's own loads of extension pages make their renderer up front and never get here, so this
+                // navigation came from the page: only resources the extension shares with that site may open.
+                if newOrigin != nil, let profile = profileID(of: webView),
+                   !allowsWebOpenedExtensionPage(url, initiator: navigationAction.sourceFrame as WKFrameInfo?, profileID: profile) {
+                    showBlockedExtensionPage(url, in: webView); return
+                }
                 navigatePane(id, address: url.absoluteString); return
             }
             if ["http", "https"].contains(scheme) { TabActivityProbe.install(in: webView.configuration) }
@@ -1688,6 +1694,13 @@ import QuartzCore
     }
     func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
         if navigationAction.targetFrame == nil, let url = navigationAction.request.url, let profile = profileID(of: webView) {
+            // A page opening an extension page in a new window gets the same check as a navigation.
+            if ["webkit-extension", "safari-web-extension"].contains(url.scheme?.lowercased() ?? ""),
+               browserExtensionOrigins[browsers.first(where: { $0.value === webView })?.key ?? UUID()] != url.host?.lowercased(),
+               !allowsWebOpenedExtensionPage(url, initiator: navigationAction.sourceFrame as WKFrameInfo?, profileID: profile) {
+                pageFeedback.show("Blocked a website from opening an extension page", symbol: "hand.raised", in: webHost)
+                return nil
+            }
             _ = openProfileTab(url, profileID: profile, active: true, opener: browsers.first(where: { $0.value === webView })?.key)
         }
         return nil
