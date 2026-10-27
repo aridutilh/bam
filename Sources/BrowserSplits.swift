@@ -57,6 +57,8 @@ import WebKit
         guard let left = session.tabs.first(where: { $0.id == group.primaryID }), let right = session.tabs.first(where: { $0.id == group.secondaryID }) else { return }
         let split = splitCoordinators[group.primaryID] ?? makeSplitCoordinator(group)
         let leftWeb = webView(for: left), rightWeb = webView(for: right)
+        split.accent = session.spaceDefinition(session.space).map { ArkPalette.spaceTint(for: $0) } ?? .controlAccentColor
+        split.ratio = CGFloat(group.ratio ?? 0.5)
         installActiveHost(split.view)
         split.configure(left: pictureInPicture.owns(leftWeb) ? nil : leftWeb, right: pictureInPicture.owns(rightWeb) ? nil : rightWeb, leftAddress: left.address, rightAddress: right.address)
     }
@@ -78,6 +80,7 @@ import WebKit
         split.onClose = { [weak self] side in self?.closeSplitPane(id(side)) }
         split.onUnsplit = { [weak self] in self?.unsplit(group.primaryID) }
         split.onReturnVideo = { [weak self] side in self?.returnPaneVideo(id(side)) }
+        split.onRatioChange = { [weak self] ratio in self?.saveSplitRatio(Double(ratio), primary: group.primaryID) }
         return split
     }
     func refreshSplitMetadata() {
@@ -142,6 +145,20 @@ import WebKit
         }
         session = draft; showActive(); save()
         splitCoordinators[primary]?.focusAddress(.right)
+    }
+    /// Whether the page area is showing a Split right now (its panes are their own cards).
+    var isShowingSplit: Bool {
+        guard let group = session.split(for: session.activeID), let split = splitCoordinators[group.primaryID] else { return false }
+        return split.view.superview === webHost
+    }
+    /// Keeps a dragged divider with the saved Split.
+    func saveSplitRatio(_ ratio: Double, primary: UUID) {
+        guard ratio.isFinite, var splits = session.splits, let index = splits.firstIndex(where: { $0.primaryID == primary }) else { return }
+        let clamped = min(0.9, max(0.1, ratio))
+        guard splits[index].ratio != clamped else { return }
+        splits[index].ratio = abs(clamped - 0.5) < 0.005 ? nil : clamped
+        session.splits = splits
+        save()
     }
     @objc func unsplitCurrent(_ sender: Any?) { unsplit(session.activeID) }
     func unsplit(_ id: UUID) {

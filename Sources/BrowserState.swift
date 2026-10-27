@@ -212,6 +212,8 @@ struct KeptLayoutEntry: Equatable {
 struct BrowserSplit: Codable, Equatable {
     var primaryID: UUID
     var secondaryID: UUID
+    /// The left pane's share of the width (0.1…0.9), saved when its divider is dragged. Older sessions: even.
+    var ratio: Double? = nil
 }
 
 /// The reserved default ID always maps to WebKit's existing default data store.

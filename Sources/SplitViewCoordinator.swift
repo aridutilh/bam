@@ -1,12 +1,17 @@
 import AppKit
 import WebKit
 
-/// Native two-pane presentation. BrowserController retains tab/session ownership
-/// and navigation delegates; this coordinator only hosts the existing web views.
-@MainActor final class SplitViewCoordinator: NSObject, NSSplitViewDelegate {
+/// Two panes as separate cards with a gap between them, each with its own slim bar, like the
+/// reference's Split View (measured from 2x captures: 10-point gap, 10-point corners, 32-point
+/// bar, a thin ring in the Space's color on the focused pane, the gap itself is the divider).
+/// BrowserController retains tab/session ownership and navigation delegates; this coordinator
+/// only hosts the existing web views.
+@MainActor final class SplitViewCoordinator: NSObject {
     enum Side: Int, CaseIterable { case left, right }
+    static let gap: CGFloat = 10
+    static let minimumPaneWidth: CGFloat = 220
 
-    var view: NSView { splitView }
+    var view: NSView { container }
     private(set) var focusedSide: Side = .left
     var onNavigate: ((Side, URL) -> Void)?
     var onBack: ((Side) -> Void)?
@@ -16,25 +21,33 @@ import WebKit
     var onClose: ((Side) -> Void)?
     var onUnsplit: (() -> Void)?
     var onReturnVideo: ((Side) -> Void)?
+    /// The left pane's share of the width changed by a drag (0…1); the browser saves it with the Split.
+    var onRatioChange: ((CGFloat) -> Void)?
+    /// The focused pane's ring: the Space's color.
+    var accent: NSColor = .controlAccentColor { didSet { refreshFocusAppearance() } }
+    /// The left pane's share of the width (0…1).
+    var ratio: CGFloat {
+        get { dividerFraction }
+        set { let clamped = newValue.isFinite ? min(0.9, max(0.1, newValue)) : 0.5
+              if clamped != dividerFraction { dividerFraction = clamped; layoutPanes() } }
+    }
 
-    private let splitView = OrbitNativeSplitView(frame: .zero)
+    private let container = SplitContainer()
     private let leftPane = OrbitSplitPane(side: .left)
     private let rightPane = OrbitSplitPane(side: .right)
+    private let gapView = SplitGap()
     private var dividerFraction: CGFloat = 0.5
-    private var isLayingOut = false
     private var eventMonitor: Any?
     private var focusObserver: NSObjectProtocol?
 
     override init() {
         super.init()
-        splitView.isVertical = true
-        splitView.dividerStyle = .thin
-        splitView.delegate = self
-        splitView.autoresizingMask = [.width, .height]
-        splitView.setAccessibilityLabel("Split browser view")
-        splitView.addArrangedSubview(leftPane)
-        splitView.addArrangedSubview(rightPane)
-        splitView.layoutPanes = { [weak self] in self?.layoutPanes() }
+        container.autoresizingMask = [.width, .height]
+        container.setAccessibilityLabel("Split browser view")
+        container.addSubview(leftPane); container.addSubview(rightPane); container.addSubview(gapView)
+        container.layoutPanes = { [weak self] in self?.layoutPanes() }
+        gapView.onDrag = { [weak self] x in self?.dragDivider(to: x) }
+        gapView.onDragEnded = { [weak self] in guard let self else { return }; self.onRatioChange?(self.dividerFraction) }
         for pane in [leftPane, rightPane] {
             pane.onFocus = { [weak self, weak pane] in guard let pane else { return }; self?.setFocusedSide(pane.side) }
             pane.onSubmit = { [weak self, weak pane] text in
@@ -53,16 +66,16 @@ import WebKit
         }
         refreshFocusAppearance()
         eventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]) { [weak self] event in
-            guard let self, let window = self.splitView.window, event.window === window, !self.splitView.isHiddenOrHasHiddenAncestor else { return event }
-            let point = self.splitView.convert(event.locationInWindow, from: nil)
-            guard self.splitView.bounds.contains(point) else { return event }
+            guard let self, let window = self.container.window, event.window === window, !self.container.isHiddenOrHasHiddenAncestor else { return event }
+            let point = self.container.convert(event.locationInWindow, from: nil)
+            guard self.container.bounds.contains(point) else { return event }
             if self.leftPane.frame.contains(point) { self.setFocusedSide(.left) }
             else if self.rightPane.frame.contains(point) { self.setFocusedSide(.right) }
             return event
         }
         focusObserver = NotificationCenter.default.addObserver(forName: NSWindow.didUpdateNotification, object: nil, queue: .main) { [weak self] note in
             MainActor.assumeIsolated {
-                guard let self, let window = note.object as? NSWindow, window === self.splitView.window else { return }
+                guard let self, let window = note.object as? NSWindow, window === self.container.window else { return }
                 self.synchronizeResponderFocus(in: window)
             }
         }
@@ -112,11 +125,11 @@ import WebKit
 
     private func pane(for side: Side) -> OrbitSplitPane { side == .left ? leftPane : rightPane }
     private func refreshFocusAppearance() {
-        leftPane.isFocused = focusedSide == .left
-        rightPane.isFocused = focusedSide == .right
+        leftPane.setFocused(focusedSide == .left, accent: accent)
+        rightPane.setFocused(focusedSide == .right, accent: accent)
     }
     private func synchronizeResponderFocus(in window: NSWindow) {
-        guard !splitView.isHiddenOrHasHiddenAncestor else { return }
+        guard !container.isHiddenOrHasHiddenAncestor else { return }
         var responder = window.firstResponder
         // AppKit's field editor is owned by the window, not by the text field.
         if let editor = responder as? NSTextView, let field = editor.delegate as? NSTextField { responder = field }
@@ -128,25 +141,21 @@ import WebKit
         }
     }
 
-    private var availableWidth: CGFloat { max(0, splitView.bounds.width - splitView.dividerThickness) }
-    private var minimumPaneWidth: CGFloat { min(200, availableWidth / 2) }
+    private var availableWidth: CGFloat { max(0, container.bounds.width - Self.gap) }
+    private var minimumWidth: CGFloat { min(Self.minimumPaneWidth, availableWidth / 2) }
     private func layoutPanes() {
-        guard !isLayingOut else { return }
-        isLayingOut = true
-        defer { isLayingOut = false }
-        let available = availableWidth
-        let width = min(max(minimumPaneWidth, available * dividerFraction), max(0, available - minimumPaneWidth))
-        leftPane.frame = NSRect(x: 0, y: 0, width: width, height: splitView.bounds.height)
-        rightPane.frame = NSRect(x: width + splitView.dividerThickness, y: 0, width: max(0, available - width), height: splitView.bounds.height)
-        leftPane.needsLayout = true; rightPane.needsLayout = true
+        let available = availableWidth, height = container.bounds.height
+        let width = min(max(minimumWidth, (available * dividerFraction).rounded()), max(0, available - minimumWidth))
+        leftPane.frame = NSRect(x: 0, y: 0, width: width, height: height)
+        gapView.frame = NSRect(x: width, y: 0, width: Self.gap, height: height)
+        rightPane.frame = NSRect(x: width + Self.gap, y: 0, width: max(0, available - width), height: height)
     }
-    func splitView(_ splitView: NSSplitView, resizeSubviewsWithOldSize oldSize: NSSize) { layoutPanes() }
-    func splitView(_ splitView: NSSplitView, constrainMinCoordinate proposedMinimumPosition: CGFloat, ofSubviewAt dividerIndex: Int) -> CGFloat { max(proposedMinimumPosition, minimumPaneWidth) }
-    func splitView(_ splitView: NSSplitView, constrainMaxCoordinate proposedMaximumPosition: CGFloat, ofSubviewAt dividerIndex: Int) -> CGFloat { min(proposedMaximumPosition, availableWidth - minimumPaneWidth) }
-    func splitView(_ splitView: NSSplitView, canCollapseSubview subview: NSView) -> Bool { false }
-    func splitViewDidResizeSubviews(_ notification: Notification) {
-        guard !isLayingOut, availableWidth > 0 else { return }
-        dividerFraction = min(1, max(0, leftPane.frame.width / availableWidth))
+    /// Follows the pointer with the gap's middle; the panes keep their minimum width.
+    private func dragDivider(to x: CGFloat) {
+        guard availableWidth > 0 else { return }
+        let left = min(max(minimumWidth, x - Self.gap / 2), availableWidth - minimumWidth)
+        dividerFraction = left / availableWidth
+        layoutPanes()
     }
 
     deinit {
@@ -155,9 +164,34 @@ import WebKit
     }
 }
 
-@MainActor private final class OrbitNativeSplitView: NSSplitView {
+/// Holds the panes; transparent, so the window shows in the gap between them.
+@MainActor private final class SplitContainer: NSView {
     var layoutPanes: (() -> Void)?
+    override var isFlipped: Bool { true }
     override func setFrameSize(_ newSize: NSSize) { super.setFrameSize(newSize); layoutPanes?() }
+    override func layout() { super.layout(); layoutPanes?() }
+}
+
+/// The gap between the panes is the divider: point at it for the resize cursor, drag to move it.
+@MainActor private final class SplitGap: NSView {
+    var onDrag: ((CGFloat) -> Void)?
+    var onDragEnded: (() -> Void)?
+    override var isFlipped: Bool { true }
+    override func resetCursorRects() { addCursorRect(bounds, cursor: .resizeLeftRight) }
+    override func mouseDown(with event: NSEvent) {}
+    override func mouseDragged(with event: NSEvent) {
+        guard let superview else { return }
+        onDrag?(superview.convert(event.locationInWindow, from: nil).x)
+    }
+    override func mouseUp(with event: NSEvent) { onDragEnded?() }
+    override func isAccessibilityElement() -> Bool { true }
+    override func accessibilityRole() -> NSAccessibility.Role? { .splitter }
+    override func accessibilityLabel() -> String? { "Split divider" }
+}
+
+/// Draws only; clicks go to the page under it.
+@MainActor private final class SplitPassThrough: NSView {
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }
 
 @MainActor private final class OrbitSplitAddressField: NSTextField {
@@ -165,7 +199,74 @@ import WebKit
     override func cancelOperation(_ sender: Any?) { escape?() }
 }
 
+/// Split's pane colors: a slim bar a shade off the page, a hairline under it.
+@MainActor private enum SplitTone {
+    static let bar = NSColor.chrome(light: NSColor(white: 0.975, alpha: 1), dark: NSColor(white: 0.13, alpha: 1))
+    static let line = NSColor.chrome(light: NSColor(white: 0, alpha: 0.07), dark: NSColor(white: 1, alpha: 0.07))
+    static let edge = NSColor.chrome(light: NSColor(white: 0, alpha: 0.10), dark: NSColor(white: 1, alpha: 0.09))
+    static func ink(_ alpha: CGFloat) -> NSColor {
+        .chrome(light: NSColor(white: 0.1, alpha: alpha), dark: NSColor(white: 1, alpha: alpha))
+    }
+}
+
+/// One small symbol button in a pane's bar.
+@MainActor private final class SplitBarButton: NSButton {
+    private var hovering = false
+    var dimmed = false { didSet { paint() } }
+    init(symbol: String, label: String) {
+        super.init(frame: .zero)
+        isBordered = false; title = ""; wantsLayer = true
+        setButtonType(.momentaryChange)
+        layer?.cornerRadius = 6
+        configure(symbol: symbol, label: label)
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+    func configure(symbol: String, label: String) {
+        image = NSImage(systemSymbolName: symbol, accessibilityDescription: label)?.withSymbolConfiguration(.init(pointSize: 13, weight: .regular))
+        toolTip = label; setAccessibilityLabel(label)
+        paint()
+    }
+    private func paint() {
+        contentTintColor = SplitTone.ink(!isEnabled ? 0.22 : (dimmed ? 0.5 : 0.7))
+        layer?.backgroundColor = hovering && isEnabled ? resolvedCGColor(SplitTone.ink(0.08), for: self) : NSColor.clear.cgColor
+    }
+    override var isEnabled: Bool { didSet { paint() } }
+    override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); paint() }
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self))
+    }
+    override func mouseEntered(with event: NSEvent) { hovering = true; paint() }
+    override func mouseExited(with event: NSEvent) { hovering = false; paint() }
+}
+
+/// The pane's site in the middle of its bar: a link symbol and the host; click it to edit the address.
+@MainActor private final class SplitSiteButton: NSButton {
+    var host = "" { didSet { paint() } }
+    var dimmed = false { didSet { paint() } }
+    init() {
+        super.init(frame: .zero)
+        isBordered = false; wantsLayer = true; layer?.cornerRadius = 6
+        setButtonType(.momentaryChange)
+        imagePosition = .imageLeading; imageHugsTitle = true
+        lineBreakMode = .byTruncatingTail
+        paint()
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+    private func paint() {
+        let ink = SplitTone.ink(dimmed ? 0.5 : 0.85)
+        image = NSImage(systemSymbolName: "link", accessibilityDescription: nil)?.withSymbolConfiguration(.init(pointSize: 10.5, weight: .semibold))
+        contentTintColor = SplitTone.ink(dimmed ? 0.35 : 0.55)
+        attributedTitle = NSAttributedString(string: host.isEmpty ? "Search or Enter URL…" : " " + host, attributes: [
+            .font: BamType.sans(12.5, weight: .medium), .foregroundColor: host.isEmpty ? SplitTone.ink(0.4) : ink])
+    }
+    override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); paint() }
+    override func resetCursorRects() { addCursorRect(bounds, cursor: .iBeam) }
+}
+
 @MainActor private final class OrbitSplitPane: NSView, NSTextFieldDelegate {
+    static let barHeight: CGFloat = 32
     let side: SplitViewCoordinator.Side
     var onFocus: (() -> Void)?
     var onSubmit: ((String) -> Void)?
@@ -175,30 +276,38 @@ import WebKit
     var onClose: (() -> Void)?
     var onUnsplit: (() -> Void)?
     var onReturnVideo: (() -> Void)?
-    var isFocused = false { didSet { needsDisplay = true } }
+    private(set) var isFocused = false
     private weak var webView: WKWebView?
+    private let bar = NSView()
+    private let line = NSView()
     private let content = NSView()
+    private let ring = SplitPassThrough()
     private let address = OrbitSplitAddressField()
-    private let back = NSButton()
-    private let forward = NSButton()
-    private let reload = NSButton()
-    private let close = NSButton()
-    private let unsplit = NSButton()
+    private let site = SplitSiteButton()
+    private let back = SplitBarButton(symbol: "arrow.left", label: "Back")
+    private let forward = SplitBarButton(symbol: "arrow.right", label: "Forward")
+    private let reload = SplitBarButton(symbol: "arrow.clockwise", label: "Reload")
+    private let close = SplitBarButton(symbol: "xmark", label: "Close this pane")
+    private let unsplit = SplitBarButton(symbol: "rectangle.split.2x1", label: "Separate Split into Tabs")
     private let placeholder = NSTextField(labelWithString: "Video is playing in Picture in Picture")
     private let returnVideo = NSButton(title: "Return Video", target: nil, action: nil)
     private var latestAddress = ""
-    private var isEditingAddress = false
+    private var isEditingAddress = false { didSet { address.isHidden = !isEditingAddress; site.isHidden = isEditingAddress } }
+    private var accent: NSColor = .controlAccentColor
     override var isFlipped: Bool { true }
 
     init(side: SplitViewCoordinator.Side) {
         self.side = side
         super.init(frame: .zero)
         wantsLayer = true
-        layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        layer?.cornerRadius = 10; layer?.masksToBounds = true
         setAccessibilityLabel(side == .left ? "Left browser pane" : "Right browser pane")
-        for subview in [content, address, back, forward, reload, close, unsplit] { addSubview(subview) }
-        content.wantsLayer = true
-        content.layer?.backgroundColor = NSColor.textBackgroundColor.cgColor
+        for subview in [content, bar, line] { addSubview(subview) }
+        for control in [back, forward, reload, site, address, unsplit, close] as [NSView] { bar.addSubview(control) }
+        bar.wantsLayer = true; line.wantsLayer = true; content.wantsLayer = true
+        // The focus ring sits above the page, inside the rounded card.
+        ring.wantsLayer = true; ring.layer?.cornerRadius = 10; ring.layer?.borderWidth = 1
+        addSubview(ring, positioned: .above, relativeTo: nil)
         content.addSubview(placeholder); content.addSubview(returnVideo)
         placeholder.alignment = .center
         placeholder.lineBreakMode = .byWordWrapping
@@ -208,28 +317,42 @@ import WebKit
         returnVideo.bezelStyle = .rounded
         returnVideo.target = self; returnVideo.action = #selector(returnVideoPressed)
         address.isEditable = true; address.isSelectable = true
-        address.isBordered = true; address.bezelStyle = .roundedBezel
-        address.font = .systemFont(ofSize: 11)
-        address.placeholderString = "Search or enter URL"
+        address.isBordered = false; address.drawsBackground = false; address.focusRingType = .none
+        address.font = BamType.sans(12.5, weight: .medium); address.alignment = .center
+        address.placeholderString = "Search or Enter URL…"
         address.lineBreakMode = .byTruncatingMiddle
+        (address.cell as? NSTextFieldCell)?.isScrollable = true
         address.setAccessibilityLabel(side == .left ? "Left pane address" : "Right pane address")
         address.delegate = self; address.target = self; address.action = #selector(submitAddress)
         address.escape = { [weak self] in guard let self else { return }; self.finishEditing(address: self.latestAddress) }
-        setup(back, symbol: "chevron.left", label: "Back", action: #selector(backPressed))
-        setup(forward, symbol: "chevron.right", label: "Forward", action: #selector(forwardPressed))
-        setup(reload, symbol: "arrow.clockwise", label: "Reload", action: #selector(reloadPressed))
-        setup(close, symbol: "xmark", label: "Close this pane", action: #selector(closePressed))
-        setup(unsplit, symbol: "rectangle", label: "Return to a single tab", action: #selector(unsplitPressed))
-        unsplit.isHidden = side == .left
+        address.isHidden = true
+        site.target = self; site.action = #selector(editAddress)
+        site.setAccessibilityLabel(side == .left ? "Left pane site; click to edit the address" : "Right pane site; click to edit the address")
+        for (button, action) in [(back, #selector(backPressed)), (forward, #selector(forwardPressed)), (reload, #selector(reloadPressed)),
+                                 (close, #selector(closePressed)), (unsplit, #selector(unsplitPressed))] {
+            button.target = self; button.action = action
+        }
+        applyColors()
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-    private func setup(_ button: NSButton, symbol: String, label: String, action: Selector) {
-        button.isBordered = false; button.bezelStyle = .inline
-        button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: label)
-        button.imageScaling = .scaleProportionallyDown
-        button.contentTintColor = .secondaryLabelColor
-        button.target = self; button.action = action
-        button.toolTip = label; button.setAccessibilityLabel(label)
+    private func applyColors() {
+        layer?.backgroundColor = resolvedCGColor(BrowserChrome.pageSurface, for: self)
+        bar.layer?.backgroundColor = resolvedCGColor(SplitTone.bar, for: self)
+        line.layer?.backgroundColor = resolvedCGColor(SplitTone.line, for: self)
+        content.layer?.backgroundColor = resolvedCGColor(BrowserChrome.pageSurface, for: self)
+        ring.layer?.borderColor = isFocused ? resolvedCGColor(accent.withAlphaComponent(0.7), for: self) : resolvedCGColor(SplitTone.edge, for: self)
+        ring.layer?.borderWidth = isFocused ? 1.5 : 1
+    }
+    override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); applyColors() }
+
+    /// The focused pane shows its ring and its full bar; the other's bar steps back.
+    func setFocused(_ focused: Bool, accent: NSColor) {
+        isFocused = focused; self.accent = accent
+        for button in [back, forward, close] { button.dimmed = !focused }
+        site.dimmed = !focused
+        reload.isHidden = !focused; unsplit.isHidden = !focused
+        applyColors()
+        needsLayout = true
     }
 
     func host(_ web: WKWebView?) {
@@ -254,19 +377,21 @@ import WebKit
     }
     func updateAddress(_ value: String, title: String) {
         latestAddress = value
-        address.toolTip = title.isEmpty ? value : "\(title)\n\(value)"
-        if !isEditingAddress { address.stringValue = value == "orbit://newtab" ? "" : value }
+        let shown = value == "orbit://newtab" ? "" : value
+        site.host = URL(string: shown)?.host?.replacingOccurrences(of: "www.", with: "", options: .anchored) ?? shown
+        site.toolTip = title.isEmpty ? shown : "\(title)\n\(shown)"
+        if !isEditingAddress { address.stringValue = shown }
+        needsLayout = true
     }
     func updateNavigation(canGoBack: Bool, canGoForward: Bool, isLoading: Bool) {
         back.isEnabled = canGoBack; forward.isEnabled = canGoForward
-        let label = isLoading ? "Stop loading" : "Reload"
-        reload.image = NSImage(systemSymbolName: isLoading ? "xmark" : "arrow.clockwise", accessibilityDescription: label)
-        reload.toolTip = label; reload.setAccessibilityLabel(label)
+        reload.configure(symbol: isLoading ? "xmark" : "arrow.clockwise", label: isLoading ? "Stop loading" : "Reload")
     }
     func focusAddress() {
         onFocus?()
         address.stringValue = latestAddress == "orbit://newtab" ? "" : latestAddress
         isEditingAddress = true
+        needsLayout = true; layoutSubtreeIfNeeded()
         window?.makeFirstResponder(address)
         address.selectText(nil)
     }
@@ -279,11 +404,11 @@ import WebKit
     }
     func controlTextDidBeginEditing(_ obj: Notification) { isEditingAddress = true; onFocus?() }
     func controlTextDidEndEditing(_ obj: Notification) {
-        isEditingAddress = false
         // AppKit sends this notification before the Return target/action.
         // Preserve the typed value until submitAddress consumes it.
         let movement = (obj.userInfo?["NSTextMovement"] as? NSNumber)?.intValue
         if movement == NSTextMovement.return.rawValue { return }
+        isEditingAddress = false
         address.stringValue = latestAddress == "orbit://newtab" ? "" : latestAddress
     }
     func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
@@ -292,25 +417,32 @@ import WebKit
     }
     override func layout() {
         super.layout()
-        let width = bounds.width
-        let chrome: CGFloat = 36
-        content.frame = NSRect(x: 0, y: chrome, width: width, height: max(0, bounds.height - chrome))
-        back.frame = NSRect(x: 4, y: 7, width: 20, height: 22)
-        forward.frame = NSRect(x: 25, y: 7, width: 20, height: 22)
-        reload.frame = NSRect(x: 46, y: 7, width: 20, height: 22)
-        let trailing: CGFloat = side == .right ? 52 : 28
-        address.frame = NSRect(x: 70, y: 6, width: max(30, width - 76 - trailing), height: 24)
-        close.frame = NSRect(x: max(0, width - 25), y: 7, width: 20, height: 22)
-        unsplit.frame = NSRect(x: max(0, width - 49), y: 7, width: 20, height: 22)
+        let width = bounds.width, barHeight = Self.barHeight
+        bar.frame = NSRect(x: 0, y: 0, width: width, height: barHeight)
+        line.frame = NSRect(x: 0, y: barHeight - 1, width: width, height: 1)
+        content.frame = NSRect(x: 0, y: barHeight, width: width, height: max(0, bounds.height - barHeight))
+        ring.frame = bounds
+        let size: CGFloat = 24, y = (barHeight - size) / 2
+        var x: CGFloat = 8
+        back.frame = NSRect(x: x, y: y, width: size, height: size); x += size + 2
+        forward.frame = NSRect(x: x, y: y, width: size, height: size); x += size + 2
+        if !reload.isHidden { reload.frame = NSRect(x: x, y: y, width: size, height: size); x += size + 2 }
+        let leftEnd = x + 6
+        var right = width - 8
+        close.frame = NSRect(x: right - size, y: y, width: size, height: size); right -= size + 2
+        if !unsplit.isHidden { unsplit.frame = NSRect(x: right - size, y: y, width: size, height: size); right -= size + 2 }
+        let rightStart = right - 6
+        // The site sits centered in the bar when there is room, else in the gap between the controls.
+        let gap = NSRect(x: leftEnd, y: y, width: max(0, rightStart - leftEnd), height: size)
+        let siteWidth = min(gap.width, site.intrinsicContentSize.width + 16)
+        let siteX = min(max(width / 2 - siteWidth / 2, gap.minX), max(gap.minX, gap.maxX - siteWidth))
+        site.frame = NSRect(x: siteX, y: y, width: siteWidth, height: size)
+        address.frame = gap.insetBy(dx: 0, dy: 4)
         if let web = webView, web.superview === content { web.frame = content.bounds }
         placeholder.frame = NSRect(x: 12, y: content.bounds.midY + 4, width: max(0, width - 24), height: 54)
         returnVideo.frame = NSRect(x: max(6, (width - 130) / 2), y: content.bounds.midY - 34, width: min(130, max(0, width - 12)), height: 30)
     }
-    override func draw(_ dirtyRect: NSRect) {
-        super.draw(dirtyRect)
-        (isFocused ? NSColor.controlAccentColor.withAlphaComponent(0.65) : NSColor.separatorColor).setFill()
-        NSRect(x: 0, y: 35, width: bounds.width, height: 1).fill()
-    }
+    @objc private func editAddress() { focusAddress() }
     @objc private func submitAddress() { onSubmit?(address.stringValue) }
     @objc private func backPressed() { onBack?() }
     @objc private func forwardPressed() { onForward?() }

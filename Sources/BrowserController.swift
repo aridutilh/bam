@@ -586,6 +586,10 @@ import QuartzCore
         // Arc/Yab frame the page with a soft corner and a barely-there edge.
         card.layer?.cornerRadius = 10 * (1 - collapse)
         card.layer?.borderColor = resolvedCGColor(BrowserChrome.cardEdge, for: card).copy(alpha: (root.isDark ? 0.09 : 0.10) * (1 - collapse))
+        // A Split draws each pane as its own card; the page card steps back so the window shows between them.
+        let bareForSplit = isShowingSplit
+        card.layer?.backgroundColor = bareForSplit ? NSColor.clear.cgColor : resolvedCGColor(BrowserChrome.pageSurface, for: card)
+        if bareForSplit { card.layer?.borderColor = NSColor.clear.cgColor }
         applyWindowButtons(collapse: collapse)
         layoutFloatingSidebar(dockedWidth: width, targetWidth: targetWidth, height: h)
         webHost.frame = card.bounds
