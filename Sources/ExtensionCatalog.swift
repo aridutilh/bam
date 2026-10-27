@@ -960,7 +960,7 @@ struct ExtensionFetchedPackage: Sendable {
 
 /// Downloads a candidate into a staging directory, checks its hash and signature, and unpacks it.
 struct ExtensionPackageFetch: Sendable {
-    static let maximumDownloadBytes = ExtensionZipArchive.maximumTotalBytes
+    static let maximumDownloadBytes = ExtensionZipArchive.maximumArchiveBytes
     let client: any ExtensionHTTPClient
     let userAgent: String
 
@@ -989,7 +989,7 @@ struct ExtensionPackageFetch: Sendable {
             guard candidate.source == .local else { throw ExtensionPackageError("Only local candidates may use file URLs.") }
             let values = try source.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey])
             guard values.isRegularFile == true, values.isSymbolicLink != true, let size = values.fileSize, size <= Self.maximumDownloadBytes else {
-                throw ExtensionPackageError("The local package must be a regular file no larger than 100 MiB.")
+                throw ExtensionPackageError("The local package must be a regular file no larger than 128 MiB.")
             }
             try fm.copyItem(at: source, to: archiveURL)
         } else {

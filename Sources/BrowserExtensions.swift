@@ -424,12 +424,12 @@ struct BrowserExtensionPermissionReview {
             let compatibilityNote = try Self.preparePackage(package, originalManifestURL: folder.appendingPathComponent("original-manifest.json"))
             let ext = try await packageParser(package)
             try Task.checkCancellation()
-            guard ext.errors.isEmpty else { throw Self.failure(ext.errors.map(\.localizedDescription).joined(separator: "\n")) }
+            let manifestWarning = try ExtensionManifestWarnings.check(ext.errors, failure: Self.failure)
             guard !stopped else { throw Self.failure("The browser is closing.") }
             guard runtimeIdentifier == nil || !records.contains(where: { $0.profileID == profileID && $0.contextIdentifier == runtimeIdentifier }) else {
                 throw Self.failure("This extension is already installed in this profile.")
             }
-            var record = BrowserExtensionRecord(id: id, profileID: profileID, name: ext.displayName ?? "Unnamed extension", version: ext.version ?? "", packageName: name, compatibilityNote: compatibilityNote, catalog: catalog)
+            var record = BrowserExtensionRecord(id: id, profileID: profileID, name: ext.displayName ?? "Unnamed extension", version: ext.version ?? "", packageName: name, compatibilityNote: ExtensionManifestWarnings.joinedNote(compatibilityNote, manifestWarning), catalog: catalog)
             record.runtimeIdentifier = runtimeIdentifier
             record.awaitingFirstReview = true
             records.append(record)
@@ -558,7 +558,7 @@ struct BrowserExtensionPermissionReview {
         try Task.checkCancellation()
         guard !stopped, mutationRevisions[id, default: 0] == initialRevision,
               runtime.contexts[id] === oldContext else { throw BrowserExtensionUpdateCancelled(name: before.name) }
-        guard ext.errors.isEmpty else { throw Self.failure(ext.errors.map(\.localizedDescription).joined(separator: "\n")) }
+        _ = try ExtensionManifestWarnings.check(ext.errors, failure: Self.failure)
         var replacement = Self.retainingDeclaredPermissions(before, for: ext)
         replacement.name = ext.displayName ?? before.name; replacement.version = ext.version ?? ""
         replacement.compatibilityNote = note; replacement.catalog = catalog
@@ -1495,7 +1495,7 @@ struct BrowserExtensionPermissionReview {
             }
         } else if let parsed { ext = parsed } else { ext = try await packageParser(packageURL(record)) }
         try Task.checkCancellation()
-        guard ext.errors.isEmpty else { throw Self.failure(ext.errors.map(\.localizedDescription).joined(separator: "\n")) }
+        _ = try ExtensionManifestWarnings.check(ext.errors, failure: Self.failure)
         guard !stopped, loadGeneration[id] == token, let initialIndex = records.firstIndex(where: { $0.id == id }), review || records[initialIndex].enabled else { return }
         var index = initialIndex
         let plan = ExtensionCompatibility.plan(manifest: ext.manifest)
@@ -1875,11 +1875,11 @@ struct BrowserExtensionPermissionReview {
                 let values = try file.resourceValues(forKeys: keys)
                 guard values.isSymbolicLink != true, values.isDirectory == true || values.isRegularFile == true else { throw failure("Extension folders must contain regular files, without symbolic links.") }
                 count += 1; if values.isRegularFile == true { bytes += Int64(values.fileSize ?? 0) }
-                guard count <= 10_000, bytes <= 100 * 1_024 * 1_024 else { throw failure("This local extension exceeds Bam’s 100 MB / 10,000-file import limit.") }
+                guard count <= ExtensionZipArchive.maximumEntries, bytes <= Int64(ExtensionZipArchive.maximumTotalBytes) else { throw failure("This local extension exceeds Bam’s 512 MB / 30,000-file import limit.") }
             }
             if let traversalError { throw traversalError }
         }
-        guard bytes <= 100 * 1_024 * 1_024 else { throw failure("This local extension exceeds Bam’s 100 MB import limit.") }
+        guard bytes <= Int64(ExtensionZipArchive.maximumTotalBytes) else { throw failure("This local extension exceeds Bam’s 512 MB import limit.") }
     }
 }
 

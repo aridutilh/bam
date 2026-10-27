@@ -255,7 +255,7 @@ import Security
 
         try reject("declared-total-too-large", { _ = try ExtensionZipArchive(data: buildZip([
             ZipSpec(name: "manifest.json", data: manifest),
-            ZipSpec(name: "big.bin", data: Data("x".utf8), deflate: true, uncompressedSizeOverride: 100 * 1_024 * 1_024 + 1)])) }, containing: "100 MiB")
+            ZipSpec(name: "big.bin", data: Data("x".utf8), deflate: true, uncompressedSizeOverride: 512 * 1_024 * 1_024 + 1)])) }, containing: "512 MiB")
         try reject("declared-manifest-too-large", { _ = try ExtensionZipArchive(data: buildZip([
             ZipSpec(name: "manifest.json", data: manifest, deflate: true, uncompressedSizeOverride: 1_048_577)])) }, containing: "1 MiB")
         let underDeclared = try ExtensionZipArchive(data: buildZip([
@@ -283,9 +283,9 @@ import Security
         try reject("duplicate-case-insensitive", { _ = try ExtensionZipArchive(data: buildZip([
             ZipSpec(name: "manifest.json", data: manifest), ZipSpec(name: "A.js", data: Data("1".utf8)), ZipSpec(name: "a.js", data: Data("2".utf8))])) }, containing: "duplicate")
         var many = [ZipSpec(name: "manifest.json", data: manifest)]
-        for index in 0..<10_000 { many.append(ZipSpec(name: "f\(index)")) }
-        try reject("too-many-entries", { _ = try ExtensionZipArchive(data: buildZip(many)) }, containing: "10000")
-        try check(try ExtensionZipArchive(data: buildZip(Array(many.prefix(10_000)))).entries.count == 10_000, "Exactly 10,000 entries are accepted")
+        for index in 0..<30_000 { many.append(ZipSpec(name: "f\(index)")) }
+        try reject("too-many-entries", { _ = try ExtensionZipArchive(data: buildZip(many)) }, containing: "30000")
+        try check(try ExtensionZipArchive(data: buildZip(Array(many.prefix(30_000)))).entries.count == 30_000, "Exactly 30,000 entries are accepted")
 
         // Existing symlinks inside the destination are never followed.
         let outside = root.appendingPathComponent("outside", isDirectory: true)
