@@ -4,6 +4,7 @@
 
 - Split View with New Page moves to Arc's ⌃⇧= (it was ⌥⌘=). A custom shortcut you set yourself is kept.
 - Opening a Split now shows the search bar over the new page: pick a site, search or an open tab and it loads there. Press Esc (or click outside) and the empty page closes again.
+- Little Bam windows no longer close into the archive while they're playing audio or video, holding text you're writing, downloading, or using the camera or microphone, and time your Mac spent asleep no longer counts toward "Archive Little Bams after" (waking up the next morning used to close them all).
 - Right-clicking a tab follows Arc's order: Copy Link, Share, Change Icon…, Rename…, Mute, Duplicate and, for Today tabs, Move to (with New Space…), with Close Tab and Close Tabs Below last.
 - Double-click a tab's title to rename it in place; Return keeps the name, Esc cancels, and an empty name goes back to the page's own title.
 - The footer's bottom-left button is now Arc's archive box: it opens Archived Tabs, and its menu has Downloads, History and Manage Spaces.

@@ -116,7 +116,9 @@ import WebKit
         buildMenus(); window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
         // Settings › Links: ⌥⌘N from any app, only while that setting is on (never by default in a fresh preview).
         GlobalLittleBamHotKey.shared.onPress = { [weak self] in
-            self?.controller?.openLittleOrbit(url: nil)
+            // Not while quitting (a window would open into a closing app) or under a modal alert.
+            guard let controller = self?.controller, !controller.isShuttingDown, NSApp.modalWindow == nil else { return }
+            controller.openLittleOrbit(url: nil)
             NSApp.activate(ignoringOtherApps: true)
         }
         GlobalLittleBamHotKey.shared.update()
