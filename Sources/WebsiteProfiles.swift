@@ -20,7 +20,8 @@ import WebKit
     /// `before` (an extension's `tabs.create` index) places the new tab immediately before that tab of the same
     /// profile in session order, which is the order extensions see; only the order changes, never the anchor's Space,
     /// section, folder or split. Placed in the same step it is added, before anything refreshes or publishes it.
-    @discardableResult func openProfileTab(_ url: URL, profileID: UUID, active: Bool, kept: Bool = false, before anchor: UUID? = nil) -> UUID? {
+    /// `opener` (a link opened from a page) places the tab right after that page's tab and its earlier link tabs.
+    @discardableResult func openProfileTab(_ url: URL, profileID: UUID, active: Bool, kept: Bool = false, before anchor: UUID? = nil, opener: UUID? = nil) -> UUID? {
         guard URLInput.directURL(url.absoluteString) != nil || allowsExtensionPage(url, profileID: profileID) else { return nil }
         // Refuse before anything changes, so a refused pinned request leaves no ordinary tab behind.
         if kept, ExtensionPinnedPolicy.creationRefusal(url: url, pinned: true) != nil { return nil }
@@ -34,7 +35,7 @@ import WebKit
         // so opening a tab in another profile (by an extension or a ⌘-click) never leaves an extra blank behind.
         let fallback = session.tabs.filter { !existing.contains($0.id) && $0.isHome && !$0.isSaved }.map(\.id)
         func discardFallback() { for blank in fallback { _ = session.close(blank); teardownPage(blank) } }
-        let id = session.add(address: url.absoluteString)
+        let id = session.add(address: url.absoluteString, opener: kept ? nil : opener)
         if kept, !session.setRetention(id: id, kind: .kept) {
             _ = session.close(id); session.changeSpace(previousSpace); session.select(previousTab); discardFallback()
             refresh(); return nil

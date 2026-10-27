@@ -466,6 +466,16 @@ struct BrowserSession: Codable {
     /// ("space:<id>", "folder:<uuid>", "tab:<uuid>"). Repeat imports skip
     /// keys already present, even when the user later removed that item.
     var importLinks: [String: String]?
+    /// Most recently shown tabs, newest first (Split primaries). Drives ⌃⇥.
+    var recentTabIDs: [UUID]?
+    /// Link-opened tab → the tab it was opened from. In memory only, like a
+    /// browser's opener: it decides where the next link tab goes and which
+    /// tab takes over when a link tab closes.
+    var openers: [UUID: UUID] = [:]
+    /// Closed ordinary tab → the Today row it sat below (nil: top), so a
+    /// reopened tab returns to its place. In memory only.
+    var closedAnchors: [UUID: ClosedAnchor] = [:]
+    struct ClosedAnchor { let space: Int; let after: UUID? }
     // Persist the high-water mark, including deleted Spaces, so tab/archive
     // metadata can never accidentally refer to a different newly created Space.
     private var lastIssuedSpaceID: Int
@@ -491,6 +501,7 @@ struct BrowserSession: Codable {
         case version, tabs, activeID, space, sidebarWidth, sidebarVisible
         case lastSelectedTabIDsBySpace, splits, spaces, lastIssuedSpaceID, profiles
         case folders, rootOrder, importLinks
+        case recentTabIDs = "recentTabs"
     }
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -512,6 +523,7 @@ struct BrowserSession: Codable {
         folders = ((try? values.decodeIfPresent([LossyFolder].self, forKey: .folders)).flatMap { $0 } ?? []).compactMap(\.value)
         rootOrder = (try? values.decodeIfPresent([Int: [UUID]].self, forKey: .rootOrder)).flatMap { $0 }
         importLinks = (try? values.decodeIfPresent([String: String].self, forKey: .importLinks)).flatMap { $0 }
+        recentTabIDs = (try? values.decodeIfPresent([UUID].self, forKey: .recentTabIDs)).flatMap { $0 }
         lastIssuedSpaceID = max(2, max(try values.decodeIfPresent(Int.self, forKey: .lastIssuedSpaceID) ?? 2,
                                       spaces.map(\.id).max() ?? 2))
     }
@@ -529,6 +541,7 @@ struct BrowserSession: Codable {
         if !folders.isEmpty { try values.encode(folders, forKey: .folders) }
         if let rootOrder, !rootOrder.isEmpty { try values.encode(rootOrder, forKey: .rootOrder) }
         if let importLinks, !importLinks.isEmpty { try values.encode(importLinks, forKey: .importLinks) }
+        if let recentTabIDs, !recentTabIDs.isEmpty { try values.encode(recentTabIDs, forKey: .recentTabIDs) }
     }
 
     /// The very first launch of an installed Bam: one tab on bambrowser.com,
@@ -768,7 +781,9 @@ struct BrowserSession: Codable {
     }
     private func fallbackTab(in space: Int, last: Bool = false) -> UUID? {
         let visible = orderedTabs(in: space).filter { !$0.isUnloaded }
-        let ordinary = visible.filter { !$0.isSaved }
+        // A blank New Tab placeholder has no sidebar row: any real tab is a better landing.
+        let pages = visible.filter { !$0.isSaved && !$0.isHome }
+        let ordinary = pages.isEmpty ? visible.filter { !$0.isSaved } : pages
         let kept = visible.filter { $0.isSaved && !$0.isFavorite }
         let preferred = !ordinary.isEmpty ? ordinary : !kept.isEmpty ? kept : visible
         return (last ? preferred.last : preferred.first)?.id
@@ -813,13 +828,81 @@ struct BrowserSession: Codable {
             else { add() }
         }
     }
-    @discardableResult mutating func add(address: String = "orbit://newtab", title: String? = nil) -> UUID {
+    /// New tabs open at the top of Today, as in Arc. `opener` (a link opened
+    /// from a page) places the tab just after its opener and the tabs already
+    /// opened from it, in open order.
+    @discardableResult mutating func add(address: String = "orbit://newtab", title: String? = nil, opener: UUID? = nil) -> UUID {
         rememberActiveSelection()
         let defaultTitle = address == "orbit://newtab" ? "New tab" : address == "orbit://video" ? "Picture in Picture demo" : URL(string: address)?.host ?? address
         let tab = BrowserTab(title: title ?? defaultTitle, address: address, space: space)
-        tabs.append(tab); activeID = tab.id
+        let opener = opener.flatMap { id in tabs.first { $0.id == id && !$0.isSaved && $0.space == space } }.map(\.id)
+        tabs.insert(tab, at: TabOrdering.insertionIndex(in: tabs, space: space, opener: opener, openers: openers))
+        if let opener { openers[tab.id] = opener }
+        activeID = tab.id
         rememberActiveSelection()
         return tab.id
+    }
+    /// Puts a reopened ordinary tab back where it was closed (falling back to
+    /// the top of Today) and returns its index.
+    @discardableResult mutating func insertRestored(_ tab: BrowserTab, originalID: UUID) -> Int {
+        guard !tab.isSaved else { tabs.append(tab); return tabs.count - 1 }
+        let anchor = closedAnchors.removeValue(forKey: originalID)
+        let index: Int
+        if let anchor, anchor.space == tab.space, let after = anchor.after,
+           let position = tabs.firstIndex(where: { $0.id == after && !$0.isSaved && $0.space == tab.space }) {
+            index = position + 1
+        } else {
+            index = TabOrdering.insertionIndex(in: tabs, space: tab.space, opener: nil, openers: [:])
+        }
+        tabs.insert(tab, at: index)
+        return index
+    }
+    /// Records that `id` is the tab on screen, for ⌃⇥'s recent order.
+    mutating func noteRecent(_ id: UUID) {
+        let id = split(for: id)?.primaryID ?? id
+        var list = recentTabIDs ?? []
+        if list.first == id { return }
+        list.removeAll { $0 == id }
+        list.insert(id, at: 0)
+        let live = Set(tabs.map(\.id))
+        list = Array(list.filter { live.contains($0) }.prefix(64))
+        recentTabIDs = list
+    }
+    /// The tabs a ⌃⇥ switcher offers, newest first: the current tab, then the
+    /// tabs used most recently in this Space (its Favorites included), topped
+    /// up in sidebar order when there's little history. At most `limit`.
+    func recentSwitcherTabs(limit: Int = 5) -> [UUID] {
+        let rows = shortcutTabs()
+        let candidates = Set(rows)
+        var result: [UUID] = []
+        func take(_ id: UUID) {
+            let id = split(for: id)?.primaryID ?? id
+            guard result.count < limit, candidates.contains(id), !result.contains(id) else { return }
+            result.append(id)
+        }
+        take(activeID)
+        for id in recentTabIDs ?? [] { take(id) }
+        for id in rows { take(id) }
+        return result
+    }
+    /// The tabs ⌘1–⌘9 reach, in sidebar order: Favorites, then the kept rows
+    /// on show (folders open), then Today. Blank New Tab placeholders that
+    /// have no row are skipped, like the sidebar does.
+    func shortcutTabs() -> [UUID] {
+        let profile = spaceDefinition(space)?.profileID ?? BrowserProfile.defaultID
+        let grouped = splitSecondaryIDs
+        let byID = Dictionary(tabs.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let favoriteIDs = favorites(in: profile).map(\.id)
+        let kept = visibleKeptLayout(in: space, revealing: activeID).compactMap { $0.isFolder ? nil : byID[$0.id]?.id }
+        let today = tabs.filter { $0.space == space && !$0.isSaved && !grouped.contains($0.id) && (!$0.isHome || $0.id == activeID) }.map(\.id)
+        return favoriteIDs + kept + today
+    }
+    /// ⌘1–⌘8 go to that tab, ⌘9 to the last one.
+    func shortcutTab(_ number: Int) -> UUID? {
+        let rows = shortcutTabs()
+        guard (1...9).contains(number), !rows.isEmpty else { return nil }
+        if number == 9 { return rows.last }
+        return rows.indices.contains(number - 1) ? rows[number - 1] : nil
     }
     mutating func select(_ id: UUID) {
         let selectedID = split(for: id)?.primaryID ?? id
@@ -833,6 +916,7 @@ struct BrowserSession: Codable {
             destination = matching
         }
         rememberActiveSelection()
+        if TabOrdering.family(of: activeID, openers: openers) != TabOrdering.family(of: selectedID, openers: openers) { openers.removeAll() }
         space = destination
         let members = split(for: selectedID).map { [$0.primaryID, $0.secondaryID] } ?? [selectedID]
         for index in tabs.indices where members.contains(tabs[index].id) { tabs[index].saved?.isUnloaded = false }
@@ -866,6 +950,23 @@ struct BrowserSession: Codable {
         rememberActiveSelection()
         let group = split(for: id)
         let members = Set(group?.primaryID == id ? [id, group!.secondaryID] : [id])
+        // Where a closing Today tab hands the selection, decided before it leaves.
+        let today = tabs.filter { $0.space == closing.space && !$0.isSaved && !splitSecondaryIDs.contains($0.id) }
+        let successor = !closing.isSaved && members.contains(activeID)
+            ? TabOrdering.successor(closing: id, today: today.map(\.id), openers: openers,
+                                    eligible: { candidate in today.first { $0.id == candidate }.map { !$0.isHome && !$0.isUnloaded } ?? false })
+            : nil
+        for member in members {
+            guard let tab = tabs.first(where: { $0.id == member }), !tab.isSaved else { continue }
+            let row = today.firstIndex { $0.id == member }
+            let above = row.flatMap { $0 > 0 ? today[..<$0].last { !members.contains($0.id) }?.id : nil }
+            if closedAnchors.count > 200 { closedAnchors.removeAll() }
+            closedAnchors[member] = ClosedAnchor(space: tab.space, after: above)
+        }
+        for member in members {
+            openers[member] = nil
+            for (child, opener) in openers where opener == member { openers[child] = nil }
+        }
         removeSplit(containing: id)
         for index in tabs.indices where members.contains(tabs[index].id) && tabs[index].isSaved {
             tabs[index].address = tabs[index].saved!.address
@@ -873,6 +974,7 @@ struct BrowserSession: Codable {
             tabs[index].sleepState = nil
         }
         tabs.removeAll { members.contains($0.id) && !$0.isSaved }
+        if let successor, tabs.contains(where: { $0.id == successor }) { activeID = successor }
         repairRememberedSelections()
         repairActiveSelection()
         return closing
@@ -1453,5 +1555,42 @@ enum SessionFile {
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         try encoder.encode(session).write(to: url, options: .atomic)
+    }
+}
+
+/// Pure tab-order rules shared by the session and its tests.
+enum TabOrdering {
+    /// A link tab's family is its opener; any other tab is its own family.
+    static func family(of id: UUID, openers: [UUID: UUID]) -> UUID { openers[id] ?? id }
+
+    /// Where a new ordinary tab goes in `tabs` (whose order is Today's order).
+    /// Without an opener: before the Space's first Today tab (the top). With
+    /// one: after the opener and the run of tabs already opened from it.
+    static func insertionIndex(in tabs: [BrowserTab], space: Int, opener: UUID?, openers: [UUID: UUID]) -> Int {
+        let today = tabs.indices.filter { tabs[$0].space == space && !tabs[$0].isSaved }
+        guard let opener, let start = today.firstIndex(where: { tabs[$0].id == opener }) else {
+            return today.first ?? tabs.count
+        }
+        var last = today[start]
+        for position in today[(start + 1)...] {
+            guard openers[tabs[position].id] == opener else { break }
+            last = position
+        }
+        return last + 1
+    }
+
+    /// The tab that takes over when the selected Today tab `closing` closes.
+    /// A link tab goes to the next tab opened from the same page (below, then
+    /// above), then to its opener; any other tab goes to the row below, then
+    /// above. Nil leaves the choice to the session's fallback.
+    static func successor(closing: UUID, today: [UUID], openers: [UUID: UUID], eligible: (UUID) -> Bool) -> UUID? {
+        guard let index = today.firstIndex(of: closing) else { return nil }
+        let below = today[(index + 1)...].filter(eligible)
+        let above = today[..<index].reversed().filter(eligible)
+        if let opener = openers[closing] {
+            if let sibling = below.first(where: { openers[$0] == opener }) ?? above.first(where: { openers[$0] == opener }) { return sibling }
+            if today.contains(opener) ? eligible(opener) : true { return opener }
+        }
+        return below.first ?? above.first
     }
 }

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- ⌃⇥ now goes to the tab you used last, not the next one down. Keep holding ⌃ and press ⇥ again to bring up your five most recent tabs with page previews; release ⌃ to go there, ⌃⇧⇥ to step back, Esc to stay put.
+- ⌘1 to ⌘8 jump to that tab in the sidebar, Favorites first, and ⌘9 jumps to the last tab (Tabs › Go to Tab).
+- New tabs open at the top of Today. Links you open in a new tab land right below the page they came from, in the order you opened them, and closing one takes you to its neighbor from the same page, then back to that page.
+- ⌘Z reopens the last closed tab when you're not typing, and closed tabs come back where they were instead of at the bottom.
 - Bam now blocks ads and trackers on its own, on by default. It uses uBlock Origin's standard lists (EasyList, EasyPrivacy and more), refreshed weekly in the background, and stops requests before they're made. Turn it off for one site in the site controls, or everywhere in Settings › General › Privacy. If a page keeps failing to load, Bam offers "Allow Ads Here".
 - Copy Link (⇧⌘C) now copies a clean address: tracking tags like utm_, fbclid, gclid and YouTube or Spotify share codes are removed, and everything the page needs is kept. The confirmation says "Link copied".
 - Copy Markdown Link (⌥⇧⌘C) copies [Title](address), and pastes as the page's title as a live link in Mail, Notes and Slack.

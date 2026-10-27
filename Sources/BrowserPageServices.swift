@@ -10,12 +10,17 @@ import WebKit
         guard selectSpace(forProfile: profileID) else { return }
         cancelPaging(); dismissAddress()
         var restored: [BrowserTab] = []
+        var previousIndex: Int?
         for var tab in record.tabs {
+            let originalID = tab.id
             tab.id = UUID()
             // Closed records retain stable Space IDs; a removed Space must not
             // be recreated or accidentally resolve to a newly created one.
             if session.spaceDefinition(tab.space)?.profileID != profileID { tab.space = session.space }
-            restored.append(tab); session.tabs.append(tab)
+            restored.append(tab)
+            // The first tab goes back where it was closed; tabs closed with it (a Split) follow it in order.
+            if let previous = previousIndex { session.tabs.insert(tab, at: previous + 1); previousIndex = previous + 1 }
+            else { previousIndex = session.insertRestored(tab, originalID: originalID) }
         }
         guard let first = restored.first else { return }
         session.select(first.id)
