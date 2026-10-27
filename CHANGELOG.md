@@ -8,6 +8,12 @@
 - Reading Mode (⌥⌘R): the article alone in one clean column over the page, opening at the paragraph you were reading. Choose text size (⌘+ / ⌘-), serif or sans, and a Light, Sepia, Dark or matching theme. ⌘F finds words in the article, and Esc or ⌥⌘R returns to the page exactly as you left it.
 - Hide Elements (⇧⌘H): point at a cookie banner, ad or sidebar and click to make it crumble away. ⌘Z brings back the last, Esc finishes. What you hide stays hidden on that site from the first frame of every page; View › Restore Hidden Elements on This Site brings it all back.
 - A new Develop menu: Show Web Inspector (⌥⌘I), Show JavaScript Console (⌥⌘J) and Inspect Element (⌥⌘C). Pages are also inspectable from Safari's Develop menu, and right-clicking a page offers Inspect Element.
+- Peek grows out of the link you clicked as one card, with the site and page title in a slim address bar, a Copy Link button (⇧⌘C) and round Close, Open in Tab, Split View and Little Bam buttons beside it. The page behind dims softly. Closing shrinks the card back into the link; ⌘O grows it into the tab.
+- A Peek no longer flashes dark while its page loads: it shows the page behind's color until the new page draws.
+- Little Bam has a calmer frame: it wears its Space's color, the page sits in a rounded card, and one field in the bar holds the login profile, Back, Forward, Reload, the site, extensions and Copy Link. The traffic lights sit centered in the bar, and the window pops in and out like a system panel.
+- Floating video can be tucked away: throw or drag it past the left or right edge of the screen and it hides behind the edge with a blurred sliver and a chevron showing, while the sound plays on. Point at the sliver to pull it out a little; click it, press Return or use two fingers to bring it back.
+- Floating video now flies out of its place in the page when it starts, and on close it is drawn back into the page before fading.
+- Dragging floating video with the mouse now glides it to a corner (or the corner it was thrown toward) when you let go.
 
 ## 0.25.1 build 51 — Quit dialog and sidebar scroll bar polish
 

@@ -16,11 +16,69 @@ enum PiPPositioning {
         let frame: CGRect
         let duration: TimeInterval
         let isFlick: Bool
+        /// Set when the release tucks the video behind a screen edge.
+        var tuck: TuckSide? = nil
+    }
+
+    // MARK: Tucking behind a screen edge
+
+    enum TuckSide: Equatable { case left, right }
+    /// How much of a tucked video stays on screen: a tab-sized sliver to point at or pull back.
+    static let tuckSliver: CGFloat = 28
+    /// Pointing at the sliver slides this much more into view.
+    static let tuckPeek: CGFloat = 14
+    /// Hanging this share of its width past an outer edge at release tucks it.
+    static let tuckOverhang: CGFloat = 0.4
+    /// A sideways throw at an edge it already touches must be this fast to tuck.
+    static let tuckThrowSpeed: CGFloat = 900
+
+    /// Whether a release tucks the video, and on which side. Only outer edges of the display
+    /// arrangement tuck (an edge shared with another display is crossed, not tucked into), and a
+    /// video too large for a sliver to make sense never tucks.
+    static func tuckSide(for frame: CGRect, velocity: CGPoint, screens: [CGRect]) -> TuckSide? {
+        guard valid(frame), let screen = destinationScreen(for: frame, screens: screens),
+              frame.width <= screen.width * 0.6 else { return nil }
+        let usable = screens.filter(valid)
+        func outer(_ side: TuckSide) -> Bool {
+            let probe = CGPoint(x: side == .right ? screen.maxX + 2 : screen.minX - 2,
+                                y: min(max(frame.midY, screen.minY + 1), screen.maxY - 1))
+            return !usable.contains { $0 != screen && $0.contains(probe) }
+        }
+        let overLeft = screen.minX - frame.minX, overRight = frame.maxX - screen.maxX
+        if overRight > frame.width * tuckOverhang, outer(.right) { return .right }
+        if overLeft > frame.width * tuckOverhang, outer(.left) { return .left }
+        // Two-finger moves stop at the edge, so a throw from against it tucks as well.
+        let v = boundedVelocity(velocity)
+        guard abs(v.x) >= tuckThrowSpeed, abs(v.x) >= abs(v.y) * 1.5 else { return nil }
+        if v.x > 0, overRight >= -(cornerInset + 2), outer(.right) { return .right }
+        if v.x < 0, overLeft >= -(cornerInset + 2), outer(.left) { return .left }
+        return nil
+    }
+
+    /// The tucked frame: behind `side` of the frame's display with only the sliver showing.
+    static func tuckedFrame(_ frame: CGRect, side: TuckSide, screens: [CGRect], peek: Bool = false) -> CGRect {
+        guard valid(frame), let screen = destinationScreen(for: frame, screens: screens) else { return frame }
+        let shown = tuckSliver + (peek ? tuckPeek : 0)
+        let x = side == .right ? screen.maxX - shown : screen.minX - frame.width + shown
+        let y = min(max(frame.minY, screen.minY + cornerInset), max(screen.minY + cornerInset, screen.maxY - frame.height - cornerInset))
+        return CGRect(x: x, y: y, width: frame.width, height: frame.height)
+    }
+
+    /// Back out from behind the edge: against that side at the same height, caught by a nearby corner.
+    static func untuckedFrame(_ frame: CGRect, side: TuckSide, screens: [CGRect]) -> CGRect {
+        guard valid(frame), let screen = destinationScreen(for: frame, screens: screens) else { return frame }
+        let x = side == .right ? screen.maxX - frame.width - cornerInset : screen.minX + cornerInset
+        return releaseFrame(CGRect(x: x, y: frame.minY, width: frame.width, height: frame.height), screens: screens)
     }
 
     static func releasePlan(_ frame: CGRect, velocity: CGPoint, screens: [CGRect]) -> ReleasePlan {
         guard valid(frame), destinationScreen(for: frame, screens: screens) != nil else {
             return ReleasePlan(frame: frame, duration: 0.22, isFlick: false)
+        }
+        if let side = tuckSide(for: frame, velocity: velocity, screens: screens) {
+            let target = tuckedFrame(frame, side: side, screens: screens)
+            let travel = abs(target.minX - frame.minX)
+            return ReleasePlan(frame: target, duration: 0.28 + 0.12 * Double(min(1, travel / 400)), isFlick: true, tuck: side)
         }
         let velocity = boundedVelocity(velocity)
         let speed = hypot(velocity.x, velocity.y)
