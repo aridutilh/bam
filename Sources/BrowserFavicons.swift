@@ -9,13 +9,14 @@ import WebKit
               tab.chosenSymbol == nil else { return nil }
         let address = tab.isUnloaded ? (tab.saved?.address ?? tab.address) : tab.address
         // An icon carried over from Arc wins while the tab is still on that site.
-        if let imported = importedTabIcons.image(for: id, address: address, profile: session.profileID(for: tab)) { return imported }
+        if let imported = importedTabIcons.image(for: id, address: address, profile: session.profileID(for: tab)) { return FaviconInk.adapted(imported) }
         guard let url = URL(string: address) else { return nil }
         // Imported tabs never reach their sites for an icon until the user
         // opens them; Bam's own cache may still answer.
         let dormantImport = browsers[id] == nil && importedTabIDs.contains(id)
-        return favicons.image(for: url, profileID: session.profileID(for: tab),
-                              allowFetch: !dormantImport && faviconNetworkAllowed(for: url))
+        // Dark one-colour marks (GitHub, Notion…) draw white on dark chrome, as in Arc (FaviconInk).
+        return FaviconInk.adapted(favicons.image(for: url, profileID: session.profileID(for: tab),
+                                                 allowFetch: !dormantImport && faviconNetworkAllowed(for: url)))
     }
     /// Tab IDs created by any Arc import (from persisted provenance).
     var importedTabIDs: Set<UUID> {
@@ -28,8 +29,8 @@ import WebKit
 
     func favicon(forSiteURL url: URL, allowFetch: Bool) -> NSImage? {
         guard !isShuttingDown else { return nil }
-        return favicons.image(for: url, profileID: commandProfileID,
-                              allowFetch: allowFetch && faviconNetworkAllowed(for: url))
+        return FaviconInk.adapted(favicons.image(for: url, profileID: commandProfileID,
+                                                 allowFetch: allowFetch && faviconNetworkAllowed(for: url)))
     }
 
     /// Native fixtures may display starter tabs but must not visit their sites.

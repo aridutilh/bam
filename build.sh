@@ -70,6 +70,8 @@ if [ "$VERIFIED" != true ]; then exit 1; fi
 "$BUILD_DIR/folder-tests" "$BUILD_DIR/folder-fixtures"
 "$SWIFTC" "${COMMON[@]}" -parse-as-library "$PROJECT_DIR/Sources/BrowserState.swift" "$PROJECT_DIR/Tests/TabOrderingTests.swift" -o "$BUILD_DIR/tab-ordering-tests"
 "$BUILD_DIR/tab-ordering-tests"
+"$SWIFTC" "${COMMON[@]}" -parse-as-library -framework AppKit "$PROJECT_DIR/Sources/FaviconInk.swift" "$PROJECT_DIR/Tests/FaviconInkTests.swift" -o "$BUILD_DIR/favicon-ink-tests"
+"$BUILD_DIR/favicon-ink-tests"
 "$SWIFTC" "${COMMON[@]}" -parse-as-library -framework AppKit -framework WebKit "$PROJECT_DIR/Sources/BrowserState.swift" "$PROJECT_DIR/Sources/ArcImport.swift" "$PROJECT_DIR/Sources/FaviconSVGRenderer.swift" "$PROJECT_DIR/Sources/WebsiteFaviconStore.swift" "$PROJECT_DIR/Sources/ArcIconImport.swift" "$PROJECT_DIR/Tests/ArcImportTests.swift" -o "$BUILD_DIR/arc-import-tests"
 "$BUILD_DIR/arc-import-tests" "$BUILD_DIR/arc-import-fixtures"
 "$SWIFTC" "${COMMON[@]}" -parse-as-library -framework AppKit -framework WebKit "$PROJECT_DIR/Sources/BrowserState.swift" "$PROJECT_DIR/Sources/ArcImport.swift" "$PROJECT_DIR/Sources/FaviconSVGRenderer.swift" "$PROJECT_DIR/Sources/WebsiteFaviconStore.swift" "$PROJECT_DIR/Sources/ArcIconImport.swift" "$PROJECT_DIR/Tests/ArcIconImportTests.swift" -o "$BUILD_DIR/arc-icon-tests"

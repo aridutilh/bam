@@ -384,8 +384,8 @@ import WebKit
         glass.material = .hudWindow; glass.blendingMode = .withinWindow; glass.state = .active
         glass.wantsLayer = true; glass.layer?.cornerRadius = 15; glass.layer?.masksToBounds = true
         addSubview(glass)
-        layer?.shadowColor = NSColor.black.cgColor; layer?.shadowOpacity = 0.18
-        layer?.shadowRadius = 10; layer?.shadowOffset = CGSize(width: 0, height: -3)
+        layer?.shadowColor = NSColor.black.cgColor; layer?.shadowOpacity = 0.28
+        layer?.shadowRadius = 14; layer?.shadowOffset = CGSize(width: 0, height: -3)
         let text = NSMutableAttributedString()
         let body: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 13, weight: .semibold), .foregroundColor: NSColor.labelColor]
         let quiet: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 13, weight: .regular), .foregroundColor: NSColor.secondaryLabelColor]
@@ -406,10 +406,19 @@ import WebKit
     override func layout() {
         super.layout()
         glass.frame = bounds
+        // An opaque pill, so the page's own text underneath never shows through and muddles it (QA #8).
+        glass.isHidden = true
+        layer?.cornerRadius = 15
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+            layer?.borderColor = NSColor.separatorColor.cgColor
+        }
+        layer?.borderWidth = 1
         layer?.shadowPath = CGPath(roundedRect: bounds, cornerWidth: 15, cornerHeight: 15, transform: nil)
         let height = ceil(label.attributedStringValue.size().height) + 2
         label.frame = NSRect(x: 18, y: (bounds.height - height) / 2, width: bounds.width - 32, height: height)
     }
+    override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); needsLayout = true }
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }
 

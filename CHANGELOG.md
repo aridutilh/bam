@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Dark one-colour site icons, like GitHub's, now show up light on dark sidebars, in the ⌃⇥ switcher and in the search box, as in Arc.
+- Closing your last Today tab takes you back to the tab you used before it instead of opening a blank page.
+- The search box no longer lists the page you're on twice while it finishes an address, and ⌘L lists pages only, as Arc's does.
+- Hide Elements' hint is a solid pill, so the page underneath no longer shows through it.
+- An empty ⌘T lists your recent tabs, previous one first, so ⌘T then Return jumps back. ⌘L lists the current page and your recent tabs, as Arc's does.
+
 - The permission review when adding an extension no longer mentions 1Password's desktop app for extensions that have nothing to do with it; the desktop-app note now only appears for extensions that ask to talk to a desktop app.
 
 - Close Window (⇧⌘W) closes the window you're in, private windows included.
