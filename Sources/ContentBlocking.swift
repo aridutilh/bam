@@ -476,9 +476,13 @@ import WebKit
         }
         card.present(in: web)
         prompt = card
-        DispatchQueue.main.asyncAfter(deadline: .now() + 12) { [weak self, weak card] in
-            guard let self, let card, self.prompt === card, !card.isHovered else { return }
-            self.dismissPrompt()
+        dismissWhenIdle(card, after: 12)
+    }
+    /// The toast has no close button: it leaves on its own, waiting while the pointer rests on it.
+    private func dismissWhenIdle(_ card: ContentBlockingPrompt, after delay: TimeInterval) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self, weak card] in
+            guard let self, let card, self.prompt === card else { return }
+            if card.isHovered { self.dismissWhenIdle(card, after: 2) } else { self.dismissPrompt() }
         }
     }
     func dismissPrompt() { prompt?.dismiss(); prompt = nil }
