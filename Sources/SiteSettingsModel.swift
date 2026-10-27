@@ -23,6 +23,8 @@ struct SiteSettingsContext: Equatable {
     var url: URL?
     var connection: Connection
     var pageZoom: Double = 1
+    /// Settings › Websites' page zoom: where Reset (and ⌘0) takes the page.
+    var defaultZoom: Double = 1
     /// nil where it doesn't apply (no host, or a private window that can't keep it).
     var keepsAwake: Bool? = nil
     var extensions: [ExtensionItem] = []
@@ -60,7 +62,8 @@ enum SiteSettingsModel {
         let zoom = context.pageZoom.isFinite ? context.pageZoom : 1
         let percent = Int((zoom * 100).rounded())
         // Same limits as View › Zoom In / Zoom Out.
-        return ("\(percent)%", percent != 100, zoom < 2.999, zoom > 0.401)
+        let home = context.defaultZoom.isFinite ? Int((context.defaultZoom * 100).rounded()) : 100
+        return ("\(percent)%", percent != home, zoom < 2.999, zoom > 0.401)
     }
 
     static func accessText(_ access: SiteSettingsContext.ExtensionAccess) -> String {

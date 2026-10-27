@@ -20,7 +20,7 @@ struct SiteSettingsActions {
         SiteSettingsContext(url: web.url,
                             connection: SiteSettingsModel.connection(url: web.url, onlySecureContent: web.hasOnlySecureContent,
                                                                      certificate: certificateSummary(web.serverTrust)),
-                            pageZoom: Double(web.pageZoom), keepsAwake: keepsAwake, extensions: extensions,
+                            pageZoom: Double(web.pageZoom), defaultZoom: WebsitePreferences.pageZoom, keepsAwake: keepsAwake, extensions: extensions,
                             blocksAds: ContentBlockingPreference.site(web.url) == nil || !ContentBlocking.shared.isAvailable ? nil
                                 : ContentBlockingPreference.blocks(web.url) || !ContentBlockingPreference.isEnabled,
                             adBlockerOn: ContentBlockingPreference.isEnabled)

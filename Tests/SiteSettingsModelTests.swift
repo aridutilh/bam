@@ -36,6 +36,9 @@ import Foundation
         let z = SiteSettingsModel.zoom(zoomed)
         try check(z.label == "110%" && z.canReset && z.canZoomIn && z.canZoomOut, "110% zoom was misreported: \(z)")
         try check(!SiteSettingsModel.zoom(secure).canReset, "Reset was offered at 100%")
+        var homed = zoomed; homed.defaultZoom = 1.1
+        try check(!SiteSettingsModel.zoom(homed).canReset, "Reset was offered at Settings' default zoom")
+        homed.pageZoom = 1; try check(SiteSettingsModel.zoom(homed).canReset, "Reset wasn't offered away from Settings' default zoom")
         zoomed.pageZoom = 3; try check(!SiteSettingsModel.zoom(zoomed).canZoomIn, "Zoom In was offered at the maximum")
         zoomed.pageZoom = 0.4; try check(!SiteSettingsModel.zoom(zoomed).canZoomOut, "Zoom Out was offered at the minimum")
 
