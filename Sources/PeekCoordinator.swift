@@ -607,8 +607,10 @@ enum PeekMotion {
             animation.fromValue = start; animation.toValue = end
             animation.duration = duration; animation.timingFunction = curve
             if key == "opacity", layer === still, case .expand = style {
-                // Expanding into the tab: the still stays solid, then gives way to the live page under it.
-                animation.timingFunction = CAMediaTimingFunction(controlPoints: 0.6, 0, 0.9, 0.4)
+                // Expanding into the tab: the live page underneath is the same page, so the still
+                // gives way early instead of doubling up with it.
+                animation.duration = duration * 0.55
+                animation.timingFunction = CAMediaTimingFunction(name: .easeOut)
             }
             layer.add(animation, forKey: "peek.exit.\(key)")
         }
