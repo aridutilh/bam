@@ -361,7 +361,8 @@ enum PaletteTarget: Equatable {
                 row.configure(title: hit.title.isEmpty ? address : hit.title, detail: hit.title.isEmpty ? "" : address,
                               badge: "", symbol: "clock")
             case .quickAction(let action):
-                row.configure(title: action.title, detail: action.host, badge: "", symbol: "plus", boxed: true)
+                let look = Self.quickActionLook(action.id)
+                row.configure(title: action.title, detail: action.host, badge: "", symbol: look.symbol, boxed: true, tint: look.color)
             case .calculation(let calculation):
                 row.configure(title: "= " + calculation.display, detail: calculation.expression, badge: "", symbol: "equal", boxed: true)
             }
@@ -440,6 +441,20 @@ enum PaletteTarget: Equatable {
         case .history(let hit): return .address(hit.address, alwaysNewTab: false)
         case .quickAction(let action): return .address(action.address, alwaysNewTab: true)
         case .calculation(let calculation): return .calculation(calculation)
+        }
+    }
+    /// A Quick Action's own glyph and color, drawn by Bam (no service artwork).
+    static func quickActionLook(_ id: String) -> (symbol: String, color: NSColor) {
+        switch id {
+        case "doc": return ("doc.text.fill", NSColor(srgbRed: 0.26, green: 0.52, blue: 0.96, alpha: 1))
+        case "meet": return ("video.fill", NSColor(srgbRed: 0.0, green: 0.62, blue: 0.47, alpha: 1))
+        case "sheet": return ("tablecells.fill", NSColor(srgbRed: 0.06, green: 0.62, blue: 0.35, alpha: 1))
+        case "slides": return ("rectangle.on.rectangle", NSColor(srgbRed: 0.96, green: 0.65, blue: 0.0, alpha: 1))
+        case "cal": return ("calendar", NSColor(srgbRed: 0.26, green: 0.52, blue: 0.96, alpha: 1))
+        case "form": return ("list.bullet.rectangle.fill", NSColor(srgbRed: 0.45, green: 0.28, blue: 0.75, alpha: 1))
+        case "figma": return ("pencil.and.outline", NSColor(srgbRed: 0.64, green: 0.35, blue: 1.0, alpha: 1))
+        case "linear": return ("circle.lefthalf.filled", NSColor(srgbRed: 0.37, green: 0.42, blue: 0.82, alpha: 1))
+        default: return ("plus", .secondaryLabelColor)
         }
     }
     /// "example.com/path", "localhost:3000" or a full URL, not words or sums.
@@ -605,6 +620,8 @@ extension NSTextField {
     /// A hairline rounded square behind symbol icons (search, commands), as Yab draws them.
     private let iconBox = NSView()
     private var boxed = false
+    /// A Quick Action's color: its glyph takes it and its box a soft wash of it.
+    private var tint: NSColor?
     private var favicon: NSImage?
     private var symbol = "magnifyingglass"
     private let title = NSTextField(labelWithString: "")
@@ -633,7 +650,8 @@ extension NSTextField {
         applySelection()
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
-    func configure(title: String, detail: String, badge: String, symbol: String, boxed: Bool = false) {
+    func configure(title: String, detail: String, badge: String, symbol: String, boxed: Bool = false, tint: NSColor? = nil) {
+        self.tint = tint
         self.title.stringValue = title
         self.detail.stringValue = detail
         self.badge.stringValue = badge
@@ -665,11 +683,16 @@ extension NSTextField {
         title.textColor = primary
         detail.textColor = secondary
         badge.textColor = secondary
-        icon.contentTintColor = favicon == nil ? (isSelected && selectedTextColor != .labelColor ? selectedTextColor : .secondaryLabelColor) : nil
+        icon.contentTintColor = favicon == nil ? (isSelected && selectedTextColor != .labelColor ? selectedTextColor : (tint ?? .secondaryLabelColor)) : nil
         iconBox.isHidden = !(boxed && favicon == nil)
         effectiveAppearance.performAsCurrentDrawingAppearance {
-            iconBox.layer?.borderColor = NSColor.labelColor.withAlphaComponent(isSelected ? 0.16 : 0.12).cgColor
-            iconBox.layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(0.02).cgColor
+            if let tint {
+                iconBox.layer?.borderColor = NSColor.clear.cgColor
+                iconBox.layer?.backgroundColor = tint.withAlphaComponent(0.15).cgColor
+            } else {
+                iconBox.layer?.borderColor = NSColor.labelColor.withAlphaComponent(isSelected ? 0.16 : 0.12).cgColor
+                iconBox.layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(0.02).cgColor
+            }
         }
         needsLayout = true
     }
