@@ -216,6 +216,7 @@ extension BrowserController: NSMenuItemValidation {
         if suspendsChromeInteraction { return false }
         if isViewLoaded, view.window?.attachedSheet != nil { return false }
         if let pageTool = validatePageToolsItem(menuItem) { return pageTool }
+        if let tabAction = validateTabActionItem(menuItem) { return tabAction }
         switch menuItem.action {
         case #selector(toggleAutomaticTabSleeping(_:)):
             menuItem.state = automaticTabSleeping ? .on : .off

@@ -17,6 +17,8 @@ import WebKit
     var resignObserver: NSObjectProtocol?
     /// Set while a ⌘Z that belongs to the page is sent through again.
     var replayingUndo = false
+    /// Tabs (Split primaries) the user muted; reapplied to pages created later.
+    var mutedTabs: Set<UUID> = []
     /// A quick ⌃⇥ tap lands without the overlay ever drawing.
     static let revealDelay: TimeInterval = 0.09
     static let maximumTiles = 5
