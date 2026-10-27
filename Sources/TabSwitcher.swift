@@ -19,6 +19,8 @@ import WebKit
     var replayingUndo = false
     /// Tabs (Split primaries) the user muted; reapplied to pages created later.
     var mutedTabs: Set<UUID> = []
+    /// A tab waiting for the Space being created ("Move to ▸ New Space…").
+    var pendingMoveToNewSpace: UUID?
     /// The hovered-link address at the page's corner (LinkStatus.swift).
     lazy var linkStatus = LinkStatusController()
     /// A quick ⌃⇥ tap lands without the overlay ever drawing.

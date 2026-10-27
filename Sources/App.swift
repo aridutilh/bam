@@ -501,6 +501,7 @@ import WebKit
         tabs.addItem(.separator())
         item(tabs, "Duplicate Tab", #selector(BrowserController.duplicateTab(_:)), "", .command, controller)
         item(tabs, "Rename Tab…", #selector(BrowserController.renameTab(_:)), "", .command, controller)
+        item(tabs, "Change Tab Icon…", #selector(BrowserController.changeTabIcon(_:)), "", .command, controller)
         item(tabs, "Mute Tab", #selector(BrowserController.toggleMuteTab(_:)), "", .command, controller)
         item(tabs, "Close Tabs Below", #selector(BrowserController.closeTabsBelow(_:)), "", .command, controller)
         bound(tabs, "Next Space", #selector(BrowserController.nextSpace(_:)), .nextSpace, controller)
