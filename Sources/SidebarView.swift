@@ -156,8 +156,8 @@ struct SidebarExtensionItem {
     var onMoveToFolder: ((UUID, UUID?) -> Void)?
     var folderTargets: ((UUID) -> [SidebarFolderTarget])?
     override var isFlipped: Bool { true }
-    private let back = ArkIconButton(symbol: "arrow.left", label: "Go back", glyphSize: 17)
-    private let forward = ArkIconButton(symbol: "arrow.right", label: "Go forward", glyphSize: 17)
+    private let back = ArkIconButton(symbol: "arrow.left", label: "Go back", glyphSize: 18)
+    private let forward = ArkIconButton(symbol: "arrow.right", label: "Go forward", glyphSize: 18)
     private let reload = ArkIconButton(symbol: "arrow.clockwise", label: "Reload page", glyphSize: 17)
     private let toggle = ArkIconButton(symbol: "sidebar.left", label: "Hide sidebar", glyphSize: 19)
     private let search = ArkSearchButton()
@@ -226,8 +226,8 @@ struct SidebarExtensionItem {
             })
         }
         [toggle, back, forward, reload, search, extensionMenu, extensionLibrary, siteSettingsButton, favoritesHost, clip, downloads, plus, spaceOverflow].forEach(addSubview)
-        // The window controls' row and the footer use the rows' ink, as Yab does; the address text stays full ink.
-        for button in [toggle, back, forward, reload, plus, spaceOverflow] { button.tone = ArkPalette.rowInk }
+        // The window controls' row and the footer's + read a step softer than the address text, as in Yab.
+        for button in [toggle, back, forward, reload, plus, spaceOverflow] { button.tone = ArkPalette.chromeIcon }
         clip.addSubview(page); connect(page); cachedPages[0] = page
         back.handler = { [weak self] in self?.onBack?() }
         forward.handler = { [weak self] in self?.onForward?() }
@@ -966,7 +966,8 @@ struct SidebarExtensionItem {
     }
     func numberOfRows(in tableView: NSTableView) -> Int { entries.count }
     func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
-        switch entries[row] { case .tab: return 36; case .divider: return 20; case .newTab: return 36 }
+        // Yab: the line between kept and Today tabs sits close to both, not in a band of its own.
+        switch entries[row] { case .tab: return 36; case .divider: return 10; case .newTab: return 36 }
     }
     func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool {
         guard entries.indices.contains(row) else { return false }
@@ -1127,6 +1128,9 @@ enum ArkPalette {
     /// beige Space). The selected row, and anything under the pointer, uses full `ink`.
     static let rowInk = NSColor.chrome(light: NSColor(srgbRed: BamInk.lightPrimary, green: BamInk.lightPrimary, blue: BamInk.lightPrimary, alpha: 0.76),
                                        dark: NSColor(srgbRed: BamInk.darkPrimary, green: BamInk.darkPrimary, blue: BamInk.darkPrimary, alpha: 0.84))
+    /// Toolbar and footer glyphs: nearly full ink (thin strokes read lighter than text at the same color).
+    static let chromeIcon = NSColor.chrome(light: NSColor(srgbRed: BamInk.lightPrimary, green: BamInk.lightPrimary, blue: BamInk.lightPrimary, alpha: 0.88),
+                                           dark: NSColor(srgbRed: BamInk.darkPrimary, green: BamInk.darkPrimary, blue: BamInk.darkPrimary, alpha: 0.9))
     static let folderInk = NSColor.chrome(light: NSColor(srgbRed: BamInk.lightPrimary, green: BamInk.lightPrimary, blue: BamInk.lightPrimary, alpha: 0.9),
                                           dark: NSColor(srgbRed: BamInk.darkPrimary, green: BamInk.darkPrimary, blue: BamInk.darkPrimary, alpha: 0.92))
     /// Space icon tint: the pastel in dark mode, a deeper version on light chrome.
@@ -2735,6 +2739,6 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted, Ar
     override func draw(_ dirtyRect: NSRect) {
         if (hovered || isHighlighted) && isEnabled { fill(isHighlighted ? ArkPalette.pressed : ArkPalette.iconHover, radius: 7) }
         symbol("arrow.down.circle", rect: NSRect(x: (bounds.width - 17) / 2, y: (bounds.height - 17) / 2, width: 17, height: 17),
-               color: ArkPalette.ink, size: 16)
+               color: hovered ? ArkPalette.ink : ArkPalette.chromeIcon, size: 16)
     }
 }
