@@ -21,20 +21,48 @@ struct LinkRoute: Codable, Equatable, Identifiable {
     var destination: LinkDestination = .mostRecentSpace
 
     /// Case-insensitive. "Contains" looks anywhere in the address; "Is equal to" compares the whole
-    /// address, ignoring a trailing slash, and a value typed without "https://" compares without it.
+    /// address, ignoring a trailing slash (and the #fragment unless the route names one), and a value
+    /// typed without "https://" compares without it. A route typed as "bücher.de" or "café" matches
+    /// the punycode host and percent-encoded path a link actually carries. The address's user info is
+    /// never compared: "https://figma.com@evil.com" goes to evil.com, so it must not match "figma.com".
+    /// Contains is still a plain substring test, as in Arc: "figma.com.evil.com" and
+    /// "evil.com/?u=figma.com" match a "figma.com" route.
     func matches(_ url: URL) -> Bool {
-        let wanted = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let wanted = Self.ruleForms(text)
         guard !wanted.isEmpty else { return false }
-        let address = url.absoluteString.lowercased()
+        let addresses = Self.addressForms(url)
         switch match {
         case .contains:
-            return address.contains(wanted)
+            return addresses.contains { address in wanted.contains { address.contains($0) } }
         case .isEqualTo:
             func trimmed(_ value: String) -> String { value.hasSuffix("/") ? String(value.dropLast()) : value }
-            if wanted.contains("://") { return trimmed(address) == trimmed(wanted) }
-            let schemeless = address.range(of: "://").map { String(address[$0.upperBound...]) } ?? address
-            return trimmed(schemeless) == trimmed(wanted)
+            return wanted.contains { rule in
+                addresses.contains { full in
+                    var address = full
+                    if !rule.contains("#"), let hash = address.firstIndex(of: "#") { address = String(address[..<hash]) }
+                    if !rule.contains("://") { address = address.range(of: "://").map { String(address[$0.upperBound...]) } ?? address }
+                    return trimmed(address) == trimmed(rule)
+                }
+            }
         }
+    }
+    /// The link as routes read it: lowercased, without user info, and also percent-decoded.
+    static func addressForms(_ url: URL) -> [String] {
+        var parts = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        if parts?.user != nil || parts?.password != nil { parts?.user = nil; parts?.password = nil }
+        let address = (parts?.url ?? url).absoluteString.lowercased()
+        let decoded = address.removingPercentEncoding
+        return decoded.map { $0 == address ? [address] : [address, $0] } ?? [address]
+    }
+    /// The route's text as typed, plus the form a link would carry (punycode host, encoded path).
+    static func ruleForms(_ text: String) -> [String] {
+        let wanted = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !wanted.isEmpty else { return [] }
+        let hasScheme = wanted.contains("://")
+        guard let parsed = URL(string: hasScheme ? wanted : "https://" + wanted) else { return [wanted] }
+        var encoded = parsed.absoluteString.lowercased()
+        if !hasScheme, encoded.hasPrefix("https://") { encoded.removeFirst(8) }
+        return encoded.isEmpty || encoded == wanted ? [wanted] : [wanted, encoded]
     }
 }
 
@@ -106,9 +134,17 @@ enum LinkRoutePreference {
         guard let site = LinkRouting.site(of: url) else { return }
         var counts = moves
         counts[key(site: site, space: space), default: 0] += 1
-        // Bounded: the oldest-looking entries don't matter once there are many.
-        if counts.count > 200 { counts = counts.filter { $0.value >= 2 } }
+        // Bounded: past 200 sites, keep the 100 moved most (filtering by count alone never shrinks
+        // once every entry has two moves).
+        if counts.count > 200 {
+            counts = Dictionary(uniqueKeysWithValues: counts.sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }.prefix(100).map { ($0.key, $0.value) })
+        }
         moves = counts
+    }
+    /// The moves are a record of sites visited, so clearing history clears them (and the declined list).
+    static func forgetMoves() {
+        moves = [:]; dismissed = []
+        defaults?.removeObject(forKey: movesKey); defaults?.removeObject(forKey: dismissedKey)
     }
 
     /// A route worth offering: a site moved to the same Space at least three times, not already

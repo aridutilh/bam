@@ -121,6 +121,10 @@ import WebKit
             MainActor.assumeIsolated { self?.appearanceDidChange() }
         }
         ShortcutStore.shared.reservedOwner = { [weak self] combo in self?.fixedMenuItem(wearing: combo)?.title }
+        // Air Traffic Control's suggestion counts are visited sites: Clear History clears them too.
+        NotificationCenter.default.addObserver(forName: BrowserLibrary.historyCleared, object: nil, queue: .main) { _ in
+            MainActor.assumeIsolated { LinkRoutePreference.forgetMoves() }
+        }
         externalURLs.connect { [weak self] urls in
             // Air Traffic Control decides: a routed Space, the current one, or Little Bam (the default).
             for url in urls { self?.controller?.openExternal(url) }

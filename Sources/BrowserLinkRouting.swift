@@ -14,7 +14,9 @@ import AppKit
     }
     /// A routed link becomes a new tab in that Space, with the main window in front.
     func openExternal(_ url: URL, inSpace id: Int) {
-        guard session.spaceDefinition(id) != nil else { openLittleOrbit(url: url); return }
+        // A sheet (the welcome, Manage Spaces, a Space editor) owns the main window: switching Spaces
+        // under it would pull the session out from beneath its edits, so the link floats instead.
+        guard session.spaceDefinition(id) != nil, view.window?.attachedSheet == nil else { openLittleOrbit(url: url); return }
         cancelPaging(); dismissAddress()
         if session.space != id { session.changeSpace(id); onSpacesChanged?() }
         _ = session.add(address: url.absoluteString)
@@ -24,7 +26,8 @@ import AppKit
     }
     /// The person put a page in a Space by hand; three times for one site and Settings › Links suggests a route.
     func noteLinkMove(_ address: String?, toSpace id: Int) {
-        guard let address, let url = URL(string: address) else { return }
+        // The counts are a record of sites visited: never from a private window or a fresh preview's controller.
+        guard !privateMode, let address, let url = URL(string: address) else { return }
         LinkRoutePreference.noteMove(url, toSpace: id)
     }
 }

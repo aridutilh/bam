@@ -42,6 +42,8 @@ struct ClosedRecord: Codable, Identifiable, Equatable {
         case cleared
     }
     var onHistoryChange: ((HistoryChange) -> Void)?
+    /// Posted after Clear History succeeds, for other records of visited sites (Air Traffic Control's move counts).
+    static let historyCleared = Notification.Name("BamHistoryCleared")
     /// One accepted visit exactly as recorded. A coalesced revisit reuses the entry's id but gets a new
     /// revision, so a token from an earlier visit of that entry no longer matches.
     struct VisitToken: Equatable {
@@ -213,6 +215,7 @@ struct ClosedRecord: Codable, Identifiable, Equatable {
         guard commit({ history.removeAll() }) else { return false }
         visitRevisions.removeAll()
         onHistoryChange?(.cleared)
+        NotificationCenter.default.post(name: Self.historyCleared, object: self)
         return true
     }
     @discardableResult func clearArchive() -> Bool { commit { closedRecords.removeAll() } }
