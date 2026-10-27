@@ -183,8 +183,15 @@ import WebKit
             }
             return true
         }
-        little.onPromote = { [weak self] web in _ = self?.adoptWebView(web) }
-        little.onPromoteTo = { [weak self] web, spaceID in self?.promote(web, into: spaceID, from: profile) }
+        little.onPromote = { [weak self] web in
+            let address = web.url?.absoluteString
+            guard let self, self.adoptWebView(web) != nil else { return }
+            self.noteLinkMove(address, toSpace: self.session.space)
+        }
+        little.onPromoteTo = { [weak self] web, spaceID in
+            self?.noteLinkMove(web.url?.absoluteString, toSpace: spaceID)
+            self?.promote(web, into: spaceID, from: profile)
+        }
         little.profileName = session.profileName(profile)
         little.destinations = { [weak self] in
             guard let self else { return [] }

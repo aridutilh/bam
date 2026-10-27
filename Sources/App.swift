@@ -122,7 +122,8 @@ import WebKit
         }
         ShortcutStore.shared.reservedOwner = { [weak self] combo in self?.fixedMenuItem(wearing: combo)?.title }
         externalURLs.connect { [weak self] urls in
-            for url in urls { self?.controller?.openLittleOrbit(url: url) }
+            // Air Traffic Control decides: a routed Space, the current one, or Little Bam (the default).
+            for url in urls { self?.controller?.openExternal(url) }
         }
         // Development extension tests start at the browser without importing
         // favorites or changing the default browser through first-run setup.

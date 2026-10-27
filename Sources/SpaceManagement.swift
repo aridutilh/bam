@@ -202,10 +202,12 @@ struct SpaceEditPlan {
         }
         var updated = session
         guard apply(&updated) else { return false }
+        let address = isFolder ? nil : session.tabs.first { $0.id == id }?.address
         guard applyProfileAwareSession(updated, rebase: { current in
             var latest = current
             return apply(&latest) ? latest : nil
         }) else { return false }
+        noteLinkMove(address, toSpace: destination)
         dismissAddress()
         return true
     }

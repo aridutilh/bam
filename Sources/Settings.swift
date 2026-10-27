@@ -1,7 +1,7 @@
 import AppKit
 
 enum SettingsSection: CaseIterable {
-    case general, appearance, websites, privacy, search, spaces, shortcuts, extensions, about
+    case general, appearance, websites, privacy, search, spaces, links, shortcuts, extensions, about
     var title: String {
         switch self {
         case .general: return "General"
@@ -10,6 +10,7 @@ enum SettingsSection: CaseIterable {
         case .privacy: return "Privacy"
         case .search: return "Search"
         case .spaces: return "Spaces"
+        case .links: return "Links"
         case .shortcuts: return "Shortcuts"
         case .extensions: return "Extensions"
         case .about: return "About"
@@ -23,6 +24,7 @@ enum SettingsSection: CaseIterable {
         case .privacy: return "hand.raised"
         case .search: return "magnifyingglass"
         case .spaces: return "square.stack.3d.up"
+        case .links: return "arrow.triangle.branch"
         case .shortcuts: return "command"
         case .extensions: return "puzzlepiece.extension"
         case .about: return "info.circle"
@@ -61,6 +63,9 @@ struct SettingsSnapshot {
     var searchEngine: DefaultSearchEngine = .duckDuckGo
     var appearance: BrowserAppearance = .system
     var spaces: [BrowserSpace] = BrowserSpace.defaults
+    /// Air Traffic Control's routes and default, and a route Bam would suggest.
+    var linkRouting = LinkRouting()
+    var linkSuggestion: (site: String, space: Int)? = nil
     var currentSpaceID = 0
     var profileName = "Default"
     var extensions: [SettingsExtensionItem] = []
@@ -81,6 +86,8 @@ struct SettingsActions {
     var setMinimumFontSize: (Double) -> Void = { _ in }
     var setAsksBeforeQuitting: (Bool) -> Void = { _ in }
     var setSearchEngine: (DefaultSearchEngine) -> Void = { _ in }
+    var setLinkRouting: (LinkRouting) -> Void = { _ in }
+    var dismissLinkSuggestion: (String, Int) -> Void = { _, _ in }
     var editSpace: (BrowserSpace) -> Bool = { _ in false }
     var switchSpace: (Int) -> Void = { _ in }
     var manageSpaces: () -> Void = {}
@@ -188,7 +195,7 @@ struct SettingsSearchHit: Equatable {
             rail.addArrangedSubview(button)
             button.widthAnchor.constraint(equalTo: rail.widthAnchor).isActive = true
             // A little air between "how Bam looks and loads" and "what you've set up in it".
-            if section == .privacy || section == .shortcuts { rail.setCustomSpacing(12, after: button) }
+            if section == .privacy || section == .links { rail.setCustomSpacing(12, after: button) }
         }
         let divider = BamHairline()
         paper.addSubview(divider)
@@ -313,6 +320,7 @@ struct SettingsSearchHit: Equatable {
         case .privacy: subtitle = "What pages may load while you browse."
         case .search: subtitle = "Where typed words go when they aren’t an address."
         case .spaces: subtitle = "Name and color each part of your day."
+        case .links: subtitle = "Where links from other apps open: Air Traffic Control."
         case .shortcuts: subtitle = "Every command in the menu bar. Click a key to change it."
         case .extensions: subtitle = "Local WebExtensions in the \(snapshot.profileName) profile."
         case .about: subtitle = "Bam \(snapshot.version)"
@@ -326,6 +334,7 @@ struct SettingsSearchHit: Equatable {
         case .privacy: cards = privacyCards()
         case .search: cards = searchCards()
         case .spaces: cards = spacesCards()
+        case .links: cards = linksCards()
         case .shortcuts: cards = shortcutsCards()
         case .extensions: cards = extensionsCards()
         case .about: cards = aboutCards()
@@ -384,8 +393,8 @@ struct SettingsSearchHit: Equatable {
     }
 
     /// A pop-up choice (Arc's style for a long list): a pill naming the pick that opens a checked menu.
-    private func choiceMenu(_ titles: [String], picked: Int, label: String, _ pick: @escaping (Int) -> Void) -> NSView {
-        let current = titles.indices.contains(picked) ? titles[picked] : ""
+    private func choiceMenu(_ titles: [String], picked: Int, label: String, current shown: String? = nil, _ pick: @escaping (Int) -> Void) -> NSView {
+        let current = shown ?? (titles.indices.contains(picked) ? titles[picked] : "")
         let button = SettingsMenuPill(title: current)
         button.setAccessibilityLabel(label); button.setAccessibilityValue(current)
         button.onPress = { [weak self, weak button] in
@@ -681,6 +690,128 @@ struct SettingsSearchHit: Equatable {
     }
     @objc private func manageSpaces() { actions.manageSpaces() }
 
+    // MARK: Links
+
+    /// Destinations in the order Arc lists them: each Space, then Most Recent Space and Little Bam.
+    private var linkDestinations: [(LinkDestination, String)] {
+        snapshot.spaces.map { (.space($0.id), $0.name) } + [(.mostRecentSpace, "Most Recent Space"), (.littleBam, "Little Bam")]
+    }
+    private func destinationMenu(_ current: LinkDestination, label: String, _ change: @escaping (LinkDestination) -> Void) -> NSView {
+        let options = linkDestinations
+        let picked = options.firstIndex { $0.0 == current } ?? -1
+        return choiceMenu(options.map(\.1), picked: picked, label: label, current: picked < 0 ? "Missing Space" : nil) { index in
+            change(options[index].0)
+        }
+    }
+    /// Applies a change to the routes and redraws the section.
+    private func updateRouting(_ change: (inout LinkRouting) -> Void) {
+        var routing = snapshot.linkRouting
+        change(&routing)
+        act { actions.setLinkRouting(routing) }
+        refresh()
+    }
+    private weak var linkTestResult: NSTextField?
+    private var focusRouteID: UUID?
+
+    private func linksCards() -> [NSView] {
+        var cards: [NSView] = []
+        if let suggestion = snapshot.linkSuggestion, let space = snapshot.spaces.first(where: { $0.id == suggestion.space }) {
+            let tip = card(); tip.isDashed = true
+            let add = pill("Add Route", symbol: "plus", #selector(acceptSuggestion))
+            let later = SettingsIconButton(symbol: "xmark", label: "Don’t suggest this again")
+            later.onPress = { [weak self] in self?.act { self?.actions.dismissLinkSuggestion(suggestion.site, space.id) }; self?.refresh() }
+            let controls = NSStackView(views: [add, later]); controls.spacing = 8
+            tip.add(row("Open \(suggestion.site) links in \(space.name)?", "You’ve moved \(suggestion.site) to \(space.name) a few times.", controls,
+                        keywords: ["suggested route"]))
+            cards += [caption("Suggested"), tip]
+        }
+        let routes = card()
+        let newRoute = pill("New Route", symbol: "plus", #selector(addRoute))
+        routes.add(row("Routes", "Checked top to bottom. The first match wins.", newRoute,
+                       keywords: ["air traffic control", "atc", "route", "rules", "links from other apps", "open links in space"]))
+        for (index, route) in snapshot.linkRouting.routes.enumerated() {
+            let line = SettingsRouteRow(route: route, position: index + 1)
+            line.matchMenu = choiceMenu(LinkRoute.Match.allCases.map(\.title), picked: LinkRoute.Match.allCases.firstIndex(of: route.match) ?? 0,
+                                        label: "Route \(index + 1) comparison") { [weak self] pick in
+                self?.updateRouting { $0.routes[index].match = LinkRoute.Match.allCases[pick] }
+            }
+            line.destinationMenu = destinationMenu(route.destination, label: "Route \(index + 1) opens in") { [weak self] destination in
+                self?.updateRouting { $0.routes[index].destination = destination }
+            }
+            line.onText = { [weak self] text in
+                self?.updateRouting { $0.routes[index].text = text.trimmingCharacters(in: .whitespacesAndNewlines) }
+            }
+            line.onRemove = { [weak self] in self?.updateRouting { $0.routes.remove(at: index) } }
+            line.build()
+            routes.add(line)
+            if route.id == focusRouteID {
+                focusRouteID = nil
+                DispatchQueue.main.async { [weak self, weak line] in if let field = line?.field { self?.window.makeFirstResponder(field) } }
+            }
+        }
+        if snapshot.linkRouting.routes.isEmpty {
+            routes.add(row("No routes yet", "Links from other apps all go to the default below.", enabled: false))
+        }
+        let fallback = card()
+        fallback.add(row("Everything else opens in", "Links that match no route. Little Bam floats over the app you clicked in.",
+                         destinationMenu(snapshot.linkRouting.fallback, label: "Default destination") { [weak self] destination in
+                             self?.updateRouting { $0.fallback = destination }
+                         }, keywords: ["default", "little bam", "fallback"]))
+        let test = card()
+        let field = BamTextField(string: "", placeholder: "Paste a link, like figma.com/file/abc")
+        field.setAccessibilityLabel("Link to try")
+        field.widthAnchor.constraint(equalToConstant: 280).isActive = true
+        let result = NSTextField(labelWithString: "")
+        result.font = BamType.sans(12.5, weight: .semibold); result.textColor = BamTheme.muted
+        result.lineBreakMode = .byTruncatingTail
+        linkTestResult = result
+        field.onCommit = { [weak self] text in self?.tryLink(text); return true }
+        let tryRow = row("Try a link", "See where a link from another app would open.", field, keywords: ["test", "check a url"])
+        test.add(tryRow)
+        let resultHost = NSView(); resultHost.translatesAutoresizingMaskIntoConstraints = false
+        result.translatesAutoresizingMaskIntoConstraints = false
+        resultHost.addSubview(result)
+        NSLayoutConstraint.activate([
+            result.leadingAnchor.constraint(equalTo: resultHost.leadingAnchor, constant: 16),
+            result.trailingAnchor.constraint(lessThanOrEqualTo: resultHost.trailingAnchor, constant: -16),
+            result.topAnchor.constraint(equalTo: resultHost.topAnchor, constant: 0),
+            result.bottomAnchor.constraint(equalTo: resultHost.bottomAnchor, constant: -12)
+        ])
+        test.stack.addArrangedSubview(resultHost)
+        resultHost.widthAnchor.constraint(equalTo: test.stack.widthAnchor).isActive = true
+        result.stringValue = "Press Return to check."
+        return cards + [caption("Air Traffic Control"), routes, caption("Default"), fallback, caption("Try it"), test]
+    }
+    @objc private func acceptSuggestion() {
+        guard let suggestion = snapshot.linkSuggestion else { return }
+        updateRouting { $0.routes.append(LinkRoute(match: .contains, text: suggestion.site, destination: .space(suggestion.space))) }
+    }
+    @objc private func addRoute() {
+        let route = LinkRoute(match: .contains, text: "", destination: .mostRecentSpace)
+        focusRouteID = route.id
+        updateRouting { $0.routes.append(route) }
+    }
+    /// What "Try a link" says for a typed address.
+    func linkTestDescription(_ text: String) -> String {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "Press Return to check." }
+        let candidate = trimmed.contains("://") ? trimmed : "https://" + trimmed
+        guard let url = URL(string: candidate), url.host != nil else { return "That isn’t a web address." }
+        let spaces = snapshot.spaces
+        let found = snapshot.linkRouting.destination(for: url, spaceExists: { id in spaces.contains { $0.id == id } })
+        let place: String
+        switch found.destination {
+        case .space(let id): place = spaces.first { $0.id == id }?.name ?? "a Space"
+        case .mostRecentSpace: place = "the Space you’re in"
+        case .littleBam: place = "Little Bam"
+        }
+        if let route = found.route, let position = snapshot.linkRouting.routes.firstIndex(of: route) {
+            return "Opens in \(place), by route \(position + 1) (\(route.match.title.lowercased()) “\(route.text)”)."
+        }
+        return "Opens in \(place), the default. No route matches."
+    }
+    private func tryLink(_ text: String) { linkTestResult?.stringValue = linkTestDescription(text) }
+
     // MARK: Shortcuts
 
     private struct ShortcutLine {
@@ -930,7 +1061,7 @@ struct SettingsSearchHit: Equatable {
         func rows(in view: NSView) -> [BamRow] { (view as? BamRow).map { [$0] } ?? view.subviews.flatMap(rows) }
         let builders: [(SettingsSection, () -> [NSView])] = [
             (.general, generalCards), (.appearance, appearanceCards), (.websites, websitesCards), (.privacy, privacyCards),
-            (.search, searchCards), (.spaces, spacesCards), (.extensions, extensionsCards), (.about, aboutCards)
+            (.search, searchCards), (.spaces, spacesCards), (.links, linksCards), (.extensions, extensionsCards), (.about, aboutCards)
         ]
         for (section, cards) in builders {
             for row in cards().flatMap(rows) where !row.title.hasPrefix("No ") {
@@ -1094,6 +1225,56 @@ struct SettingsSearchHit: Equatable {
     @objc private func press() { onPress?() }
     override func setAccessibilityLabel(_ label: String?) { pill.setAccessibilityLabel(label) }
     override func setAccessibilityValue(_ value: Any?) { pill.setAccessibilityValue(value) }
+}
+
+/// One Air Traffic Control route, laid out like Arc's: "URL [Contains] [text] (−)" over
+/// "↳ Open in [Space]". The controller supplies the two menus and handles every change.
+@MainActor final class SettingsRouteRow: NSView {
+    var matchMenu: NSView?
+    var destinationMenu: NSView?
+    var onText: ((String) -> Void)?
+    var onRemove: (() -> Void)?
+    let field: BamTextField
+    private let position: Int
+    init(route: LinkRoute, position: Int) {
+        self.position = position
+        field = BamTextField(string: route.text, placeholder: "figma.com")
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+        field.setAccessibilityLabel("Route \(position) text")
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+    func build() {
+        func label(_ text: String, _ symbol: String) -> NSView {
+            let icon = NSImageView(image: NSImage(systemSymbolName: symbol, accessibilityDescription: nil)!
+                .withSymbolConfiguration(.init(pointSize: 11, weight: .semibold))!)
+            icon.contentTintColor = BamTheme.muted
+            let words = NSTextField(labelWithString: text); words.font = BamType.sans(12.5, weight: .semibold); words.textColor = BamTheme.muted
+            let stack = NSStackView(views: [icon, words]); stack.spacing = 5
+            stack.translatesAutoresizingMaskIntoConstraints = false
+            stack.widthAnchor.constraint(equalToConstant: 72).isActive = true
+            return stack
+        }
+        field.onCommit = { [weak self] text in self?.onText?(text); return true }
+        let remove = SettingsIconButton(symbol: "minus.circle", label: "Remove route \(position)")
+        remove.onPress = { [weak self] in self?.onRemove?() }
+        let top = NSStackView(views: [label("URL", "link"), matchMenu ?? NSView(), field, remove])
+        top.spacing = 8; top.alignment = .centerY
+        field.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let bottom = NSStackView(views: [label("Open in", "arrow.turn.down.right"), destinationMenu ?? NSView()])
+        bottom.spacing = 8; bottom.alignment = .centerY
+        let stack = NSStackView(views: [top, bottom]); stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 8
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
+            stack.topAnchor.constraint(equalTo: topAnchor, constant: 12),
+            stack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -12),
+            top.widthAnchor.constraint(equalTo: stack.widthAnchor)
+        ])
+        setAccessibilityElement(false)
+    }
 }
 
 /// A closure as a menu item's target; the item keeps it alive through representedObject.

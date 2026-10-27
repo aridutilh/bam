@@ -22,6 +22,10 @@ import AppKit
         snapshot.searchEngine = URLInput.searchEngine
         snapshot.appearance = BrowserAppearance.current
         snapshot.spaces = session.spaces
+        snapshot.linkRouting = LinkRoutePreference.routing
+        let spaces = session.spaces
+        snapshot.linkSuggestion = LinkRoutePreference.suggestion(routing: snapshot.linkRouting,
+                                                                 spaceExists: { id in spaces.contains { $0.id == id } })
         snapshot.currentSpaceID = session.space
         snapshot.profileName = session.profileName(commandProfileID)
         if #available(macOS 15.4, *) {
@@ -66,6 +70,8 @@ import AppKit
             QuitConfirmationPreference().asksBeforeQuitting = on
         }
         actions.setSearchEngine = { [weak self] engine in self?.setDefaultSearchEngine(engine) }
+        actions.setLinkRouting = { LinkRoutePreference.routing = $0 }
+        actions.dismissLinkSuggestion = { LinkRoutePreference.dismissSuggestion(site: $0, space: $1) }
         actions.editSpace = { [weak self] space in self?.editSpace(space) ?? false }
         actions.switchSpace = { [weak self] id in self?.changeSpace(id) }
         actions.manageSpaces = { [weak self] in self?.manageSpaces(nil) }
