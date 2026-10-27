@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Extensions from the Chrome Web Store and Firefox Add-ons now get Safari's extension address (safari-web-extension://), so services that already work with Safari extensions answer them. Raindrop.io's popup, blank before, now shows its sign-in. Extensions you already installed keep their address and their data.
+- Raindrop.io, SponsorBlock, Calendly, Wappalyzer and Adblock Plus now install. Bam skips small manifest mistakes the way Safari does, reads script paths like "/js/app.js" the way Chrome does, and accepts larger extensions (up to 30,000 files and 512 MB unpacked).
+- Todoist and Adblock Plus now start: Bam leaves out network-rule headers WebKit can't change instead of failing the whole update, and supplies the Chrome constants (like webRequest.ResourceType) extensions read at startup.
 - Bam now blocks ads and trackers on its own, on by default. It uses uBlock Origin's standard lists (EasyList, EasyPrivacy and more), refreshed weekly in the background, and stops requests before they're made. Turn it off for one site in the site controls, or everywhere in Settings › General › Privacy. If a page keeps failing to load, Bam offers "Allow Ads Here".
 - Copy Link (⇧⌘C) now copies a clean address: tracking tags like utm_, fbclid, gclid and YouTube or Spotify share codes are removed, and everything the page needs is kept. The confirmation says "Link copied".
 - Copy Markdown Link (⌥⇧⌘C) copies [Title](address), and pastes as the page's title as a live link in Mail, Notes and Slack.
