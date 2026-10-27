@@ -710,6 +710,15 @@ struct SettingsSearchHit: Equatable {
         act { actions.setLinkRouting(routing) }
         refresh()
     }
+    /// Edits one route by id. Rows hold their route's id, not its position: a field that commits as
+    /// its row is torn down (after a removal above it, or of itself) must not write to another route
+    /// or past the end of the list.
+    private func updateRoute(_ id: UUID, _ change: @escaping (inout LinkRoute) -> Void) {
+        guard snapshot.linkRouting.routes.contains(where: { $0.id == id }) else { return }
+        updateRouting { routing in
+            if let index = routing.routes.firstIndex(where: { $0.id == id }) { change(&routing.routes[index]) }
+        }
+    }
     private weak var linkTestResult: NSTextField?
     private var focusRouteID: UUID?
 
@@ -733,15 +742,15 @@ struct SettingsSearchHit: Equatable {
             let line = SettingsRouteRow(route: route, position: index + 1)
             line.matchMenu = choiceMenu(LinkRoute.Match.allCases.map(\.title), picked: LinkRoute.Match.allCases.firstIndex(of: route.match) ?? 0,
                                         label: "Route \(index + 1) comparison") { [weak self] pick in
-                self?.updateRouting { $0.routes[index].match = LinkRoute.Match.allCases[pick] }
+                self?.updateRoute(route.id) { $0.match = LinkRoute.Match.allCases[pick] }
             }
             line.destinationMenu = destinationMenu(route.destination, label: "Route \(index + 1) opens in") { [weak self] destination in
-                self?.updateRouting { $0.routes[index].destination = destination }
+                self?.updateRoute(route.id) { $0.destination = destination }
             }
             line.onText = { [weak self] text in
-                self?.updateRouting { $0.routes[index].text = text.trimmingCharacters(in: .whitespacesAndNewlines) }
+                self?.updateRoute(route.id) { $0.text = text.trimmingCharacters(in: .whitespacesAndNewlines) }
             }
-            line.onRemove = { [weak self] in self?.updateRouting { $0.routes.remove(at: index) } }
+            line.onRemove = { [weak self] in self?.updateRouting { $0.routes.removeAll { $0.id == route.id } } }
             line.build()
             routes.add(line)
             if route.id == focusRouteID {
