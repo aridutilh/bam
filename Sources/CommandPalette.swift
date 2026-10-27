@@ -315,9 +315,8 @@ extension BrowserController {
             menu.addItem(.separator())
             menu.addItem(item("Copy Link", "link", "c", [.command, .shift]) { [weak self] in self?.copyPaletteSelectionLink() })
         }
-        let source = anchor ?? paletteState.footer?.actionsAnchor
-        guard let source else { return }
-        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: source.bounds.height + 6), in: source)
+        guard let source = anchor ?? paletteState.footer?.actionsAnchor else { return }
+        popUpAbove(menu, source, alignRight: true)
     }
 
     /// The footer's places button: the browser's lists you can jump into.
@@ -328,7 +327,14 @@ extension BrowserController {
             guard let command = PaletteCommandCatalog.commands.first(where: { $0.id == id }) else { continue }
             menu.addItem(PaletteMenuAction.item(command.title, symbol: command.symbol) { [weak self] in self?.performPaletteCommand(command) })
         }
-        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: anchor.bounds.height + 6), in: anchor)
+        popUpAbove(menu, anchor, alignRight: false)
+    }
+    /// Footer menus open upward from their button, inside the card's edge, like Yab's.
+    private func popUpAbove(_ menu: NSMenu, _ anchor: NSView, alignRight: Bool) {
+        let size = menu.size
+        let x = alignRight ? anchor.bounds.width - size.width : 0
+        let y = anchor.isFlipped ? -size.height - 6 : anchor.bounds.height + size.height + 6
+        menu.popUp(positioning: nil, at: NSPoint(x: x, y: y), in: anchor)
     }
 
     /// What the person typed: the field's text without a completed ending.
@@ -377,7 +383,13 @@ extension BrowserController {
         let state = paletteState
         let typed = state.typed
         let scoped = paletteEngine != nil
-        let commands = scoped ? [] : PaletteCommandCatalog.matches(typed)
+        var commands = scoped ? [] : PaletteCommandCatalog.matches(typed)
+        // ⌘L before any edit: the page's own link is one row away, as in Yab.
+        if !scoped, !newTabOnSubmit, let active = session.active, !active.isHome, typed == active.address,
+           let copy = PaletteCommandCatalog.commands.first(where: { $0.id == "copy-url" }) {
+            commands = [PaletteCommandMatch(command: copy, leading: false)]
+        }
+        let calculation = scoped ? nil : PaletteCalculator.evaluate(typed)
         let activeSpace = session.spaces.first { $0.id == session.space }
         let recent = session.tabs.map(\.id).enumerated()
             .sorted { lhs, rhs in
@@ -387,12 +399,12 @@ extension BrowserController {
         let folders = Dictionary(session.folders.map { ($0.id, $0.name) }, uniquingKeysWith: { first, _ in first })
         tabSearchResults?.update(tabs: session.tabs, query: typed, activeID: focusedTabID,
                                  canCreate: true, spaces: session.spaces, profiles: session.profiles,
-                                 engine: paletteEngine, suggestions: paletteSuggestions, commands: commands,
+                                 engine: paletteEngine, suggestions: calculation == nil ? paletteSuggestions : [], commands: commands,
                                  selectionTint: activeSpace.map { ArkPalette.spaceTint(for: $0) },
                                  history: scoped ? [] : state.history.matches(typed, excluding: state.openTabKeys, limit: 3),
                                  completion: scoped ? nil : state.completion,
                                  recentTabIDs: recent,
-                                 calculation: scoped ? nil : PaletteCalculator.evaluate(typed),
+                                 calculation: calculation,
                                  quickActions: scoped ? [] : PaletteQuickActionCatalog.matches(typed),
                                  folderNames: folders, searchEngineName: URLInput.searchEngine.name)
         // Only the palette's own frames depend on its results: no whole-browser layout per keystroke or suggestion.
@@ -634,14 +646,20 @@ extension BrowserController {
         let overlay = addressOverlay
         if let overlay {
             overlay.dismiss = nil
-            if animated && !reduceMotion {
-                // A quick fade, without holding up whatever the pick does next.
-                overlay.subviews.forEach { $0.setAccessibilityElement(false) }
+            // A quick fade of the card alone, without holding up whatever the pick does next: the click-catching
+            // overlay leaves at once, and the fading card lets clicks through.
+            if animated && !reduceMotion, let card = addressCard as? PaletteCard, let shadow = paletteState.shadow {
+                view.window?.makeFirstResponder(commandWebView)
+                card.passesThrough = true
+                card.setAccessibilityElement(false)
+                for piece in [shadow, card] as [NSView] { piece.removeFromSuperview(); root.addSubview(piece) }
+                overlay.removeFromSuperview()
                 NSAnimationContext.runAnimationGroup({ context in
                     context.duration = 0.1
                     context.timingFunction = CAMediaTimingFunction(name: .easeIn)
-                    overlay.animator().alphaValue = 0
-                }, completionHandler: { overlay.removeFromSuperview() })
+                    card.animator().alphaValue = 0
+                    shadow.animator().alphaValue = 0
+                }, completionHandler: { card.removeFromSuperview(); shadow.removeFromSuperview() })
             } else { overlay.removeFromSuperview() }
         }
         addressOverlay = nil; addressField = nil; addressCard = nil; tabSearchResults = nil

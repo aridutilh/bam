@@ -30,6 +30,9 @@ enum PaletteStyle {
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
     var isDark: Bool { effectiveAppearance.isDarkPalette }
+    /// Set while the card fades out after a pick: clicks go straight through to the page.
+    var passesThrough = false
+    override func hitTest(_ point: NSPoint) -> NSView? { passesThrough ? nil : super.hitTest(point) }
     private func paint() {
         let dark = isDark
         layer?.backgroundColor = PaletteStyle.card(dark).cgColor
