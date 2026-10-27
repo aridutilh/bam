@@ -933,7 +933,7 @@ struct SidebarExtensionItem {
               oldKeys[oldKeys.count - 1 - suffix] == newKeys[newKeys.count - 1 - suffix] { suffix += 1 }
         let removed = oldKeys.count - prefix - suffix, inserted = newKeys.count - prefix - suffix
         // One row moved (a reorder, a drop, Keep/Unkeep): it slides to its new place and the rows between make room.
-        if removed == inserted, removed >= 2, removed <= 300 {
+        if removed == inserted, removed >= 2, removed <= 300, !acceptingDrop {
             let i = prefix, j = prefix + removed - 1
             let from: Int?, to: Int?
             if Array(oldKeys[(i + 1)...j]) == Array(newKeys[i..<j]) && oldKeys[i] == newKeys[j] { from = i; to = j }
@@ -1095,7 +1095,11 @@ struct SidebarExtensionItem {
     func tableView(_ tableView: NSTableView, acceptDrop info: NSDraggingInfo, row: Int, dropOperation: NSTableView.DropOperation) -> Bool {
         guard let raw = info.draggingPasteboard.string(forType: .bamSidebarRow), let id = UUID(uuidString: raw),
               let space = spaceAppearance?.id else { return false }
-        guard drop?(id, dropTarget(row: row, operation: dropOperation).target, space) ?? false else { return false }
+        // The dropped row glides from the drop point (glideDrop); it must not also slide from its old slot.
+        acceptingDrop = true
+        let accepted = drop?(id, dropTarget(row: row, operation: dropOperation).target, space) ?? false
+        acceptingDrop = false
+        guard accepted else { return false }
         glideDrop(info, to: id)
         return true
     }
@@ -1119,6 +1123,8 @@ struct SidebarExtensionItem {
         layer.add(glide, forKey: "bam.dropGlide")
     }
     static let dropGlideDuration: TimeInterval = 0.24
+    /// True while a drop is being committed: a single-row move then lands in place without moveRow's slide.
+    private var acceptingDrop = false
 
     override func layout() {
         super.layout(); let w = bounds.width
