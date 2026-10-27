@@ -23,6 +23,13 @@ import AppKit
         snapshot.appearance = BrowserAppearance.current
         snapshot.spaces = session.spaces
         snapshot.linkRouting = LinkRoutePreference.routing
+        snapshot.linkToggles = Dictionary(uniqueKeysWithValues: LinkBehavior.Toggle.allCases.map { ($0, LinkBehavior.isOn($0)) })
+        snapshot.hotKeyProblem = GlobalLittleBamHotKey.shared.problem
+        let sharing = GlobalLittleBamHotKey.shared.sharedWith
+        if snapshot.hotKeyProblem == nil, !sharing.isEmpty {
+            snapshot.hotKeyNote = "\(sharing.joined(separator: " and ")) may open a window on ⌥⌘N too. Turn it off there to keep only Bam’s."
+        }
+        snapshot.littleBamArchiveChoice = LinkBehavior.LittleBamArchive.allCases.firstIndex(of: LinkBehavior.littleBamArchive) ?? 1
         let spaces = session.spaces
         snapshot.linkSuggestion = LinkRoutePreference.suggestion(routing: snapshot.linkRouting,
                                                                  spaceExists: { id in spaces.contains { $0.id == id } })
@@ -71,6 +78,14 @@ import AppKit
         }
         actions.setSearchEngine = { [weak self] engine in self?.setDefaultSearchEngine(engine) }
         actions.setLinkRouting = { LinkRoutePreference.routing = $0 }
+        actions.setLinkToggle = { toggle, on in
+            LinkBehavior.set(toggle, on)
+            if toggle == .globalLittleBamKey { GlobalLittleBamHotKey.shared.update() }
+        }
+        actions.setLittleBamArchive = { index in
+            guard LinkBehavior.LittleBamArchive.allCases.indices.contains(index) else { return }
+            LinkBehavior.littleBamArchive = LinkBehavior.LittleBamArchive.allCases[index]
+        }
         actions.dismissLinkSuggestion = { LinkRoutePreference.dismissSuggestion(site: $0, space: $1) }
         actions.editSpace = { [weak self] space in self?.editSpace(space) ?? false }
         actions.switchSpace = { [weak self] id in self?.changeSpace(id) }

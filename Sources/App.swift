@@ -114,6 +114,12 @@ import WebKit
             if self?.settings?.window.isVisible == true { self?.settings?.refresh() }
         }
         buildMenus(); window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
+        // Settings › Links: ⌥⌘N from any app, only while that setting is on (never by default in a fresh preview).
+        GlobalLittleBamHotKey.shared.onPress = { [weak self] in
+            self?.controller?.openLittleOrbit(url: nil)
+            NSApp.activate(ignoringOtherApps: true)
+        }
+        GlobalLittleBamHotKey.shared.update()
         NotificationCenter.default.addObserver(forName: ShortcutStore.didChange, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.applyShortcuts() }
         }
