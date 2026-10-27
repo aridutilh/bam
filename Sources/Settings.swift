@@ -66,6 +66,13 @@ struct SettingsSnapshot {
     /// Air Traffic Control's routes and default, and a route Bam would suggest.
     var linkRouting = LinkRouting()
     var linkSuggestion: (site: String, space: Int)? = nil
+    /// Settings › Links toggles, the global key's trouble (if any), and Little Bam's archive time.
+    var linkToggles: [LinkBehavior.Toggle: Bool] = [:]
+    var hotKeyProblem: String? = nil
+    /// Another running browser that may also answer ⌥⌘N.
+    var hotKeyNote: String? = nil
+    var littleBamArchiveChoices: [String] = LinkBehavior.LittleBamArchive.allCases.map(\.title)
+    var littleBamArchiveChoice = 1
     var currentSpaceID = 0
     var profileName = "Default"
     var extensions: [SettingsExtensionItem] = []
@@ -88,6 +95,8 @@ struct SettingsActions {
     var setSearchEngine: (DefaultSearchEngine) -> Void = { _ in }
     var setLinkRouting: (LinkRouting) -> Void = { _ in }
     var dismissLinkSuggestion: (String, Int) -> Void = { _, _ in }
+    var setLinkToggle: (LinkBehavior.Toggle, Bool) -> Void = { _, _ in }
+    var setLittleBamArchive: (Int) -> Void = { _ in }
     var editSpace: (BrowserSpace) -> Bool = { _ in false }
     var switchSpace: (Int) -> Void = { _ in }
     var manageSpaces: () -> Void = {}
@@ -320,7 +329,7 @@ struct SettingsSearchHit: Equatable {
         case .privacy: subtitle = "What pages may load while you browse."
         case .search: subtitle = "Where typed words go when they aren’t an address."
         case .spaces: subtitle = "Name and color each part of your day."
-        case .links: subtitle = "Where links from other apps open: Air Traffic Control."
+        case .links: subtitle = "Little Bam, Peek, and where links from other apps open."
         case .shortcuts: subtitle = "Every command in the menu bar. Click a key to change it."
         case .extensions: subtitle = "Local WebExtensions in the \(snapshot.profileName) profile."
         case .about: subtitle = "Bam \(snapshot.version)"
@@ -780,7 +789,41 @@ struct SettingsSearchHit: Equatable {
         test.stack.addArrangedSubview(resultHost)
         resultHost.widthAnchor.constraint(equalTo: test.stack.widthAnchor).isActive = true
         result.stringValue = "Press Return to check."
-        return cards + [caption("Air Traffic Control"), routes, caption("Default"), fallback, caption("Try it"), test]
+        // Little Bam and Peek, as in Arc's Links pane.
+        func linkToggle(_ toggle: LinkBehavior.Toggle, _ label: String) -> BamToggle {
+            self.toggle(snapshot.linkToggles[toggle] ?? true, label: label) { [weak self] on in
+                self?.actions.setLinkToggle(toggle, on)
+                if toggle == .globalLittleBamKey { self?.refresh() }
+            }
+        }
+        let little = card()
+        var keyDetail = snapshot.hotKeyNote ?? "Opens a Little Bam over whatever app you’re in."
+        var keyControl: NSView = linkToggle(.globalLittleBamKey, "Open Little Bam with Option Command N in any app")
+        if let problem = snapshot.hotKeyProblem {
+            keyDetail = problem
+            let retry = pill("Try Again", symbol: "arrow.clockwise", #selector(retryHotKey))
+            let stack = NSStackView(views: [retry, keyControl]); stack.spacing = 10
+            keyControl = stack
+        }
+        little.add(row("Open Little Bam with ⌥⌘N in any app", keyDetail, keyControl, keywords: ["global shortcut", "hotkey", "little bam", "option command n"]))
+        little.add(row("Open Little Bam when clicking links with ⌥⌘ held", nil,
+                       linkToggle(.optionCommandClickLittleBam, "Open Little Bam when clicking links with Option Command held"), keywords: ["little bam", "click"]))
+        let archive = choiceMenu(snapshot.littleBamArchiveChoices, picked: snapshot.littleBamArchiveChoice, label: "Archive Little Bams after") { [actions] index in
+            actions.setLittleBamArchive(index)
+        }
+        little.add(row("Archive Little Bams after", "A Little Bam left unused this long closes into the archive.", archive,
+                       keywords: ["little bam", "close", "archive"]))
+        let peek = card()
+        peek.add(row("Open a Peek when clicking links with Shift held", nil,
+                      linkToggle(.shiftClickPeek, "Open a Peek when clicking links with Shift held"), keywords: ["peek", "shift click", "preview"]))
+        peek.add(row("Open a Peek for links to other sites", "Only from kept tabs and Favorites, so they stay where they are.",
+                      linkToggle(.peekOtherSitesFromSaved, "Open a Peek for links to other sites from kept tabs and Favorites"), keywords: ["peek", "pinned", "favorites"]))
+        return cards + [caption("Little Bam"), little, caption("Peek"), peek,
+                        caption("Air Traffic Control"), routes, caption("Default"), fallback, caption("Try it"), test]
+    }
+    @objc private func retryHotKey() {
+        act { actions.setLinkToggle(.globalLittleBamKey, true) }
+        refresh()
     }
     @objc private func acceptSuggestion() {
         guard let suggestion = snapshot.linkSuggestion else { return }

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Settings › Links gets Arc's Little Bam and Peek switches. "Open Little Bam with ⌥⌘N in any app" is a system-wide shortcut, only active while it's on. If macOS won't give Bam the key, Settings says so and offers Try Again. If Arc or Yab is running, Settings warns that they may open their own window on ⌥⌘N too. The other switches cover ⌥⌘-click to open a link in Little Bam, Shift-click to Peek, and Peek for links from kept tabs and Favorites to other sites. Fresh previews leave ⌥⌘N off.
+- "Archive Little Bams after" (1 hour, 6 hours or 12 hours; 6 by default, as in Arc): a Little Bam you haven't used for that long closes, and its page goes to the archive.
 - Change Tab Icon… (Tabs menu and command bar) now works on every tab, not only kept ones: pick an icon and a name, and they stay with the tab if you keep it later.
 - Air Traffic Control, as in Arc: Settings › Links routes links from other apps. Each route is "URL contains …" or "URL is equal to …", and opens in a chosen Space, the Space you're in, or Little Bam. Routes are checked top to bottom. Everything else goes to a default you pick (Little Bam, as before). "Try a link" shows where an address would open and which route decides. If you move the same site into the same Space three times, Settings › Links suggests a route for it.
 - New tab actions, as in Arc: Duplicate (with its back/forward history), Rename… (leave it empty to go back to the page title), Mute / Unmute for a tab playing sound and Close Tabs Below. They're in the Tabs menu and the command bar.
