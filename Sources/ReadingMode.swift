@@ -169,6 +169,7 @@ import WebKit
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = page.configuration.websiteDataStore
         configuration.preferences.isElementFullscreenEnabled = true
+        configuration.preferences.minimumFontSize = CGFloat(WebsitePreferences.minimumFontSize) // Settings › Websites
         reader = ReaderWebView(frame: page.bounds, configuration: configuration)
         super.init()
         configuration.userContentController.add(ReaderMessageProxy(owner: self), contentWorld: .page, name: "bamReader")
