@@ -86,6 +86,22 @@ import WebKit
         try check(controller.session.tabs.first(where: { $0.id == group.secondaryID })?.address == splitURL, "Split promotion persists the settled pushState URL")
         await pause()
         try check(controller.focusedTabID == group.secondaryID && controller.activeWebView === preview, "New split keeps final AppKit focus on the promoted pane")
+        // A click on a pane's bar (Back, the site…) moves the keyboard there as well,
+        // so the window's responder sync keeps the ring, and ⌘L/⌘R, on that pane.
+        split.activate(.left, fromBar: true); controller.view.window?.update(); await pause()
+        try check(split.focusedSide == .left && controller.activeWebView === original && controller.view.window?.firstResponder === original,
+                  "A click on the left pane's bar left the keyboard, ring or commands on the right pane")
+        split.activate(.right, fromBar: true); controller.view.window?.update(); await pause()
+        try check(split.focusedSide == .right && controller.activeWebView === preview && controller.view.window?.firstResponder === preview,
+                  "A click on the right pane's bar did not bring the keyboard back to it")
+        // The saved divider: clamped, never NaN, and absent from older sessions.
+        split.ratio = .nan; try check(split.ratio == 0.5, "A NaN ratio was not reset to even")
+        split.ratio = 4; try check(split.ratio == 0.9, "An out-of-range ratio was not clamped")
+        controller.saveSplitRatio(0.3, primary: first.id)
+        try check(controller.session.split(for: first.id)?.ratio == 0.3, "A dragged ratio was not saved with the Split")
+        let legacy = #"{"primaryID":"\#(first.id.uuidString)","secondaryID":"\#(group.secondaryID.uuidString)"}"#
+        try check((try? JSONDecoder().decode(BrowserSplit.self, from: Data(legacy.utf8)))?.ratio == nil, "An older session's Split did not decode")
+        controller.saveSplitRatio(0.5, primary: first.id); split.ratio = 0.5
         split.setFocusedSide(.left)
         try check(controller.activeWebView === original, "Left focus routes browser commands")
         controller.select(second.id); controller.select(first.id)

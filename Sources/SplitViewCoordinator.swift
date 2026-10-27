@@ -69,8 +69,9 @@ import WebKit
             guard let self, let window = self.container.window, event.window === window, !self.container.isHiddenOrHasHiddenAncestor else { return event }
             let point = self.container.convert(event.locationInWindow, from: nil)
             guard self.container.bounds.contains(point) else { return event }
-            if self.leftPane.frame.contains(point) { self.setFocusedSide(.left) }
-            else if self.rightPane.frame.contains(point) { self.setFocusedSide(.right) }
+            for pane in [self.leftPane, self.rightPane] where pane.frame.contains(point) {
+                self.activate(pane.side, fromBar: pane.convert(event.locationInWindow, from: nil).y < OrbitSplitPane.barHeight)
+            }
             return event
         }
         focusObserver = NotificationCenter.default.addObserver(forName: NSWindow.didUpdateNotification, object: nil, queue: .main) { [weak self] note in
@@ -111,6 +112,13 @@ import WebKit
         focusedSide = side
         refreshFocusAppearance()
         onFocus?(side)
+    }
+
+    /// A click in a pane. On its bar the pane also takes the keyboard; a click on
+    /// the page gives it the keyboard by itself.
+    func activate(_ side: Side, fromBar: Bool) {
+        setFocusedSide(side)
+        if fromBar { pane(for: side).claimKeyFocus() }
     }
 
     /// Only removes web views currently hosted here. A web view moved to PiP is
@@ -394,6 +402,17 @@ import WebKit
         needsLayout = true; layoutSubtreeIfNeeded()
         window?.makeFirstResponder(address)
         address.selectText(nil)
+    }
+    /// A click on this pane's bar gives the pane the keyboard (the page takes it itself
+    /// on a click in it). Otherwise the responder stays in the other pane and the
+    /// window-update sync pulls the ring, and ⌘L/⌘R, straight back there.
+    func claimKeyFocus() {
+        guard let window else { return }
+        var responder = window.firstResponder
+        if let editor = responder as? NSTextView, editor.isFieldEditor, let field = editor.delegate as? NSView { responder = field }
+        if let view = responder as? NSView, view === self || view.isDescendant(of: self) { return }
+        if let web = webView, web.superview === content { window.makeFirstResponder(web) }
+        else { window.makeFirstResponder(returnVideo) }
     }
     func finishEditing(address value: String) {
         isEditingAddress = false
