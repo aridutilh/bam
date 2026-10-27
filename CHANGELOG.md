@@ -64,6 +64,12 @@
 - Reload and Stop swap with a quick scale.
 - Auto-archive, as in Arc: Today tabs you haven't looked at for 12 hours close on their own and go to the archive. Choose 12 hours, 24 hours, 7 days, 30 days or Never in Settings › General. Only time Bam is open on an awake Mac counts, so a night asleep, days quit or a clock change never archive everything at once. Kept tabs and Favorites are never archived, and neither are tabs playing media, in a call, in Picture in Picture, downloading, under a Peek or holding text you've typed but not sent. A Split is archived only when both sides are due. Private windows never archive. A tab closes only once it's safely in the archive, which now holds 1,000 entries. Bam checks at launch, on wake and every few minutes, and tabs from before this update start their clock when you upgrade.
 - The archive has its own window (History › View Archive…, or "Archived Tabs" in the command bar). It lists tabs you closed and tabs Bam archived, grouped by day, with search, an "Archived" mark on the ones Bam closed, Restore on every row, and Clear Archive.
+- Copy URL (⇧⌘C) now copies a clean address: tracking tags like utm_, fbclid, gclid and YouTube or Spotify share codes are removed, and everything the page needs is kept.
+- Copy URL as Markdown (⌥⇧⌘C) copies [Title](address), and pastes as the page's title as a live link in Mail, Notes and Slack.
+- Page confirmations now look and move like Arc's: "Copied Current URL" grows in at the page's top-right corner as a frosted pill with a Share button, stays a few seconds (longer while you point at it) and shrinks away.
+- Reading Mode (⌥⌘R): the article alone in one clean column over the page, opening at the paragraph you were reading. Choose text size (⌘+ / ⌘-), serif or sans, and a Light, Sepia, Dark or matching theme. ⌘F finds words in the article, and Esc or ⌥⌘R returns to the page exactly as you left it.
+- Hide Elements (⇧⌘H): point at a cookie banner, ad or sidebar and click to make it crumble away. ⌘Z brings back the last, Esc finishes. What you hide stays hidden on that site from the first frame of every page; View › Restore Hidden Elements on This Site brings it all back.
+- View › Developer: Developer Tools (⌥⌘I), Inspect Elements (⌥⌘C) and JavaScript Console (⌥⌘J). Pages are also inspectable from Safari's Develop menu, and right-clicking a page offers Inspect Element.
 
 ## 0.25.1 build 51 — Quit dialog and sidebar scroll bar polish
 

@@ -10,10 +10,12 @@ enum CleanLinks {
         "li_fat_id", "igshid", "igsh", "mc_eid", "mc_cid", "mkt_tok", "_openstat", "ref_src", "ref_url",
         "s_cid", "wickedid", "rb_clickid", "srsltid", "_gl", "_ga", "_hsenc", "_hsmi", "__hssc", "__hstc",
         "__hsfp", "hsctatracking", "oly_anon_id", "oly_enc_id", "vero_id", "vero_conv", "ncid", "sc_cid",
-        "epik", "_kx", "irclickid", "ocid"
+        "epik", "_kx", "irclickid", "ocid",
+        // Matomo/Piwik campaign names. Not a pk_ prefix: pk_id, pk_slug… are often a page's own key.
+        "pk_campaign", "pk_cpn", "pk_kwd", "pk_keyword", "pk_source", "pk_medium", "pk_content", "pk_cid", "pk_group", "pk_vid"
     ]
-    /// Name prefixes for campaign families (utm_source, pk_campaign, mtm_kwd, hsa_acc…).
-    static let trackingPrefixes = ["utm_", "pk_", "mtm_", "hsa_"]
+    /// Name prefixes for campaign families (utm_source, mtm_kwd, hsa_acc…).
+    static let trackingPrefixes = ["utm_", "mtm_", "hsa_"]
     /// Share parameters that are tracking only on these sites; elsewhere the
     /// same short names (si, s, t, feature) can be the page's own.
     static let siteTracking: [(hosts: [String], names: Set<String>, prefixes: [String])] = [

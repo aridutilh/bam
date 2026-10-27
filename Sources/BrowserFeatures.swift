@@ -57,7 +57,13 @@ import WebKit
         guard let surface = pageCommandSurface, let url = cleanLink(for: surface.web) else { return }
         pageCommandPasteboard.clearContents()
         guard pageCommandPasteboard.setString(url.absoluteString, forType: .string) else { return }
-        pageFeedback.show("Link copied", symbol: "link", in: surface.host)
+        pageFeedback.show("Copied Current URL", symbol: "link", in: surface.host, action: shareAction(for: url))
+    }
+    /// Share on the copy confirmation, as in Arc: the system share menu for this address.
+    func shareAction(for url: URL) -> PageFeedbackAction {
+        PageFeedbackAction(symbol: "square.and.arrow.up", label: "Share") { anchor, closed in
+            SharePickerSession.show(url, from: anchor, closed: closed)
+        }
     }
     /// "[Title](address)" as text, and as a live link for apps that paste rich text.
     @objc func copyMarkdownLink(_ sender: Any?) {
@@ -67,7 +73,7 @@ import WebKit
         pageCommandPasteboard.declareTypes([.string, .html], owner: nil)
         guard pageCommandPasteboard.setString(CleanLinks.markdown(title: title, url: url), forType: .string) else { return }
         pageCommandPasteboard.setString(CleanLinks.html(title: title, url: url), forType: .html)
-        pageFeedback.show("Markdown link copied", symbol: "text.badge.checkmark", in: surface.host)
+        pageFeedback.show("Copied Current URL", symbol: "link", in: surface.host, action: shareAction(for: url))
     }
     @objc func hardReload(_ sender: Any?) {
         guard let surface = pageCommandSurface else { return }
@@ -253,5 +259,33 @@ extension BrowserController: NSMenuItemValidation {
             return NSApp.keyWindow === view.window && session.active?.isFavorite != true && session.split(for: session.activeID) == nil
         default: return true
         }
+    }
+}
+
+/// Keeps the share picker (and the call that releases the confirmation it hangs
+/// from) alive until the person picks a service or dismisses it.
+@MainActor final class SharePickerSession: NSObject, NSSharingServicePickerDelegate {
+    private static var current: SharePickerSession?
+    private let picker: NSSharingServicePicker
+    private var closed: (@MainActor () -> Void)?
+
+    private init(_ url: URL, closed: @escaping @MainActor () -> Void) {
+        picker = NSSharingServicePicker(items: [url]); self.closed = closed
+        super.init()
+        picker.delegate = self
+    }
+    static func show(_ url: URL, from anchor: NSView, closed: @escaping @MainActor () -> Void) {
+        current?.finish()
+        let session = SharePickerSession(url, closed: closed)
+        current = session
+        session.picker.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: .minY)
+    }
+    nonisolated func sharingServicePicker(_ sharingServicePicker: NSSharingServicePicker, didChoose service: NSSharingService?) {
+        MainActor.assumeIsolated { finish() }
+    }
+    private func finish() {
+        let done = closed; closed = nil
+        if Self.current === self { Self.current = nil }
+        done?()
     }
 }

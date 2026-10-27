@@ -23,6 +23,8 @@ import Foundation
                   == "https://shop.example/p", "Click IDs stayed")
         try check(clean("https://example.com/?UTM_Source=news") == "https://example.com/", "Parameter names are not case-insensitive")
         try check(clean("https://example.com/?pk_campaign=a&mtm_kwd=b&q=keep") == "https://example.com/?q=keep", "Matomo/Piwik prefixes stayed")
+        try check(clean("https://shop.example/item?pk_id=5&pk_source=n") == "https://shop.example/item?pk_id=5",
+                  "A page's own pk_ key was stripped: \(clean("https://shop.example/item?pk_id=5&pk_source=n"))")
         // A clean address comes back exactly as it was, encoding included.
         let tidy = "https://example.com/search?q=caf%C3%A9%20au%20lait&lang=fr"
         try check(clean(tidy) == tidy, "A clean URL changed: \(clean(tidy))")
