@@ -302,6 +302,25 @@ import Foundation
         let extra = full.tabs.last!.id
         expect(!full.canBecomeFavorite(id: extra) && !full.setRetention(id: extra, kind: .favorite), "A full Favorites grid refuses both ways")
 
+        // A removed kept tab (the cross on an unloaded kept row) reopens kept, named, in its folder and place.
+        let r1 = kept("R1"), r2 = kept("R2"), r3 = kept("R3"), rToday = BrowserTab(title: "Now", address: "https://now.example", space: 0)
+        var removal = BrowserSession(tabs: [r1, r2, r3, rToday], activeID: rToday.id)
+        let shelf = removal.createFolder(name: "Shelf", space: 0, containing: [r1.id, r2.id, r3.id])!
+        if let index = removal.tabs.firstIndex(where: { $0.id == r2.id }) { removal.tabs[index].saved?.customTitle = "My name" }
+        let snapshot = removal.tabs.first { $0.id == r2.id }!
+        expect(removal.setRetention(id: r2.id, kind: nil) && removal.close(r2.id) != nil && !removal.tabs.contains { $0.id == r2.id },
+               "Removing a kept tab takes it out of the session")
+        var back = snapshot; back.id = UUID()
+        removal.insertRestored(back, originalID: snapshot.id)
+        let reopened = removal.tabs.first { $0.id == back.id }
+        expect(reopened?.saved?.kind == .kept && reopened?.saved?.customTitle == "My name" && reopened?.folderID == shelf,
+               "It comes back kept, with its own name, in its folder")
+        expect(rows(removal) == ["[Shelf]", "  R1", "  R2", "  R3"], "…and in its old place (\(rows(removal)))")
+        var orphan = snapshot; orphan.id = UUID(); orphan.folderID = UUID()
+        removal.insertRestored(orphan, originalID: UUID())
+        expect(removal.tabs.first { $0.id == orphan.id }?.folderID == nil && rows(removal).contains("R2") ,
+               "A tab whose folder is gone comes back at the top level, never hidden")
+
         print("PASS: \(count) folder checks")
     }
 }

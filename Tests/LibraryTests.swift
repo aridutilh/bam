@@ -333,6 +333,17 @@ import AppKit
               && follow.history[0].title == "Second", "The earlier tab's late title doesn't overwrite the newer visit, and costs nothing")
         check(secondTab.apply(url: shared, title: "Second document", profileID: profile, library: follow) && follow.history[0].title == "Second document",
               "The newer tab's title applies")
+        // Sidebar rows whose title is only an address borrow history's latest real title, through an index that
+        // follows every history change.
+        let titles = BrowserLibrary(storageURL: nil)
+        titles.recordVisit(title: "Real page", address: "https://titles.example/a")
+        titles.recordVisit(title: "Between", address: "https://titles.example/z")
+        titles.recordVisit(title: "titles.example/a", address: "https://titles.example/a")
+        check(titles.knownTitle(forAddress: "https://titles.example/a") == "Real page", "An address-like visit title is skipped for the real one")
+        titles.recordVisit(title: "Other", address: "https://titles.example/b")
+        titles.recordVisit(title: "Newer name", address: "https://titles.example/a")
+        check(titles.knownTitle(forAddress: "https://titles.example/a") == "Newer name" && titles.knownTitle(forAddress: "https://titles.example/c") == nil,
+              "The index follows new visits; unknown addresses have none")
         print("PASS: \(checks) library metadata checks")
     }
 }

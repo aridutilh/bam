@@ -55,9 +55,11 @@ struct SidebarTabItem: Equatable {
     var importedFromArc: Bool = false
     /// A better-known title (from history) for a row whose own title is only its address. Display only.
     var knownTitle: String? = nil
+    /// The title is the name the person gave a kept tab: shown exactly as typed.
+    var hasCustomTitle: Bool = false
     /// What the row shows: the best-known title without its trailing site name (SidebarDisplayPolicy.rowTitle).
     var displayTitle: String {
-        if isFolder || isSplit { return title }
+        if isFolder || isSplit || hasCustomTitle { return title }
         return SidebarDisplayPolicy.rowTitle(title, address: subtitle, knownTitle: knownTitle)
     }
 }
@@ -2266,8 +2268,10 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted, Ar
         closeButton.isHidden = true
         closeButton.handler = { [weak self] in
             guard let self else { return }
-            // An unloaded kept tab's cross removes the row; everything else closes (a kept tab unloads, keeping it).
-            if self.item.isPinned && self.item.isUnloaded && !self.item.isSplit { self.remove?() } else { self.close?() }
+            // The second click of a double-click on a kept tab's minus lands on the cross it just became: unloading
+            // must never run straight on into removing the tab.
+            if self.removesOnTrailingAction, (NSApp.currentEvent?.clickCount ?? 1) > 1 { return }
+            self.performTrailingAction()
         }
         chevronView.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 9, weight: .semibold)
         chevronView.contentTintColor = ArkPalette.ink; chevronView.isHidden = true
@@ -2294,7 +2298,7 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted, Ar
             // Reused for another row mid-press: abandon that press and any drag it began.
             dragOrigin = nil; pressedID = nil; didDrag = false
         }
-        if first || old.title != item.title || old.isFolder != item.isFolder || old.subtitle != item.subtitle || old.knownTitle != item.knownTitle {
+        if first || old.title != item.title || old.isFolder != item.isFolder || old.subtitle != item.subtitle || old.knownTitle != item.knownTitle || old.hasCustomTitle != item.hasCustomTitle {
             // Assistive tech hears exactly what the row shows, including the blank-title fallback.
             let shown = item.displayTitle
             titleLabel.stringValue = shown.isEmpty ? (item.isFolder ? "Folder" : "New Tab") : shown
@@ -2333,6 +2337,10 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted, Ar
             closeButton.setAccessibilityHelp(item.isSplit ? "Saved panes unload and remain in the sidebar; ordinary panes close."
                 : removes ? "Removes this kept tab. Reopen Closed Tab brings it back." : unloads ? "Unloads the page and keeps the tab." : nil)
             setAccessibilityHelp(item.isSplit ? "Split. Closing unloads saved panes and keeps their saved tabs; ordinary panes close." : item.isPinned ? "Kept tab. Closing unloads its page and keeps the saved tab." : "Tab")
+            // The trailing button shows only under the pointer; VoiceOver reaches the same action from the row itself.
+            setAccessibilityCustomActions(item.isFolder ? nil : [NSAccessibilityCustomAction(name: label) { [weak self] in
+                self?.performTrailingAction(); return true
+            }])
         }
         updateTrailingControls()
         if item.isFolder, first || !old.isFolder || old.isExpanded != item.isExpanded {
@@ -2600,6 +2608,10 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted, Ar
         return image
     }
     override func accessibilityPerformPress() -> Bool { activate(); return true }
+    /// An unloaded kept tab's trailing action removes it; everything else closes (a kept tab unloads, keeping it).
+    private var removesOnTrailingAction: Bool { item.isPinned && item.isUnloaded && !item.isSplit && !item.isFolder }
+    private func performTrailingAction() { if removesOnTrailingAction { remove?() } else { close?() } }
+    @objc private func removeFromMenu() { if removesOnTrailingAction { remove?() } }
     private func folderSubmenu() -> NSMenuItem {
         let moveItem = NSMenuItem(title: "Move to Folder", action: nil, keyEquivalent: "")
         let submenu = NSMenu(title: "Move to Folder"); submenu.autoenablesItems = false
@@ -2689,6 +2701,13 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted, Ar
         closeItem.target = self; closeItem.isEnabled = !item.isPinned || !item.isUnloaded
         closeItem.toolTip = item.isSplit ? "Saved panes unload and remain in the sidebar; ordinary panes close." : nil
         menu.addItem(closeItem)
+        if removesOnTrailingAction {
+            // The menu's way to the cross on an unloaded kept tab (keyboard and VoiceOver users never see that button).
+            let removeItem = NSMenuItem(title: "Remove Tab", action: #selector(removeFromMenu), keyEquivalent: "")
+            removeItem.image = NSImage(systemSymbolName: "trash", accessibilityDescription: nil)
+            removeItem.target = self; removeItem.toolTip = "Removes this kept tab. Reopen Closed Tab brings it back."
+            menu.addItem(removeItem)
+        }
         return menu
     }
     @objc private func moveFromMenu(_ sender: NSMenuItem) { move?(sender.tag) }

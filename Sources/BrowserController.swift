@@ -243,6 +243,7 @@ import QuartzCore
     var profileLibraries: [UUID: BrowserLibrary] = [:]
     /// Frame observers that keep the traffic lights in the sidebar's toolbar row (placeWindowButtons).
     var windowButtonObservers: [NSObjectProtocol] = []
+    var windowButtonObservedViews: [ObjectIdentifier] = []
     var placingWindowButtons = false
     var library: BrowserLibrary { library(for: commandProfileID) }
     var confirmProfileChange: ((String) -> Bool)?
@@ -494,7 +495,11 @@ import QuartzCore
     func placeWindowButtons() {
         guard let window = view.window, let close = window.standardWindowButton(.closeButton),
               let titlebar = close.superview, let container = titlebar.superview else { return }
-        if windowButtonObservers.isEmpty {
+        // Observe the views AppKit has now; it can hand the window new titlebar views (full screen, tab merges).
+        let observedIDs = [ObjectIdentifier(close), ObjectIdentifier(container)]
+        if windowButtonObservedViews != observedIDs {
+            windowButtonObservers.forEach(NotificationCenter.default.removeObserver)
+            windowButtonObservers.removeAll(); windowButtonObservedViews = observedIDs
             for observed in [close, container] {
                 observed.postsFrameChangedNotifications = true
                 windowButtonObservers.append(NotificationCenter.default.addObserver(forName: NSView.frameDidChangeNotification,
@@ -503,7 +508,8 @@ import QuartzCore
                 })
             }
         }
-        guard !placingWindowButtons, !window.styleMask.contains(.fullScreen) else { return }
+        // Full screen, and a window showing the system tab bar (Merge All Windows), keep AppKit's own layout.
+        guard !placingWindowButtons, !window.styleMask.contains(.fullScreen), window.tabGroup?.isTabBarVisible != true else { return }
         placingWindowButtons = true; defer { placingWindowButtons = false }
         let height = ArkMetrics.toolbarCenterY * 2
         let frame = NSRect(x: 0, y: window.frame.height - height, width: window.frame.width, height: height)
@@ -904,14 +910,15 @@ import QuartzCore
         cancelPaging(); session.select(id); dismissAddress(); showActive(); save()
     }
     /// `archived`: auto-archive closed it, so the archive says so.
-    func close(_ id: UUID, archived: Bool = false) {
+    /// `recordsClosed: false` when the caller already put the tab in Recently Closed (removeSavedTab).
+    func close(_ id: UUID, archived: Bool = false, recordsClosed: Bool = true) {
         cancelPaging(); cancelAutomaticDepartures()
         let group = session.split(for: id)
         let closingIDs = group?.primaryID == id ? [id, group!.secondaryID] : [id]
         let closed = closingIDs.compactMap { closingID in session.tabs.first { $0.id == closingID } }
         let removed = closed.filter { !$0.isSaved }
         // An auto-archived blank tab just goes; there is nothing in it to restore.
-        if let source = closed.first, !(archived && removed.allSatisfy(\.isHome)) {
+        if recordsClosed, let source = closed.first, !(archived && removed.allSatisfy(\.isHome)) {
             library(for: session.profileID(for: source)).recordClosed(tabs: removed, split: removed.count == 2, reason: archived ? .archived : nil)
         }
         _ = session.close(id)
@@ -943,13 +950,15 @@ import QuartzCore
         navigationTokens.removeValue(forKey: id); browserExtensionOrigins.removeValue(forKey: id)
         pendingHome.remove(id); tabErrors.removeValue(forKey: id); pendingLoads.remove(id); requestedAddresses.removeValue(forKey: id)
     }
-    /// The cross on an unloaded kept tab removes it, as in Arc and Yab. It leaves as an ordinary closed tab, so
-    /// Reopen Closed Tab (⇧⌘T) and Recently Closed can bring the page back.
+    /// The cross on an unloaded kept tab removes it, as in Arc and Yab. Recently Closed keeps the whole kept tab (its
+    /// custom name and icon, its folder and place), so Reopen Closed Tab (⇧⌘T) puts it back as it was.
     func removeSavedTab(_ id: UUID) {
         cancelPaging()
-        guard let tab = session.tabs.first(where: { $0.id == id }), tab.saved?.kind == .kept, session.split(for: id) == nil,
-              session.setRetention(id: id, kind: nil) else { return }
-        close(id)
+        guard let tab = session.tabs.first(where: { $0.id == id }), tab.saved?.kind == .kept, session.split(for: id) == nil else { return }
+        let library = library(for: session.profileID(for: tab))
+        guard session.setRetention(id: id, kind: nil) else { return }
+        library.recordClosed(tabs: [tab], split: false)
+        close(id, recordsClosed: false)
     }
     func pinTab(_ id: UUID) {
         cancelPaging()
@@ -961,11 +970,10 @@ import QuartzCore
     /// a real title. Reads only a profile library that is already loaded; nil otherwise (the row shows the host).
     func knownTitle(for tab: BrowserTab, in snapshot: BrowserSession) -> String? {
         let address = tab.isUnloaded ? (tab.saved?.address ?? tab.address) : tab.address
-        guard tab.displayTitle.isEmpty || SidebarDisplayPolicy.looksLikeAddress(tab.displayTitle, address: address),
+        guard tab.saved?.customTitle == nil,
+              tab.displayTitle.isEmpty || SidebarDisplayPolicy.looksLikeAddress(tab.displayTitle, address: address),
               let library = profileLibraries[snapshot.profileID(for: tab)] else { return nil }
-        return library.history.first {
-            $0.address == address && !$0.title.isEmpty && !SidebarDisplayPolicy.looksLikeAddress($0.title, address: address)
-        }?.title
+        return library.knownTitle(forAddress: address)
     }
     func sidebarItems(for space: Int) -> [SidebarTabItem] {
         var preview = session; preview.changeSpace(space)
