@@ -7,5 +7,7 @@
 - SmokeA.html and SmokeB.html: original minimal navigation fixtures. Their legacy Orbit titles support existing test assertions.
 - Fonts/BricolageGrotesque.ttf (Bricolage Grotesque, variable) and Fonts/InstrumentSans.ttf + InstrumentSans-Italic.ttf (Instrument Sans, variable): the typefaces bambrowser.com uses, copied unmodified from the google/fonts repository on October 24, 2026. Both are licensed under the SIL Open Font License 1.1 (Fonts/OFL-BricolageGrotesque.txt, Fonts/OFL-InstrumentSans.txt), which permits bundling and redistribution with the app. Bam registers them for its own process at launch and falls back to the system fonts if they are missing.
 - Sidebar artwork is drawn by Bam or uses SF Symbols provided by macOS at runtime. No Apple symbol font is redistributed.
+- Reader/Readability.js and Reader/Readability-readerable.js: Mozilla Readability 0.5.0, copied unmodified from the @mozilla/readability npm package (unpkg.com) on October 27, 2026. Apache License 2.0 (Reader/LICENSE-Readability.md); the license header is kept in each file. Used by Reading Mode to find a page's article.
+- Reader/Reader.html, Reader.css and Reader.js: original Reading Mode page written for Bam. It uses the bundled Bam fonts and the system's New York serif.
 
 The public repository and release contain no extracted Arc artwork, animation JSON, pre-rendered animation frames, or onboarding media. Bam is independent and is not affiliated with The Browser Company.

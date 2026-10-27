@@ -3,6 +3,11 @@
 ## Unreleased
 
 - Bam now blocks ads and trackers on its own, on by default. It uses uBlock Origin's standard lists (EasyList, EasyPrivacy and more), refreshed weekly in the background, and stops requests before they're made. Turn it off for one site in the site controls, or everywhere in Settings › General › Privacy. If a page keeps failing to load, Bam offers "Allow Ads Here".
+- Copy Link (⇧⌘C) now copies a clean address: tracking tags like utm_, fbclid, gclid and YouTube or Spotify share codes are removed, and everything the page needs is kept. The confirmation says "Link copied".
+- Copy Markdown Link (⌥⇧⌘C) copies [Title](address), and pastes as the page's title as a live link in Mail, Notes and Slack.
+- Reading Mode (⌥⌘R): the article alone in one clean column over the page, opening at the paragraph you were reading. Choose text size (⌘+ / ⌘-), serif or sans, and a Light, Sepia, Dark or matching theme. ⌘F finds words in the article, and Esc or ⌥⌘R returns to the page exactly as you left it.
+- Hide Elements (⇧⌘H): point at a cookie banner, ad or sidebar and click to make it crumble away. ⌘Z brings back the last, Esc finishes. What you hide stays hidden on that site from the first frame of every page; View › Restore Hidden Elements on This Site brings it all back.
+- A new Develop menu: Show Web Inspector (⌥⌘I), Show JavaScript Console (⌥⌘J) and Inspect Element (⌥⌘C). Pages are also inspectable from Safari's Develop menu, and right-clicking a page offers Inspect Element.
 
 ## 0.25.1 build 51 — Quit dialog and sidebar scroll bar polish
 

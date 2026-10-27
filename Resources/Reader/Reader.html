@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en" data-theme="auto" data-face="serif">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src file: 'self'; style-src file: 'self' 'unsafe-inline'; font-src file: 'self'; img-src * data: blob:; media-src *; frame-src https:">
+<meta name="color-scheme" content="light dark">
+<title>Reading Mode</title>
+<link rel="stylesheet" href="Reader.css">
+</head>
+<body>
+<div id="progress" aria-hidden="true"></div>
+<div id="controls" role="toolbar" aria-label="Reading Mode">
+  <button id="appearance" type="button" aria-haspopup="true" aria-expanded="false" title="Text and theme">Aa</button>
+  <button id="done" type="button" title="Leave Reading Mode (Esc)">Done</button>
+  <div id="panel" role="dialog" aria-label="Text and theme" hidden>
+    <div class="row sizes">
+      <button type="button" data-step="-1" aria-label="Smaller text"><span class="small">A</span></button>
+      <span class="divider"></span>
+      <button type="button" data-step="1" aria-label="Larger text"><span class="large">A</span></button>
+    </div>
+    <div class="row faces">
+      <button type="button" data-face="serif" aria-label="Serif"><span class="sample serif">Aa</span><span class="name">Serif</span></button>
+      <button type="button" data-face="sans" aria-label="Sans"><span class="sample sans">Aa</span><span class="name">Sans</span></button>
+    </div>
+    <div class="row themes">
+      <button type="button" class="swatch auto" data-theme="auto" aria-label="Match appearance" title="Match appearance"></button>
+      <button type="button" class="swatch light" data-theme="light" aria-label="Light" title="Light"></button>
+      <button type="button" class="swatch sepia" data-theme="sepia" aria-label="Sepia" title="Sepia"></button>
+      <button type="button" class="swatch dark" data-theme="dark" aria-label="Dark" title="Dark"></button>
+    </div>
+  </div>
+</div>
+<main id="reader">
+  <header>
+    <p id="site"></p>
+    <h1 id="title"></h1>
+    <p id="meta"></p>
+  </header>
+  <article id="content"></article>
+</main>
+<script src="Reader.js"></script>
+</body>
+</html>

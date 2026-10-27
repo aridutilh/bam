@@ -10,9 +10,10 @@ import WebKit
     /// while a utility window is active.
     private var findSurface: (web: WKWebView, host: NSView)? {
         if let little = littleWindows.values.first(where: { $0.window?.isKeyWindow == true }),
-           let web = little.webView, let host = little.window?.contentView { return (web, host) }
+           let web = little.webView, let host = little.window?.contentView { return (pageTools.reading.readerView(over: web) ?? web, host) }
         guard NSApp.keyWindow === view.window, let web = peeks[session.activeID]?.webView ?? activeWebView else { return nil }
-        return (web, card)
+        // Reading Mode lies over the page: Find searches the article.
+        return (pageTools.reading.readerView(over: web) ?? web, card)
     }
     @objc func findInPage(_ sender: Any?) {
         guard let surface = findSurface else { return }
@@ -32,7 +33,7 @@ import WebKit
     }
     /// Page commands follow the focused browser surface. A Library, About, or
     /// floating-video window must never act on an unrelated background tab.
-    private var pageCommandSurface: (web: WKWebView, host: NSView)? {
+    var pageCommandSurface: (web: WKWebView, host: NSView)? {
         guard !isShuttingDown, let key = NSApp.keyWindow, key.attachedSheet == nil else { return nil }
         let web: WKWebView?
         if let little = littleWindows.values.first(where: { $0.window === key }) {
@@ -50,11 +51,23 @@ import WebKit
         let url = web.url ?? (web as? PreviewWKWebView)?.requestedURL
         return url.flatMap { URLInput.directURL($0.absoluteString) }
     }
+    /// The address to share: the current page's, without tracking parameters.
+    func cleanLink(for web: WKWebView) -> URL? { copyableURL(for: web).map(CleanLinks.clean) }
     @objc func copyCurrentURL(_ sender: Any?) {
-        guard let surface = pageCommandSurface, let url = copyableURL(for: surface.web) else { return }
+        guard let surface = pageCommandSurface, let url = cleanLink(for: surface.web) else { return }
         pageCommandPasteboard.clearContents()
         guard pageCommandPasteboard.setString(url.absoluteString, forType: .string) else { return }
-        pageFeedback.show("Page copied", symbol: "link", in: surface.host)
+        pageFeedback.show("Link copied", symbol: "link", in: surface.host)
+    }
+    /// "[Title](address)" as text, and as a live link for apps that paste rich text.
+    @objc func copyMarkdownLink(_ sender: Any?) {
+        guard let surface = pageCommandSurface, let url = cleanLink(for: surface.web) else { return }
+        let title = surface.web.title
+        pageCommandPasteboard.clearContents()
+        pageCommandPasteboard.declareTypes([.string, .html], owner: nil)
+        guard pageCommandPasteboard.setString(CleanLinks.markdown(title: title, url: url), forType: .string) else { return }
+        pageCommandPasteboard.setString(CleanLinks.html(title: title, url: url), forType: .html)
+        pageFeedback.show("Markdown link copied", symbol: "text.badge.checkmark", in: surface.host)
     }
     @objc func hardReload(_ sender: Any?) {
         guard let surface = pageCommandSurface else { return }
@@ -102,7 +115,8 @@ import WebKit
         peek.onOpenLittleOrbit = { [weak self] web in self?.openLittleOrbit(adopting: web) }
         peek.onSplit = { [weak self] web in self?.openSplit(adopting: web, beside: owner) }
         let store = activeWebView?.configuration.websiteDataStore ?? profileStores.store(for: profile)
-        if !peek.present(url: url, in: card, websiteDataStore: store, configure: { [weak self] in self?.configureExtensions($0, profileID: profile) }, beforeLoad: { [weak self] action in self?.whenExtensionsReady(profileID: profile, perform: action) }) { peeks.removeValue(forKey: owner); peekExtensionIDs.removeValue(forKey: owner) }
+        if !peek.present(url: url, in: card, websiteDataStore: store, configure: { [weak self] in self?.configureExtensions($0, profileID: profile); self?.preparePageTools(configuration: $0) }, beforeLoad: { [weak self] action in self?.whenExtensionsReady(profileID: profile, perform: action) }) { peeks.removeValue(forKey: owner); peekExtensionIDs.removeValue(forKey: owner) }
+        if let web = peek.webView { PageInspector.enable(web) }
         scheduleExtensionRefresh()
     }
     @discardableResult func adoptWebView(_ web: WKWebView) -> UUID? {
@@ -153,7 +167,7 @@ import WebKit
         let id = UUID()
         let profile = sourceProfile ?? web.flatMap { profileID(of: $0) } ?? commandWebView.flatMap { profileID(of: $0) } ?? session.currentProfileID
         let store = web?.configuration.websiteDataStore ?? profileStores.store(for: profile)
-        let little = LittleBamController(websiteDataStore: store, configure: { [weak self] in self?.configureExtensions($0, profileID: profile) }, beforeLoad: { [weak self] action in self?.whenExtensionsReady(profileID: profile, perform: action) })
+        let little = LittleBamController(websiteDataStore: store, configure: { [weak self] in self?.configureExtensions($0, profileID: profile); self?.preparePageTools(configuration: $0) }, beforeLoad: { [weak self] action in self?.whenExtensionsReady(profileID: profile, perform: action) })
         little.onDownload = { [weak self] download in self?.downloads.start(download: download) }
         little.onVisit = { [weak self] title, address in self?.library(for: profile).recordVisit(title: title, address: address) }
         littleWindows[id] = little
@@ -191,6 +205,7 @@ import WebKit
         if let web { little.adopt(webView: web) }
         else if let url { _ = little.open(url: url) }
         little.show(relativeTo: view.window); scheduleExtensionRefresh()
+        if let web = little.webView { PageInspector.enable(web) }
     }
 }
 
@@ -200,6 +215,7 @@ extension BrowserController: NSMenuItemValidation {
         // and the onboarding overlay owns the window while it is up.
         if suspendsChromeInteraction { return false }
         if isViewLoaded, view.window?.attachedSheet != nil { return false }
+        if let pageTool = validatePageToolsItem(menuItem) { return pageTool }
         switch menuItem.action {
         case #selector(toggleAutomaticTabSleeping(_:)):
             menuItem.state = automaticTabSleeping ? .on : .off
@@ -211,7 +227,7 @@ extension BrowserController: NSMenuItemValidation {
             guard let host = currentSleepProtectionHost else { return false }
             menuItem.state = keepAwakeHosts.contains(host) ? .on : .off
             return NSApp.keyWindow === view.window && commandWebView === activeWebView
-        case #selector(copyCurrentURL(_:)):
+        case #selector(copyCurrentURL(_:)), #selector(copyMarkdownLink(_:)):
             return pageCommandSurface.flatMap { copyableURL(for: $0.web) } != nil
         case #selector(hardReload(_:)):
             return pageCommandSurface != nil
