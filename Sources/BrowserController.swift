@@ -289,7 +289,8 @@ import QuartzCore
     /// While first-run onboarding covers the window, browser chrome must not
     /// react to swipes or menu commands behind it.
     var suspendsChromeInteraction = false
-    var automaticallyShowsVideo = true
+    /// These three follow the person, not the window: a change in one normal window reaches every other one.
+    var automaticallyShowsVideo = true { didSet { if oldValue != automaticallyShowsVideo { windowGroup?.sharePreferences(from: self) } } }
     var peeks: [UUID: PeekCoordinator] = [:] { didSet { invalidateExtensionSurfaceTopology() } }
     var littleWindows: [UUID: LittleBamController] = [:] { didSet { invalidateExtensionSurfaceTopology() } }
     var swipe = SpaceSwipeStateMachine()
@@ -385,8 +386,8 @@ import QuartzCore
     var memoryPressureSource: DispatchSourceMemoryPressure?
     var sleepTask: Task<Void, Never>?
     var sleepPassID: UUID?
-    var automaticTabSleeping = true
-    var keepAwakeHosts: Set<String> = []
+    var automaticTabSleeping = true { didSet { if oldValue != automaticTabSleeping { windowGroup?.sharePreferences(from: self) } } }
+    var keepAwakeHosts: Set<String> = [] { didSet { if oldValue != keepAwakeHosts { windowGroup?.sharePreferences(from: self) } } }
     /// The address field's site settings popover, and the page it describes.
     let siteSettings = SiteSettingsPopover()
     weak var siteSettingsWeb: WKWebView?
@@ -404,6 +405,10 @@ import QuartzCore
         if isPrivateWindow { self.profileStores.onStoreCreated = { PrivateBrowsing.register($0) } }
         self.favicons = primary?.favicons ?? WebsiteFaviconStore(directory: ephemeral ? nil : sessionURL.deletingLastPathComponent().appendingPathComponent("Favicons", isDirectory: true))
         self.primaryBrowser = primary
+        if let primary {
+            automaticallyShowsVideo = primary.automaticallyShowsVideo; automaticTabSleeping = primary.automaticTabSleeping
+            keepAwakeHosts = primary.keepAwakeHosts
+        }
         session = primary?.session ?? (privateWindow ? .privateWindow() : ephemeral ? .fresh() : SessionFile.load(sessionURL))
         if !ephemeral, UserDefaults.standard.object(forKey: "AutomaticallyShowPlayingVideo") != nil { automaticallyShowsVideo = UserDefaults.standard.bool(forKey: "AutomaticallyShowPlayingVideo") }
         displayedWidth = session.sidebarVisible ? CGFloat(session.sidebarWidth) : 0
