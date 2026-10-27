@@ -209,7 +209,7 @@ import WebKit
             entry("Copy Link", #selector(copyTabLink(_:)), "link", key: "c", enabled: URLInput.directURL(tab.address) != nil),
             shareMenuItem(for: id),
             .separator(),
-            entry("Change Icon…", #selector(changeTabIcon(_:)), "face.smiling"),
+        ] + (tab.isSaved ? [] : [entry("Change Icon…", #selector(changeTabIcon(_:)), "face.smiling")]) + [  // kept rows have Edit Saved Tab…
             entry("Rename…", #selector(renameTab(_:)), "pencil"),
             entry(muted ? "Unmute" : "Mute", #selector(toggleMuteTab(_:)), muted ? "speaker.wave.2" : "speaker.slash",
                   enabled: muted || isTabPlayingAudio(id)),
@@ -223,9 +223,25 @@ import WebKit
               let url = browsers[id].flatMap(cleanLink(for:)) ?? URLInput.directURL(tab.address).map(CleanLinks.clean) else {
             let item = NSMenuItem(title: "Share", action: nil, keyEquivalent: ""); item.isEnabled = false; return item
         }
-        let item = NSSharingServicePicker(items: [url]).standardShareMenuItem
-        item.title = "Share"
+        // A real submenu, as Arc's (AirDrop, Mail, Messages, Notes…): the picker's
+        // standard item only opens a popover on click.
+        let item = NSMenuItem(title: "Share", action: nil, keyEquivalent: "")
+        item.image = NSImage(systemSymbolName: "square.and.arrow.up", accessibilityDescription: nil)
+        let menu = NSMenu(title: "Share")
+        for service in Self.sharingServices(for: url) {
+            let entry = NSMenuItem(title: service.menuItemTitle, action: #selector(shareFromMenu(_:)), keyEquivalent: "")
+            entry.target = self; entry.image = service.image; entry.representedObject = ShareRequest(service: service, url: url)
+            menu.addItem(entry)
+        }
+        if menu.items.isEmpty { item.isEnabled = false } else { item.submenu = menu }
         return item
+    }
+    @available(macOS, deprecated: 13.0)
+    private static func legacyServices(for url: URL) -> [NSSharingService] { NSSharingService.sharingServices(forItems: [url]) }
+    private static func sharingServices(for url: URL) -> [NSSharingService] { legacyServices(for: url) }
+    @objc func shareFromMenu(_ sender: NSMenuItem) {
+        guard let request = sender.representedObject as? ShareRequest else { return }
+        request.service.perform(withItems: [request.url])
     }
     /// Arc's "Move to ▸": every Space (this one ticked), then "New Space…".
     func moveToMenuItem(for id: UUID) -> NSMenuItem {
@@ -281,4 +297,10 @@ import WebKit
         default: return nil
         }
     }
+}
+
+/// A Share submenu entry's service and link.
+final class ShareRequest: NSObject {
+    let service: NSSharingService, url: URL
+    init(service: NSSharingService, url: URL) { self.service = service; self.url = url }
 }
