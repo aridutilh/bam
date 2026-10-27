@@ -97,7 +97,7 @@ import WebKit
     /// Whether the page's content controller should have the lists, and make it so.
     fileprivate func apply(to webView: WKWebView) {
         guard let tracker = pages.object(forKey: webView) else { return }
-        let wanted = ContentBlockingPreference.blocks(webView.url) && !lists.isEmpty && !Self.isExtensionPage(webView)
+        let wanted = ContentBlockingPreference.blocks(webView.url, inPrivateWindow: PrivateBrowsing.isPrivate(webView)) && !lists.isEmpty && !Self.isExtensionPage(webView)
         let controller = webView.configuration.userContentController
         if wanted && tracker.attached !== listsToken {
             if tracker.attached != nil { tracker.attachedLists.forEach(controller.remove) }
@@ -125,9 +125,11 @@ import WebKit
     private var listsToken = NSObject()
 
     /// Site controls' "Block ads and trackers": remembered for the site, and its open pages reload.
-    func setBlocks(_ on: Bool, forSiteOf url: URL?) {
+    /// From a private window it lasts only while private windows are open and is never saved.
+    func setBlocks(_ on: Bool, forSiteOf url: URL?, inPrivateWindow: Bool = false) {
         guard let site = ContentBlockingPreference.site(url) else { return }
-        ContentBlockingPreference.setBlocks(on, for: url)
+        if inPrivateWindow { ContentBlockingPreference.setPrivateBlocks(on, for: url) }
+        else { ContentBlockingPreference.setBlocks(on, for: url) }
         for webView in pages.keyEnumerator().allObjects.compactMap({ $0 as? WKWebView }) {
             guard let other = ContentBlockingPreference.site(webView.url),
                   other == site || other.hasSuffix("." + site) || site.hasSuffix("." + other) else { continue }
@@ -461,7 +463,7 @@ import WebKit
     }
     private func loadingChanged(_ web: WKWebView) {
         guard web.isLoading else { return }
-        let blocking = ContentBlockingPreference.blocks(web.url) && !(owner?.lists.isEmpty ?? true)
+        let blocking = ContentBlockingPreference.blocks(web.url, inPrivateWindow: PrivateBrowsing.isPrivate(web)) && !(owner?.lists.isEmpty ?? true)
         let tripped = breakage.pageStarted(web.url, at: ProcessInfo.processInfo.systemUptime)
         if tripped && blocking && ContentBlockingPreference.site(web.url) != nil { showPrompt(on: web) }
     }
@@ -469,10 +471,10 @@ import WebKit
     private func showPrompt(on web: WKWebView) {
         guard prompt == nil else { return }
         let card = ContentBlockingPrompt()
-        let url = web.url
+        let url = web.url, isPrivate = PrivateBrowsing.isPrivate(web)
         card.onAllow = { [weak self] in
             self?.dismissPrompt()
-            ContentBlocking.shared.setBlocks(false, forSiteOf: url)
+            ContentBlocking.shared.setBlocks(false, forSiteOf: url, inPrivateWindow: isPrivate)
         }
         card.present(in: web)
         prompt = card

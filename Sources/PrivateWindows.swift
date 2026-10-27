@@ -38,12 +38,22 @@ extension PaletteCommandCatalog {
     static func availableInPrivateWindow(_ command: PaletteCommand) -> Bool { !hiddenInPrivateWindow.contains(command.id) }
 }
 
+/// Tells app-wide features whether a page belongs to a private window, by its website data store.
+@MainActor enum PrivateBrowsing {
+    private static let stores = NSHashTable<WKWebsiteDataStore>.weakObjects()
+    static func register(_ store: WKWebsiteDataStore) { stores.add(store) }
+    static func isPrivate(_ web: WKWebView) -> Bool { stores.contains(web.configuration.websiteDataStore) }
+}
+
 extension BrowserController {
     /// Wipes everything a private window's pages stored, then releases its pages.
     /// Called once, as its window closes.
     func discardPrivateWindowData() {
         guard isPrivateWindow else { return }
         prepareToClose(persistSession: false)
+        // App-wide key monitors would otherwise outlive the window (their closures hold it weakly).
+        tabNavigation.monitors.forEach(NSEvent.removeMonitor); tabNavigation.monitors.removeAll()
+        if let observer = tabNavigation.resignObserver { NotificationCenter.default.removeObserver(observer); tabNavigation.resignObserver = nil }
         for id in Array(browsers.keys) { teardownPage(id) }
         for store in profileStores.openedStores {
             store.removeData(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(), modifiedSince: .distantPast) {}
@@ -116,11 +126,14 @@ extension BrowserController {
         #selector(BrowserController.showHistory(_:)), #selector(BrowserController.togglePin(_:)),
         #selector(BrowserController.toggleFavorite(_:)), #selector(BrowserController.showExtensionLibrary(_:))
     ]
-    /// The private window in front, if any. Sheets, popovers and child panels count as their parent window.
+    /// The private window in front, if any. Sheets, popovers and child panels count as their parent window,
+    /// and a Little Bam opened from a private window (⌥⌘-click, Peek) counts as that window.
     var keyPrivateWindow: PrivateWindowController? {
         var window = NSApp.keyWindow ?? NSApp.mainWindow
         while let current = window {
-            if let match = privateWindows().first(where: { $0.window === current }) { return match }
+            if let match = privateWindows().first(where: { entry in
+                entry.window === current || entry.controller.littleWindows.values.contains { $0.window === current }
+            }) { return match }
             window = current.sheetParent ?? current.parent
         }
         return nil

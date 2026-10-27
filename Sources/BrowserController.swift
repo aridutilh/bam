@@ -400,6 +400,7 @@ import QuartzCore
         self.downloads = primary?.downloads ?? downloadCoordinator ?? DownloadCoordinator()
         self.sessionURL = primary?.sessionURL ?? sessionURL; self.privateMode = primary?.privateMode ?? ephemeral; self.isPrivateWindow = privateWindow && primary == nil
         self.profileStores = primary?.profileStores ?? profileStores ?? WebsiteProfileStore(ephemeral: ephemeral)
+        if isPrivateWindow { self.profileStores.onStoreCreated = { PrivateBrowsing.register($0) } }
         self.favicons = primary?.favicons ?? WebsiteFaviconStore(directory: ephemeral ? nil : sessionURL.deletingLastPathComponent().appendingPathComponent("Favicons", isDirectory: true))
         self.primaryBrowser = primary
         session = primary?.session ?? (privateWindow ? .privateWindow() : ephemeral ? .fresh() : SessionFile.load(sessionURL))

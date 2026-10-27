@@ -71,12 +71,35 @@ enum ContentBlockingPreference {
         }
     }
 
-    /// Whether blocking applies to pages at `url` right now.
-    static func blocks(_ url: URL?) -> Bool {
+    /// Whether blocking applies to pages at `url` right now. A private window's own per-site choices
+    /// win over the remembered ones for its pages.
+    static func blocks(_ url: URL?, inPrivateWindow: Bool = false) -> Bool {
         guard isEnabled else { return false }
         guard let site = site(url) else { return true }
+        if inPrivateWindow, let override = privateOverride(for: site) { return override }
         return !isAllowed(site, in: allowedSites)
     }
+
+    /// Per-site choices made in private windows: site → blocks. Memory only, never written to
+    /// preferences or shown in Settings, and forgotten when the last private window closes.
+    nonisolated(unsafe) private static var privateOverrides: [String: Bool] = [:]
+    private static func privateOverride(for site: String) -> Bool? {
+        var candidate = Substring(site)
+        while true {
+            if let value = privateOverrides[String(candidate)] { return value }
+            guard let dot = candidate.firstIndex(of: ".") else { return nil }
+            candidate = candidate[candidate.index(after: dot)...]
+            if !candidate.contains(".") { return nil }
+        }
+    }
+    /// A private window's site-controls switch: changes only what private windows do on the site.
+    static func setPrivateBlocks(_ on: Bool, for url: URL?) {
+        guard let site = site(url) else { return }
+        privateOverrides = privateOverrides.filter { !($0.key == site || $0.key.hasSuffix("." + site)) }
+        privateOverrides[site] = on
+        NotificationCenter.default.post(name: .contentBlockingChanged, object: nil)
+    }
+    static func forgetPrivateChoices() { privateOverrides.removeAll() }
 
     /// Per-site switch from site controls. Turning blocking back on also clears a parent-domain allowance.
     static func setBlocks(_ on: Bool, for url: URL?) {
