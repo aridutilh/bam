@@ -35,7 +35,8 @@ import AppKit
             ("kept tabs and Favorites", { $0.isSaved = true }), ("the tab on screen", { $0.isVisible = true }),
             ("a tab playing media", { $0.isPlayingMedia = true }), ("a tab in a call", { $0.isCapturing = true }),
             ("a tab in Picture in Picture", { $0.isPictureInPicture = true }), ("a tab downloading", { $0.isDownloading = true }),
-            ("a tab under a Peek", { $0.hasPeek = true })
+            ("a tab under a Peek", { $0.hasPeek = true }), ("a tab holding typed text", { $0.hasTypedText = true }),
+            ("a tab the archive can't hold", { $0.isRestorable = false })
         ]
         for (name, change) in protected {
             require(policy.due([tab(1000, change)], now: now, after: twelve).isEmpty, "never archives \(name)")
@@ -80,6 +81,25 @@ import AppKit
         require(roundTrip.lastViewedAt == now, "last viewed time survives a relaunch")
         let legacy = #"{"id":"\#(UUID().uuidString)","title":"Old","address":"https://example.com","space":0,"pinned":false}"#
         require(try! decoder.decode(BrowserTab.self, from: Data(legacy.utf8)).lastViewedAt == nil, "older sessions load with no view time")
+        var renamed = stamped; renamed.customTitle = "Mine"
+        let both = try! decoder.decode(BrowserTab.self, from: encoder.encode(renamed))
+        require(both.customTitle == "Mine" && both.lastViewedAt == now && both == renamed, "a renamed tab keeps its name and view time together")
+
+        // The clock counts only time Bam is open on an awake Mac.
+        let base = now.addingTimeInterval(-14 * hour)
+        require(ArchiveClock.shift(lastWall: base, lastUptime: 1000, now: base.addingTimeInterval(300), uptime: 1300) == 0, "a normal five minutes counts in full")
+        let slept = ArchiveClock.shift(lastWall: base, lastUptime: 1000, now: base.addingTimeInterval(13 * hour), uptime: 1060)
+        require(abs(slept - (13 * hour - 60)) < 1, "13 hours asleep don't count")
+        require(policy.due([tab(1) { $0.lastViewedAt = ArchiveClock.moved(base, by: slept, now: base.addingTimeInterval(13 * hour)) }],
+                           now: base.addingTimeInterval(13 * hour), after: twelve).isEmpty, "so waking up archives nothing")
+        require(ArchiveClock.shift(lastWall: base, lastUptime: 1000, now: base.addingTimeInterval(-hour + 300), uptime: 1300) == -hour,
+                "the clock set back an hour moves view times back with it")
+        require(ArchiveClock.shift(lastWall: base, lastUptime: 1000, now: base.addingTimeInterval(86_400 + 300), uptime: 1300) == 86_400,
+                "a clock jump forward doesn't count")
+        require(ArchiveClock.shift(lastTick: base, now: base.addingTimeInterval(3 * 86_400)) == 3 * 86_400, "days quit don't count")
+        require(ArchiveClock.shift(lastTick: nil, now: now) == 0, "first launch after upgrading shifts nothing")
+        require(ArchiveClock.shift(lastWall: base, lastUptime: 1000, now: base.addingTimeInterval(310), uptime: 1300) == 0, "timer jitter is ignored")
+        require(ArchiveClock.moved(now, by: hour, now: now) == now, "a moved view time never passes now")
 
         // Day headings.
         let calendar = Calendar(identifier: .gregorian)

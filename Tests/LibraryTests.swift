@@ -95,9 +95,9 @@ import AppKit
 
         let limit = BrowserLibrary(storageURL: nil)
         for n in 0..<5_003 { limit.recordVisit(title: "Entry \(n)", address: "https://example.com/\(n)") }
-        for n in 0..<203 { limit.recordClosed(tabs: [tab("https://example.com/\(n)")], split: false) }
+        for n in 0..<1_003 { limit.recordClosed(tabs: [tab("https://example.com/\(n)")], split: false) }
         check(limit.history.count == 5_000 && limit.history.first?.title == "Entry 5002" && limit.history.last?.title == "Entry 3", "History retains the newest 5,000 visits")
-        check(limit.closedRecords.count == 200 && limit.closedRecords.last?.tabs[0].address == "https://example.com/3", "Archive retains the newest 200 closures")
+        check(limit.closedRecords.count == 1_000 && limit.closedRecords.last?.tabs[0].address == "https://example.com/3", "Archive retains the newest 1,000 closures")
         check(limit.storageURL == nil && limit.lastStorageError == nil, "Ephemeral operation needs no storage")
 
         // Auto-archive marks its records; records saved before it load as closed by hand.
@@ -105,6 +105,14 @@ import AppKit
         reasons.recordClosed(tabs: [tab("https://example.com/auto")], split: false, reason: .archived)
         reasons.recordClosed(tabs: [tab("https://example.com/hand")], split: false)
         check(reasons.closedRecords.map(\.wasAutoArchived) == [false, true], "Auto-archived records say so; hand-closed ones don't")
+        // Auto-archive writes its batch once, keeps every field of each tab, and refuses what the archive can't hold.
+        let batch = BrowserLibrary(storageURL: nil)
+        var named = tab("https://example.com/named"); named.customTitle = "Mine"; named.lastViewedAt = Date(timeIntervalSince1970: 1_800_000_000)
+        check(batch.recordArchived([[tab("https://example.com/older")], [named]]) && batch.closedRecords.count == 2
+              && batch.closedRecords[0].tabs == [named] && batch.closedRecords.allSatisfy(\.wasAutoArchived), "Archived batch keeps tabs whole, newest on top")
+        let extensionPage = BrowserTab(title: "Options", address: "safari-web-extension://ABC/options.html", space: 0)
+        check(!BrowserLibrary.canArchive([extensionPage]) && !batch.recordArchived([[extensionPage]]) && batch.closedRecords.count == 2,
+              "A tab the archive can't hold is refused, not dropped")
         let legacyRecord = #"{"id":"\#(UUID().uuidString)","closedAt":1800000000000,"split":false,"tabs":[{"id":"\#(UUID().uuidString)","title":"Old","address":"https://example.com","space":0,"pinned":false}]}"#
         let legacyDecoder = JSONDecoder(); legacyDecoder.dateDecodingStrategy = .millisecondsSince1970
         check((try? legacyDecoder.decode(ClosedRecord.self, from: Data(legacyRecord.utf8)))?.reason == nil, "Older archive records load without a reason")

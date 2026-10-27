@@ -57,10 +57,50 @@ enum ArchivePreference {
         }
         return interval.seconds
     }
+    /// When auto-archive's clock last ran (wall time), so time Bam was quit doesn't count. Memory only on a disposable launch.
+    static let clockKey = "ArchiveClockTick"
+    nonisolated(unsafe) private static var memoryTick: Date?
+    static var clockTick: Date? {
+        get {
+            guard let defaults else { return memoryTick }
+            let raw = defaults.double(forKey: clockKey)
+            return raw > 0 && raw.isFinite ? Date(timeIntervalSince1970: raw) : nil
+        }
+        set {
+            if let defaults { defaults.set(newValue?.timeIntervalSince1970 ?? 0, forKey: clockKey) } else { memoryTick = newValue }
+        }
+    }
     /// How often to sweep: every five minutes, or twice per trial interval on a fresh preview's short clock.
     static var sweepPeriod: TimeInterval {
         guard defaults == nil, let seconds = effectiveSeconds else { return 300 }
         return min(300, max(5, seconds / 2))
+    }
+}
+
+/// Auto-archive counts only time Bam is open on an awake Mac. A night asleep, a week quit, or the system
+/// clock (or time zone) jumping must not age every tab at once, so each check moves every view time
+/// forward by the part of the gap that wasn't awake, running time.
+enum ArchiveClock {
+    /// Gaps this small are timer jitter, not worth rewriting the session for.
+    static let tolerance: TimeInterval = 30
+    /// Since the last check in this run: wall time that passed minus awake time that passed
+    /// (`systemUptime` stops while the Mac sleeps). Positive after sleep or a clock jump forward,
+    /// negative after the clock is set back.
+    static func shift(lastWall: Date, lastUptime: TimeInterval, now: Date, uptime: TimeInterval) -> TimeInterval {
+        let wall = now.timeIntervalSince(lastWall), awake = max(0, uptime - lastUptime)
+        return significant(wall - awake)
+    }
+    /// At launch: all the time since the previous run's last check (Bam wasn't running).
+    static func shift(lastTick: Date?, now: Date) -> TimeInterval {
+        guard let lastTick else { return 0 }
+        return significant(now.timeIntervalSince(lastTick))
+    }
+    /// A view time moved by `shift`, never past now.
+    static func moved(_ viewed: Date, by shift: TimeInterval, now: Date) -> Date {
+        min(now, viewed.addingTimeInterval(shift))
+    }
+    private static func significant(_ value: TimeInterval) -> TimeInterval {
+        value.isFinite && abs(value) >= tolerance ? value : 0
     }
 }
 
@@ -80,6 +120,10 @@ struct TabArchivePolicy {
         var isDownloading = false
         /// A Peek is open over it.
         var hasPeek = false
+        /// Text typed into the page and not yet sent (a comment or message box). Arc archives these; Bam keeps them.
+        var hasTypedText = false
+        /// The archive can't hold it (an extension page), so closing it would lose it.
+        var isRestorable = true
         /// The Split this tab belongs to, named by its first tab. A Split is archived only as a whole.
         var splitPrimaryID: UUID?
     }
@@ -90,7 +134,7 @@ struct TabArchivePolicy {
         guard let after, after.isFinite, after > 0, now.timeIntervalSince1970.isFinite else { return [] }
         func eligible(_ tab: Candidate) -> Bool {
             guard !tab.isSaved, !tab.isVisible, !tab.isPlayingMedia, !tab.isCapturing, !tab.isPictureInPicture,
-                  !tab.isDownloading, !tab.hasPeek, let viewed = tab.lastViewedAt,
+                  !tab.isDownloading, !tab.hasPeek, !tab.hasTypedText, tab.isRestorable, let viewed = tab.lastViewedAt,
                   viewed.timeIntervalSince1970.isFinite, viewed <= now else { return false }
             return now.timeIntervalSince(viewed) >= after
         }
