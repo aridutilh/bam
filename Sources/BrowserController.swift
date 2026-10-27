@@ -669,7 +669,9 @@ import QuartzCore
             else { destination.loadHTMLString("<h1>Bam</h1><p>Press Command-L to explore.</p>", baseURL: nil) }
         } else if let url = extensionURL ?? URLInput.directURL(address) {
             if extensionURL == nil { TabActivityProbe.install(in: destination.configuration) }
-            pendingHome.remove(id); destination.load(URLRequest(url: url))
+            pendingHome.remove(id)
+            if extensionURL == nil, let state = tabNavigation.pendingInteractionStates.removeValue(forKey: id) { destination.interactionState = state }
+            else { destination.load(URLRequest(url: url)) }
         } else {
             pendingLoads.remove(id); tabErrors[id] = "This address cannot be opened"; refresh()
         }
@@ -931,7 +933,8 @@ import QuartzCore
         observations.removeValue(forKey: id)
         let web = browsers.removeValue(forKey: id)
         if let web { tabActivityProbe.invalidate(web) }
-        tabNavigation.thumbnails.removeValue(forKey: id)
+        tabNavigation.thumbnails.removeValue(forKey: id); tabNavigation.pendingInteractionStates.removeValue(forKey: id)
+        if session.tabs.contains(where: { $0.id == id }) == false { tabNavigation.mutedTabs.remove(id) }
         tabLastUsed.removeValue(forKey: id); sleepRestores.removeValue(forKey: id); nonGetDocuments.remove(id); pendingNonGetDocuments.removeValue(forKey: id)
         web?.navigationDelegate = nil; web?.uiDelegate = nil; web?.stopLoading()
         // PiP restoration can synchronously re-enter showActive. The retired

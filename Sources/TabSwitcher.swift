@@ -18,10 +18,12 @@ import WebKit
     var deactivateObserver: NSObjectProtocol?
     /// Set while a ⌘Z that belongs to the page is sent through again.
     var replayingUndo = false
-    /// Tabs (Split primaries) the user muted; reapplied to pages created later.
+    /// Pages (tab IDs) the user muted; reapplied to pages created later.
     var mutedTabs: Set<UUID> = []
     /// A tab waiting for the Space being created ("Move to ▸ New Space…").
     var pendingMoveToNewSpace: UUID?
+    /// A duplicate's back/forward history, restored in place of its first load (TabActions.swift).
+    var pendingInteractionStates: [UUID: Any] = [:]
     /// The hovered-link address at the page's corner (LinkStatus.swift).
     lazy var linkStatus = LinkStatusController()
     /// A quick ⌃⇥ tap lands without the overlay ever drawing.
