@@ -1562,7 +1562,7 @@ enum URLInput {
     /// Extension-page restoration is validated separately from user input and
     /// HTTP navigation. The controller must still authorize the live context.
     static func extensionURL(_ text: String) -> URL? {
-        guard let url = URL(string: text), url.scheme?.lowercased() == "webkit-extension",
+        guard let url = URL(string: text), ["webkit-extension", "safari-web-extension"].contains(url.scheme?.lowercased() ?? ""),
               let host = url.host, UUID(uuidString: host) != nil,
               url.user == nil, url.password == nil, url.port == nil else { return nil }
         return url

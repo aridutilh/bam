@@ -614,6 +614,54 @@ import JavaScriptCore
         guardJS.evaluateScript(ExtensionCompatibility.workerScript(manifest: ["permissions": ["declarativeNetRequest"]], browserVersion: "test"))
         try check(guardJS.evaluateScript("browser.declarativeNetRequest.updateDynamicRules.__bamDNRGuard === true && browser.declarativeNetRequest.updateDynamicRules({removeRuleIds: []}) === nativeResult")!.toBool(),
                   "Re-running the adapter wrapped the DNR guard twice")
+        // modifyHeaders names WebKit refuses (Todoist's `Doist-Platform`) are left out; everything else passes through.
+        guardJS.evaluateScript("""
+            nativeCalls = []; var warned = [];
+            console.warn = function (text) { warned.push(text); };
+            var todoist = {id: 1, priority: 1, condition: {urlFilter: '|https://api.todoist.com/'}, action: {type: 'modifyHeaders',
+              requestHeaders: [{header: 'Doist-Platform', operation: 'set', value: 'chrome'}, {header: 'User-Agent', operation: 'set', value: 'x'}]}};
+            var onlyCustom = {id: 2, priority: 1, condition: {urlFilter: '/c'}, action: {type: 'modifyHeaders', responseHeaders: [{header: 'X-Custom', operation: 'remove'}]}};
+            var mixed = {id: 3, priority: 1, condition: {urlFilter: '/m'}, action: {type: 'modifyHeaders', requestHeaders: [{header: 'X-Only', operation: 'remove'}],
+              responseHeaders: [{header: 'Set-Cookie', operation: 'remove'}]}};
+            var headerOptions = {addRules: [todoist, onlyCustom, mixed, safe], removeRuleIds: [1]};
+            var headerResult = browser.declarativeNetRequest.updateSessionRules(headerOptions);
+            var sent = nativeCalls[0] && nativeCalls[0].args[0];
+            var headerOK = headerResult === nativeResult && nativeCalls.length === 1 && sent !== headerOptions && sent.removeRuleIds[0] === 1
+              && sent.addRules.length === 3 && sent.addRules[0].id === 1 && sent.addRules[0].action.requestHeaders.length === 1
+              && sent.addRules[0].action.requestHeaders[0].header === 'User-Agent' && sent.addRules[1].id === 3
+              && sent.addRules[1].action.requestHeaders === undefined && sent.addRules[1].action.responseHeaders.length === 1
+              && sent.addRules[2] === safe && todoist.action.requestHeaders.length === 2 && warned.length === 1
+              && warned[0].indexOf('Doist-Platform') >= 0 && warned[0].indexOf('X-Custom') >= 0;
+            var accepted = {id: 4, priority: 1, condition: {urlFilter: '/a'}, action: {type: 'modifyHeaders', requestHeaders: [{header: 'referer', operation: 'remove'}]}};
+            var acceptedOptions = {addRules: [accepted]};
+            nativeCalls = [];
+            browser.declarativeNetRequest.updateDynamicRules(acceptedOptions);
+            headerOK = headerOK && nativeCalls[0].args[0] === acceptedOptions && warned.length === 1;
+            """)
+        try check(guardErrors.isEmpty && guardJS.evaluateScript("headerOK")!.toBool(),
+                  "modifyHeaders entries WebKit refuses were not left out exactly: \(guardJS.evaluateScript("JSON.stringify([sent, warned])")!)")
+
+        // Chrome enum constants: supplied only where the namespace exists and the engine has none; never replacing one.
+        let enums = JSContext()!
+        var enumErrors: [String] = []
+        enums.exceptionHandler = { _, error in enumErrors.append(error?.toString() ?? "JavaScript error") }
+        enums.evaluateScript("""
+            var location = {origin: 'webkit-extension://fixture', href: 'webkit-extension://fixture/worker.js'}, console = {error: function() {}, warn: function() {}}, performance = {now: function() { return 0; }};
+            function WR() {} function Tabs() {} function DNR() {}
+            var engineStatus = {LOADING: 'loading'};
+            var browser = {runtime: {getURL: function(p) { return 'webkit-extension://fixture' + p; }, getManifest: function() { return {}; }}, webRequest: new WR(), tabs: new Tabs(), declarativeNetRequest: new DNR()};
+            browser.tabs.TabStatus = engineStatus;
+            """)
+        enums.evaluateScript(ExtensionCompatibility.workerScript(manifest: [:], browserVersion: "test"))
+        try check(enumErrors.isEmpty && enums.evaluateScript("""
+            Object.values(browser.webRequest.ResourceType).indexOf('webbundle') < 0 && browser.webRequest.ResourceType.MAIN_FRAME === 'main_frame'
+            && Object.isFrozen(browser.webRequest.ResourceType) && browser.tabs.TabStatus === engineStatus && browser.tabs.TAB_ID_NONE === -1
+            && browser.runtime.OnInstalledReason.INSTALL === 'install' && browser.runtime.PlatformOs.MAC === 'mac'
+            && browser.declarativeNetRequest.RuleActionType.MODIFY_HEADERS === 'modifyHeaders' && browser.declarativeNetRequest.MAX_NUMBER_OF_REGEX_RULES === 1000
+            && typeof browser.declarativeNetRequest.getAvailableStaticRuleCount === 'function'
+            && browser.windows === undefined && browser.contextMenus === undefined
+            """)!.toBool(), "Chrome enum constants were missing, replaced an engine enum, or created a namespace: \(enums.evaluateScript("JSON.stringify([Object.keys(browser), Object.getOwnPropertyNames(browser.webRequest)])")!) \(enumErrors)")
+        enums.evaluateScript("browser.declarativeNetRequest.getAvailableStaticRuleCount().then(function (n) { availableCount = n; });")
 
         // scripting.ExecutionWorld: the enum WebKit lacks, on the native namespace and its shared
         // prototype (so a distinct chrome.scripting wrapper sees it); never replacing a native enum.

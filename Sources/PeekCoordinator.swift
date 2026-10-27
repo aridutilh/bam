@@ -717,7 +717,7 @@ enum PreviewURLPolicy {
     /// An extension's own page in a pop-out window Bam opened for that extension (`windows.create`). The runtime has
     /// already checked the page belongs to the requesting extension; the address field never uses this.
     static func allowsExtensionWindowPage(_ url: URL) -> Bool {
-        url.scheme?.lowercased() == "webkit-extension" && url.host?.isEmpty == false && url.user == nil && url.password == nil
+        ["webkit-extension", "safari-web-extension"].contains(url.scheme?.lowercased() ?? "") && url.host?.isEmpty == false && url.user == nil && url.password == nil
     }
     static func allows(_ url: URL) -> Bool {
         guard let scheme = url.scheme?.lowercased(), ["http", "https"].contains(scheme),
