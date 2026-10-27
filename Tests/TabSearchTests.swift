@@ -131,6 +131,7 @@ import AppKit
         results.update(tabs: [kept, favorite], query: "", activeID: UUID(), canCreate: false, spaces: renamedSpaces)
         require(labels(in: results).contains("Project Atlas") && labels(in: results).contains("Lab"),
                 "A kept result uses its custom title and current Space name")
+        results.update(tabs: [kept, favorite], query: "o", activeID: UUID(), canCreate: false, spaces: renamedSpaces)
         require(labels(in: results).filter { $0 == "Global Inbox" }.count == 1
                     && labels(in: results).contains("— favorite.example/home")
                     && !labels(in: results).contains { $0.hasPrefix("Sleeping") },
@@ -381,10 +382,13 @@ enum PaletteFieldChecks {
         if case .tab(let id, _) = results.selectedTarget { require(id == c.id, "The selected target is that tab") } else { require(false, "Selected target is a tab") }
         require(results.preferredHeight == 4 * PaletteGeometry.rowHeight, "Four roomy rows (Gamma, Delta, Beta, Mail), nothing else")
         // ⌘L before any edit: this page first (its title alone), then recent tabs.
-        results.update(tabs: [a, b, c], query: a.address, activeID: a.id, canCreate: true, recentTabIDs: [a.id, c.id, b.id], editingAddress: true)
+        let copyLink = PaletteCommandCatalog.commands.filter { $0.id == "copy-url" }.map { PaletteCommandMatch(command: $0, leading: false) }
+        results.update(tabs: [a, b, c], query: a.address, activeID: a.id, canCreate: true, commands: copyLink,
+                       recentTabIDs: [a.id, c.id, b.id], editingAddress: true)
         let editing = labels(results)
-        require(editing.first == "Alpha" && editing.dropFirst().first == "Gamma" && !editing.contains("— alpha.example"),
-                "⌘L lists this page, then recent tabs: \(editing)")
+        require(editing.first == "Alpha" && editing.dropFirst().first == "Gamma" && !editing.contains("— alpha.example")
+                    && editing.contains("Copy Link") && editing.firstIndex(of: "Copy Link")! > editing.firstIndex(of: "Beta")!,
+                "⌘L lists this page, then recent tabs, then Copy Link last: \(editing)")
 
         // Typed: the completed site leads, then the search, then pages; an open tab wins over its visited page.
         let hub = BrowserTab(title: "Bam repo", address: "https://github.com/aridutilh/bam", space: 0)

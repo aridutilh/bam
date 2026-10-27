@@ -259,8 +259,9 @@ enum PaletteTarget: Equatable {
             if recent.isEmpty, let active = byID[activeID] { recent = [active] }
             entries = recent.map(Entry.tab)
         } else if editingAddress, let current = byID[activeID] {
-            // ⌘L, before any edit: this page, then where you were before.
-            entries = [.tab(current)] + recentTabs(limit: 4).map(Entry.tab)
+            // ⌘L, before any edit: this page, then where you were before, then page commands (Copy Link) last,
+            // where Arc keeps its own command rows.
+            entries = [.tab(current)] + recentTabs(limit: 4).map(Entry.tab) + commands.map { Entry.command($0.command) }
         } else {
             if let calculation { entries.append(.calculation(calculation)) }
             var matchedTabs = searchIndex.matches(tabs: listable, query: trimmed, activeID: activeID)
@@ -315,8 +316,8 @@ enum PaletteTarget: Equatable {
                 let address = tab.isHome ? "" : tab.isVideoDemo ? "Picture in Picture demo"
                     : PaletteAddressKey.display(tab.isUnloaded ? (tab.saved?.address ?? tab.address) : tab.address)
                 let title = tab.displayTitle.isEmpty ? address : tab.displayTitle
-                // ⌘L's own page reads as Arc's: its title alone.
-                let detail = (current && editingAddress) || title == address ? "" : address
+                // Arc lists tabs by title alone under an empty field and ⌘L; typed results add " — address".
+                let detail = trimmed.isEmpty || editingAddress || title == address ? "" : address
                 row.configure(title: title, detail: detail, badge: context, symbol: tab.symbol,
                               action: current ? nil : "Switch to Tab")
             case .command(let command):
@@ -657,12 +658,13 @@ extension NSTextField {
         badge.textColor = secondary
         icon.contentTintColor = favicon == nil ? (isSelected ? selectedTextColor : (tint ?? .secondaryLabelColor)) : nil
         let hasAction = !action.stringValue.isEmpty
-        action.isHidden = !hasAction; arrow.isHidden = !hasAction; arrowBox.isHidden = !hasAction || !isSelected
+        action.isHidden = !hasAction; arrow.isHidden = !hasAction; arrowBox.isHidden = !hasAction
         action.textColor = isSelected ? primary : .tertiaryLabelColor
-        // Selected: the arrow sits in a white key, colored like the fill. Otherwise a quiet bare arrow.
-        arrow.contentTintColor = isSelected ? accent : .tertiaryLabelColor
+        // Selected: the arrow sits in a white key, colored like the fill. Otherwise a faint key, as Arc.
+        arrow.contentTintColor = isSelected ? accent : .secondaryLabelColor
         effectiveAppearance.performAsCurrentDrawingAppearance {
-            arrowBox.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.95).cgColor
+            arrowBox.layer?.backgroundColor = (isSelected ? NSColor.white.withAlphaComponent(0.95)
+                                               : NSColor.labelColor.withAlphaComponent(0.07)).cgColor
         }
         needsLayout = true
     }

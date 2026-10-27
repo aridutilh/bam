@@ -346,8 +346,11 @@ extension BrowserController {
         let state = paletteState
         let typed = state.typed
         let scoped = paletteEngine != nil
-        let commands = scoped ? [] : PaletteCommandCatalog.matches(typed)
         let editingAddress = !scoped && state.openedAddress != nil && typed == state.openedAddress
+        // Untouched ⌘L offers this page's link; typed text finds commands by name.
+        let commands = scoped ? [] : editingAddress
+            ? PaletteCommandCatalog.commands.filter { $0.id == "copy-url" }.map { PaletteCommandMatch(command: $0, leading: false) }
+            : PaletteCommandCatalog.matches(typed)
         let calculation = scoped ? nil : PaletteCalculator.evaluate(typed)
         let activeSpace = session.spaces.first { $0.id == session.space }
         let recent = session.tabs.map(\.id).enumerated()

@@ -11,7 +11,7 @@
 - A redesigned ⌘T/⌘L search box: a dark or light card washed with your Space's color, roomy rows written "Title — address", the selected row filled with the Space's color, and "Switch to Tab →" on open tabs. It appears instantly.
 - It finishes addresses as you type ("git" → github.com, highlighted), and the site's icon replaces the magnifier. Press → or Tab to take it, Delete to drop it.
 - Pages you visited before show up with your open tabs, without listing a page twice.
-- An empty ⌘T lists your most recent tabs, the previous one first, so ⌘T then Return jumps back. ⌘L lists the current page first.
+- An empty ⌘T lists your most recent tabs, the previous one first, so ⌘T then Return jumps back. ⌘L lists the current page first, with Copy Link at the end.
 - Typing a sum like 12*(3+4) shows the answer first. Return copies it.
 - Quick aliases open a fresh document, meeting or spreadsheet in a new tab: type "doc", "meet" or "sheet" (docs.new, meet.new, sheets.new and more).
 - New keys in the search box: ⌘Return opens in a background tab, ⇧⌘Return in a new tab, ⇧⌘C copies the selected result's link, ⌘K shows actions for it (Open in Split View, Copy Link, Close Tab…), and Esc steps back before it closes.
