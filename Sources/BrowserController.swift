@@ -825,6 +825,7 @@ import QuartzCore
         refreshExtensionActions()
         root.theme = session.spaceDefinition(session.space)?.theme
         root.space = session.spaceDefinition(session.space)?.colorIndex ?? 0
+        littleWindows.values.forEach { $0.refreshSpaces() }
         sidebar.configureSpaces(session.spaces)
         let tabs = sidebarItems(in: session)
         sidebar.update(tabs: tabs, space: session.space, canGoBack: activeWebView?.canGoBack ?? false, canGoForward: activeWebView?.canGoForward ?? false, isLoading: activeWebView?.isLoading ?? false)
