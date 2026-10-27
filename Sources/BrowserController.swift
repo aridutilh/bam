@@ -241,6 +241,7 @@ import QuartzCore
     var profileLibraries: [UUID: BrowserLibrary] = [:]
     /// Frame observers that keep the traffic lights in the sidebar's toolbar row (placeWindowButtons).
     var windowButtonObservers: [NSObjectProtocol] = []
+    var windowButtonObservedViews: [ObjectIdentifier] = []
     var placingWindowButtons = false
     var library: BrowserLibrary { library(for: commandProfileID) }
     var confirmProfileChange: ((String) -> Bool)?
@@ -488,7 +489,11 @@ import QuartzCore
     func placeWindowButtons() {
         guard let window = view.window, let close = window.standardWindowButton(.closeButton),
               let titlebar = close.superview, let container = titlebar.superview else { return }
-        if windowButtonObservers.isEmpty {
+        // Observe the views AppKit has now; it can hand the window new titlebar views (full screen, tab merges).
+        let observedIDs = [ObjectIdentifier(close), ObjectIdentifier(container)]
+        if windowButtonObservedViews != observedIDs {
+            windowButtonObservers.forEach(NotificationCenter.default.removeObserver)
+            windowButtonObservers.removeAll(); windowButtonObservedViews = observedIDs
             for observed in [close, container] {
                 observed.postsFrameChangedNotifications = true
                 windowButtonObservers.append(NotificationCenter.default.addObserver(forName: NSView.frameDidChangeNotification,
@@ -497,7 +502,8 @@ import QuartzCore
                 })
             }
         }
-        guard !placingWindowButtons, !window.styleMask.contains(.fullScreen) else { return }
+        // Full screen, and a window showing the system tab bar (Merge All Windows), keep AppKit's own layout.
+        guard !placingWindowButtons, !window.styleMask.contains(.fullScreen), window.tabGroup?.isTabBarVisible != true else { return }
         placingWindowButtons = true; defer { placingWindowButtons = false }
         let height = ArkMetrics.toolbarCenterY * 2
         let frame = NSRect(x: 0, y: window.frame.height - height, width: window.frame.width, height: height)
