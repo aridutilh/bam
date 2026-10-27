@@ -294,12 +294,21 @@ import WebKit
     }
     /// The action's selector, plus the item's choice when one menu repeats an action
     /// (Appearance ▸ Dark → "chooseAppearance:dark", Go to Space ▸ 2nd → "selectSpace:2").
+    /// Items AppKit adds on its own are left alone: hidden alternates (Edit ▸ Emoji & Symbols' fn E),
+    /// private commands, and chords a KeyCombo can't hold (the fn key, as in Window ▸ Fill). Written
+    /// back without fn, such a chord would become a bare letter that swallows typing.
+    static func isListable(_ item: NSMenuItem) -> Bool {
+        guard let action = item.action, !item.isSeparatorItem, !item.title.isEmpty, !item.isHidden, !item.isAlternate,
+              !NSStringFromSelector(action).hasPrefix("_"),
+              item.keyEquivalentModifierMask.intersection([.function, .numericPad, .help]).isEmpty,
+              action != #selector(NSWindow.makeKeyAndOrderFront(_:)), !(item.representedObject is NSWindow) else { return false }
+        return true
+    }
     static func shortcutID(for item: NSMenuItem, in menu: NSMenu) -> String? {
-        guard let action = item.action, !item.isSeparatorItem, !item.title.isEmpty,
-              action != #selector(NSWindow.makeKeyAndOrderFront(_:)), !(item.representedObject is NSWindow) else { return nil }
+        guard isListable(item), let action = item.action else { return nil }
         let name = NSStringFromSelector(action)
         if let choice = item.representedObject as? String { return name + choice }
-        let siblings = menu.items.filter { $0.action == action }
+        let siblings = menu.items.filter { $0.action == action && isListable($0) }
         guard siblings.count > 1, let index = siblings.firstIndex(where: { $0 === item }) else { return name }
         return name + String(index + 1)
     }
@@ -308,7 +317,7 @@ import WebKit
         let items = menuShortcutItems()
         ShortcutStore.shared.register(items.map { entry in
             MenuShortcut(id: entry.id, title: entry.item.title, menu: entry.menu,
-                         defaultCombo: entry.item.keyEquivalent.isEmpty ? nil : KeyCombo(entry.item.keyEquivalent, entry.item.keyEquivalentModifierMask))
+                         defaultCombo: KeyCombo(menuItem: entry.item))
         })
         applyShortcuts(items)
     }
@@ -327,6 +336,8 @@ import WebKit
         let store = ShortcutStore.shared
         for entry in known ?? menuShortcutItems() where store.command(entry.id) != nil {
             let combo = store.combo(forID: entry.id)
+            // Only touch items whose chord changes, so a default stays exactly as the menu built it.
+            guard KeyCombo(menuItem: entry.item) != combo else { continue }
             entry.item.keyEquivalent = combo?.key ?? ""
             entry.item.keyEquivalentModifierMask = combo?.modifiers ?? []
         }
