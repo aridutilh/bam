@@ -2,90 +2,66 @@
 
 ## Unreleased
 
-- Websites can no longer open an extension's private pages (its settings, for example) by linking or redirecting to them. As in Chrome, a site can only open the pages an extension chooses to share with it; anything else shows a plain "This page is blocked" page. Extension popups, settings pages and the tabs extensions open themselves are unchanged.
-- Split View with New Page moves to Arc's ⌃⇧= (it was ⌥⌘=). A custom shortcut you set yourself is kept.
-- Opening a Split now shows the search bar over the new page: pick a site, search or an open tab and it loads there. Press Esc (or click outside) and the empty page closes again.
-- Little Bam windows no longer close into the archive while they're playing audio or video, holding text you're writing, downloading, or using the camera or microphone, and time your Mac spent asleep no longer counts toward "Archive Little Bams after" (waking up the next morning used to close them all).
-- When a tab you're not looking at plays sound, a small player appears at the bottom of the sidebar, as in Arc: the page's icon (click it to go to the tab), previous and next when the site has them, play/pause and mute. It steps aside while that tab is on screen or its video floats in Picture in Picture.
-- Tabs playing sound show a speaker after their icon; click it to mute or unmute the tab.
-- Audio and video files opened directly (an .mp3 link, for example) no longer say "Couldn't load page" while they play.
-- Right-clicking a tab follows Arc's order: Copy Link, Share, Change Icon…, Rename…, Mute, Duplicate and, for Today tabs, Move to (with New Space…), with Close Tab and Close Tabs Below last.
-- Double-click a tab's title to rename it in place; Return keeps the name, Esc cancels, and an empty name goes back to the page's own title.
-- The footer's bottom-left button is now Arc's archive box: it opens Archived Tabs, and its menu has Downloads, History and Manage Spaces.
-- Switching Spaces with the keyboard, the footer or the Spaces menu now slides the new Space in quickly, as Arc does, and the window color crossfades with it instead of jumping. The footer's Space icons fade between gray and color.
-- With the sidebar hidden, rest the pointer at the window's left edge and the sidebar slides in as a floating card over the page; it slides away when you move off it. Press ⌘S while it's showing to pin it back, and the page slides over to make room.
-- Dragging a tab is more physical: a tab you drop glides from where you let go into its new place, and tabs that move (drops, Move Earlier/Later, keeping a tab) slide to their new spots instead of jumping.
-- Links routes: a route for "bücher.de" or "café" now matches the links that actually carry them, "Is equal to" ignores a #section the route doesn't name, and a disguised link like figma.com@evil.com no longer counts as figma.com.
-- Fixed a crash in Settings › Links when removing a route while its text was still being edited.
-- Bam's record of which sites you move to which Space (for route suggestions) is cleared with Clear History, never kept from private windows, and stays small.
-- A link from another app that would open in a Space now opens in Little Bam while the welcome or a Space sheet is open, instead of switching Spaces underneath it.
-- Settings › Links gets Arc's Little Bam and Peek switches. "Open Little Bam with ⌥⌘N in any app" is a system-wide shortcut, only active while it's on. If macOS won't give Bam the key, Settings says so and offers Try Again. If Arc or Yab is running, Settings warns that they may open their own window on ⌥⌘N too. The other switches cover ⌥⌘-click to open a link in Little Bam, Shift-click to Peek, and Peek for links from kept tabs and Favorites to other sites. ⌥⌘N starts off, since Arc and Yab answer the same key; the other switches start on, as in Arc.
-- "Archive Little Bams after" (1 hour, 6 hours or 12 hours; 6 by default, as in Arc): a Little Bam you haven't used for that long closes, and its page goes to the archive.
-- Capture (⇧⌘2, File › Capture…): the window dims and the block under the pointer lights up. Click to take that block, or drag to take any area. ↑ widens to the surrounding block, ↓ narrows back, and F takes the whole page. The picture goes straight to your clipboard, and a small panel beside it offers Copy, Save…, Share… and Retake. File › Capture Full Page takes the whole page in one go. Nothing is saved unless you choose Save….
-- Change Tab Icon… (Tabs menu and command bar) now works on every tab, not only kept ones: pick an icon and a name, and they stay with the tab if you keep it later.
-- Air Traffic Control, as in Arc: Settings › Links routes links from other apps. Each route is "URL contains …" or "URL is equal to …", and opens in a chosen Space, the Space you're in, or Little Bam. Routes are checked top to bottom. Everything else goes to a default you pick (Little Bam, as before). "Try a link" shows where an address would open and which route decides. If you move the same site into the same Space three times, Settings › Links suggests a route for it.
-- Split View is redrawn: each page is its own rounded card with a small gap between them, and each has a slim bar with Back, Forward, the site (click it to type an address) and Close. The page you're using gets a thin ring in your Space's color and its bar shows Reload and Separate. Drag the gap to resize; the Split remembers where you left it.
-- New tab actions, as in Arc: Duplicate (with its back/forward history), Rename… (leave it empty to go back to the page title), Mute / Unmute for a tab playing sound and Close Tabs Below. They're in the Tabs menu and the command bar.
-- Point at a link and its address shows in a small capsule at the page's bottom-left corner, as in Arc.
-- Fixed: after switching or editing Spaces, typing the letter "e" could open the Emoji & Symbols palette instead of typing. Shortcuts Settings no longer lists or rewrites the hidden menu items macOS adds on its own.
-- Settings › Websites' page zoom and minimum font size now also apply in Peek and Little Bam (and minimum font size in Reading Mode), and a Peek or Little Bam page moved into a tab keeps its zoom. Site controls offer Reset only when the page is away from your default zoom.
-- The command palette shows each command's current shortcut after you change or remove it in Settings › Shortcuts.
-- Removing a kept tab with its × no longer loses it: Reopen Closed Tab (⇧⌘T) brings it back kept, with its name, icon and folder, in the same place. Right-click › Remove Tab does the same, and VoiceOver offers each row's close, unload or remove action.
-- New Window (⌘N) opens another window on the same Spaces, Favorites and tabs, as in Arc. Each window has its own Space and selected tab, and a tab opened, closed or moved in one shows up in the other. Choosing a tab that's open in another window brings its page over as it is, and the window it left offers to show it again. Second windows come back after a relaunch, and Little Bam's Open in Space goes to the window in front. Extensions run in the main window only for now. Auto-archive never closes a tab you're using in any window, and ⌃⇥ goes back through the tabs you used in that window.
-- In a private window, turning the ad blocker off for a site (or "Allow Ads Here") now lasts only while private windows are open; it's no longer saved or listed in Settings. ⌘1–⌘9 and the Extensions menu now act on the private window in front, as do menu commands in a Little Bam opened from it.
-- ⌃⇥ now goes to the tab you used last, not the next one down. Keep holding ⌃ and press ⇥ again to bring up your five most recent tabs with page previews; release ⌃ to go there, ⌃⇧⇥ to step back, Esc to stay put.
-- ⌘1 to ⌘8 jump to that tab in the sidebar, Favorites first, and ⌘9 jumps to the last tab (Tabs › Go to Tab).
-- New tabs open at the top of Today. Links you open in a new tab land right below the page they came from, in the order you opened them, and closing one takes you to its neighbor from the same page, then back to that page.
-- ⌘Z reopens the last closed tab when you're not typing, and closed tabs come back where they were instead of at the bottom.
-- Bam now blocks ads and trackers on its own, on by default. It uses uBlock Origin's standard lists (EasyList, EasyPrivacy and more), refreshed weekly in the background, and stops requests before they're made. Turn it off for one site in the site controls, or everywhere in Settings › Privacy. If a page keeps failing to load, Bam offers "Allow Ads Here".
-- Private windows: File › New Private Window (⇧⌘N) opens a dark window with a "Private" label and one set of tabs. It keeps no history, the command bar shows nothing you visited elsewhere, extensions stay off, and its cookies, logins and site data are wiped when you close it. It is never saved or reopened after a relaunch. ⌘W on its last tab closes it.
-- Menu commands and shortcuts now act on the window in front, so ⌘T, ⌘L, ⌘W and the rest work in a private window as they do in the main one.
-- Extensions from the Chrome Web Store and Firefox Add-ons now get Safari's extension address (safari-web-extension://), so services that already work with Safari extensions answer them. Raindrop.io's popup, blank before, now shows its sign-in. Extensions you already installed keep their address and their data.
-- Raindrop.io, SponsorBlock, Calendly, Wappalyzer and Adblock Plus now install. Bam skips small manifest mistakes the way Safari does, reads script paths like "/js/app.js" the way Chrome does, and accepts larger extensions (up to 30,000 files and 512 MB unpacked).
-- Todoist and Adblock Plus now start: Bam leaves out network-rule headers WebKit can't change instead of failing the whole update, and supplies the Chrome constants (like webRequest.ResourceType) extensions read at startup.
-- Bam now blocks ads and trackers on its own, on by default. It uses uBlock Origin's standard lists (EasyList, EasyPrivacy and more), refreshed weekly in the background, and stops requests before they're made. Turn it off for one site in the site controls, or everywhere in Settings › General › Privacy. If a page keeps failing to load, Bam offers "Allow Ads Here".
-- Copy Link (⇧⌘C) now copies a clean address: tracking tags like utm_, fbclid, gclid and YouTube or Spotify share codes are removed, and everything the page needs is kept. The confirmation says "Link copied".
-- Copy Markdown Link (⌥⇧⌘C) copies [Title](address), and pastes as the page's title as a live link in Mail, Notes and Slack.
-- Reading Mode (⌥⌘R): the article alone in one clean column over the page, opening at the paragraph you were reading. Choose text size (⌘+ / ⌘-), serif or sans, and a Light, Sepia, Dark or matching theme. ⌘F finds words in the article, and Esc or ⌥⌘R returns to the page exactly as you left it.
-- Hide Elements (⇧⌘H): point at a cookie banner, ad or sidebar and click to make it crumble away. ⌘Z brings back the last, Esc finishes. What you hide stays hidden on that site from the first frame of every page; View › Restore Hidden Elements on This Site brings it all back.
-- A new Develop menu: Show Web Inspector (⌥⌘I), Show JavaScript Console (⌥⌘J) and Inspect Element (⌥⌘C). Pages are also inspectable from Safari's Develop menu, and right-clicking a page offers Inspect Element.
-- Peek has a new opening: the link you clicked turns into a dark pill, then a card springs out of it while the page behind dims slightly (the sidebar stays as it is). Close, Open in Tab, Split View and Little Bam sit beside the card as round buttons, and the address field shows the Peek's site while it's open. Closing shrinks the card back into the link; ⌘O grows it into the tab; ⇧⌘C copies its link.
-- A Peek no longer flashes dark while its page loads: it shows the page behind's color until the new page draws.
-- Little Bam has a simpler frame: a bar in its Space's color with one field for the login profile, the site, extensions and Copy Link, the Open in Space control beside it, and the page right below. It zooms out of the middle when it opens and shrinks away when it closes. Back, Forward and Reload stay on ⌘[, ⌘] and ⌘R.
-- Floating video can be tucked away: throw or drag it past the left or right edge of the screen and it hides behind the edge with a blurred sliver and a chevron showing, while the sound plays on. Point at the sliver to pull it out a little; click it, press Return or use two fingers to bring it back.
-- Floating video now flies out of its place in the page when it starts, and on close it is drawn back into the page before fading.
-- Dragging floating video with the mouse now glides it to a corner (or the corner it was thrown toward) when you let go.
-- A redesigned ⌘T/⌘L search box: a dark or light card washed with your Space's color, roomy rows written "Title — address", the selected row filled with the Space's color, and "Switch to Tab →" on open tabs. It appears instantly.
-- It finishes addresses as you type ("git" → github.com, highlighted), and the site's icon replaces the magnifier. Press → or Tab to take it, Delete to drop it.
-- Pages you visited before show up with your open tabs, without listing a page twice.
-- An empty ⌘T lists your most recent tabs, the previous one first, so ⌘T then Return jumps back. ⌘L lists the current page first, with Copy Link at the end.
-- Typing a sum like 12*(3+4) shows the answer first. Return copies it.
-- Quick aliases open a fresh document, meeting or spreadsheet in a new tab: type "doc", "meet" or "sheet" (docs.new, meet.new, sheets.new and more).
-- New keys in the search box: ⌘Return opens in a background tab, ⇧⌘Return in a new tab, ⇧⌘C copies the selected result's link, ⌘K shows actions for it (Open in Split View, Copy Link, Close Tab…), and Esc steps back before it closes.
-- The search box finds the new page tools by their menu names: Copy URL, Copy URL as Markdown, Reading Mode, Hide Elements, Restore Hidden Elements, Developer Tools, JavaScript Console and Inspect Elements (the old names still work).
-- Search box fixes: address completion keeps a site's port and http (typing "localh" now finishes to localhost:3000), and pasted text is never completed. Typing a site's name such as "figma" or "notion" and pressing Return goes to the site instead of creating a new file. The selected row stays readable on yellow and green Spaces, sums like "0x10" or "1,5+1" no longer show a wrong answer, and typing stays quick with a full history.
-- Settings is reorganized into General, Appearance, Websites, Privacy, Search, Spaces, Shortcuts, Extensions and About, with denser rows that are quicker to scan.
-- A search field at the top of Settings (⌘F) finds any setting by name, and any command by name or keys (try "zoom" or "⇧⌘C"). Return jumps to the first result and highlights it.
-- Every command in the menu bar can now have its own shortcut, not just seven. Settings › Shortcuts lists them by menu with a filter for names or keys. Pick a key another command already uses and Bam offers to move it. Each command can be reset to its default or left without a shortcut. Shortcuts you changed before carry over.
-- Settings › Websites sets the zoom every page starts at (90%, 100%, 110% or 125%; ⌘0 returns to it) and a minimum font size for small text. It also lists the sites you keep awake, so you can add one by typing its address or remove one.
-- Settings › Appearance shows each Space's color next to the light and dark theme, so you can recolor a Space without opening it.
-- Settings › Privacy lists the sites where you've allowed ads, so you can block them there again.
-- The window's close, minimize and zoom buttons now sit on the same line as the sidebar, back, forward and reload buttons, as in Arc.
-- Tabs that never got a real title (often restored or imported ones) show the page's last known title, or its site name, instead of a long raw address. Titles also drop a trailing site name like "– Vercel" or "- YouTube".
-- Sidebar rows follow Arc's sizes and spacing: 14-point titles, 16-point icons, the address and Favorites at Arc's heights, and long titles ending in "…" just before the close button.
-- Every tab shows its close button when you point at it, the selected one included. Kept tabs that are open show a minus that puts the page to sleep and keeps the row; once it's asleep, the minus turns into a cross that removes the row (Reopen Closed Tab brings it back).
-- The address at the top of the sidebar reads a little quieter, and a long address fades out at its end.
-- The footer shows each Space as its emoji, the current one in color and the others in gray, spaced like Arc's and closing up when there are many.
-- Tabs fade softly as they scroll under the Space name and above the footer, and a thin line sits over the footer while more tabs continue below.
-- Reload and Stop swap with a quick scale.
-- Auto-archive, as in Arc: Today tabs you haven't looked at for 12 hours close on their own and go to the archive. Choose 12 hours, 24 hours, 7 days, 30 days or Never in Settings › General. Only time Bam is open on an awake Mac counts, so a night asleep, days quit or a clock change never archive everything at once. Kept tabs and Favorites are never archived, and neither are tabs playing media, in a call, in Picture in Picture, downloading, under a Peek or holding text you've typed but not sent. A Split is archived only when both sides are due. Private windows never archive. A tab closes only once it's safely in the archive, which now holds 1,000 entries. Bam checks at launch, on wake and every few minutes, and tabs from before this update start their clock when you upgrade.
-- The archive has its own window (History › View Archive…, or "Archived Tabs" in the command bar). It lists tabs you closed and tabs Bam archived, grouped by day, with search, an "Archived" mark on the ones Bam closed, Restore on every row, and Clear Archive.
-- Copy URL (⇧⌘C) now copies a clean address: tracking tags like utm_, fbclid, gclid and YouTube or Spotify share codes are removed, and everything the page needs is kept.
-- Copy URL as Markdown (⌥⇧⌘C) copies [Title](address), and pastes as the page's title as a live link in Mail, Notes and Slack.
-- Page confirmations now look and move like Arc's: "Copied Current URL" grows in at the page's top-right corner as a frosted pill with a Share button, stays a few seconds (longer while you point at it) and shrinks away.
-- Reading Mode (⌥⌘R): the article alone in one clean column over the page, opening at the paragraph you were reading. Choose text size (⌘+ / ⌘-), serif or sans, and a Light, Sepia, Dark or matching theme. ⌘F finds words in the article, and Esc or ⌥⌘R returns to the page exactly as you left it.
-- Hide Elements (⇧⌘H): point at a cookie banner, ad or sidebar and click to make it crumble away. ⌘Z brings back the last, Esc finishes. What you hide stays hidden on that site from the first frame of every page; View › Restore Hidden Elements on This Site brings it all back.
-- View › Developer: Developer Tools (⌥⌘I), Inspect Elements (⌥⌘C) and JavaScript Console (⌥⌘J). Pages are also inspectable from Safari's Develop menu, and right-clicking a page offers Inspect Element.
+## 0.26.0 build 52 — The Arc pass
+
+Bam now looks, moves and behaves much more like Arc, which shuts down on December 22. Arc was the reference for every change; nothing here claims full Arc or Chrome parity.
+
+**Search box (⌘T / ⌘L)**
+- Redrawn as Arc's: a card washed with your Space's color, roomy "Title — address" rows, the selected row filled with the Space's color, "Switch to Tab →" on open tabs. It appears instantly.
+- Finishes addresses as you type ("git" → github.com; → or Tab takes it), shows pages you visited before alongside open tabs without listing a page twice, answers sums (12*(3+4)), and opens docs.new, meet.new or sheets.new from "doc", "meet" or "sheet".
+- An empty ⌘T lists your recent tabs, previous one first, so ⌘T then Return jumps back. ⌘L lists the current page, with Copy URL at the end.
+- ⌘Return opens in a background tab, ⇧⌘Return in a new tab, ⇧⌘C copies a result's link, ⌘K shows actions for it, and Esc steps back before it closes. The box finds every command by its menu name.
+
+**Sidebar**
+- The close, minimize and zoom buttons sit on the same line as the sidebar, back, forward and reload buttons, as in Arc.
+- Rows use Arc's sizes. Titles drop a trailing site name ("– Vercel"), and tabs without a real title show their last known title or site instead of a raw address.
+- Close buttons appear when you point at a tab. A kept tab's minus puts it to sleep, then turns into a cross that removes it; ⇧⌘T brings it back kept, with its name, icon and folder.
+- Double-click a tab to rename it. Right-click follows Arc's menu: Copy Link, Share, Change Icon…, Rename…, Mute, Duplicate, Move to (with New Space…), Close Tab and Close Tabs Below.
+- Tabs playing sound show a speaker (click to mute). When a tab you can't see plays sound, a small player appears above the footer, as in Arc.
+- The footer shows each Space as its emoji, Arc's archive box sits bottom-left, and tabs fade as they scroll under the Space name and footer.
+- With the sidebar hidden, rest the pointer at the window's left edge and it slides in as a floating card; ⌘S pins it back.
+- Switching Spaces slides at Arc's speed with the window color crossfading. Dropped tabs glide into place.
+
+**Tabs**
+- ⌃⇥ goes to the tab you used last; hold ⌃ and press ⇥ again for your five most recent tabs with previews.
+- ⌘1–⌘8 jump to that tab, Favorites first; ⌘9 to the last.
+- Links you open in a new tab land right below their page; closing one returns to its neighbor, then to that page. ⌘Z reopens a closed tab when you're not typing.
+- Duplicate (keeps history), Rename, Change Icon, Mute and Close Tabs Below work on every tab.
+- Auto-archive, as in Arc: Today tabs you haven't looked at for 12 hours (or 24 hours, 7 days, 30 days, Never) go to the archive. Only time Bam is open on an awake Mac counts, and tabs playing, downloading, on a call or holding unsent text stay. History › View Archive… lists them by day with search and Restore.
+
+**Windows**
+- New Window (⌘N) opens another window on the same Spaces and tabs, as in Arc; each window has its own Space and selected tab. Extensions don't run in extra windows yet.
+- New Private Window (⇧⌘N): a dark window that keeps no history, cookies or settings, with extensions off. Everything is wiped when it closes.
+- Menu commands act on the window in front.
+
+**Peek, Little Bam, Split View and video**
+- Peek opens Arc's way: the link turns into a pill and a card springs out of it, with Close, Open in Tab, Split View and Little Bam beside it. Closing shrinks it back into the link.
+- Little Bam has a simpler frame in its Space's color and zooms in and out like Little Arc.
+- Split View panes are separate rounded cards with their own bars; drag the gap to resize (Bam remembers it). ⌃⇧= opens a split with the search box over the new pane.
+- Floating video flies out of the page, glides to a corner when dropped, can be tucked behind the screen edge, and is drawn back into the page on close.
+
+**Links from other apps**
+- Air Traffic Control, as in Arc: Settings › Links routes links from other apps to a Space or Little Bam by "URL contains …" or "URL is equal to …".
+- Settings › Links also has Arc's ⌥⌘-click → Little Bam, Shift-click → Peek, Peek for links from kept tabs, Archive Little Bams after 1/6/12 hours, and an opt-in ⌥⌘N that opens Little Bam from any app (off by default, since Arc and Yab answer the same key).
+
+**Pages**
+- A built-in ad and tracker blocker, on by default, using uBlock Origin's standard lists, refreshed weekly. Arc's "Block Ads & Trackers" row in site controls turns it off for a site, and "Allow Ads Here" appears if a page keeps failing.
+- Copy URL (⇧⌘C) removes tracking tags; Copy URL as Markdown (⌥⇧⌘C) copies [Title](address). Both show Arc's "Copied Current URL" pill with a Share button.
+- Reading Mode (⌥⌘R), Hide Elements (⇧⌘H) and Capture (⇧⌘2: click a block, drag an area, or F for the full page).
+- View › Developer: Developer Tools (⌥⌘I), Inspect Elements (⌥⌘C), JavaScript Console (⌥⌘J).
+- The address of a link you point at shows at the page's bottom-left, as in Arc.
+
+**Settings**
+- Reorganized into nine sections with a search field (⌘F) that finds any setting or command, even by keys.
+- Every menu command can have its own shortcut. Websites sets a default zoom and minimum font size; Privacy lists sites where ads are allowed; Appearance shows each Space's color.
+
+**Extensions**
+- Raindrop.io, SponsorBlock, Calendly, Wappalyzer and Adblock Plus now install, and Todoist and Adblock Plus now start. New store installs use Safari's extension address, which more services accept.
+- Websites can only open the extension pages an extension chooses to share, as in Chrome.
+
+**Fixes**
+- Typing "e" could open Emoji & Symbols after editing Spaces. Fixed.
+- Opening an .mp3 or video file directly no longer says "Couldn't load page".
 
 ## 0.25.1 build 51 — Quit dialog and sidebar scroll bar polish
 
