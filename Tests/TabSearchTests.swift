@@ -99,21 +99,22 @@ import AppKit
         let personal = BrowserTab(title: "Personal tab", address: "https://example.com/personal", space: 7)
         let customSpaces = [BrowserSpace(id: 7, name: "Personal", symbol: "sun.max", colorIndex: 1),
                             BrowserSpace(id: 41, name: "Research", symbol: "book", colorIndex: 2)]
-        results.update(tabs: [research, personal], query: "tab", activeID: research.id, canCreate: false, spaces: customSpaces)
-        require(labels(in: results).contains("Research · Current") && labels(in: results).contains("Personal"),
+        // Rows carry one quiet piece of context: the current tab says so; a tab in another Space names that Space.
+        results.update(tabs: [research, personal], query: "tab", activeID: personal.id, canCreate: false, spaces: customSpaces)
+        require(labels(in: results).contains("Research") && labels(in: results).contains("Current Tab"),
                 "Search labels must resolve non-contiguous stable Space IDs")
         results.moveSelection(delta: 1)
         let renamedSpaces = [BrowserSpace(id: 41, name: "Lab", symbol: "book", colorIndex: 2), customSpaces[0]]
-        results.update(tabs: [research, personal], query: "tab", activeID: research.id, canCreate: false, spaces: renamedSpaces)
-        require(labels(in: results).contains("Lab · Current") && !labels(in: results).contains("Research · Current"),
+        results.update(tabs: [research, personal], query: "tab", activeID: personal.id, canCreate: false, spaces: renamedSpaces)
+        require(labels(in: results).contains("Lab") && !labels(in: results).contains("Research"),
                 "Rename/reorder refresh must show the current Space name")
-        require(results.activateSelection() && chosen == personal.id,
+        require(results.activateSelection() && chosen == research.id,
                 "Renaming or reordering Spaces must retain the selected tab identity")
-        results.update(tabs: [research], query: "", activeID: research.id, canCreate: false, spaces: [])
-        require(labels(in: results).contains("Unknown Space · Current"),
+        results.update(tabs: [research], query: "tab", activeID: UUID(), canCreate: false, spaces: [])
+        require(labels(in: results).contains("Unknown Space"),
                 "An absent Space definition must not label a tab with another Space's name")
-        results.update(tabs: [prefix], query: "", activeID: prefix.id, canCreate: false)
-        require(labels(in: results).contains("Studio · Current"), "Legacy callers retain default Space names")
+        results.update(tabs: [prefix], query: "arc", activeID: UUID(), canCreate: false)
+        require(labels(in: results).contains("Studio"), "Legacy callers retain default Space names")
         let kept = BrowserTab(title: "Unrelated live title", address: "https://example.com/current", space: 41,
                               saved: SavedTabState(kind: .kept, address: "https://saved.example/original", customTitle: "Project Atlas", customSymbol: "book"))
         let favorite = BrowserTab(title: "Old favorite title", address: "https://favorite.example/home", space: 7,
@@ -127,13 +128,13 @@ import AppKit
                 "A saved destination must not hide the current navigation from search")
         require(TabSearchMatcher.matches(tabs: [favorite], query: "global inbox", activeID: UUID()).map(\.id) == [favorite.id],
                 "Sleeping Favorites remain searchable with their original identity")
-        results.update(tabs: [kept, favorite], query: "", activeID: kept.id, canCreate: false, spaces: renamedSpaces)
-        require(labels(in: results).contains("Project Atlas") && labels(in: results).contains("Lab · Current"),
+        results.update(tabs: [kept, favorite], query: "", activeID: UUID(), canCreate: false, spaces: renamedSpaces)
+        require(labels(in: results).contains("Project Atlas") && labels(in: results).contains("Lab"),
                 "A kept result uses its custom title and current Space name")
-        require(labels(in: results).filter { $0 == "Favorite · Default" }.count == 1
-                    && labels(in: results).contains("Global Inbox")
-                    && labels(in: results).contains("Sleeping · https://favorite.example/home"),
-                "A sleeping Favorite must show one result with its login profile and state")
+        require(labels(in: results).filter { $0 == "Global Inbox" }.count == 1
+                    && labels(in: results).contains("— favorite.example/home")
+                    && !labels(in: results).contains { $0.hasPrefix("Sleeping") },
+                "A sleeping Favorite shows one result, \"Title — saved address\" as Arc writes it")
         results.moveSelection(delta: 1)
         require(results.activateSelection() && chosen == favorite.id,
                 "Opening a sleeping search result passes the existing saved-tab identity to the controller")
@@ -157,8 +158,8 @@ import AppKit
         require(originalRows.allSatisfy { icon($0).contentTintColor == nil },
                 "Selected and unselected favicons retain full color")
         originalRows.forEach { $0.layoutSubtreeIfNeeded() }
-        require(icon(originalRows[0]).imageScaling == .scaleProportionallyUpOrDown && icon(originalRows[0]).frame.size == NSSize(width: 16, height: 16),
-                "Non-square and retina images fit the existing 16-point slot proportionally")
+        require(icon(originalRows[0]).imageScaling == .scaleProportionallyUpOrDown && icon(originalRows[0]).frame.size == NSSize(width: 18, height: 18),
+                "Non-square and retina images fit the 18-point icon slot proportionally")
         cached[kept.id] = blue; cached[favorite.id] = nil
         results.refreshFavicons()
         require(zip(originalRows, resultRows()).allSatisfy { $0 === $1 } && results.selectedIndex == selectedBefore,
@@ -239,29 +240,29 @@ import AppKit
             require(PaletteCommandCatalog.matches(query).contains { $0.command.id == id }, "\(query) finds \(id)")
         }
         require(Set(PaletteCommandCatalog.commands.map(\.id)).count == PaletteCommandCatalog.commands.count, "Command IDs are unique")
-        // The palette never extends past the window: ten rows (three commands, the query and six tabs) at the 540pt
-        // minimum window rise and scroll; a short list keeps the stable centered top.
+        // The palette never extends past the window: ten rows at the 540pt minimum rise and scroll; a short list
+        // keeps the stable centered top, and the card's height follows its rows (Arc's).
         for (height, rows) in [(CGFloat(540), 10), (540, 3), (900, 10), (300, 10)] {
-            let resultsHeight = CGFloat(rows) * PaletteGeometry.rowHeight + 8
+            let resultsHeight = CGFloat(rows) * PaletteGeometry.rowHeight
             let fit = PaletteGeometry.fit(windowHeight: height, resultsHeight: resultsHeight)
             let bottom = fit.top + PaletteGeometry.chromeHeight + fit.visibleResultsHeight
             require(fit.top >= 0 && bottom <= height - PaletteGeometry.margin + 0.001 || height < 2 * PaletteGeometry.margin + PaletteGeometry.chromeHeight,
                     "The palette fits a \(height)pt window with \(rows) rows (top \(fit.top), bottom \(bottom))")
-            if bottom <= height - PaletteGeometry.margin, fit.visibleResultsHeight == resultsHeight {
-                require(fit.top == PaletteGeometry.top(forWindowHeight: height) || fit.top < PaletteGeometry.top(forWindowHeight: height),
-                        "A fitting card keeps or rises from the centered top")
-            }
         }
-        let tenRows = 10 * PaletteGeometry.rowHeight + 8
-        let atMinimum = PaletteGeometry.fit(windowHeight: 540, resultsHeight: tenRows)
-        require(atMinimum.visibleResultsHeight == tenRows && atMinimum.top < PaletteGeometry.top(forWindowHeight: 540)
-                    && atMinimum.top + PaletteGeometry.chromeHeight + tenRows <= 540 - PaletteGeometry.margin,
-                "Ten rows at the 540pt minimum: the card rises from the centered top and shows every row unclipped")
+        let sixRows = 6 * PaletteGeometry.rowHeight
+        let atMinimum = PaletteGeometry.fit(windowHeight: 540, resultsHeight: sixRows)
+        require(atMinimum.visibleResultsHeight == sixRows && atMinimum.top <= PaletteGeometry.top(forWindowHeight: 540),
+                "Six rows at the 540pt minimum show unclipped")
+        let tenRows = 10 * PaletteGeometry.rowHeight
         let short = PaletteGeometry.fit(windowHeight: 400, resultsHeight: tenRows)
         require(short.visibleResultsHeight < tenRows && short.top == PaletteGeometry.margin,
-                "Ten rows in a 400pt window: the card rises to the margin and its results scroll")
-        require(PaletteGeometry.fit(windowHeight: 900, resultsHeight: 3 * PaletteGeometry.rowHeight + 8).top == PaletteGeometry.top(forWindowHeight: 900),
-                "A short list keeps the stable centered top")
+                "Ten rows in a 400pt window: the card rises to the margin and its rows scroll")
+        require(PaletteGeometry.fit(windowHeight: 900, resultsHeight: 3 * PaletteGeometry.rowHeight).top == PaletteGeometry.top(forWindowHeight: 900)
+                    && PaletteGeometry.fit(windowHeight: 900, resultsHeight: 1 * PaletteGeometry.rowHeight).top == PaletteGeometry.top(forWindowHeight: 900),
+                "Short lists keep the stable centered top")
+        require(PaletteGeometry.width(forWindowWidth: 1512) == 764 && PaletteGeometry.width(forWindowWidth: 800) == 540
+                    && PaletteGeometry.width(forWindowWidth: 500) == 460 && PaletteGeometry.width(forWindowWidth: 3000) == 820,
+                "Width is about half the window, 540–820pt, as Arc's, and never wider than the window allows")
         // Scrolling results keep the keyboard selection in view.
         let scroller = NSScrollView(frame: NSRect(x: 0, y: 0, width: 540, height: 120))
         let scrolled = TabSearchResultsView(frame: NSRect(x: 0, y: 0, width: 540, height: 400))
@@ -290,12 +291,129 @@ import AppKit
         require(results.selectedIndex == 0, "A held Up arrow stops at the first row")
         results.moveSelection(delta: -1)
         require(results.selectedIndex == lastRow, "A discrete Up press at the top still wraps to the last row")
-        // Trailing actions: other tabs say what Return does; the current tab keeps its Space context only.
+        // Trailing actions, as Arc: other tabs say Switch to Tab; the current one says it is current.
         let current = held[0], other = held[1]
         results.update(tabs: [current, other], query: "held", activeID: current.id, canCreate: false)
         let actionLabels = labels(in: results)
-        require(actionLabels.filter { $0 == "Switch to Tab" }.count == 1 && actionLabels.contains("Studio · Current"),
-                "Only the non-current tab offers Switch to Tab; the current one keeps its context: \(actionLabels)")
+        require(actionLabels.filter { $0 == "Switch to Tab" }.count == 1 && actionLabels.contains("Current Tab"),
+                "Only the non-current tab offers Switch to Tab; the current one says so: \(actionLabels)")
+        PaletteFieldChecks.run(require, labels: labels)
         print("PASS: \(checks) tab search ranking, command, favicon and selection checks")
+    }
+}
+
+/// The field's newer behaviors: sections under an empty field, inline completion, visited pages, Quick Actions
+/// and the calculator.
+enum PaletteFieldChecks {
+    @MainActor static func run(_ require: (Bool, String) -> Void, labels allLabels: (NSView) -> [String]) {
+        // Shown text only: the hidden "No matching tabs" label and empty fields are left out.
+        func labels(_ view: NSView) -> [String] { allLabels(view).filter { !$0.isEmpty && $0 != "No matching tabs" && $0 != "No tabs" } }
+        let now = Date()
+        // History merges visits per page and ranks address starts first, then frequency and recency.
+        let visits = [
+            PaletteVisit(address: "https://github.com/", title: "GitHub", visitedAt: now),
+            PaletteVisit(address: "https://www.github.com", title: "GitHub", visitedAt: now.addingTimeInterval(-3600)),
+            PaletteVisit(address: "https://github.com/aridutilh/bam#readme", title: "aridutilh/bam", visitedAt: now),
+            PaletteVisit(address: "https://gitlab.com/", title: "GitLab", visitedAt: now.addingTimeInterval(-86_400 * 90)),
+            PaletteVisit(address: "https://news.example/item", title: "Why git is hard", visitedAt: now),
+            PaletteVisit(address: "file:///etc/passwd", title: "Not a web page", visitedAt: now),
+        ]
+        let index = PaletteHistoryIndex(visits: visits, now: now)
+        require(index.sites.count == 4, "History merges www, trailing slash and fragments into one page and skips non-web addresses")
+        let git = index.matches("git", limit: 5)
+        require(git.map(\.address).prefix(3) == ["https://github.com/", "https://github.com/aridutilh/bam#readme", "https://gitlab.com/"]
+                    && git.last?.address == "https://news.example/item",
+                "Address starts outrank title words; more and newer visits rank higher: \(git.map(\.address))")
+        require(index.matches("git", excluding: [PaletteAddressKey.key("https://github.com")], limit: 5).allSatisfy { $0.address != "https://github.com/" },
+                "An open tab's page is left out of visited pages")
+        require(index.matches("why hard", limit: 3).first?.title == "Why git is hard", "Every typed word can match the title")
+
+        // Inline completion.
+        let candidates = index.sites.map { PaletteCompletionCandidate(address: $0.address, title: $0.title, weight: $0.score) }
+        let completion = PaletteAutocomplete.complete("Git", candidates: candidates)
+        require(completion?.text == "Github.com" && completion?.tail == "hub.com" && completion?.typed == "Git"
+                    && completion?.address == "https://github.com/" && completion?.title == "GitHub",
+                "Typing completes to the most-visited host, keeping the typed casing: \(String(describing: completion))")
+        require(PaletteAutocomplete.complete("github.com/ari", candidates: candidates)?.text == "github.com/aridutilh/bam",
+                "A typed slash completes a visited path")
+        require(PaletteAutocomplete.complete("www.git", candidates: candidates)?.text == "www.github.com", "A typed www. keeps it")
+        require(PaletteAutocomplete.complete("git hub", candidates: candidates) == nil && PaletteAutocomplete.complete("https://git", candidates: candidates) == nil
+                    && PaletteAutocomplete.complete("zz", candidates: candidates) == nil && PaletteAutocomplete.complete("", candidates: candidates) == nil,
+                "Words, schemes and unknown text never complete")
+        require(PaletteAutocomplete.complete("github.com", candidates: candidates)?.tail == "", "An exact host stays a completion with no ending")
+
+        // Calculator.
+        require(PaletteCalculator.evaluate("2*21+0.5")?.display == "42.5" && PaletteCalculator.evaluate("= (1+2)^2 × 3")?.value == 27
+                    && PaletteCalculator.evaluate("1,000 + 234.5")?.display == "1,234.5" && PaletteCalculator.evaluate("1,000 + 234.5")?.plain == "1234.5"
+                    && PaletteCalculator.evaluate("50%")?.value == 0.5 && PaletteCalculator.evaluate("10 / 4")?.display == "2.5"
+                    && PaletteCalculator.evaluate("-3 - -3")?.display == "0",
+                "Arithmetic with precedence, powers, percent, grouping and unicode operators")
+        for text in ["42", "3.14", "-5", "2026-10-27", "555-1234", "10/27/2026", "1.2.3", "1/0", "abc", "2+", "github.com", "(1+2"] {
+            require(PaletteCalculator.evaluate(text) == nil, "\(text) is not a sum")
+        }
+
+        // Quick Actions.
+        let doc = PaletteQuickActionCatalog.matches("doc")
+        require(doc.first?.action.host == "docs.new" && doc.first?.leading == true, "An alias names a Quick Action outright")
+        require(PaletteQuickActionCatalog.matches("new meeting").first?.action.host == "meet.new"
+                    && PaletteQuickActionCatalog.matches("mee").first?.leading == false
+                    && PaletteQuickActionCatalog.matches("do").isEmpty,
+                "Titles lead, partial aliases trail, two letters never match")
+
+        // The results view, as Arc's: an empty field lists recent tabs, no headings, the previous tab first.
+        let results = TabSearchResultsView(frame: NSRect(x: 0, y: 0, width: 600, height: 400))
+        let a = BrowserTab(title: "Alpha", address: "https://alpha.example/", space: 0)
+        let b = BrowserTab(title: "Beta", address: "https://beta.example/", space: 0)
+        let c = BrowserTab(title: "Gamma", address: "https://gamma.example/", space: 0)
+        let d = BrowserTab(title: "Delta", address: "https://delta.example/", space: 0)
+        let blank = BrowserTab(title: "New tab", address: "orbit://newtab", space: 0)
+        let fav = BrowserTab(title: "Mail", address: "https://mail.example/", space: 0, saved: SavedTabState(kind: .favorite, address: "https://mail.example/"))
+        var chosen: UUID?, opened: [(String, Bool)] = [], copied: String?
+        results.onSelect = { chosen = $0 }
+        results.onOpenAddress = { opened.append(($0, $1)) }
+        results.onCopy = { copied = $0 }
+        results.update(tabs: [a, b, c, d, blank, fav], query: "", activeID: a.id, canCreate: true, recentTabIDs: [a.id, blank.id, c.id, d.id, b.id, fav.id])
+        let empty = labels(results)
+        require(empty.first == "Gamma" && empty.contains("Mail") && !empty.contains("New tab") && !empty.contains("Alpha")
+                    && !empty.contains("Recent Tabs") && !empty.contains("docs.new"),
+                "Empty field: recent tabs only, no current or blank tab, no headings: \(empty)")
+        require(results.activateSelection() && chosen == c.id, "⌘T Return jumps back to the previous tab")
+        if case .tab(let id, _) = results.selectedTarget { require(id == c.id, "The selected target is that tab") } else { require(false, "Selected target is a tab") }
+        require(results.preferredHeight == 4 * PaletteGeometry.rowHeight, "Four roomy rows (Gamma, Delta, Beta, Mail), nothing else")
+        // ⌘L before any edit: this page first (its title alone), then recent tabs.
+        results.update(tabs: [a, b, c], query: a.address, activeID: a.id, canCreate: true, recentTabIDs: [a.id, c.id, b.id], editingAddress: true)
+        let editing = labels(results)
+        require(editing.first == "Alpha" && editing.dropFirst().first == "Gamma" && !editing.contains("— alpha.example"),
+                "⌘L lists this page, then recent tabs: \(editing)")
+
+        // Typed: the completed site leads, then the search, then pages; an open tab wins over its visited page.
+        let hub = BrowserTab(title: "Bam repo", address: "https://github.com/aridutilh/bam", space: 0)
+        let siteCompletion = PaletteAutocomplete.complete("git", candidates: candidates)
+        results.update(tabs: [a, hub], query: "git", activeID: a.id, canCreate: true,
+                       history: index.matches("git", excluding: [PaletteAddressKey.key(hub.address)], limit: 3),
+                       completion: siteCompletion)
+        let typed = labels(results)
+        require(typed.first == "GitHub" && typed.dropFirst().first == "— github.com" && typed.contains("git") && typed.contains("Bam repo")
+                    && typed.contains("GitLab") && !typed.contains("aridutilh/bam") && typed.filter({ $0 == "— github.com" }).count == 1,
+                "\"GitHub — github.com\", the search, the open tab, visited pages, without duplicates: \(typed)")
+        require(results.activateSelection() && opened.last?.0 == "https://github.com/" && opened.last?.1 == false,
+                "Return on the completed site opens it")
+        // A completion whose page is already open shows that tab, and Return switches to it.
+        let open = PaletteAutocomplete.complete("github.com/ar", candidates: candidates)
+        results.update(tabs: [a, hub], query: "github.com/ar", activeID: a.id, canCreate: true, completion: open)
+        require(results.activateSelection() && chosen == hub.id && labels(results).contains("Switch to Tab"), "An open completion switches to its tab")
+
+        // Calculator and Quick Action rows.
+        let sum = PaletteCalculator.evaluate("6*7")
+        results.update(tabs: [], query: "6*7", activeID: UUID(), canCreate: true, calculation: sum)
+        require(labels(results).first == "42" && labels(results).contains("— 6*7") && labels(results).contains("Copy")
+                    && results.activateSelection() && copied == "42",
+                "An answer leads and Return copies it")
+        results.update(tabs: [], query: "doc", activeID: UUID(), canCreate: true, quickActions: PaletteQuickActionCatalog.matches("doc"))
+        require(labels(results).first == "New document" && results.activateSelection() && opened.last?.0 == "https://docs.new" && opened.last?.1 == true,
+                "A Quick Action alias leads and always opens a new tab")
+        require(TabSearchResultsView.looksLikeAddress("example.com/a") && TabSearchResultsView.looksLikeAddress("localhost:3000")
+                    && !TabSearchResultsView.looksLikeAddress("2*21+0.5") && !TabSearchResultsView.looksLikeAddress("find a site"),
+                "Address-shaped text is told apart from words and sums")
     }
 }

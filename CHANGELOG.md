@@ -14,6 +14,14 @@
 - Floating video can be tucked away: throw or drag it past the left or right edge of the screen and it hides behind the edge with a blurred sliver and a chevron showing, while the sound plays on. Point at the sliver to pull it out a little; click it, press Return or use two fingers to bring it back.
 - Floating video now flies out of its place in the page when it starts, and on close it is drawn back into the page before fading.
 - Dragging floating video with the mouse now glides it to a corner (or the corner it was thrown toward) when you let go.
+- A redesigned ⌘T/⌘L search box: a dark or light card washed with your Space's color, roomy rows written "Title — address", the selected row filled with the Space's color, and "Switch to Tab →" on open tabs. It appears instantly.
+- It finishes addresses as you type ("git" → github.com, highlighted), and the site's icon replaces the magnifier. Press → or Tab to take it, Delete to drop it.
+- Pages you visited before show up with your open tabs, without listing a page twice.
+- An empty ⌘T lists your most recent tabs, the previous one first, so ⌘T then Return jumps back. ⌘L lists the current page first.
+- Typing a sum like 12*(3+4) shows the answer first. Return copies it.
+- Quick aliases open a fresh document, meeting or spreadsheet in a new tab: type "doc", "meet" or "sheet" (docs.new, meet.new, sheets.new and more).
+- New keys in the search box: ⌘Return opens in a background tab, ⇧⌘Return in a new tab, ⇧⌘C copies the selected result's link, ⌘K shows actions for it (Open in Split View, Copy Link, Close Tab…), and Esc steps back before it closes.
+- The search box finds the new page tools by name: Copy Link, Copy Markdown Link, Reading Mode, Hide Elements, Restore Hidden Elements, Web Inspector, JavaScript Console and Inspect Element.
 
 ## 0.25.1 build 51 — Quit dialog and sidebar scroll bar polish
 
