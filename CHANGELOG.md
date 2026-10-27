@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Peek grows out of the link you clicked as one card, with the site and page title in a slim address bar, a Copy Link button (⇧⌘C) and round Close, Open in Tab, Split View and Little Bam buttons beside it. The page behind dims softly. Closing shrinks the card back into the link; ⌘O grows it into the tab.
+- A Peek no longer flashes dark while its page loads: it shows the page behind's color until the new page draws.
+
 ## 0.25.1 build 51 — Quit dialog and sidebar scroll bar polish
 
 - The quit dialog is lighter and tidier: a cleaner heading, flat buttons, clearer Esc and Return keys, and everything lined up on one edge.
