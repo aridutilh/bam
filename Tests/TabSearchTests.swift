@@ -373,6 +373,11 @@ enum PaletteFieldChecks {
         }
 
         // Quick Actions.
+        for name in ["figma", "notion", "linear", "docs", "repo"] {
+            require(PaletteQuickActionCatalog.matches(name).allSatisfy { !$0.leading }, "Typing the site name \(name) never makes Return create something")
+        }
+        require(PaletteQuickActionCatalog.matches("figma.new").first?.leading == true && PaletteQuickActionCatalog.matches("new notion").first?.leading == true,
+                "The *.new host or the action's name still leads")
         let doc = PaletteQuickActionCatalog.matches("doc")
         require(doc.first?.action.host == "docs.new" && doc.first?.leading == true, "An alias names a Quick Action outright")
         require(PaletteQuickActionCatalog.matches("new meeting").first?.action.host == "meet.new"

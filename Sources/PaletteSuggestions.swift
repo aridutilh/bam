@@ -228,6 +228,10 @@ enum PaletteQuickActionCatalog {
         PaletteQuickAction(id: "repo", title: "New GitHub repository", host: "repo.new", aliases: ["repo"]),
         PaletteQuickAction(id: "gist", title: "New gist", host: "gist.new", aliases: ["gist"]),
     ]
+    /// Aliases that are also how people go to a site ("figma", "notion", "linear", "docs"): they list the action
+    /// but never take Return, so typing a site's name and pressing Return doesn't create a new file or issue.
+    static let siteWords: Set<String> = ["notion", "figma", "linear", "repo", "gist", "issue", "cal", "event",
+                                          "form", "forms", "docs", "sheets", "slides", "slide"]
     /// Shown under the empty field.
     static let suggested = ["doc", "meet", "sheet"].compactMap { id in actions.first { $0.id == id } }
 
@@ -239,7 +243,7 @@ enum PaletteQuickActionCatalog {
         var hits: [(PaletteQuickAction, Bool, Int)] = []
         for (index, action) in actions.enumerated() {
             let title = action.title.lowercased()
-            if action.aliases.contains(query) || query == action.host || (query.count >= 5 && title.hasPrefix(query)) {
+            if (action.aliases.contains(query) && !siteWords.contains(query)) || query == action.host || (query.count >= 5 && title.hasPrefix(query)) {
                 hits.append((action, true, index))
             } else if action.aliases.contains(where: { $0.hasPrefix(query) }) || action.host.hasPrefix(query) || title.hasPrefix(query) {
                 hits.append((action, false, index + actions.count))
