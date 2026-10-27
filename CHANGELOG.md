@@ -1,24 +1,5 @@
 # Changelog
 
-## Unreleased
-
-- Fixed: dragging a tab in the sidebar could land it one row above where you dropped it, and dropping just under New Tab could keep the tab by accident. The list no longer shifts when a drag starts.
-- Fixed: double-clicking a tab's title to rename it could close the field straight away.
-- Kept tabs' menus use the same "Move to ▸" as Today tabs (with New Space…), and a kept tab that hasn't been opened shows a cross that removes it, as in Arc.
-
-- Extensions can be inspected like pages: each extension's background and pages appear under its name in Safari's Develop menu, so its console errors can be read.
-
-- Dark one-colour site icons, like GitHub's, now show up light on dark sidebars, in the ⌃⇥ switcher and in the search box, as in Arc.
-- Closing your last Today tab takes you back to the tab you used before it instead of opening a blank page.
-- The search box no longer lists the page you're on twice while it finishes an address, and ⌘L lists pages only, as Arc's does.
-- Hide Elements' hint is a solid pill, so the page underneath no longer shows through it.
-- An empty ⌘T lists your recent tabs, previous one first, so ⌘T then Return jumps back. ⌘L lists the current page and your recent tabs, as Arc's does.
-
-- The permission review when adding an extension no longer mentions 1Password's desktop app for extensions that have nothing to do with it; the desktop-app note now only appears for extensions that ask to talk to a desktop app.
-
-- Close Window (⇧⌘W) closes the window you're in, private windows included.
-- A tab's Share menu now opens as a submenu of share options (AirDrop, Mail, Messages, Notes…), and the ⌃⇥ switcher shows the same letter icon as the sidebar for pages without a favicon.
-
 ## 0.26.0 build 52 — The Arc pass
 
 Bam now looks, moves and behaves much more like Arc, which shuts down on December 22. Arc was the reference for every change; nothing here claims full Arc or Chrome parity.
@@ -80,6 +61,17 @@ Bam now looks, moves and behaves much more like Arc, which shuts down on Decembe
 **Fixes**
 - Typing "e" could open Emoji & Symbols after editing Spaces. Fixed.
 - Opening an .mp3 or video file directly no longer says "Couldn't load page".
+- Fixed: dragging a tab in the sidebar could land it one row above where you dropped it, and dropping just under New Tab could keep the tab by accident. The list no longer shifts when a drag starts.
+- Fixed: double-clicking a tab's title to rename it could close the field straight away.
+- Kept tabs' menus use the same "Move to ▸" as Today tabs (with New Space…), and a kept tab that hasn't been opened shows a cross that removes it, as in Arc.
+- Extensions can be inspected like pages: each extension's background and pages appear under its name in Safari's Develop menu, so its console errors can be read.
+- Dark one-colour site icons, like GitHub's, now show up light on dark sidebars, in the ⌃⇥ switcher and in the search box, as in Arc.
+- Closing your last Today tab takes you back to the tab you used before it instead of opening a blank page.
+- The search box no longer lists the page you're on twice while it finishes an address, and ⌘L lists pages only, as Arc's does.
+- Hide Elements' hint is a solid pill, so the page underneath no longer shows through it.
+- The permission review when adding an extension no longer mentions 1Password's desktop app for extensions that have nothing to do with it; the desktop-app note now only appears for extensions that ask to talk to a desktop app.
+- Close Window (⇧⌘W) closes the window you're in, private windows included.
+- A tab's Share menu now opens as a submenu of share options (AirDrop, Mail, Messages, Notes…), and the ⌃⇥ switcher shows the same letter icon as the sidebar for pages without a favicon.
 
 ## 0.25.1 build 51 — Quit dialog and sidebar scroll bar polish
 

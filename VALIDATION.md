@@ -1,3 +1,14 @@
+## 0.26.0 build 52 — the Arc pass (full build and all twelve native suites passed at `341d161`)
+
+**Gates (release build from a frozen worktree of `night/chrome` at `341d161`):**
+- `bash build.sh` passed with no failures (all component suites, including tab ordering 50, archive 42, link routes 34, link behavior 17, Space theme n/a (not in this release), content-blocking converter 78, extension navigation policy 27, clean links 25, favicon ink 8).
+- All twelve native suites passed against the installed Bam Preview: WebKit, PiP positioning 83, PiP, Interactions 187, Automatic PiP 85, Features 417, Tab resources 37, Profiles 98, Extensions 826, Favicons 85, Profile activation 45, Arc import 155, Windows 59 (new).
+- The focus-dependent suites (PiP, Automatic PiP, Features, Profiles, Profile activation, Arc import, Windows) first failed while the Mac's screen was locked (macOS refuses app activation); they all passed in one run once it was unlocked. The same PiP failure reproduced on the previous good commit while locked, ruling out a code cause.
+
+**Review:** every feature branch had an independent code review before release; reviews fixed roughly 70 bugs (data-loss, privacy and security findings included). Hands-on QA of the combined build and of five store extensions found no crashes; its findings were fixed before the gate.
+
+**Limits:** extensions don't run in second (⌘N) windows yet; Split View has two panes (Arc allows up to four); Arc import brings layout only (no passwords, sign-ins or history); visual parity with Arc was judged from screenshots and 60fps recordings, not certified. Nothing here claims full Arc or Chrome parity.
+
 ## 0.25.1 build 51 — quit dialog and sidebar scroll bar (full build, all eleven native suites and installed visual review passed at `0c2d6cf`)
 
 **Gates (worktree `bam-scrollbar`, tested source `0c2d6cf`):**
