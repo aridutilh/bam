@@ -82,7 +82,8 @@ struct ExtensionHostOverride {
             return true
         }
         value.createTab = { [weak self, weak value] url, profile, active in
-            self?.openProfileTab(url, profileID: profile, active: active, kept: value?.createsKeptTab == true, before: value?.createsTabBefore)
+            self?.openProfileTab(url, profileID: profile, active: active, kept: value?.createsKeptTab == true, before: value?.createsTabBefore,
+                               extensionOrder: true)
         }
         value.placesTabsBeforeAnchor = true
         value.setTabPinned = { [weak self] id, profile, pinned in

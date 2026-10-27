@@ -21,7 +21,8 @@ import WebKit
     /// profile in session order, which is the order extensions see; only the order changes, never the anchor's Space,
     /// section, folder or split. Placed in the same step it is added, before anything refreshes or publishes it.
     /// `opener` (a link opened from a page) places the tab right after that page's tab and its earlier link tabs.
-    @discardableResult func openProfileTab(_ url: URL, profileID: UUID, active: Bool, kept: Bool = false, before anchor: UUID? = nil, opener: UUID? = nil) -> UUID? {
+    /// `extensionOrder` (an extension's `tabs.create`) places it where the tabs API says instead of at the top of Today.
+    @discardableResult func openProfileTab(_ url: URL, profileID: UUID, active: Bool, kept: Bool = false, before anchor: UUID? = nil, opener: UUID? = nil, extensionOrder: Bool = false) -> UUID? {
         guard URLInput.directURL(url.absoluteString) != nil || allowsExtensionPage(url, profileID: profileID) else { return nil }
         // Refuse before anything changes, so a refused pinned request leaves no ordinary tab behind.
         if kept, ExtensionPinnedPolicy.creationRefusal(url: url, pinned: true) != nil { return nil }
@@ -41,10 +42,14 @@ import WebKit
             refresh(); return nil
         }
         discardFallback()
-        // The new tab was appended, so it sits after the anchor: move it to just before it.
-        if let anchor, let from = session.tabs.firstIndex(where: { $0.id == id }),
-           let to = session.tabs.firstIndex(where: { $0.id == anchor }), to < from {
-            var tabs = session.tabs; tabs.insert(tabs.remove(at: from), at: to); session.tabs = tabs
+        // Extensions see this profile's tabs in session order (tabs.query, tabs.move, onCreated all read it), and a
+        // tabs.create without an index means "append". New tabs otherwise open at the top of Today, so an extension's
+        // tab is moved to its tabs-API place: just before the anchor (on either side of it), or after the last tab.
+        if extensionOrder, let from = session.tabs.firstIndex(where: { $0.id == id }) {
+            var tabs = session.tabs
+            let tab = tabs.remove(at: from)
+            let target = anchor.map { anchor in tabs.firstIndex { $0.id == anchor } } ?? tabs.count
+            if let target, target != from { tabs.insert(tab, at: target); session.tabs = tabs }
         }
         if active { select(id); view.window?.makeKeyAndOrderFront(nil) }
         else {
