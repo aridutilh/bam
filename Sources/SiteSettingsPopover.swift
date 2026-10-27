@@ -135,21 +135,15 @@ struct SiteSettingsActions {
         }
 
         if let blocks = context.blocksAds {
-            let toggle = BamToggle(frame: .zero)
-            toggle.isOn = blocks && context.adBlockerOn
-            toggle.isEnabled = context.adBlockerOn
+            // Arc's site-control setting row: a round glyph, the name, and its state underneath; the row is the switch.
+            let on = blocks && context.adBlockerOn
             let url = context.url
-            // The page reloads, as it must for WebKit to load what was blocked (or stop loading it).
-            toggle.onChange = { ContentBlocking.shared.setBlocks($0, forSiteOf: url) }
-            toggle.setAccessibilityLabel("Block ads and trackers")
-            let name = label("Block ads and trackers", font: BamType.sans(13, weight: .medium), color: context.adBlockerOn ? BamTheme.ink : BamTheme.muted)
-            full(NSStackView(views: [name, NSView(), toggle]))
-            if let detail = SiteSettingsModel.adsDetail(context) {
-                let text = label(detail, font: BamType.sans(11.5), color: BamTheme.muted)
-                full(text)
-                column.setCustomSpacing(12, after: text)
-                if let previous = column.arrangedSubviews.dropLast().last { column.setCustomSpacing(3, after: previous) }
+            let row = SiteSettingsSettingRow(symbol: on ? "shield.fill" : "shield.slash", title: "Block Ads & Trackers",
+                                             state: SiteSettingsModel.adsState(context), isOn: on, enabled: context.adBlockerOn) {
+                // The page reloads, as it must for WebKit to load what was blocked (or stop loading it).
+                ContentBlocking.shared.setBlocks(!on, forSiteOf: url)
             }
+            full(row)
         }
 
         // Extensions and their access to this site.
@@ -231,6 +225,60 @@ struct SiteSettingsActions {
         ])
         return button
     }
+}
+
+/// One Arc-style setting row: a 30-point round glyph (filled when on), a title and its state below.
+@MainActor private final class SiteSettingsSettingRow: NSButton {
+    private let run: () -> Void
+    private let disc = NSView()
+    private let glyph = NSImageView()
+    private let name = NSTextField(labelWithString: "")
+    private let detail = NSTextField(labelWithString: "")
+    private let isOn: Bool
+    private var hovering = false
+    init(symbol: String, title: String, state: String, isOn: Bool, enabled: Bool, run: @escaping () -> Void) {
+        self.run = run; self.isOn = isOn
+        super.init(frame: .zero)
+        isBordered = false; self.title = ""; wantsLayer = true
+        (cell as? NSButtonCell)?.highlightsBy = []
+        layer?.cornerRadius = 8; layer?.cornerCurve = .continuous
+        target = self; action = #selector(press); isEnabled = enabled
+        translatesAutoresizingMaskIntoConstraints = false
+        heightAnchor.constraint(equalToConstant: 40).isActive = true
+        disc.wantsLayer = true; disc.layer?.cornerRadius = 15
+        glyph.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?.withSymbolConfiguration(.init(pointSize: 13, weight: .semibold))
+        name.stringValue = title; name.font = BamType.sans(13, weight: .semibold)
+        detail.stringValue = state; detail.font = BamType.sans(12)
+        [disc, name, detail].forEach { addSubview($0) }
+        disc.addSubview(glyph)
+        setAccessibilityLabel(title); setAccessibilityValue(state)
+        setAccessibilityRole(.checkBox); setAccessibilityHelp(isOn ? "Turn off for this site" : "Turn on for this site")
+        addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect], owner: self))
+        paint()
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+    override var isFlipped: Bool { true }
+    override func layout() {
+        super.layout()
+        disc.frame = NSRect(x: 0, y: (bounds.height - 30) / 2, width: 30, height: 30)
+        glyph.frame = disc.bounds.insetBy(dx: 6, dy: 6)
+        name.frame = NSRect(x: 40, y: 3, width: bounds.width - 44, height: 17)
+        detail.frame = NSRect(x: 40, y: 21, width: bounds.width - 44, height: 16)
+    }
+    private func paint() {
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            disc.layer?.backgroundColor = (isOn ? BamTheme.ink : BamTheme.line).cgColor
+            let dark = effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+            layer?.backgroundColor = (hovering && isEnabled ? NSColor(white: dark ? 1 : 0, alpha: dark ? 0.06 : 0.045) : NSColor.clear).cgColor
+        }
+        glyph.contentTintColor = isOn ? BamTheme.surface : BamTheme.muted
+        name.textColor = isEnabled ? BamTheme.ink : BamTheme.muted
+        detail.textColor = BamTheme.muted
+    }
+    override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); paint() }
+    override func mouseEntered(with event: NSEvent) { hovering = true; paint() }
+    override func mouseExited(with event: NSEvent) { hovering = false; paint() }
+    @objc private func press() { run() }
 }
 
 @MainActor private final class SiteSettingsButton: NSButton {

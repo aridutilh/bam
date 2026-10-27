@@ -50,6 +50,13 @@ import Foundation
         try check(SiteSettingsModel.extensionListHeight(rows: 40, rowHeight: 40, spacing: 6, available: 20) == 86, "A tiny screen hid the list below two rows")
         try check(SiteSettingsModel.extensionListHeight(rows: 1, rowHeight: 40, spacing: 6, available: 10) == 40
                   && SiteSettingsModel.extensionListHeight(rows: 0, rowHeight: 40, spacing: 6, available: 300) == 0, "Edge sizes were wrong")
+        // Ad blocking reads like Arc's site-control settings: On, or why it's off.
+        var ads = secure; ads.blocksAds = true
+        try check(SiteSettingsModel.adsState(ads) == "On", "Blocking site wasn't On")
+        ads.blocksAds = false
+        try check(SiteSettingsModel.adsState(ads) == "Off for this site", "An allowed site wasn't Off for this site")
+        ads.adBlockerOn = false
+        try check(SiteSettingsModel.adsState(ads) == "Off in Settings", "The global switch wasn't named")
         try check(SiteSettingsModel.accessText(.allowed) == "Can read and change this site"
                   && SiteSettingsModel.accessText(.withheld) == "Not allowed on this site", "Access text was wrong")
     }

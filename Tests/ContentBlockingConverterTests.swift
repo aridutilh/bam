@@ -142,12 +142,28 @@ import WebKit
         big.important = [.block(T(urlFilter: "imp"))]
         big.cosmetic = [.hide(".x", T(urlFilter: ".*"))]
         let encoded = ContentBlockingConverter.encodedLists(big, maximum: 10)
-        try check(encoded.count == 5, "Wrong number of lists: \(encoded.count)")
+        // 25 blocks, 8 per list beside "open pages" and the exception; then important; then cosmetic.
+        try check(encoded.count == 6, "Wrong number of lists: \(encoded.count)")
         let decoded = encoded.map { (try? JSONSerialization.jsonObject(with: Data($0.utf8))) as? [[String: Any]] ?? [] }
-        try check(decoded.prefix(3).allSatisfy { $0.count <= 10 && ($0.last?["action"] as? [String: Any])?["type"] as? String == "ignore-previous-rules" },
+        try check(decoded.prefix(4).allSatisfy { $0.count <= 10 && ($0.last?["action"] as? [String: Any])?["type"] as? String == "ignore-previous-rules" },
                   "A network list was over the limit or missed the exceptions")
-        try check(encoded[0].contains("\"url-filter\":\"b0\"") && encoded[3].contains("imp") && !encoded[3].contains("\"ok\""),
+        try check(encoded[0].contains("\"url-filter\":\"b0\"") && encoded[4].contains("imp") && !encoded[4].contains("\"ok\""),
                   "Important rules weren't kept apart from exceptions")
+
+        // A whole-host filter never stops a page you go to (ad and affiliate links still open);
+        // a `$document` filter does, and an `@@...$document` exception still undoes it.
+        let pages = ContentBlockingConverter.convert(["||googleadservices.com^\n||scam.example^$document\n@@||fine.example^$document"])
+        try check(pages.blocks.count == 1 && pages.documents.count == 1, "$document blocks weren't kept apart: \(pages)")
+        let pageList = ContentBlockingConverter.encodedLists(pages)
+        let pageRules = (try? JSONSerialization.jsonObject(with: Data(pageList[0].utf8))) as? [[String: Any]] ?? []
+        func position(_ test: ([String: Any]) -> Bool) -> Int { pageRules.firstIndex(where: test) ?? -1 }
+        let trigger = { (rule: [String: Any]) in rule["trigger"] as? [String: Any] ?? [:] }
+        let opens = position { (trigger($0)["load-context"] as? [String]) == ["top-frame"] }
+        let host = position { (trigger($0)["url-filter"] as? String)?.contains("googleadservices") == true }
+        let scam = position { (trigger($0)["url-filter"] as? String)?.contains("scam") == true }
+        let fine = position { (trigger($0)["if-domain"] as? [String]) == ["*fine.example"] }
+        try check(host >= 0 && host < opens && opens < scam && scam < fine,
+                  "Rule order must be host blocks, open pages, $document blocks, exceptions: \(pageRules)")
 
         // Per-site switch and site keys.
         try check(ContentBlockingPreference.site(URL(string: "https://www.Example.com/a")) == "example.com", "www. wasn't dropped from the site")

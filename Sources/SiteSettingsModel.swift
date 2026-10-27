@@ -92,11 +92,10 @@ enum SiteSettingsModel {
         return min(full, max(floor, room))
     }
 
-    /// The ad-blocking row's caption under its toggle.
-    static func adsDetail(_ context: SiteSettingsContext) -> String? {
-        guard let blocks = context.blocksAds else { return nil }
-        if !context.adBlockerOn { return "The ad blocker is off in Settings." }
-        return blocks ? nil : "Ads are allowed on this site."
+    /// The ad-blocking row's state line, as Arc words its site-control settings.
+    static func adsState(_ context: SiteSettingsContext) -> String {
+        if !context.adBlockerOn { return "Off in Settings" }
+        return context.blocksAds == false ? "Off for this site" : "On"
     }
 
     static func connection(url: URL?, onlySecureContent: Bool, certificate: String?) -> SiteSettingsContext.Connection {
