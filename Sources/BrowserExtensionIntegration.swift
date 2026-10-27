@@ -17,8 +17,8 @@ struct ExtensionHostOverride {
         let isolated: Bool
         if case .isolated = profileStores.policy { isolated = true } else { isolated = false }
         let value = extensionHostOverride.map { BrowserExtensions(storageURL: $0.storageURL, isPrivate: false, controllerStorage: .ownedPersistent($0.controllerIdentifier)) }
-            ?? BrowserExtensions(storageURL: privateMode ? nil : sessionURL.deletingLastPathComponent().appendingPathComponent("Extensions", isDirectory: true),
-                                 isPrivate: privateMode, controllerStorage: isolated ? .nonPersistent : .automatic)
+            ?? BrowserExtensions(storageURL: extensionsOff ? nil : sessionURL.deletingLastPathComponent().appendingPathComponent("Extensions", isDirectory: true),
+                                 isPrivate: extensionsOff, controllerStorage: isolated ? .nonPersistent : .automatic)
         extensionStorage = value
         value.profileName = { [weak self] in self?.session.profileName($0) ?? "Profile" }
         value.surfaces = { [weak self] in self?.extensionSurfaces(profileID: $0) ?? [] }
@@ -140,7 +140,7 @@ struct ExtensionHostOverride {
     /// profile's extensions can run. So history.search reads memory only and never triggers disk I/O.
     /// Not in private windows (no library file, and history is unavailable there).
     func preloadHistoryForExtensions(profileID: UUID) {
-        guard !privateMode else { return }
+        guard !extensionsOff else { return }
         _ = library(for: profileID)
     }
     func whenExtensionsReady(profileID: UUID, perform: @escaping @MainActor () -> Void) {
@@ -435,7 +435,7 @@ struct ExtensionHostOverride {
     /// in private windows, while closing or switching profiles, or for an unknown profile.
     @available(macOS 15.4, *)
     func extensionHistorySnapshot(profileID: UUID) -> [ExtensionHistory.Visit]? {
-        let available = !privateMode && !isShuttingDown && !isApplyingProfileChange && session.profiles.contains(where: { $0.id == profileID })
+        let available = !extensionsOff && !isShuttingDown && !isApplyingProfileChange && session.profiles.contains(where: { $0.id == profileID })
         return LibraryHistoryEvents.snapshot(of: profileLibraries[profileID], available: available)
     }
 
@@ -446,7 +446,7 @@ struct ExtensionHostOverride {
     /// Nothing in private windows.
     @available(macOS 15.4, *)
     func wireExtensionHistory(_ library: BrowserLibrary, profileID: UUID, host: BrowserExtensions) {
-        guard !privateMode else { return }
+        guard !extensionsOff else { return }
         library.onHistoryChange = { [weak self, weak library, weak host] change in
             guard let self, let library, let host, !self.isShuttingDown,
                   self.session.profiles.contains(where: { $0.id == profileID }),

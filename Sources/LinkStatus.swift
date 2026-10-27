@@ -46,13 +46,17 @@ import WebKit
     private weak var hoveredWeb: WKWebView?
     private var hideWork: DispatchWorkItem?
 
-    /// Adds the hover script to a page's content controller once.
+    /// Adds the hover script to a page's content controller once, and points its messages here (a
+    /// page moved from another window keeps its script and now reports to this window).
     func install(in web: WKWebView, owner: BrowserController) {
         self.owner = owner
         let controller = web.configuration.userContentController
-        guard !installed.contains(controller) else { return }
-        installed.add(controller)
-        controller.addUserScript(WKUserScript(source: Self.source, injectionTime: .atDocumentEnd, forMainFrameOnly: false, in: Self.world))
+        if !installed.contains(controller) {
+            installed.add(controller)
+            if !controller.userScripts.contains(where: { $0.source == Self.source }) {
+                controller.addUserScript(WKUserScript(source: Self.source, injectionTime: .atDocumentEnd, forMainFrameOnly: false, in: Self.world))
+            }
+        }
         controller.removeScriptMessageHandler(forName: Self.messageName, contentWorld: Self.world)
         controller.add(WeakMessageHandler(self), contentWorld: Self.world, name: Self.messageName)
     }

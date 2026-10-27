@@ -181,28 +181,32 @@ import WebKit
         littleWindows[id] = little
         little.onClose = { [weak self] in self?.littleWindows.removeValue(forKey: id); self?.scheduleExtensionRefresh() }
         little.canPromote = { [weak self] in
-            guard let self else { return false }
-            guard self.selectSpace(forProfile: profile) else {
+            guard let target = self?.promotionTarget else { return false }
+            guard target.selectSpace(forProfile: profile) else {
                 let alert = NSAlert(); alert.messageText = "Make room for this profile"
                 alert.informativeText = "Assign a Space to this window’s login profile, or remove an unused Space, before opening it in the main browser."
                 alert.addButton(withTitle: "OK"); alert.runModal(); return false
             }
             return true
         }
+        // "Open in Space" lands in the frontmost normal window (the main one when no other is open).
         little.onPromote = { [weak self] web in
             let address = web.url?.absoluteString
-            guard let self, self.adoptWebView(web) != nil else { return }
-            self.noteLinkMove(address, toSpace: self.session.space)
+            guard let self else { return }
+            let target = self.promotionTarget
+            guard target.adoptWebView(web) != nil else { return }
+            self.noteLinkMove(address, toSpace: target.session.space)
         }
         little.onPromoteTo = { [weak self] web, spaceID in
-            self?.noteLinkMove(web.url?.absoluteString, toSpace: spaceID)
-            self?.promote(web, into: spaceID, from: profile)
+            guard let self else { return }
+            self.noteLinkMove(web.url?.absoluteString, toSpace: spaceID)
+            self.promotionTarget.promote(web, into: spaceID, from: profile)
         }
         little.profileName = session.profileName(profile)
         little.destinations = { [weak self] in
-            guard let self else { return [] }
-            let landing = self.session.currentProfileID == profile ? self.session.space : self.session.spaceID(forProfile: profile)
-            return self.session.spaces.map {
+            guard let target = self?.promotionTarget else { return [] }
+            let landing = target.session.currentProfileID == profile ? target.session.space : target.session.spaceID(forProfile: profile)
+            return target.session.spaces.map {
                 LittleBamDestination(id: $0.id, name: $0.name, symbol: $0.symbol, colorIndex: $0.colorIndex, isDefault: $0.id == landing)
             }
         }

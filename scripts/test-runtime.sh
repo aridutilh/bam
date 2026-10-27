@@ -39,7 +39,7 @@ for attempt in {1..50}; do [ -s "$RUN_DIR/port" ] && break; sleep 0.1; done
 export BAM_TEST_URL="http://127.0.0.1:$(cat "$RUN_DIR/port")/index.html"
 export ARK_TEST_URL="$BAM_TEST_URL"
 export ORBIT_TEST_URL="$BAM_TEST_URL"
-for test in --web-test --pip-test --interaction-test --auto-pip-test --feature-test --resource-test --profile-test --extension-test --favicon-test --profile-instance-test --arc-import-test; do
+for test in --web-test --pip-test --interaction-test --auto-pip-test --feature-test --resource-test --profile-test --extension-test --favicon-test --profile-instance-test --arc-import-test --window-test; do
     case "$test" in
         --web-test) marker='PASS: WebKit — ' ;;
         --pip-test) marker='PASS: PiP — ' ;;
@@ -60,6 +60,8 @@ for test in --web-test --pip-test --interaction-test --auto-pip-test --feature-t
         --profile-instance-test) marker='PASS: Profile activation — ' ;;
         # Repository synthetic Arc layout from the loopback server; temporary session only.
         --arc-import-test) marker='PASS: Arc import — ' ;;
+        # Two windows over one session, saved to a temporary session file only.
+        --window-test) marker='PASS: Windows — ' ;;
     esac
     log="$RUN_DIR/${test#--}.log"
     if ! "$APP/Contents/MacOS/$EXECUTABLE" "$test" 2>&1 | tee "$log"; then

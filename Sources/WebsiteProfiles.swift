@@ -79,6 +79,8 @@ import WebKit
         return nil
     }
     func library(for profileID: UUID) -> BrowserLibrary {
+        // History is one file per profile, written by the main browser only.
+        if let primaryBrowser { return primaryBrowser.library(for: profileID) }
         if let existing = profileLibraries[profileID] {
             existing.profileName = session.profileName(profileID)
             return existing
@@ -89,14 +91,15 @@ import WebKit
         let value = BrowserLibrary(storageURL: privateMode ? nil : url)
         value.recordsHistory = !isPrivateWindow
         value.profileName = session.profileName(profileID)
+        // History and the Archive are shared by every normal window: what they open lands in the one in front.
         value.onOpenURL = { [weak self] address in
-            guard let self, self.selectSpace(forProfile: profileID) else { return }
-            self.cancelPaging(); self.dismissAddress()
-            self.session.add(address: address); self.showActive(); self.save()
+            guard let target = self?.promotionTarget, target.selectSpace(forProfile: profileID) else { return }
+            target.cancelPaging(); target.dismissAddress()
+            target.session.add(address: address); target.showActive(); target.save()
         }
         value.onRestoreClosed = { [weak self] record in
-            guard let self, self.selectSpace(forProfile: profileID) else { return }
-            self.restoreClosed(record, profileID: profileID)
+            guard let target = self?.promotionTarget, target.selectSpace(forProfile: profileID) else { return }
+            target.restoreClosed(record, profileID: profileID)
         }
         profileLibraries[profileID] = value
         // A library created after the extension host exists is wired now. This reads the stored host and never

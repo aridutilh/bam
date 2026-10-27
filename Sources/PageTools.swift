@@ -19,7 +19,7 @@ import WebKit
 }
 
 @MainActor extension BrowserController {
-    var hiddenElements: HiddenElementStore { pageTools.hiddenElements(persists: !privateMode) }
+    var hiddenElements: HiddenElementStore { (primaryBrowser ?? self).pageTools.hiddenElements(persists: !privateMode) }
 
     /// Every page web view Bam shows: inspectable, and hidden-element rules from its first frame.
     func preparePageTools(_ web: WKWebView) {
