@@ -108,7 +108,6 @@ extension BrowserController {
         }
     }
 
-
     /// Another window changed the shared tabs or Spaces: drop pages of tabs closed there (a kept tab
     /// closed there is unloaded, a tab moved to another profile needs that profile's website data),
     /// keep this window's selection valid, and redraw.
@@ -279,8 +278,9 @@ struct BrowserWindowState: Codable, Equatable {
             session = session.sharing(windowStateOf: reference.session)
         }
         session.repairWindowSelection()
-        controller.session = session
+        // Join first: a tab the repair had to add (every Space empty) reaches the other windows too.
         group.add(controller)
+        controller.session = session
         if state == nil {
             // Arc opens a new window on the same Space with nothing chosen yet: a new tab under the command bar.
             _ = controller.session.add(address: "orbit://newtab")
@@ -292,12 +292,22 @@ struct BrowserWindowState: Codable, Equatable {
         window.contentViewController = controller
         window.delegate = self
         if let saved = state.map({ NSRectFromString($0.frame) }), saved.width >= 400, saved.height >= 300,
-           NSScreen.screens.contains(where: { $0.visibleFrame.intersects(saved) }) {
+           Self.titleBarReachable(saved) {
             window.setFrame(saved, display: false)
         } else if let frame {
             // Arc opens the new window exactly over the one you were in.
             window.setFrame(frame, display: false)
         } else { window.center() }
+    }
+
+    /// A saved frame is used only if enough of its title bar is still on a display to drag it
+    /// (displays get unplugged or rearranged between runs).
+    static func titleBarReachable(_ frame: NSRect, screens: [NSRect] = NSScreen.screens.map(\.visibleFrame)) -> Bool {
+        let titleBar = NSRect(x: frame.minX, y: frame.maxY - 28, width: frame.width, height: 28)
+        return screens.contains { screen in
+            let overlap = screen.intersection(titleBar)
+            return overlap.width >= 120 && overlap.height >= 8
+        }
     }
 
     var state: BrowserWindowState {

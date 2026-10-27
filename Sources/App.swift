@@ -159,6 +159,7 @@ import WebKit
         let reference = commandRouter.keySecondaryWindow?.controller ?? controller
         let entry = openSecondaryWindow(state: nil, like: reference, frame: reference.view.window?.frame)
         entry.show(openingPalette: true)
+        saveWindowStates()   // only shown windows are saved
     }
     @discardableResult private func openSecondaryWindow(state: BrowserWindowState?, like reference: BrowserController?, frame: NSRect?) -> SecondaryWindowController {
         let entry = SecondaryWindowController(primary: controller, group: windowGroup, state: state, like: reference, frame: frame)
@@ -170,7 +171,6 @@ import WebKit
             }
         }
         secondaryWindows.append(entry)
-        saveWindowStates()
         return entry
     }
     private var isTerminating = false
@@ -185,6 +185,7 @@ import WebKit
             openSecondaryWindow(state: state, like: nil, frame: nil).show(openingPalette: false)
         }
         window.makeKeyAndOrderFront(nil)
+        saveWindowStates()
     }
     /// File ▸ New Private Window (⇧⌘N).
     @objc func newPrivateWindow(_ sender: Any?) {
