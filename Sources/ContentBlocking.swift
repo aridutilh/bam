@@ -33,7 +33,7 @@ import WebKit
     ]
     nonisolated static let refreshInterval: TimeInterval = 7 * 24 * 3_600
     /// Bumped whenever the converter changes what it emits, so cached lists are rebuilt.
-    nonisolated static let converterVersion = 1
+    nonisolated static let converterVersion = 2
     nonisolated static let compileFlag = "--compile-content-rules"
 
     struct Manifest: Codable, Sendable {
@@ -43,6 +43,8 @@ import WebKit
         var builtInOnly: Bool
         var builtAt: Date
         var sourcesUpdated: Date?
+        /// `converterVersion` at build time; nil for builds before it was recorded.
+        var converterVersion: Int? = nil
     }
 
     /// Off for test fixtures (unless `BAM_CONTENT_BLOCKING=1`), or with `BAM_CONTENT_BLOCKING=0`.
@@ -95,7 +97,7 @@ import WebKit
     /// Whether the page's content controller should have the lists, and make it so.
     fileprivate func apply(to webView: WKWebView) {
         guard let tracker = pages.object(forKey: webView) else { return }
-        let wanted = ContentBlockingPreference.blocks(webView.url) && !lists.isEmpty
+        let wanted = ContentBlockingPreference.blocks(webView.url) && !lists.isEmpty && !Self.isExtensionPage(webView)
         let controller = webView.configuration.userContentController
         if wanted && tracker.attached !== listsToken {
             if tracker.attached != nil { tracker.attachedLists.forEach(controller.remove) }
@@ -105,6 +107,11 @@ import WebKit
             tracker.attachedLists.forEach(controller.remove)
             tracker.attached = nil; tracker.attachedLists = []
         }
+    }
+    /// Extension pages run in their extension's shared configuration; lists added there would also
+    /// filter the extension's background page and popups, and nothing would take them off again.
+    static func isExtensionPage(_ webView: WKWebView) -> Bool {
+        webView.url?.scheme?.lowercased().hasSuffix("-extension") == true // webkit-extension, safari-web-extension…
     }
     private func applyEverywhere() {
         for webView in pages.keyEnumerator().allObjects.compactMap({ $0 as? WKWebView }) { apply(to: webView) }
@@ -139,7 +146,7 @@ import WebKit
         try? FileManager.default.createDirectory(at: listsDirectory, withIntermediateDirectories: true)
         loadCompiled { [weak self] loaded in
             guard let self else { return }
-            if !loaded || self.listsChangedSinceBuild() { self.compile() }
+            if !loaded || self.listsChangedSinceBuild() || self.readManifest()?.converterVersion != Self.converterVersion { self.compile() }
         }
         // Check for new lists a little after launch, then every few hours while Bam stays open.
         DispatchQueue.main.asyncAfter(deadline: .now() + 20) { [weak self] in self?.download(force: false) }
@@ -229,7 +236,13 @@ import WebKit
         process.standardOutput = FileHandle.nullDevice
         process.qualityOfService = .utility
         process.terminationHandler = { finish($0.terminationStatus == 0) }
-        do { try process.run() } catch { Self.compileLists(in: directory) { finish($0) } }
+        do { try process.run() } catch { Self.compileLists(in: directory) { finish($0) }; return }
+        // A full build takes seconds; one that hangs would otherwise block every later update this session.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 300) { [weak process] in
+            guard let process, process.isRunning else { return }
+            NSLog("Bam content blocking: list compiler timed out")
+            process.terminate()
+        }
     }
 
     /// Fetch every list when they're a week old (or on request), without cookies or a shared cache.
@@ -252,13 +265,14 @@ import WebKit
         let session = URLSession(configuration: configuration)
         let group = DispatchGroup()
         let folder = listsDirectory
-        let changed = ChangeCounter()
+        let changed = ChangeCounter(), fetched = ChangeCounter()
         for source in Self.sources {
             group.enter()
             session.dataTask(with: source.url) { data, response, _ in
                 defer { group.leave() }
                 guard (response as? HTTPURLResponse)?.statusCode == 200, let data, data.count > 200,
                       let text = String(data: data, encoding: .utf8), Self.looksLikeFilterList(text) else { return }
+                fetched.increment()
                 let file = folder.appendingPathComponent(source.file + ".txt")
                 if (try? Data(contentsOf: file)) == data { return }
                 if (try? data.write(to: file, options: .atomic)) != nil { changed.increment() }
@@ -270,7 +284,8 @@ import WebKit
                 guard let self else { return }
                 self.downloading = false
                 ContentBlockingPreference.status.updating = false
-                FileManager.default.createFile(atPath: stamp.path, contents: Data())
+                // Offline: try again at the next check instead of in a week.
+                if fetched.value > 0 { FileManager.default.createFile(atPath: stamp.path, contents: Data()) }
                 if changed.value > 0 || self.listsChangedSinceBuild() { self.compile() }
                 else {
                     ContentBlockingPreference.status.updated = Date()
@@ -333,36 +348,76 @@ import WebKit
             let identifiers = encoded.indices.map { "bam-\(digest)-\($0)" }
             DispatchQueue.main.async {
                 guard let store = WKContentRuleListStore(url: storeDirectory) else { completion(false); return }
+                var compiled: [String] = [], dropped = 0
                 // One at a time keeps the peak lower than compiling every list at once.
                 func next(_ index: Int) {
                     guard index < encoded.count else {
-                        let manifest = Manifest(identifiers: identifiers, ruleCount: output.ruleCount, listCount: texts.count,
-                                                builtInOnly: builtInOnly, builtAt: Date(), sourcesUpdated: newest)
+                        guard !compiled.isEmpty else { completion(false); return }
+                        let manifest = Manifest(identifiers: compiled, ruleCount: output.ruleCount - dropped, listCount: texts.count,
+                                                builtInOnly: builtInOnly, builtAt: Date(), sourcesUpdated: newest, converterVersion: converterVersion)
                         let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .secondsSince1970
                         guard let data = try? encoder.encode(manifest),
                               (try? data.write(to: directory.appendingPathComponent("manifest.json"), options: .atomic)) != nil else { completion(false); return }
                         // Drop lists from older builds.
                         store.getAvailableContentRuleListIdentifiers { existing in
-                            for old in existing ?? [] where !identifiers.contains(old) { store.removeContentRuleList(forIdentifier: old) { _ in } }
-                            print("Compiled \(output.ruleCount) content rules in \(identifiers.count) lists (\(output.skipped) filters skipped) in \(String(format: "%.1f", Date().timeIntervalSince(started)))s")
+                            for old in existing ?? [] where !compiled.contains(old) { store.removeContentRuleList(forIdentifier: old) { _ in } }
+                            print("Compiled \(output.ruleCount - dropped) content rules in \(compiled.count) lists (\(output.skipped) filters skipped, \(dropped) rejected by WebKit) in \(String(format: "%.1f", Date().timeIntervalSince(started)))s")
                             completion(true)
                         }
                         return
                     }
                     store.lookUpContentRuleList(forIdentifier: identifiers[index]) { existing, _ in
-                        if existing != nil { next(index + 1); return }
+                        if existing != nil { compiled.append(identifiers[index]); next(index + 1); return }
                         store.compileContentRuleList(forIdentifier: identifiers[index], encodedContentRuleList: encoded[index]) { list, error in
-                            guard list != nil else {
-                                NSLog("Bam content blocking: list \(index) failed: \(error.map { "\($0)" } ?? "unknown")")
-                                completion(false); return
+                            if list != nil { compiled.append(identifiers[index]); next(index + 1); return }
+                            // WebKit rejects a whole list over one rule it can't parse; find those rules and leave them out.
+                            NSLog("Bam content blocking: list \(index) failed (\(error.map { "\($0)" } ?? "unknown")); looking for the rules WebKit rejects")
+                            compileLeavingOutRejected(encoded[index], as: identifiers[index], in: store) { ok, rejected in
+                                if ok { compiled.append(identifiers[index]); dropped += rejected }
+                                else { NSLog("Bam content blocking: list \(index) left out") }
+                                next(index + 1)
                             }
-                            next(index + 1)
                         }
                     }
                 }
                 next(0)
             }
         }
+    }
+
+    /// Compiles a list WebKit refused, without the rules it rejects: halves are test-compiled until each
+    /// rejected rule is found (about twice the work of one compile per bad rule). Gives up past `limit`.
+    nonisolated static func compileLeavingOutRejected(_ encoded: String, as identifier: String, in store: WKContentRuleListStore,
+                                                      limit: Int = 64, completion: @escaping (Bool, Int) -> Void) {
+        guard let rules = (try? JSONSerialization.jsonObject(with: Data(encoded.utf8))) as? [Any] else { completion(false, 0); return }
+        let probe = identifier + "-probe"
+        func json(_ items: [Any]) -> String? {
+            (try? JSONSerialization.data(withJSONObject: items, options: [.withoutEscapingSlashes])).flatMap { String(data: $0, encoding: .utf8) }
+        }
+        var rejected: [Int] = []
+        var pending: [Range<Int>] = [0..<rules.count]
+        func step() {
+            guard rejected.count <= limit else { store.removeContentRuleList(forIdentifier: probe) { _ in }; completion(false, 0); return }
+            guard let range = pending.popLast() else {
+                store.removeContentRuleList(forIdentifier: probe) { _ in }
+                let skip = Set(rejected)
+                let kept = rules.indices.filter { !skip.contains($0) }.map { rules[$0] }
+                guard !kept.isEmpty, let text = json(kept) else { completion(false, 0); return }
+                store.compileContentRuleList(forIdentifier: identifier, encodedContentRuleList: text) { list, _ in
+                    completion(list != nil, rejected.count)
+                }
+                return
+            }
+            guard let text = json(Array(rules[range])) else { rejected.append(contentsOf: range); step(); return }
+            store.compileContentRuleList(forIdentifier: probe, encodedContentRuleList: text) { list, _ in
+                if list != nil { step(); return }
+                if range.count == 1 { rejected.append(range.lowerBound); step(); return }
+                let middle = range.lowerBound + range.count / 2
+                pending.append(middle..<range.upperBound); pending.append(range.lowerBound..<middle)
+                step()
+            }
+        }
+        step()
     }
 }
 
@@ -414,7 +469,6 @@ import WebKit
             self?.dismissPrompt()
             ContentBlocking.shared.setBlocks(false, forSiteOf: url)
         }
-        card.onClose = { [weak self] in self?.dismissPrompt() }
         card.present(in: web)
         prompt = card
         DispatchQueue.main.asyncAfter(deadline: .now() + 12) { [weak self, weak card] in
@@ -425,80 +479,80 @@ import WebKit
     func dismissPrompt() { prompt?.dismiss(); prompt = nil }
 }
 
-/// The small corner card: "Page not working?" with "Allow Ads Here". Drawn in Bam's own palette
-/// (card surface, ink, red action) so it reads as the browser speaking, not the page.
+/// "Page not working?" as an Arc-style toast: a small frosted pill at the page's top-right with one
+/// bordered action, that grows into place and leaves on its own.
 @MainActor final class ContentBlockingPrompt: NSView {
     var onAllow: () -> Void = {}
-    var onClose: () -> Void = {}
     private(set) var isHovered = false
+    private let glass = NSVisualEffectView()
     private let title = NSTextField(labelWithString: "Page not working?")
-    private let detail = NSTextField(labelWithString: "Ads are blocked on this site.")
-    private let allow = BamPillButton(title: "Allow Ads Here", prominent: true)
-    private let close = NSButton()
-    static let size = NSSize(width: 372, height: 62)
+    private let allow = ContentBlockingToastButton(title: "Allow Ads Here")
+    static let height: CGFloat = 44, inset: CGFloat = 8
 
     init() {
-        super.init(frame: NSRect(origin: .zero, size: Self.size))
+        super.init(frame: .zero)
         wantsLayer = true
-        layer?.cornerRadius = 14; layer?.cornerCurve = .continuous
-        layer?.borderWidth = 1
         layer?.masksToBounds = false
-        layer?.shadowOpacity = 1; layer?.shadowRadius = 14; layer?.shadowOffset = CGSize(width: 0, height: -4)
-        title.font = BamType.sans(13.5, weight: .bold)
-        detail.font = BamType.sans(12)
-        [title, detail].forEach { $0.lineBreakMode = .byTruncatingTail; $0.setAccessibilityElement(false) }
-        allow.translatesAutoresizingMaskIntoConstraints = true
+        layer?.shadowColor = NSColor.black.cgColor
+        layer?.shadowOpacity = 0.16; layer?.shadowRadius = 12; layer?.shadowOffset = CGSize(width: 0, height: -3)
+        glass.material = .popover; glass.blendingMode = .withinWindow; glass.state = .active
+        glass.wantsLayer = true
+        glass.layer?.cornerRadius = 12; glass.layer?.cornerCurve = .continuous; glass.layer?.masksToBounds = true
+        glass.layer?.borderWidth = 0.5
+        addSubview(glass)
+        title.font = .systemFont(ofSize: 13.5, weight: .medium); title.textColor = .labelColor
+        title.setAccessibilityElement(false)
         allow.target = self; allow.action = #selector(allowPressed)
-        allow.setAccessibilityLabel("Allow Ads Here")
-        close.isBordered = false
-        close.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Dismiss")?.withSymbolConfiguration(.init(pointSize: 10, weight: .bold))
-        close.target = self; close.action = #selector(closePressed)
-        close.setAccessibilityLabel("Dismiss")
-        [close, title, detail, allow].forEach(addSubview)
+        glass.addSubview(title); glass.addSubview(allow)
         paint()
-        setAccessibilityElement(true); setAccessibilityRole(.group); setAccessibilityLabel("Page not working? Ads and trackers are blocked here.")
+        setAccessibilityElement(true); setAccessibilityRole(.group)
+        setAccessibilityLabel("Page not working? Ads and trackers are blocked on this site.")
         addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect], owner: self))
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
 
     private func paint() {
         effectiveAppearance.performAsCurrentDrawingAppearance {
-            layer?.backgroundColor = BamTheme.card.cgColor
-            layer?.borderColor = BamTheme.line.cgColor
-            layer?.shadowColor = BamTheme.shadow.cgColor
+            glass.layer?.borderColor = NSColor.separatorColor.cgColor
         }
-        title.textColor = BamTheme.ink; detail.textColor = BamTheme.muted; close.contentTintColor = BamTheme.muted
     }
     override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); paint() }
 
+    var preferredSize: NSSize {
+        let text = ceil(title.attributedStringValue.size().width)
+        return NSSize(width: 16 + text + 12 + allow.preferredWidth + 8, height: Self.height)
+    }
     override func layout() {
         super.layout()
+        glass.frame = bounds
         let h = bounds.height
-        close.frame = NSRect(x: 12, y: (h - 20) / 2, width: 20, height: 20)
-        let button = allow.fittingSize
-        let width = max(button.width, 112)
-        allow.frame = NSRect(x: bounds.width - width - 12, y: (h - button.height) / 2, width: width, height: button.height)
-        let textX: CGFloat = 40, textWidth = allow.frame.minX - textX - 10
-        title.frame = NSRect(x: textX, y: h / 2, width: textWidth, height: 18)
-        detail.frame = NSRect(x: textX, y: h / 2 - 17, width: textWidth, height: 16)
+        allow.frame = NSRect(x: bounds.width - allow.preferredWidth - 8, y: (h - 28) / 2, width: allow.preferredWidth, height: 28)
+        title.frame = NSRect(x: 16, y: (h - 18) / 2, width: allow.frame.minX - 28, height: 18)
     }
 
     func present(in host: NSView) {
-        let inset: CGFloat = 12
-        let y = host.isFlipped ? host.bounds.height - Self.size.height - inset : inset
-        frame = NSRect(x: host.bounds.width - Self.size.width - inset, y: y, width: Self.size.width, height: Self.size.height)
-        autoresizingMask = host.isFlipped ? [.minXMargin, .minYMargin] : [.minXMargin, .maxYMargin]
-        alphaValue = 0
+        let size = preferredSize
+        let y = host.isFlipped ? Self.inset : host.bounds.height - size.height - Self.inset
+        frame = NSRect(x: host.bounds.width - size.width - Self.inset, y: y, width: size.width, height: size.height)
+        autoresizingMask = host.isFlipped ? [.minXMargin, .maxYMargin] : [.minXMargin, .minYMargin]
         host.addSubview(self, positioned: .above, relativeTo: nil)
+        layoutSubtreeIfNeeded()
+        // Grows into place from 96% about its own center, fading in (Arc's toast entrance).
         let reduce = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-        let rest = frame
-        if !reduce { frame = rest.offsetBy(dx: 0, dy: host.isFlipped ? 8 : -8) }
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = reduce ? 0.12 : 0.24
-            context.timingFunction = CAMediaTimingFunction(controlPoints: 0.22, 0.61, 0.36, 1)
-            animator().alphaValue = 1
-            animator().frame = rest
+        guard let layer else { return }
+        let duration = reduce ? 0.12 : 0.22
+        let fade = CABasicAnimation(keyPath: "opacity"); fade.fromValue = 0; fade.toValue = 1
+        let group = CAAnimationGroup(); group.duration = duration
+        group.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0.9, 0.3, 1)
+        if reduce { group.animations = [fade] } else {
+            let grow = CABasicAnimation(keyPath: "transform")
+            let b = layer.bounds
+            var t = CATransform3DMakeTranslation(b.width * 0.02, b.height * 0.02, 0)
+            t = CATransform3DScale(t, 0.96, 0.96, 1)
+            grow.fromValue = NSValue(caTransform3D: t); grow.toValue = NSValue(caTransform3D: CATransform3DIdentity)
+            group.animations = [fade, grow]
         }
+        layer.add(group, forKey: "enter")
         NSAccessibility.post(element: NSApp as Any, notification: .announcementRequested,
                              userInfo: [.announcement: "Page not working? Allow Ads Here is available.",
                                         .priority: NSAccessibilityPriorityLevel.medium.rawValue])
@@ -506,11 +560,41 @@ import WebKit
     func dismiss() {
         NSAnimationContext.runAnimationGroup({ context in
             context.duration = 0.16
+            context.timingFunction = CAMediaTimingFunction(name: .easeIn)
             animator().alphaValue = 0
         }, completionHandler: { [weak self] in MainActor.assumeIsolated { self?.removeFromSuperview() } })
     }
     override func mouseEntered(with event: NSEvent) { isHovered = true }
     override func mouseExited(with event: NSEvent) { isHovered = false }
     @objc private func allowPressed() { onAllow() }
-    @objc private func closePressed() { onClose() }
+}
+
+/// The toast's bordered action, like the square button in Arc's toasts but carrying words.
+@MainActor private final class ContentBlockingToastButton: NSButton {
+    private var hovering = false
+    init(title: String) {
+        super.init(frame: .zero)
+        isBordered = false; wantsLayer = true
+        self.title = title
+        font = .systemFont(ofSize: 12.5, weight: .semibold)
+        layer?.cornerRadius = 7; layer?.cornerCurve = .continuous; layer?.borderWidth = 0.5
+        setAccessibilityLabel(title)
+        addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect], owner: self))
+        paint()
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+    var preferredWidth: CGFloat { ceil((title as NSString).size(withAttributes: [.font: font as Any]).width) + 22 }
+    private func paint() {
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            let dark = effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+            let base = dark ? NSColor(white: 1, alpha: hovering ? 0.16 : 0.10) : NSColor(white: 1, alpha: hovering ? 0.95 : 0.7)
+            layer?.backgroundColor = (isHighlighted ? NSColor(white: dark ? 1 : 0, alpha: 0.12) : base).cgColor
+            layer?.borderColor = NSColor.separatorColor.cgColor
+        }
+        attributedTitle = NSAttributedString(string: title, attributes: [.font: font as Any, .foregroundColor: NSColor.labelColor])
+    }
+    override var isHighlighted: Bool { didSet { paint() } }
+    override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); paint() }
+    override func mouseEntered(with event: NSEvent) { hovering = true; paint() }
+    override func mouseExited(with event: NSEvent) { hovering = false; paint() }
 }
