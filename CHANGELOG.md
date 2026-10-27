@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Change Tab Icon… (Tabs menu and command bar) now works on every tab, not only kept ones: pick an icon and a name, and they stay with the tab if you keep it later.
 - New tab actions, as in Arc: Duplicate (with its back/forward history), Rename… (leave it empty to go back to the page title), Mute / Unmute for a tab playing sound and Close Tabs Below. They're in the Tabs menu and the command bar.
 - Point at a link and its address shows in a small capsule at the page's bottom-left corner, as in Arc.
 - Fixed: after switching or editing Spaces, typing the letter "e" could open the Emoji & Symbols palette instead of typing. Shortcuts Settings no longer lists or rewrites the hidden menu items macOS adds on its own.

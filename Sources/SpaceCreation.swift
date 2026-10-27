@@ -404,6 +404,7 @@ extension BrowserController {
 
     func openSpaceCreation() {
         guard spaceCreationPanel == nil else { return }
+        tabNavigation.pendingMoveToNewSpace = nil
         guard !isPrivateWindow else { NSSound.beep(); return }
         guard session.spaces.count < BrowserSession.maximumSpaces else { NSSound.beep(); return }
         dismissAddress()
@@ -470,6 +471,7 @@ extension BrowserController {
             spaceCreationPanel?.showNameError(); NSSound.beep(); return
         }
         dismissSpaceCreation()
+        finishPendingMove(toNewSpace: id)
         changeSpace(id)
         onSpacesChanged?()
         refresh(); save()

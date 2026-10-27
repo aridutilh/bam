@@ -134,11 +134,58 @@ import WebKit
         pageFeedback.show("Link copied", symbol: "link", in: webHost)
     }
 
+    // MARK: Change Icon / edit
+
+    @objc func changeTabIcon(_ sender: Any?) {
+        guard let id = actionTabID(sender) else { NSSound.beep(); return }
+        editTab(id)
+    }
+    /// Arc's Change Icon…: name and icon for any tab, in the sheet kept tabs already use.
+    func editTab(_ id: UUID) {
+        guard !isShuttingDown, savedTabEditor == nil, let tab = session.tabs.first(where: { $0.id == id }),
+              let window = view.window, window.attachedSheet == nil else { return }
+        cancelPaging(); dismissAddress(); findBar.hide(); pageFeedback.hide()
+        let editor = SavedTabEditorController(tab: tab)
+        savedTabEditor = editor
+        editor.onSave = { [weak self] title, symbol in
+            guard let self, self.session.updateTab(id: id, customTitle: title, customSymbol: symbol) else { return false }
+            self.refresh(); self.refreshPaletteResults(); self.save()
+            return true
+        }
+        editor.onDismiss = { [weak self] in
+            guard let self else { return }
+            self.savedTabEditor = nil
+            self.view.window?.makeFirstResponder(self.commandWebView)
+        }
+        editor.present(on: window)
+        window.attachedSheet?.makeFirstResponder(editor.iconPicker)
+    }
+
+    // MARK: Move to
+
+    @objc func moveTabToSpace(_ sender: Any?) {
+        guard let item = sender as? NSMenuItem, let id = item.representedObject as? UUID else { return }
+        cancelPaging()
+        if moveTab(id, toSpace: item.tag) { refresh(); refreshPaletteResults(); save() } else { NSSound.beep() }
+    }
+    /// Arc's "New Space…": make a Space, and the tab moves into it once it exists.
+    @objc func moveTabToNewSpace(_ sender: Any?) {
+        guard let id = actionTabID(sender) else { NSSound.beep(); return }
+        openSpaceCreation()
+        if spaceCreationPanel != nil { tabNavigation.pendingMoveToNewSpace = id }
+    }
+    /// Called by Space creation with the new Space, before it is shown.
+    func finishPendingMove(toNewSpace space: Int) {
+        guard let id = tabNavigation.pendingMoveToNewSpace else { return }
+        tabNavigation.pendingMoveToNewSpace = nil
+        if session.tabs.contains(where: { $0.id == id }) { _ = moveTab(id, toSpace: space) }
+    }
+
     // MARK: Menus
 
-    /// Ready-made items for a sidebar tab row's menu, in Arc's order (top group:
-    /// Copy Link, Rename…, Mute; then Duplicate). The sidebar adds them; each
-    /// targets this controller with the row's ID.
+    /// Ready-made items for a sidebar tab row's menu, in Arc's order (Copy Link,
+    /// Share ▸; Change Icon…, Rename…, Mute; Duplicate). Move to ▸ and the
+    /// archive pair come separately. Each targets this controller with the row's ID.
     func tabActionMenuItems(for id: UUID) -> [NSMenuItem] {
         guard let tab = session.tabs.first(where: { $0.id == id }) else { return [] }
         func entry(_ title: String, _ action: Selector, _ symbol: String, key: String = "", enabled: Bool = true) -> NSMenuItem {
@@ -151,13 +198,47 @@ import WebKit
         let muted = isTabMuted(id)
         return [
             entry("Copy Link", #selector(copyTabLink(_:)), "link", key: "c", enabled: URLInput.directURL(tab.address) != nil),
+            shareMenuItem(for: id),
             .separator(),
+            entry("Change Icon…", #selector(changeTabIcon(_:)), "face.smiling"),
             entry("Rename…", #selector(renameTab(_:)), "pencil"),
             entry(muted ? "Unmute" : "Mute", #selector(toggleMuteTab(_:)), muted ? "speaker.wave.2" : "speaker.slash",
                   enabled: muted || isTabPlayingAudio(id)),
             .separator(),
             entry("Duplicate", #selector(duplicateTab(_:)), "plus.square.on.square", enabled: !tab.isArcEasel && URLInput.extensionURL(tab.address) == nil)
         ]
+    }
+    /// Share ▸ (the system share menu: AirDrop, Mail, Messages, Notes…) for the tab's page.
+    func shareMenuItem(for id: UUID) -> NSMenuItem {
+        guard let tab = session.tabs.first(where: { $0.id == id }),
+              let url = browsers[id].flatMap(cleanLink(for:)) ?? URLInput.directURL(tab.address).map(CleanLinks.clean) else {
+            let item = NSMenuItem(title: "Share", action: nil, keyEquivalent: ""); item.isEnabled = false; return item
+        }
+        let item = NSSharingServicePicker(items: [url]).standardShareMenuItem
+        item.title = "Share"
+        return item
+    }
+    /// Arc's "Move to ▸": every Space (this one ticked), then "New Space…".
+    func moveToMenuItem(for id: UUID) -> NSMenuItem {
+        let item = NSMenuItem(title: "Move to", action: nil, keyEquivalent: "")
+        let menu = NSMenu(title: "Move to"); menu.autoenablesItems = false
+        guard let tab = session.tabs.first(where: { $0.id == id }) else { item.isEnabled = false; return item }
+        let current = tab.isFavorite ? session.space : tab.space
+        for space in session.spaces {
+            let entry = NSMenuItem(title: space.name, action: #selector(moveTabToSpace(_:)), keyEquivalent: "")
+            entry.target = self; entry.representedObject = id; entry.tag = space.id
+            entry.state = space.id == current ? .on : .off
+            entry.isEnabled = space.id != current && !tab.isFavorite
+            entry.image = ArkSpaceIcon.image(for: space, pointSize: 14)
+            menu.addItem(entry)
+        }
+        menu.addItem(.separator())
+        let new = NSMenuItem(title: "New Space…", action: #selector(moveTabToNewSpace(_:)), keyEquivalent: "")
+        new.target = self; new.representedObject = id
+        new.isEnabled = !tab.isFavorite && session.spaces.count < BrowserSession.maximumSpaces && !isPrivateWindow
+        menu.addItem(new)
+        item.submenu = menu
+        return item
     }
     /// "Close Tabs Below" for a Today row's menu, next to Close Tab.
     func closeTabsBelowMenuItem(for id: UUID) -> NSMenuItem {
@@ -182,6 +263,8 @@ import WebKit
             return session.tabs.contains { $0.id == id } && view.window?.attachedSheet == nil
         case #selector(closeTabsBelow(_:)):
             return !session.todayTabs(below: id).isEmpty
+        case #selector(changeTabIcon(_:)):
+            return session.tabs.contains { $0.id == id } && view.window?.attachedSheet == nil && savedTabEditor == nil
         case #selector(copyTabLink(_:)):
             return session.tabs.first { $0.id == id }.flatMap { URLInput.directURL($0.address) } != nil
         default: return nil

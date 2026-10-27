@@ -69,17 +69,17 @@ import AppKit
 
     init(tab: BrowserTab) {
         let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 460, height: 330), styleMask: [.titled], backing: .buffered, defer: false)
-        panel.title = "Edit Saved Tab"; panel.isReleasedWhenClosed = false
+        panel.title = tab.isSaved ? "Edit Saved Tab" : "Edit Tab"; panel.isReleasedWhenClosed = false
         super.init(window: panel)
         let content = FlippedContainer(frame: NSRect(x: 0, y: 0, width: 460, height: 330))
         panel.contentView = content
         func label(_ text: String, _ rect: NSRect) {
             let field = NSTextField(labelWithString: text); field.frame = rect; content.addSubview(field)
         }
-        label(tab.isFavorite ? "Favorite · shared within this login profile" : "Kept tab · stays in this Space", NSRect(x: 24, y: 18, width: 410, height: 20))
+        label(tab.isFavorite ? "Favorite · shared within this login profile" : tab.isSaved ? "Kept tab · stays in this Space" : "Today tab · in this Space", NSRect(x: 24, y: 18, width: 410, height: 20))
         label("Name", NSRect(x: 24, y: 52, width: 410, height: 20))
         nameField.frame = NSRect(x: 24, y: 77, width: 412, height: 26)
-        nameField.stringValue = tab.saved?.customTitle ?? ""
+        nameField.stringValue = tab.saved?.customTitle ?? tab.customTitle ?? ""
         nameField.placeholderString = tab.title
         nameField.setAccessibilityLabel("Saved tab name — leave blank to use page title")
         nameField.delegate = self; content.addSubview(nameField)
@@ -91,9 +91,9 @@ import AppKit
             iconPicker.lastItem?.representedObject = symbol
             iconPicker.lastItem?.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
         }
-        if let symbol = tab.saved?.customSymbol, let index = BrowserSpace.symbols.firstIndex(of: symbol) { iconPicker.selectItem(at: index + 1) }
+        if let symbol = tab.chosenSymbol, let index = BrowserSpace.symbols.firstIndex(of: symbol) { iconPicker.selectItem(at: index + 1) }
         iconPicker.setAccessibilityLabel("Saved tab icon"); content.addSubview(iconPicker)
-        let address = NSTextField(wrappingLabelWithString: "Saved page: \(tab.saved?.address ?? tab.address)")
+        let address = NSTextField(wrappingLabelWithString: tab.isSaved ? "Saved page: \(tab.saved?.address ?? tab.address)" : "Page: \(tab.address)")
         address.frame = NSRect(x: 24, y: 184, width: 412, height: 42)
         address.font = .systemFont(ofSize: 11); address.textColor = .secondaryLabelColor
         address.maximumNumberOfLines = 2; address.toolTip = tab.saved?.address

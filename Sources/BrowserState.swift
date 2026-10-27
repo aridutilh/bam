@@ -61,6 +61,11 @@ struct BrowserTab: Codable, Identifiable, Equatable {
     /// When this tab was last the visible one (wall clock, saved with the session). Auto-archive
     /// closes Today tabs that haven't been viewed for the chosen time; nil means "not seen yet".
     var lastViewedAt: Date?
+    /// An icon the user chose for an ordinary tab (one of `BrowserSpace.symbols`);
+    /// kept tabs and Favorites carry theirs in `saved`.
+    var customSymbol: String?
+    /// The user's icon, whatever kind of tab this is. A chosen icon replaces the favicon.
+    var chosenSymbol: String? { saved?.customSymbol ?? customSymbol }
 
     init(id: UUID = UUID(), title: String, address: String, space: Int,
          pinned: Bool = false, saved: SavedTabState? = nil, sleepState: TabSleepState? = nil, folderID: UUID? = nil) {
@@ -92,7 +97,7 @@ struct BrowserTab: Codable, Identifiable, Equatable {
         return URL(string: address)?.host ?? address
     }
     var symbol: String {
-        if let symbol = saved?.customSymbol { return symbol }
+        if let symbol = chosenSymbol { return symbol }
         if isHome { return "sparkle" }
         if isVideoDemo { return "play.rectangle.fill" }
         if isArcEasel { return "scribble.variable" }
@@ -105,7 +110,7 @@ struct BrowserTab: Codable, Identifiable, Equatable {
     /// without an icon yet are still told apart. Nil when a custom or
     /// special symbol applies (those, and real favicons, always win).
     var monogram: String? {
-        guard saved?.customSymbol == nil, symbol == "globe" else { return nil }
+        guard chosenSymbol == nil, symbol == "globe" else { return nil }
         return Monogram.make(title: displayTitle, address: address)
     }
     static func validAddress(_ address: String) -> Bool {
@@ -115,7 +120,7 @@ struct BrowserTab: Codable, Identifiable, Equatable {
     fileprivate static func validCustomTitle(_ title: String) -> Bool {
         title.count <= 80 && !title.unicodeScalars.contains { CharacterSet.controlCharacters.contains($0) }
     }
-    private enum CodingKeys: String, CodingKey { case id, title, address, space, pinned, saved, sleepState, folderID, customTitle, lastViewedAt }
+    private enum CodingKeys: String, CodingKey { case id, title, address, space, pinned, saved, sleepState, folderID, customTitle, lastViewedAt, customSymbol }
     private enum SavedProfileKeys: String, CodingKey { case profileID }
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -137,6 +142,7 @@ struct BrowserTab: Codable, Identifiable, Equatable {
         else { saved = try? values.decodeIfPresent(SavedTabState.self, forKey: .saved) }
         sleepState = try? values.decodeIfPresent(TabSleepState.self, forKey: .sleepState)
         folderID = try? values.decodeIfPresent(UUID.self, forKey: .folderID)
+        customSymbol = (try? values.decodeIfPresent(String.self, forKey: .customSymbol)).flatMap { $0 }.flatMap { BrowserSpace.symbols.contains($0) ? $0 : nil }
         customTitle = (try? values.decodeIfPresent(String.self, forKey: .customTitle)).flatMap { $0 }.flatMap { Self.validCustomTitle($0) && !$0.isEmpty ? $0 : nil }
         lastViewedAt = (try? values.decodeIfPresent(Date.self, forKey: .lastViewedAt)).flatMap { $0?.timeIntervalSince1970.isFinite == true ? $0 : nil }
         if saved == nil, (try? values.decodeIfPresent(Bool.self, forKey: .pinned)) == true {
@@ -153,6 +159,7 @@ struct BrowserTab: Codable, Identifiable, Equatable {
         try values.encodeIfPresent(folderID, forKey: .folderID)
         try values.encodeIfPresent(customTitle, forKey: .customTitle)
         try values.encodeIfPresent(lastViewedAt, forKey: .lastViewedAt)
+        try values.encodeIfPresent(customSymbol, forKey: .customSymbol)
     }
 }
 
@@ -733,10 +740,13 @@ struct BrowserSession: Codable {
             if tabs[index].saved == nil {
                 guard BrowserTab.validAddress(tabs[index].address) else { return false }
                 var saved = SavedTabState(kind: kind, address: tabs[index].address)
-                saved.customTitle = tabs[index].customTitle
-                tabs[index].saved = saved; tabs[index].customTitle = nil
+                saved.customTitle = tabs[index].customTitle; saved.customSymbol = tabs[index].customSymbol
+                tabs[index].saved = saved; tabs[index].customTitle = nil; tabs[index].customSymbol = nil
             } else { tabs[index].saved?.kind = kind }
-        } else { let name = tabs[index].saved?.customTitle; tabs[index].customTitle = name; tabs[index].saved = nil }
+        } else {
+            let name = tabs[index].saved?.customTitle, icon = tabs[index].saved?.customSymbol
+            tabs[index].customTitle = name; tabs[index].customSymbol = icon; tabs[index].saved = nil
+        }
         if kind == .favorite { tabs[index].saved?.profileID = profile }
         else { tabs[index].saved?.profileID = nil }
         if kind != .kept { tabs[index].folderID = nil }
@@ -752,6 +762,18 @@ struct BrowserSession: Codable {
         tabs[index].address = saved.address
         tabs[index].saved?.isUnloaded = false
         tabs[index].sleepState = nil
+        return true
+    }
+    /// Name and icon for any tab: kept tabs and Favorites through `saved`, ordinary tabs directly.
+    @discardableResult mutating func updateTab(id: UUID, customTitle: String?, customSymbol: String?) -> Bool {
+        guard let index = tabs.firstIndex(where: { $0.id == id }) else { return false }
+        if tabs[index].isSaved { return updateSavedTab(id: id, customTitle: customTitle, customSymbol: customSymbol) }
+        let title = customTitle?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let symbol = customSymbol?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard title.map(BrowserTab.validCustomTitle) ?? true,
+              symbol.map({ $0.isEmpty || BrowserSpace.symbols.contains($0) }) ?? true else { return false }
+        tabs[index].customTitle = title?.isEmpty == false && title != tabs[index].title ? title : nil
+        tabs[index].customSymbol = symbol?.isEmpty == false ? symbol : nil
         return true
     }
     @discardableResult mutating func updateSavedTab(id: UUID, customTitle: String?, customSymbol: String?) -> Bool {
@@ -928,7 +950,10 @@ struct BrowserSession: Codable {
             if !source.isFavorite { space = source.space }
         }
         let new = add(address: source.address, title: source.title, opener: source.isSaved ? nil : id)
-        if let index = tabs.firstIndex(where: { $0.id == new }) { tabs[index].customTitle = source.saved?.customTitle ?? source.customTitle }
+        if let index = tabs.firstIndex(where: { $0.id == new }) {
+            tabs[index].customTitle = source.saved?.customTitle ?? source.customTitle
+            tabs[index].customSymbol = source.chosenSymbol
+        }
         return new
     }
     /// Today tabs below `id`, top to bottom (Arc's "Tabs Below"). Empty for kept tabs and Favorites.
