@@ -171,9 +171,12 @@ import WebKit
         try check(row(red.id) === rowIdentity, "Favicon arrival replaced an existing sidebar row")
         try check(try await js(redWeb, "window.faviconFixtureSentinel") as? String == "red-document", "Icon loading reloaded or modified the page")
 
-        // Open the real palette with an empty query: no remote suggestions.
+        // Open the real palette and name the tab (an empty field lists other tabs, not the current one). The words
+        // differ from the title's start so the search row's label is never mistaken for the tab row.
+        // Remote suggestions are cancelled so no network reply can rebuild the rows mid-check.
         controller.openAddress(newTab: false, empty: true)
         guard let results = controller.tabSearchResults else { throw Failure.assertion("Command palette did not create results") }
+        controller.addressField?.stringValue = "Favicon Red"; controller.refreshPaletteResults(); controller.suggestionFetcher.cancel()
         controller.view.layoutSubtreeIfNeeded()
         let redResult = descendants(results).first { $0.accessibilityLabel()?.hasPrefix("Bam Favicon Red,") == true }
         try check(isColor(icon(in: redResult)?.image, red: true), "Existing-tab palette result did not receive the real cached icon")
@@ -283,6 +286,7 @@ import WebKit
         try capture(controller.sidebar, named: "svg-sidebar")
         controller.openAddress(newTab: false, empty: true)
         guard let svgResults = controller.tabSearchResults else { throw Failure.assertion("SVG palette did not create results") }
+        controller.addressField?.stringValue = "Favicon SVG"; controller.refreshPaletteResults(); controller.suggestionFetcher.cancel()
         controller.view.layoutSubtreeIfNeeded()
         let svgResult = descendants(svgResults).first { $0.accessibilityLabel()?.hasPrefix("Bam Favicon SVG,") == true }
         try check(icon(in: svgResult)?.image === previousSVG && hasVisibleArtwork(icon(in: svgResult)?.image),
