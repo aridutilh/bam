@@ -278,21 +278,57 @@ import WebKit
         if menu === extensionsMenu { controller?.updateExtensionsMenu(menu) }
     }
     @objc func selectSpace(_ sender: NSMenuItem) { controller.changeSpace(sender.tag) }
-    var boundItems: [ShortcutCommand: NSMenuItem] = [:]
-    /// A menu item outside the remappable set whose key equivalent is this chord.
-    func fixedMenuItem(wearing combo: KeyCombo, in menu: NSMenu? = NSApp.mainMenu) -> NSMenuItem? {
-        for item in menu?.items ?? [] {
-            if let hit = fixedMenuItem(wearing: combo, in: item.submenu) { return hit }
-            guard !item.keyEquivalent.isEmpty, !boundItems.values.contains(where: { $0 === item }) else { continue }
+    /// Every command item in the menu bar with its stable shortcut id, in menu order. The
+    /// Extensions menu is left out: its items come and go with the extensions themselves.
+    func menuShortcutItems() -> [(id: String, menu: String, item: NSMenuItem)] {
+        var found: [(id: String, menu: String, item: NSMenuItem)] = []
+        func walk(_ menu: NSMenu, path: String) {
+            guard menu !== extensionsMenu else { return }
+            for item in menu.items {
+                if let submenu = item.submenu { walk(submenu, path: path.isEmpty ? item.title : "\(path) › \(item.title)"); continue }
+                if let id = Self.shortcutID(for: item, in: menu) { found.append((id, path, item)) }
+            }
+        }
+        for top in NSApp.mainMenu?.items ?? [] { if let submenu = top.submenu { walk(submenu, path: top.title) } }
+        return found
+    }
+    /// The action's selector, plus the item's choice when one menu repeats an action
+    /// (Appearance ▸ Dark → "chooseAppearance:dark", Go to Space ▸ 2nd → "selectSpace:2").
+    static func shortcutID(for item: NSMenuItem, in menu: NSMenu) -> String? {
+        guard let action = item.action, !item.isSeparatorItem, !item.title.isEmpty,
+              action != #selector(NSWindow.makeKeyAndOrderFront(_:)), !(item.representedObject is NSWindow) else { return nil }
+        let name = NSStringFromSelector(action)
+        if let choice = item.representedObject as? String { return name + choice }
+        let siblings = menu.items.filter { $0.action == action }
+        guard siblings.count > 1, let index = siblings.firstIndex(where: { $0 === item }) else { return name }
+        return name + String(index + 1)
+    }
+    /// Lists every menu command in Settings › Shortcuts (defaults as built) and applies saved chords.
+    func registerMenuShortcuts() {
+        let items = menuShortcutItems()
+        ShortcutStore.shared.register(items.map { entry in
+            MenuShortcut(id: entry.id, title: entry.item.title, menu: entry.menu,
+                         defaultCombo: entry.item.keyEquivalent.isEmpty ? nil : KeyCombo(entry.item.keyEquivalent, entry.item.keyEquivalentModifierMask))
+        })
+        applyShortcuts(items)
+    }
+    /// A menu item outside the list (an extension's command) whose key equivalent is this chord.
+    func fixedMenuItem(wearing combo: KeyCombo) -> NSMenuItem? { extensionsMenu.flatMap { menuItem(wearing: combo, in: $0) } }
+    private func menuItem(wearing combo: KeyCombo, in menu: NSMenu) -> NSMenuItem? {
+        for item in menu.items {
+            if let submenu = item.submenu, let hit = menuItem(wearing: combo, in: submenu) { return hit }
+            guard !item.keyEquivalent.isEmpty else { continue }
             if KeyCombo(item.keyEquivalent, item.keyEquivalentModifierMask) == combo { return item }
         }
         return nil
     }
     /// Settings changed a shortcut: the menu items pick up the new chord at once.
-    func applyShortcuts() {
-        for (command, item) in boundItems {
-            let combo = ShortcutStore.shared.combo(for: command)
-            item.keyEquivalent = combo.key; item.keyEquivalentModifierMask = combo.modifiers
+    func applyShortcuts(_ known: [(id: String, menu: String, item: NSMenuItem)]? = nil) {
+        let store = ShortcutStore.shared
+        for entry in known ?? menuShortcutItems() where store.command(entry.id) != nil {
+            let combo = store.combo(forID: entry.id)
+            entry.item.keyEquivalent = combo?.key ?? ""
+            entry.item.keyEquivalentModifierMask = combo?.modifiers ?? []
         }
     }
     @objc func chooseAppearance(_ sender: NSMenuItem) {
@@ -316,6 +352,8 @@ import WebKit
             item.image = NSImage(systemSymbolName: space.symbol, accessibilityDescription: nil)
             spacesMenu.addItem(item)
         }
+        // New items wear the default ⌥⌘1…9; once the menu bar is complete, list them and apply chosen chords.
+        if NSApp.windowsMenu != nil { registerMenuShortcuts() }
     }
     @objc func recordSpaceSwipes(_ sender: Any?) { SpaceSwipeDiagnostics.shared.start() }
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
@@ -341,11 +379,10 @@ import WebKit
         func item(_ menu: NSMenu, _ title: String, _ action: Selector, _ key: String = "", _ modifiers: NSEvent.ModifierFlags = .command, _ target: AnyObject? = nil) {
             let item = NSMenuItem(title: title, action: action, keyEquivalent: key); item.keyEquivalentModifierMask = modifiers; item.target = target; menu.addItem(item)
         }
-        // Remappable commands read their chord from ShortcutStore; applyShortcuts re-reads it on change.
+        // Every item is built with its default chord; registerMenuShortcuts then lists them all
+        // in Settings › Shortcuts and puts on the chords people chose.
         func bound(_ menu: NSMenu, _ title: String, _ action: Selector, _ command: ShortcutCommand, _ target: AnyObject? = nil) {
-            let combo = ShortcutStore.shared.combo(for: command)
-            item(menu, title, action, combo.key, combo.modifiers, target)
-            boundItems[command] = menu.items.last
+            item(menu, title, action, command.defaultCombo.key, command.defaultCombo.modifiers, target)
         }
         let app = menu("Bam")
         item(app, "About Bam", #selector(showAbout), "", .command, self)
@@ -440,6 +477,7 @@ import WebKit
         let windowMenu = menu("Window"); NSApp.windowsMenu = windowMenu
         item(windowMenu, "Minimize", #selector(NSWindow.performMiniaturize(_:)), "m")
         item(windowMenu, "Zoom", #selector(NSWindow.performZoom(_:)))
+        registerMenuShortcuts()
     }
 }
 

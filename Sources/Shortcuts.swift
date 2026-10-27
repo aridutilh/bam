@@ -35,6 +35,19 @@ enum ShortcutCommand: String, CaseIterable {
         default: return nil
         }
     }
+    /// The menu command this case names in the full shortcut list (its action's selector).
+    /// Chords saved before every menu command became remappable were keyed by the raw value.
+    var menuID: String {
+        switch self {
+        case .newTab: return "newTab:"
+        case .openLocation: return "focusAddress:"
+        case .toggleSidebar: return "toggleSidebar:"
+        case .nextSpace: return "nextSpace:"
+        case .previousSpace: return "previousSpace:"
+        case .keepTab: return "togglePin:"
+        case .settings: return "showSettings:"
+        }
+    }
     var defaultCombo: KeyCombo {
         switch self {
         case .newTab: return KeyCombo("t", .command)
@@ -137,20 +150,46 @@ struct KeyCombo: Equatable {
     }
 }
 
-/// Saved chords for the remappable commands. Menu items read it when they
-/// are built and again whenever it changes; fresh previews never persist.
+/// One command in the menu bar as Settings › Shortcuts lists it. `id` is stable across
+/// launches and title changes (the action's selector, plus the item's choice when a
+/// menu repeats one action); `defaultCombo` is the chord the menu was built with.
+struct MenuShortcut: Equatable {
+    let id: String
+    var title: String
+    var menu: String
+    var defaultCombo: KeyCombo?
+}
+
+/// Saved chords for every menu command. Menu items read it when they are built and
+/// again whenever it changes; fresh previews never persist. An override can also be
+/// "no shortcut" (Remove), which is saved too.
 @MainActor final class ShortcutStore {
     static let shared = ShortcutStore()
     static let didChange = Notification.Name("BamShortcutsDidChange")
     static let defaultsKey = "Shortcuts"
 
+    enum Assignment: Equatable {
+        case assigned
+        /// Another command wears the chord; pass `takeOver` to move it.
+        case taken(by: String)
+        /// Something outside the list (an extension's command) wears it; it can't be moved.
+        case reserved(by: String)
+    }
+
     private(set) var persists = true
-    private var custom: [ShortcutCommand: KeyCombo] = [:]
-    /// The app answers with the title of a fixed menu item (Quit, Close Tab,
-    /// Go to Space 1…) that already wears a chord, so recording it is refused.
+    private(set) var catalog: [MenuShortcut]
+    private var positions: [String: Int] = [:]
+    /// id → chord, or nil for a shortcut that was removed.
+    private var custom: [String: KeyCombo?] = [:]
+    /// The app answers with the title of a menu item outside the list (an extension's
+    /// command) that already wears a chord, so recording it is refused.
     var reservedOwner: ((KeyCombo) -> String?)?
 
-    init() { load() }
+    init() {
+        catalog = ShortcutCommand.allCases.map { MenuShortcut(id: $0.menuID, title: $0.title, menu: "", defaultCombo: $0.defaultCombo) }
+        reindex()
+        load()
+    }
 
     /// Fresh previews start from the defaults and never write.
     func configure(persists: Bool) {
@@ -158,26 +197,61 @@ struct KeyCombo: Equatable {
         if !persists { custom = [:] }
     }
 
-    func combo(for command: ShortcutCommand) -> KeyCombo { custom[command] ?? command.defaultCombo }
-    func isDefault(_ command: ShortcutCommand) -> Bool { custom[command] == nil }
+    /// Adds the commands the menus hold now. A command seen before keeps its first
+    /// default (the menus may already wear a custom chord) but takes the new title.
+    func register(_ commands: [MenuShortcut]) {
+        var seen = Set<String>()
+        var ordered: [MenuShortcut] = []
+        for command in commands where seen.insert(command.id).inserted {
+            var entry = command
+            if let known = positions[command.id] { entry.defaultCombo = catalog[known].defaultCombo }
+            ordered.append(entry)
+        }
+        // Commands not in the menus right now (a Space that was removed) stay known, after the rest.
+        ordered += catalog.filter { !seen.contains($0.id) }
+        catalog = ordered
+        reindex()
+    }
+    private func reindex() { positions = Dictionary(uniqueKeysWithValues: catalog.enumerated().map { ($1.id, $0) }) }
+    func command(_ id: String) -> MenuShortcut? { positions[id].map { catalog[$0] } }
+
+    /// The chord a command wears now: its override, else its default; nil when it has none.
+    func combo(forID id: String) -> KeyCombo? {
+        if let override = custom[id] { return override }
+        return command(id)?.defaultCombo
+    }
+    func isDefault(id: String) -> Bool { custom[id] == nil }
     var anyCustom: Bool { !custom.isEmpty }
 
-    /// The title of whatever already wears this chord: another remappable
-    /// command, or a fixed menu item the app reported.
-    func owner(of combo: KeyCombo, besides command: ShortcutCommand) -> String? {
-        if let other = ShortcutCommand.allCases.first(where: { $0 != command && self.combo(for: $0) == combo }) { return other.title }
-        return reservedOwner?(combo)
+    /// The command (id and title) wearing this chord, other than `besides`.
+    func owner(of combo: KeyCombo, besides id: String?) -> (id: String?, title: String)? {
+        if let other = catalog.first(where: { $0.id != id && self.combo(forID: $0.id) == combo }) { return (other.id, other.title) }
+        return reservedOwner?(combo).map { (nil, $0) }
     }
 
-    /// Assigns a chord; a chord another command or a fixed menu item owns is
-    /// refused so no shortcut silently goes dark.
-    @discardableResult func set(_ combo: KeyCombo, for command: ShortcutCommand) -> Bool {
-        guard owner(of: combo, besides: command) == nil else { return false }
-        if combo == command.defaultCombo { custom.removeValue(forKey: command) } else { custom[command] = combo }
-        save(); return true
+    /// Gives `combo` to a command. A chord another command wears is refused unless
+    /// `takeOver`, which leaves that command without a shortcut, so no two share one.
+    @discardableResult func assign(_ combo: KeyCombo, to id: String, takeOver: Bool = false) -> Assignment {
+        if let owner = owner(of: combo, besides: id) {
+            guard let ownerID = owner.id else { return .reserved(by: owner.title) }
+            guard takeOver else { return .taken(by: owner.title) }
+            clear(ownerID)
+        }
+        if combo == command(id)?.defaultCombo { custom.removeValue(forKey: id) } else { custom[id] = .some(combo) }
+        save(); return .assigned
     }
-    func reset(_ command: ShortcutCommand) {
-        guard custom.removeValue(forKey: command) != nil else { return }
+    /// Leaves a command without a shortcut.
+    func remove(id: String) {
+        clear(id); save()
+    }
+    private func clear(_ id: String) {
+        if command(id)?.defaultCombo == nil { custom.removeValue(forKey: id) } else { custom[id] = .some(nil) }
+    }
+    /// Back to the menu's own chord; a command that took it meanwhile gives it up.
+    func reset(id: String) {
+        guard custom[id] != nil else { return }
+        custom.removeValue(forKey: id)
+        if let combo = command(id)?.defaultCombo, let owner = owner(of: combo, besides: id), let ownerID = owner.id { clear(ownerID) }
         save()
     }
     func resetAll() {
@@ -185,22 +259,62 @@ struct KeyCombo: Equatable {
         custom = [:]; save()
     }
 
+    // The original seven, by name: what the palette, sidebar hints and welcome read.
+    func combo(for command: ShortcutCommand) -> KeyCombo { combo(forID: command.menuID) ?? command.defaultCombo }
+    func isDefault(_ command: ShortcutCommand) -> Bool { isDefault(id: command.menuID) }
+    func owner(of combo: KeyCombo, besides command: ShortcutCommand) -> String? { owner(of: combo, besides: command.menuID)?.title }
+    /// Assigns without taking over: a chord something else wears is refused.
+    @discardableResult func set(_ combo: KeyCombo, for command: ShortcutCommand) -> Bool { assign(combo, to: command.menuID) == .assigned }
+    func reset(_ command: ShortcutCommand) { reset(id: command.menuID) }
+
     private func load() {
         guard let saved = UserDefaults.standard.dictionary(forKey: Self.defaultsKey) else { return }
         for (name, value) in saved {
-            guard let command = ShortcutCommand(rawValue: name), let entry = value as? [String: Any],
-                  let key = entry["key"] as? String, !key.isEmpty, let raw = entry["modifiers"] as? UInt else { continue }
+            guard let entry = value as? [String: Any] else { continue }
+            // Chords saved by 0.17–0.25 are keyed by ShortcutCommand's raw value.
+            let id = ShortcutCommand(rawValue: name)?.menuID ?? name
+            if entry["removed"] as? Bool == true { custom[id] = .some(nil); continue }
+            guard let key = entry["key"] as? String, !key.isEmpty, let raw = entry["modifiers"] as? UInt else { continue }
             let combo = KeyCombo(key, NSEvent.ModifierFlags(rawValue: raw))
-            if combo != command.defaultCombo { custom[command] = combo }
+            if combo != command(id)?.defaultCombo { custom[id] = .some(combo) }
         }
     }
     private func save() {
         if persists {
             var payload: [String: [String: Any]] = [:]
-            for (command, combo) in custom { payload[command.rawValue] = ["key": combo.key, "modifiers": combo.modifiers.rawValue] }
+            for (id, combo) in custom {
+                if let combo { payload[id] = ["key": combo.key, "modifiers": combo.modifiers.rawValue] }
+                else { payload[id] = ["removed": true] }
+            }
             if payload.isEmpty { UserDefaults.standard.removeObject(forKey: Self.defaultsKey) }
             else { UserDefaults.standard.set(payload, forKey: Self.defaultsKey) }
         }
         NotificationCenter.default.post(name: Self.didChange, object: self)
+    }
+}
+
+extension KeyCombo {
+    /// Whether a filter typed in Settings names this chord: glyphs ("⌥⌘→", "⌘k") or
+    /// words ("cmd k", "option command right").
+    func matches(_ query: String) -> Bool {
+        var text = query.lowercased()
+        for (words, glyph) in [(["command", "cmd"], "⌘"), (["option", "opt", "alt"], "⌥"), (["control", "ctrl"], "⌃"), (["shift"], "⇧")] {
+            for word in words { text = text.replacingOccurrences(of: word, with: glyph) }
+        }
+        text = text.replacingOccurrences(of: " ", with: "").replacingOccurrences(of: "+", with: "")
+        guard !text.isEmpty else { return false }
+        let glyphs: Set<Character> = ["⌘", "⌥", "⌃", "⇧"]
+        if text.contains(where: { glyphs.contains($0) }) {
+            // Modifiers in any order: every modifier typed must be held, and the rest must be the key.
+            let typed = Set(text.filter { glyphs.contains($0) })
+            let held = Set(compact.filter { glyphs.contains($0) })
+            let key = text.filter { !glyphs.contains($0) }
+            let ownKey = compact.filter { !glyphs.contains($0) }.lowercased()
+            return typed.isSubset(of: held) && (key.isEmpty || ownKey == key)
+        }
+        // Key names: "f5", "right arrow", "space". Short fragments would match every chord.
+        let names = spoken.lowercased().split(separator: " ").map(String.init)
+        let words = query.lowercased().split(separator: " ").map(String.init)
+        return !words.isEmpty && words.allSatisfy { word in names.contains { $0 == word || (word.count >= 3 && $0.hasPrefix(word)) } }
     }
 }
