@@ -39,8 +39,9 @@ import WebKit
 
 @MainActor extension BrowserController {
     func startTabArchiving() {
-        // A private window keeps nothing: no archive, no view times.
-        guard !isPrivateWindow else { return }
+        // A private window keeps nothing: no archive, no view times. A second normal window leaves the
+        // sweep to the main browser, which sees every window's tabs (one clock, one archive per tab).
+        guard !isPrivateWindow, primaryBrowser == nil else { return }
         tabArchiver.period = ArchivePreference.sweepPeriod
         tabArchiver.start { [weak self] in
             guard let self else { return }
@@ -58,10 +59,13 @@ import WebKit
         ArchivePreference.clockTick = now
         var changed = false
         if shift != 0 {
-            for index in session.tabs.indices {
-                guard let viewed = session.tabs[index].lastViewedAt else { continue }
-                session.tabs[index].lastViewedAt = ArchiveClock.moved(viewed, by: shift, now: now); changed = true
+            // One session change for the lot: with other windows open, each change is copied to them.
+            var tabs = session.tabs
+            for index in tabs.indices {
+                guard let viewed = tabs[index].lastViewedAt else { continue }
+                tabs[index].lastViewedAt = ArchiveClock.moved(viewed, by: shift, now: now); changed = true
             }
+            if changed { session.tabs = tabs }
         }
         let today = Set(session.tabs.lazy.filter { !$0.isSaved }.map(\.id))
         if let known = tabArchiver.knownToday {
@@ -103,7 +107,9 @@ import WebKit
     func stampViewed(_ ids: [UUID], at now: Date = Date()) {
         guard !ids.isEmpty else { return }
         let wanted = Set(ids)
-        for index in session.tabs.indices where wanted.contains(session.tabs[index].id) { session.tabs[index].lastViewedAt = now }
+        var tabs = session.tabs, changed = false
+        for index in tabs.indices where wanted.contains(tabs[index].id) { tabs[index].lastViewedAt = now; changed = true }
+        if changed { session.tabs = tabs }
     }
 
     /// At most this many tabs (or Splits) per sweep; the rest go five minutes later. Bounds the main-thread work.
@@ -114,33 +120,33 @@ import WebKit
     /// in Picture in Picture, downloading, under a Peek or holding typed text. Waits while a Space swipe or a
     /// sheet is in progress. A tab closes only once its archive record is saved.
     @discardableResult func sweepArchive(now: Date = Date()) async -> Int {
-        guard !isPrivateWindow, !tabArchiver.sweeping, !isShuttingDown else { return 0 }
+        guard !isPrivateWindow, primaryBrowser == nil, !tabArchiver.sweeping, !isShuttingDown else { return 0 }
         tickArchiveClock(now: now)
-        guard let after = ArchivePreference.effectiveSeconds,
-              view.window != nil, view.window?.attachedSheet == nil,
-              !trackingSwipe, pagingOffset == 0, pagingTarget == nil else { return 0 }
+        guard let after = ArchivePreference.effectiveSeconds, view.window != nil, archiveCanProceed else { return 0 }
         tabArchiver.sweeping = true
         defer { tabArchiver.sweeping = false }
         // A tab never stamped (from before auto-archive) starts its clock now, so upgrading never archives
         // a whole sidebar at once.
         var stamped = false
-        for index in session.tabs.indices where session.tabs[index].lastViewedAt == nil {
-            session.tabs[index].lastViewedAt = now; stamped = true
+        if session.tabs.contains(where: { $0.lastViewedAt == nil }) {
+            var tabs = session.tabs
+            for index in tabs.indices where tabs[index].lastViewedAt == nil { tabs[index].lastViewedAt = now }
+            session.tabs = tabs; stamped = true
         }
-        stampViewed(visibleMemberIDs, at: now)
+        stampViewed(viewedMemberIDs, at: now)
         let policy = TabArchivePolicy()
         // Only tabs already past the time need the (asynchronous) page checks.
         let timeDue = Set(policy.due(archiveCandidates(staying: []), now: now, after: after).prefix(Self.archiveBatchLimit))
         guard !timeDue.isEmpty else { if stamped { save() }; return 0 }
         var staying = Set<UUID>()
         for tab in session.tabs where timeDue.contains(session.split(for: tab.id)?.primaryID ?? tab.id) {
-            guard let web = browsers[tab.id] else { continue }
+            guard let web = livePage(tab.id) else { continue }
             if await Self.pageWantsToStay(web) { staying.insert(tab.id) }
             if isShuttingDown { return 0 }
         }
         // Re-read everything after the wait: the person may have switched tabs or Spaces meanwhile.
-        guard !isShuttingDown, view.window?.attachedSheet == nil, !trackingSwipe, pagingOffset == 0, pagingTarget == nil else { return 0 }
-        stampViewed(visibleMemberIDs, at: now)
+        guard !isShuttingDown, archiveCanProceed else { return 0 }
+        stampViewed(viewedMemberIDs, at: now)
         let due = policy.due(archiveCandidates(staying: staying), now: now, after: after).filter(timeDue.contains)
         let archived = archiveTabs(due)
         if archived == 0 && stamped { save() }
@@ -183,21 +189,25 @@ import WebKit
     }
 
     /// `staying`: tabs whose page asked to stay (playing media or holding typed text).
+    /// Every window counts: a tab on screen, playing, in Picture in Picture or under a Peek in any
+    /// normal window stays.
     func archiveCandidates(staying: Set<UUID>) -> [TabArchivePolicy.Candidate] {
-        let visible = Set(visibleMemberIDs)
+        let windows = sessionWindows
+        let visible = Set(viewedMemberIDs)
+        let selected = Set(viewingWindows.map(\.session.activeID))
         let downloading = downloads.activeSourceWebViews.map(ObjectIdentifier.init)
-        let pip = pictureInPicture.referencedTabID
+        let pip = Set(windows.compactMap(\.pictureInPicture.referencedTabID))
         return session.tabs.map { tab in
-            let web = browsers[tab.id]
+            let web = livePage(tab.id)
             let split = session.split(for: tab.id)
             return TabArchivePolicy.Candidate(
                 id: tab.id, lastViewedAt: tab.lastViewedAt, isSaved: tab.isSaved,
-                isVisible: visible.contains(tab.id) || tab.id == session.activeID,
+                isVisible: visible.contains(tab.id) || selected.contains(tab.id),
                 isPlayingMedia: staying.contains(tab.id),
                 isCapturing: web.map { $0.cameraCaptureState != .none || $0.microphoneCaptureState != .none } ?? false,
-                isPictureInPicture: pip == tab.id,
+                isPictureInPicture: pip.contains(tab.id),
                 isDownloading: web.map { downloading.contains(ObjectIdentifier($0)) } ?? false,
-                hasPeek: peeks[tab.id] != nil,
+                hasPeek: windows.contains { $0.peeks[tab.id] != nil },
                 isRestorable: tab.isHome || BrowserLibrary.canArchive([tab]),
                 splitPrimaryID: split?.primaryID)
         }

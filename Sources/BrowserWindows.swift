@@ -81,6 +81,34 @@ extension BrowserController {
 
     func shareSessionWithOtherWindows() { windowGroup?.share(from: self) }
 
+    /// Every normal window over this session, this one included (just this one when it is alone).
+    var sessionWindows: [BrowserController] {
+        guard let all = windowGroup?.browsers, !all.isEmpty else { return [self] }
+        return all.contains { $0 === self } ? all : [self] + all
+    }
+    /// Open on screen or in the Dock; false for a main window closed while another stays open.
+    var isWindowOpen: Bool {
+        guard let window = viewIfLoaded?.window else { return false }
+        return window.isVisible || window.isMiniaturized
+    }
+    /// The windows whose shown tabs count as viewed. Alone, this window always counts (as before
+    /// there were more windows); otherwise only the ones open.
+    var viewingWindows: [BrowserController] {
+        let windows = sessionWindows
+        return windows.count == 1 ? windows : windows.filter(\.isWindowOpen)
+    }
+    /// The tabs on screen in any window (both sides of a Split).
+    var viewedMemberIDs: [UUID] { viewingWindows.flatMap(\.visibleMemberIDs) }
+    /// A tab's page, in whichever window holds it.
+    func livePage(_ id: UUID) -> WKWebView? { sessionWindows.lazy.compactMap { $0.browsers[id] }.first }
+    /// No window is mid-swipe, paging Spaces or showing a sheet: auto-archive can close tabs.
+    var archiveCanProceed: Bool {
+        sessionWindows.allSatisfy { window in
+            window.viewIfLoaded?.window?.attachedSheet == nil && !window.trackingSwipe && window.pagingOffset == 0 && window.pagingTarget == nil
+        }
+    }
+
+
     /// Another window changed the shared tabs or Spaces: drop pages of tabs closed there, keep this
     /// window's selection valid, and redraw.
     func sessionChangedElsewhere() {
