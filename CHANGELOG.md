@@ -4,6 +4,7 @@
 
 - Peek grows out of the link you clicked as one card, with the site and page title in a slim address bar, a Copy Link button (⇧⌘C) and round Close, Open in Tab, Split View and Little Bam buttons beside it. The page behind dims softly. Closing shrinks the card back into the link; ⌘O grows it into the tab.
 - A Peek no longer flashes dark while its page loads: it shows the page behind's color until the new page draws.
+- Little Bam has a calmer frame: it wears its Space's color, the page sits in a rounded card, and one field in the bar holds the login profile, Back, Forward, Reload, the site, extensions and Copy Link. The traffic lights sit centered in the bar, and the window pops in and out like a system panel.
 
 ## 0.25.1 build 51 — Quit dialog and sidebar scroll bar polish
 

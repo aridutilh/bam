@@ -40,13 +40,16 @@ struct LittleBamDestination: Equatable {
 
     init(websiteDataStore: WKWebsiteDataStore, configure: ((WKWebViewConfiguration) -> Void)? = nil, beforeLoad: PreviewNavigationReadiness? = nil) {
         self.beforeLoad = beforeLoad
-        let window = LittleOrbitWindow(contentRect: NSRect(x: 0, y: 0, width: 760, height: 620),
+        let window = LittleOrbitWindow(contentRect: NSRect(x: 0, y: 0, width: LittleBamMetrics.width, height: LittleBamMetrics.height),
                                        styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
         super.init(window: window)
         window.title = "Little Bam"; window.contentMinSize = NSSize(width: 520, height: 320)
         window.titleVisibility = .hidden; window.titlebarAppearsTransparent = true
         window.isMovableByWindowBackground = false
         window.isReleasedWhenClosed = false; window.delegate = self
+        // Pops in and out like a system panel (scaled, GPU-only, so the page never re-lays out);
+        // macOS turns it into a fade under Reduce Motion.
+        window.animationBehavior = .alertPanel
         // Follows Bam's Appearance preference (NSApp.appearance), like the main window.
         window.contentView = root
         window.backgroundColor = BrowserChrome.pageSurface
@@ -104,6 +107,7 @@ struct LittleBamDestination: Equatable {
         content.onCloseRequest = { [weak self] in self?.close() }
         root.browserHost.addSubview(webView)
         webView.frame = root.browserHost.bounds; webView.autoresizingMask = [.width, .height]
+        root.browserHost.addSubview(root.progress, positioned: .above, relativeTo: webView)
         // A queued navigation belongs to the adopted view, not its obsolete host.
         if let requested = (webView as? PreviewWKWebView)?.pendingReadyURL { _ = content.load(url: requested) }
         refresh()
@@ -113,7 +117,7 @@ struct LittleBamDestination: Equatable {
         guard !didClose, let window else { return }
         if let parent, let screen = parent.screen {
             let available = screen.visibleFrame
-            let width = min(760, available.width-40), height = min(620, available.height-40)
+            let width = min(LittleBamMetrics.width, available.width-40), height = min(LittleBamMetrics.height, available.height-40)
             let origin = NSPoint(x: min(max(available.minX+20,parent.frame.midX-width/2),available.maxX-width-20),
                                  y: min(max(available.minY+20,parent.frame.midY-height/2),available.maxY-height-20))
             window.setFrame(NSRect(origin: origin, size: NSSize(width: width,height: height)), display: false)
@@ -143,6 +147,9 @@ struct LittleBamDestination: Equatable {
         cleanup()
     }
     func windowWillClose(_ notification: Notification) { cleanup() }
+    func windowDidResize(_ notification: Notification) { (window as? LittleOrbitWindow)?.centerTrafficLights() }
+    func windowDidBecomeKey(_ notification: Notification) { (window as? LittleOrbitWindow)?.centerTrafficLights() }
+    func windowDidResignKey(_ notification: Notification) { (window as? LittleOrbitWindow)?.centerTrafficLights() }
 
     private func cleanup() {
         guard !didClose else { return }
@@ -244,6 +251,7 @@ struct LittleBamDestination: Equatable {
         root.reload.toolTip = web.isLoading ? "Stop loading" : "Reload (⌘R)"
         root.progress.doubleValue = web.estimatedProgress; root.progress.isHidden = !web.isLoading
         let targets = destinations?() ?? []
+        root.tint = targets.first(where: \.isDefault)?.colorIndex
         let landing = targets.first(where: \.isDefault)?.name ?? "Bam"
         if root.promote.spaceName != landing { root.promote.spaceName = landing }
         root.promote.hasChoices = targets.count > 1
@@ -260,6 +268,18 @@ struct LittleBamDestination: Equatable {
     var onBack: (() -> Void)?
     var onForward: (() -> Void)?
     var onCopyLink: (() -> Void)?
+    /// The traffic lights sit centered in Little Bam's 44-point bar, not the system's shorter titlebar.
+    func centerTrafficLights() {
+        guard let content = contentView else { return }
+        let buttons: [NSWindow.ButtonType] = [.closeButton, .miniaturizeButton, .zoomButton]
+        let centerInWindow = NSPoint(x: 0, y: content.frame.height - LittleBamMetrics.barHeight / 2)
+        for (index, type) in buttons.enumerated() {
+            guard let button = standardWindowButton(type), let container = button.superview else { continue }
+            let center = container.convert(centerInWindow, from: nil)
+            let origin = NSPoint(x: LittleBamMetrics.lightsInset + CGFloat(index) * 20, y: (center.y - button.frame.height / 2).rounded())
+            if button.frame.origin != origin { button.setFrameOrigin(origin) }
+        }
+    }
     override func sendEvent(_ event: NSEvent) {
         if event.type == .keyDown, event.keyCode == 53, attachedSheet == nil, !(firstResponder is NSTextView) { onEscape?(); return }
         super.sendEvent(event)
@@ -283,10 +303,24 @@ struct LittleBamDestination: Equatable {
     }
 }
 
-/// The window: a translucent bar the traffic lights share, then the page.
+/// Little Bam's proportions, set against the reference small windows: a 44-point bar in the
+/// Space's color with one field plate, and the page as an inset card below it.
+enum LittleBamMetrics {
+    static let width: CGFloat = 920
+    static let height: CGFloat = 680
+    static let barHeight: CGFloat = 44
+    static let lightsInset: CGFloat = 16
+    static let pageInset: CGFloat = 7
+    static let pageRadius: CGFloat = 10
+    static let plateHeight: CGFloat = 30
+}
+
+/// The window: the Space's color around the page, a bar the traffic lights share with one field
+/// plate (profile, Back/Forward/Reload, the site, extensions, Copy Link) and the Open control.
 @MainActor private final class LittleOrbitRoot: NSView {
-    static let barHeight: CGFloat = 48
-    let bar = NSVisualEffectView()
+    static let barHeight: CGFloat = LittleBamMetrics.barHeight
+    let bar = NSView()
+    let plate = NSView()
     let browserHost = LittleOrbitBrowserHost()
     let profile = LittleBamChip(symbol: "person.crop.circle", title: "Default")
     let site = LittleBamSiteButton()
@@ -298,26 +332,29 @@ struct LittleBamDestination: Equatable {
     let copyLink = LittleBamIconButton(symbol: "link", label: "Copy link")
     let promote = LittleBamOpenControl()
     let progress = NSProgressIndicator()
+    /// The Space color the frame wears; nil is Bam's neutral chrome.
+    var tint: Int? { didSet { if tint != oldValue { applyAppearanceColors() } } }
     /// While editing, the address field replaces the site name.
     var editing = false { didSet { address.isHidden = !editing; site.isHidden = editing; needsLayout = true } }
     override var isFlipped: Bool { true }
     override init(frame: NSRect) {
         super.init(frame: frame)
         wantsLayer = true
-        bar.blendingMode = .behindWindow
-        bar.state = .active
-        bar.wantsLayer = true
-        let edge = CALayer()
-        edge.name = "edge"; bar.layer?.addSublayer(edge)
+        plate.wantsLayer = true
+        plate.layer?.cornerRadius = 8
+        browserHost.wantsLayer = true
+        browserHost.layer?.cornerRadius = LittleBamMetrics.pageRadius
+        browserHost.layer?.masksToBounds = true
+        browserHost.layer?.borderWidth = 1
         addSubview(browserHost)
         addSubview(bar)
-        [profile, back, forward, reload, site, address, extensions, copyLink, promote, progress].forEach(bar.addSubview)
+        bar.addSubview(plate)
+        [profile, back, forward, reload, site, address, extensions, copyLink, promote].forEach(bar.addSubview)
+        browserHost.addSubview(progress, positioned: .above, relativeTo: nil)
         profile.toolTip = "Login profile"
         address.placeholderString = "Search or enter a web address"; address.setAccessibilityLabel("Little Bam address")
         address.font = BamType.sans(13, weight: .medium); address.textColor = LittleBamTone.tone(1)
-        address.isBezeled = false; address.isBordered = false; address.drawsBackground = true
-        address.backgroundColor = LittleBamTone.tone(0.08)
-        address.wantsLayer = true; address.layer?.cornerRadius = 8
+        address.isBezeled = false; address.isBordered = false; address.drawsBackground = false
         address.focusRingType = .none; address.alignment = .center
         address.usesSingleLineMode = true; address.lineBreakMode = .byTruncatingTail
         (address.cell as? NSTextFieldCell)?.isScrollable = true
@@ -332,39 +369,46 @@ struct LittleBamDestination: Equatable {
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
     private func applyAppearanceColors() {
-        layer?.backgroundColor = resolvedCGColor(BrowserChrome.pageSurface, for: self)
-        bar.material = effectiveAppearance.isDarkChrome ? .hudWindow : .titlebar
-        (bar.layer?.sublayers?.first { $0.name == "edge" })?.backgroundColor = resolvedCGColor(LittleBamTone.tone(0.08), for: self)
+        layer?.backgroundColor = resolvedCGColor(LittleBamTone.frame(tint), for: self)
+        plate.layer?.backgroundColor = resolvedCGColor(LittleBamTone.plate, for: self)
+        browserHost.layer?.backgroundColor = resolvedCGColor(BrowserChrome.pageSurface, for: self)
+        browserHost.layer?.borderColor = resolvedCGColor(LittleBamTone.tone(0.07), for: self)
     }
     override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); applyAppearanceColors() }
     override func layout() {
         super.layout()
-        let width = bounds.width, barHeight = Self.barHeight
+        let width = bounds.width, barHeight = Self.barHeight, inset = LittleBamMetrics.pageInset
         bar.frame = NSRect(x: 0, y: 0, width: width, height: barHeight)
-        (bar.layer?.sublayers?.first { $0.name == "edge" })?.frame = NSRect(x: 0, y: barHeight - 1, width: width, height: 1)
-        browserHost.frame = NSRect(x: 0, y: barHeight, width: width, height: max(0, bounds.height - barHeight))
-        progress.frame = NSRect(x: 0, y: barHeight - 3, width: width, height: 3)
-        let y = (barHeight - 30) / 2
+        browserHost.frame = NSRect(x: inset, y: barHeight, width: max(0, width - 2 * inset),
+                                   height: max(0, bounds.height - barHeight - inset))
+        progress.frame = NSRect(x: 0, y: 0, width: browserHost.bounds.width, height: 3)
+        let plateHeight = LittleBamMetrics.plateHeight
+        let y = ((barHeight - plateHeight) / 2).rounded()
         // Traffic lights own the first 76 points.
-        var x: CGFloat = 80
-        profile.frame = NSRect(x: x, y: y, width: profile.intrinsicContentSize.width, height: 30); x = profile.frame.maxX + 8
-        back.frame = NSRect(x: x, y: y, width: 30, height: 30); x += 30
-        forward.frame = NSRect(x: x, y: y, width: 30, height: 30); x += 30
-        reload.frame = NSRect(x: x, y: y, width: 30, height: 30); x += 30
-        let leftEnd = x + 8
-        var right = width - 12
+        let plateStart: CGFloat = 78
+        var right = width - inset - 1
         let openWidth = promote.intrinsicContentSize.width
-        promote.frame = NSRect(x: right - openWidth, y: y, width: openWidth, height: 30); right = promote.frame.minX - 8
-        copyLink.frame = NSRect(x: right - 30, y: y, width: 30, height: 30); right -= 30
-        if !extensions.isHidden { extensions.frame = NSRect(x: right - 30, y: y, width: 30, height: 30); right -= 30 }
-        let rightStart = right - 8
+        promote.frame = NSRect(x: right - openWidth, y: y, width: openWidth, height: plateHeight); right = promote.frame.minX - 6
+        plate.frame = NSRect(x: plateStart, y: y, width: max(0, right - plateStart), height: plateHeight)
+        let icon: CGFloat = 26, iy = y + (plateHeight - icon) / 2
+        var x = plate.frame.minX + 3
+        profile.frame = NSRect(x: x, y: y + 4, width: profile.intrinsicContentSize.width, height: plateHeight - 8); x = profile.frame.maxX + 4
+        back.frame = NSRect(x: x, y: iy, width: icon, height: icon); x += icon
+        forward.frame = NSRect(x: x, y: iy, width: icon, height: icon); x += icon
+        reload.frame = NSRect(x: x, y: iy, width: icon, height: icon); x += icon
+        let leftEnd = x + 6
+        var plateRight = plate.frame.maxX - 3
+        copyLink.frame = NSRect(x: plateRight - icon, y: iy, width: icon, height: icon); plateRight -= icon
+        if !extensions.isHidden { extensions.frame = NSRect(x: plateRight - icon, y: iy, width: icon, height: icon); plateRight -= icon }
+        let rightStart = plateRight - 6
         // The site name centers in the window when there is room, else in the gap.
-        let gap = NSRect(x: leftEnd, y: y, width: max(0, rightStart - leftEnd), height: 30)
+        let gap = NSRect(x: leftEnd, y: y + 3, width: max(0, rightStart - leftEnd), height: plateHeight - 6)
         let siteWidth = min(gap.width, max(120, site.intrinsicContentSize.width))
         var siteX = width / 2 - siteWidth / 2
         siteX = min(max(siteX, gap.minX), max(gap.minX, gap.maxX - siteWidth))
-        site.frame = NSRect(x: siteX, y: y, width: siteWidth, height: 30)
-        address.frame = gap.insetBy(dx: 0, dy: 1)
+        site.frame = NSRect(x: siteX, y: gap.minY, width: siteWidth, height: gap.height)
+        address.frame = gap.insetBy(dx: 4, dy: 3)
+        (window as? LittleOrbitWindow)?.centerTrafficLights()
     }
 }
 
@@ -377,6 +421,18 @@ struct LittleBamDestination: Equatable {
     static func tone(_ alpha: CGFloat) -> NSColor {
         .chrome(light: NSColor(white: 0.08, alpha: min(1, alpha)), dark: NSColor(white: 1, alpha: alpha))
     }
+    /// The window frame in the Space's color: a pale wash on light chrome, a deep one on dark.
+    static func frame(_ colorIndex: Int?) -> NSColor {
+        guard let colorIndex else { return BrowserChrome.windowBackground }
+        let base = ArkPalette.spaceColor(colorIndex)
+        return .chrome(light: base.blended(withFraction: 0.62, of: NSColor(white: 0.97, alpha: 1)) ?? base,
+                       dark: base.blended(withFraction: 0.84, of: NSColor(white: 0.11, alpha: 1)) ?? base)
+    }
+    /// The field plate: lighter than the frame, like a recessed address field.
+    static let plate = NSColor.chrome(light: NSColor(white: 1, alpha: 0.5), dark: NSColor(white: 1, alpha: 0.07))
+    /// The Open control: a raised plate.
+    static let raised = NSColor.chrome(light: NSColor(white: 1, alpha: 0.88), dark: NSColor(white: 1, alpha: 0.12))
+    static let raisedHover = NSColor.chrome(light: NSColor(white: 1, alpha: 1), dark: NSColor(white: 1, alpha: 0.18))
 }
 
 /// A translucent 30-point square with one symbol; hover lifts it.
@@ -436,7 +492,8 @@ struct LittleBamDestination: Equatable {
         super.init(frame: .zero)
         isBordered = false; wantsLayer = true
         setButtonType(.momentaryChange)
-        isEnabled = false
+        // Informational: enabled so it isn't drawn dimmed, but it has no action.
+        target = nil; action = nil
         image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?.withSymbolConfiguration(.init(pointSize: 11, weight: .semibold))
         imagePosition = .imageLeading; imageHugsTitle = true
         layer?.cornerRadius = 8
@@ -507,7 +564,7 @@ struct LittleBamDestination: Equatable {
     init() {
         super.init(frame: .zero)
         wantsLayer = true
-        layer?.cornerRadius = 9
+        layer?.cornerRadius = 8
         layer?.borderWidth = 1
         setAccessibilityElement(true); setAccessibilityRole(.group)
         main.isBordered = false; main.title = ""; main.setButtonType(.momentaryChange)
@@ -539,8 +596,8 @@ struct LittleBamDestination: Equatable {
         ]))
         label.attributedStringValue = text
         main.setAccessibilityLabel("Open in \(spaceName)")
-        layer?.backgroundColor = resolvedCGColor(LittleBamTone.tone(hovering || pickerHovering ? 0.16 : 0.10), for: self)
-        layer?.borderColor = resolvedCGColor(LittleBamTone.tone(0.12), for: self)
+        layer?.backgroundColor = resolvedCGColor(hovering || pickerHovering ? LittleBamTone.raisedHover : LittleBamTone.raised, for: self)
+        layer?.borderColor = resolvedCGColor(LittleBamTone.tone(0.06), for: self)
         picker.layer?.backgroundColor = pickerHovering ? resolvedCGColor(LittleBamTone.tone(0.12), for: self) : NSColor.clear.cgColor
         keycap.layer?.backgroundColor = resolvedCGColor(LittleBamTone.tone(0.14), for: self)
         divider.layer?.backgroundColor = resolvedCGColor(LittleBamTone.tone(0.14), for: self)
