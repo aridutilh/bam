@@ -79,6 +79,8 @@ import WebKit
         return nil
     }
     func library(for profileID: UUID) -> BrowserLibrary {
+        // History is one file per profile, written by the main browser only.
+        if let primaryBrowser { return primaryBrowser.library(for: profileID) }
         if let existing = profileLibraries[profileID] {
             existing.profileName = session.profileName(profileID)
             return existing

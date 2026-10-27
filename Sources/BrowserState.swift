@@ -850,6 +850,17 @@ struct BrowserSession: Codable {
     private mutating func repairRememberedSelections() {
         for id in Array((lastSelectedTabIDsBySpace ?? [:]).keys) { repairRememberedSelection(in: id) }
     }
+    /// Another window changed the shared tabs or Spaces: keep this window's own selection valid.
+    mutating func repairWindowSelection() { repairRememberedSelections(); repairActiveSelection() }
+    /// This session's shared content (tabs, Spaces, folders, splits, profiles) carrying another
+    /// window's own state: its Space, selected tab, remembered selections and sidebar.
+    func sharing(windowStateOf window: BrowserSession) -> BrowserSession {
+        var merged = self
+        merged.activeID = window.activeID; merged.space = window.space
+        merged.lastSelectedTabIDsBySpace = window.lastSelectedTabIDsBySpace
+        merged.sidebarWidth = window.sidebarWidth; merged.sidebarVisible = window.sidebarVisible
+        return merged
+    }
     private mutating func repairActiveSelection() {
         if let selected = active, !selected.isUnloaded,
            (selected.isFavorite ? profileID(for: selected) == currentProfileID : spaceDefinition(selected.space) != nil) {

@@ -55,6 +55,7 @@ import WebKit
     }
     func showSplit(_ group: BrowserSplit) {
         guard let left = session.tabs.first(where: { $0.id == group.primaryID }), let right = session.tabs.first(where: { $0.id == group.secondaryID }) else { return }
+        if let elsewhere = pageShownElsewhere([group.primaryID, group.secondaryID]) { installActiveHost(elsewhere); return }
         let split = splitCoordinators[group.primaryID] ?? makeSplitCoordinator(group)
         let leftWeb = webView(for: left), rightWeb = webView(for: right)
         installActiveHost(split.view)

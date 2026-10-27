@@ -103,6 +103,8 @@ extension BrowserController {
 @MainActor final class BrowserCommandRouter: NSObject, NSMenuItemValidation {
     weak var main: BrowserController?
     var privateWindows: () -> [PrivateWindowController] = { [] }
+    /// Second normal windows (⌘N): each answers its own commands, like a private window.
+    var secondaryWindows: () -> [SecondaryWindowController] = { [] }
     /// Commands that always belong to the main browser, even with a private window in front.
     static let mainOnly: Set<Selector> = [
         #selector(BrowserController.newLittleOrbit(_:)), #selector(BrowserController.importFromArc(_:))
@@ -123,9 +125,26 @@ extension BrowserController {
         }
         return nil
     }
+    /// The second normal window in front, if any (sheets and panels count as their parent).
+    var keySecondaryWindow: SecondaryWindowController? {
+        var window = NSApp.keyWindow ?? NSApp.mainWindow
+        while let current = window {
+            if let match = secondaryWindows().first(where: { $0.window === current }) { return match }
+            window = current.sheetParent ?? current.parent
+        }
+        return nil
+    }
     func target(for selector: Selector?) -> BrowserController? {
         if let selector, Self.mainOnly.contains(selector) { return main }
-        return keyPrivateWindow?.controller ?? main
+        return keyPrivateWindow?.controller ?? keySecondaryWindow?.controller ?? main
+    }
+    /// The frontmost normal window's browser: the main one or a second window, never a private one.
+    var frontmostNormal: BrowserController? {
+        for window in NSApp.orderedWindows where window.isVisible {
+            if window === main?.view.window { return main }
+            if let match = secondaryWindows().first(where: { $0.window === window }) { return match.controller }
+        }
+        return main
     }
     override func responds(to aSelector: Selector!) -> Bool {
         if super.responds(to: aSelector) { return true }

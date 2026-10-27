@@ -310,7 +310,13 @@ import QuartzCore
     // Retain a small identity cache so nested dispatch cannot apply it twice.
     private var recentSpaceScrollEvents: [(event: NSEvent, consumed: Bool)] = []
     let sessionURL: URL
-    var session: BrowserSession { didSet { invalidateExtensionSurfaceTopology() } }
+    var session: BrowserSession { didSet { invalidateExtensionSurfaceTopology(); shareSessionWithOtherWindows() } }
+    /// The normal windows showing this profile's one session (File ▸ New Window). Nil for a private
+    /// window and fixtures, which keep their session to themselves.
+    weak var windowGroup: BrowserWindowGroup?
+    /// Set for a second normal window: the main browser, whose stores, history, downloads and
+    /// session file this window shares. Nil for the main browser itself.
+    weak var primaryBrowser: BrowserController?
     var displayedWidth: CGFloat
     var browsers: [UUID: WKWebView] = [:] { didSet { invalidateExtensionSurfaceTopology() } }
     var observations: [UUID: [NSKeyValueObservation]] = [:]
@@ -382,17 +388,18 @@ import QuartzCore
     /// `profileStores` is for disposable runs only (e.g. an isolated store from
     /// `WebsiteProfileStore(isolated:)`); nil keeps the standard store for `ephemeral`.
     init(sessionURL: URL, ephemeral: Bool = false, privateWindow: Bool = false, downloadCoordinator: DownloadCoordinator? = nil,
-         profileStores: WebsiteProfileStore? = nil) {
-        let ephemeral = ephemeral || privateWindow
-        self.downloads = downloadCoordinator ?? DownloadCoordinator()
-        self.sessionURL = sessionURL; self.privateMode = ephemeral; self.isPrivateWindow = privateWindow
-        self.profileStores = profileStores ?? WebsiteProfileStore(ephemeral: ephemeral)
-        self.favicons = WebsiteFaviconStore(directory: ephemeral ? nil : sessionURL.deletingLastPathComponent().appendingPathComponent("Favicons", isDirectory: true))
-        session = privateWindow ? .privateWindow() : ephemeral ? .fresh() : SessionFile.load(sessionURL)
+         profileStores: WebsiteProfileStore? = nil, sharing primary: BrowserController? = nil) {
+        let ephemeral = (ephemeral || privateWindow) && primary == nil
+        self.downloads = primary?.downloads ?? downloadCoordinator ?? DownloadCoordinator()
+        self.sessionURL = primary?.sessionURL ?? sessionURL; self.privateMode = primary?.privateMode ?? ephemeral; self.isPrivateWindow = privateWindow && primary == nil
+        self.profileStores = primary?.profileStores ?? profileStores ?? WebsiteProfileStore(ephemeral: ephemeral)
+        self.favicons = primary?.favicons ?? WebsiteFaviconStore(directory: ephemeral ? nil : sessionURL.deletingLastPathComponent().appendingPathComponent("Favicons", isDirectory: true))
+        self.primaryBrowser = primary
+        session = primary?.session ?? (privateWindow ? .privateWindow() : ephemeral ? .fresh() : SessionFile.load(sessionURL))
         if !ephemeral, UserDefaults.standard.object(forKey: "AutomaticallyShowPlayingVideo") != nil { automaticallyShowsVideo = UserDefaults.standard.bool(forKey: "AutomaticallyShowPlayingVideo") }
         displayedWidth = session.sidebarVisible ? CGFloat(session.sidebarWidth) : 0
         super.init(nibName: nil, bundle: nil)
-        if !ephemeral {
+        if !ephemeral && primary == nil {
             let writer = SessionWriter(url: sessionURL)
             writer.onError = { [weak self] error in
                 NSLog("Session save: %@", error.localizedDescription)
@@ -607,6 +614,8 @@ import QuartzCore
 
     func webView(for tab: BrowserTab) -> WKWebView {
         if let cached = browsers[tab.id] { return cached }
+        // One page per tab: a tab already live in another window moves here with its page intact.
+        if let moved = takePageFromOtherWindow(tab.id) { return moved }
         let configuration = WKWebViewConfiguration()
         configuration.adoptSafariUserAgent()
         configuration.websiteDataStore = profileStores.store(for: session.profileID(for: tab))
@@ -737,6 +746,8 @@ import QuartzCore
             // resetting back to the reference) is retired, never shown.
             if browsers[tab.id] != nil { teardownPage(tab.id) }
             installActiveHost(EaselReferenceView(title: tab.displayTitle))
+        } else if let elsewhere = pageShownElsewhere([tab.id]) {
+            installActiveHost(elsewhere)
         } else {
             let browser = webView(for: tab)
             if pictureInPicture.owns(browser) {
@@ -1500,6 +1511,8 @@ import QuartzCore
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4, execute: work)
     }
     func save() {
+        // A second window's tabs are the main browser's tabs: it writes the one session file.
+        if let primaryBrowser { primaryBrowser.save(); return }
         guard !privateMode else { return }
         saveWork?.cancel(); saveWork = nil
         sessionWriter?.enqueue(session)

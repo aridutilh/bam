@@ -29,6 +29,10 @@ import WebKit
     var privateWindows: [PrivateWindowController] = []
     /// Menu commands go through this to the browser in the key window.
     let commandRouter = BrowserCommandRouter()
+    /// Second normal windows (⌘N), sharing the main browser's session.
+    var secondaryWindows: [SecondaryWindowController] = []
+    let windowGroup = BrowserWindowGroup()
+    private var windowStateURL: URL?
     private var supportDirectory: URL?
     func applicationDidFinishLaunching(_ notification: Notification) {
         BamType.registerFonts()
@@ -98,6 +102,11 @@ import WebKit
         supportDirectory = support
         commandRouter.main = controller
         commandRouter.privateWindows = { [weak self] in self?.privateWindows ?? [] }
+        commandRouter.secondaryWindows = { [weak self] in self?.secondaryWindows ?? [] }
+        BrowserController.frontmostNormalBrowser = { [weak self] in self?.commandRouter.frontmostNormal }
+        windowGroup.add(controller)
+        // A fresh preview never restores windows; a real profile reopens the ones open at quit.
+        windowStateURL = preview ? nil : support.appendingPathComponent("windows.json")
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1260, height: 800), styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
         window.title = launch.windowTitle; window.titleVisibility = .hidden; window.titlebarAppearsTransparent = true
         window.isReleasedWhenClosed = false; window.delegate = self
@@ -114,6 +123,7 @@ import WebKit
             if self?.settings?.window.isVisible == true { self?.settings?.refresh() }
         }
         buildMenus(); window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
+        restoreSecondaryWindows()
         NotificationCenter.default.addObserver(forName: ShortcutStore.didChange, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.applyShortcuts() }
         }
@@ -141,6 +151,39 @@ import WebKit
         }
     }
     @objc func showWelcome(_ sender: Any?) { presentOnboarding() }
+    /// File ▸ New Window (⌘N): another window on the same Spaces and tabs, as in Arc.
+    @objc func newWindow(_ sender: Any?) {
+        guard let controller, onboarding == nil else { NSSound.beep(); return }
+        let reference = commandRouter.keySecondaryWindow?.controller ?? controller
+        let entry = openSecondaryWindow(state: nil, like: reference, frame: reference.view.window?.frame)
+        entry.show(openingPalette: true)
+    }
+    @discardableResult private func openSecondaryWindow(state: BrowserWindowState?, like reference: BrowserController?, frame: NSRect?) -> SecondaryWindowController {
+        let entry = SecondaryWindowController(primary: controller, group: windowGroup, state: state, like: reference, frame: frame)
+        entry.onClose = { [weak self] closed in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.secondaryWindows.removeAll { $0 === closed }
+                if !self.isTerminating { self.saveWindowStates() }
+            }
+        }
+        secondaryWindows.append(entry)
+        saveWindowStates()
+        return entry
+    }
+    private var isTerminating = false
+    /// Second windows' frames and selections, so they come back after a relaunch.
+    func saveWindowStates() {
+        guard let windowStateURL else { return }
+        BrowserWindowState.save(secondaryWindows.filter { $0.window.isVisible || $0.window.isMiniaturized }.map(\.state), to: windowStateURL)
+    }
+    private func restoreSecondaryWindows() {
+        guard let windowStateURL else { return }
+        for state in BrowserWindowState.load(windowStateURL) {
+            openSecondaryWindow(state: state, like: nil, frame: nil).show(openingPalette: false)
+        }
+        window.makeKeyAndOrderFront(nil)
+    }
     /// File ▸ New Private Window (⇧⌘N).
     @objc func newPrivateWindow(_ sender: Any?) {
         guard let supportDirectory, onboarding == nil else { NSSound.beep(); return }
@@ -242,7 +285,8 @@ import WebKit
                                                    icon: NSApp.applicationIconImage)
             return QuitConfirmationModel.resolve(choice, preference: preference, persist: controller.privateMode != true)
         }, save: {
-            await controller.flushSessionForTermination()
+            self.saveWindowStates()
+            return await controller.flushSessionForTermination()
         }, saveFailure: {
             let alert = NSAlert()
             alert.messageText = "Your latest browsing changes haven’t been saved"
@@ -279,18 +323,27 @@ import WebKit
         // Closing the last window triggers termination after AppKit hides it.
         // Cancel must bring back that retained session, not leave a windowless app.
         guard mainWindowWasClosed,
-              controller?.littleWindows.values.contains(where: { $0.window?.isVisible == true }) != true else { return }
+              controller?.littleWindows.values.contains(where: { $0.window?.isVisible == true }) != true,
+              !secondaryWindows.contains(where: { $0.window.isVisible }) else { return }
         mainWindowWasClosed = false
         window?.makeKeyAndOrderFront(nil)
     }
     func windowWillClose(_ notification: Notification) {
-        if let closing = notification.object as? NSWindow, closing === window { mainWindowWasClosed = true }
+        if let closing = notification.object as? NSWindow, closing === window {
+            mainWindowWasClosed = true
+            if secondaryWindows.contains(where: { $0.window.isVisible }) { controller?.releasePagesWhileHidden() }
+        }
     }
     func windowDidBecomeKey(_ notification: Notification) {
-        if let selected = notification.object as? NSWindow, selected === window { mainWindowWasClosed = false }
+        if let selected = notification.object as? NSWindow, selected === window {
+            mainWindowWasClosed = false
+            if let controller, controller.displayedTabID == nil { controller.showActive() }
+        }
     }
     func applicationWillTerminate(_ notification: Notification) {
         for entry in privateWindows { entry.controller.discardPrivateWindowData() }
+        isTerminating = true
+        for entry in secondaryWindows { entry.controller.closeAsSecondaryWindow() }
         controller?.prepareToClose(persistSession: false)
     }
     func application(_ application: NSApplication, open urls: [URL]) {
@@ -306,7 +359,7 @@ import WebKit
     func menuNeedsUpdate(_ menu: NSMenu) {
         if menu === extensionsMenu { controller?.updateExtensionsMenu(menu) }
     }
-    @objc func selectSpace(_ sender: NSMenuItem) { controller.changeSpace(sender.tag) }
+    @objc func selectSpace(_ sender: NSMenuItem) { (commandRouter.target(for: nil) ?? controller).changeSpace(sender.tag) }
     /// Every command item in the menu bar with its stable shortcut id, in menu order. The
     /// Extensions menu is left out: its items come and go with the extensions themselves.
     func menuShortcutItems() -> [(id: String, menu: String, item: NSMenuItem)] {
@@ -397,11 +450,12 @@ import WebKit
     }
     @objc func recordSpaceSwipes(_ sender: Any?) { SpaceSwipeDiagnostics.shared.start() }
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
-        if menuItem.action == #selector(newPrivateWindow(_:)) { return onboarding == nil && controller != nil }
+        if menuItem.action == #selector(newPrivateWindow(_:)) || menuItem.action == #selector(newWindow(_:)) { return onboarding == nil && controller != nil }
         if menuItem.action == #selector(selectSpace(_:)) {
             if commandRouter.keyPrivateWindow != nil { menuItem.state = .off; return false }
-            menuItem.state = controller?.session.space == menuItem.tag ? .on : .off
-            return controller?.session.spaceDefinition(menuItem.tag) != nil && window?.attachedSheet == nil
+            let browser = commandRouter.target(for: nil) ?? controller
+            menuItem.state = browser?.session.space == menuItem.tag ? .on : .off
+            return browser?.session.spaceDefinition(menuItem.tag) != nil && browser?.view.window?.attachedSheet == nil
         }
         if menuItem.action == #selector(recordSpaceSwipes(_:)) {
             return !SpaceSwipeDiagnostics.shared.isRecording && !SpaceSwipeDiagnostics.shared.isStarting
@@ -437,6 +491,7 @@ import WebKit
         item(app, "Show All", #selector(NSApplication.unhideAllApplications(_:)))
         app.addItem(.separator()); item(app, "Quit Bam", #selector(NSApplication.terminate(_:)), "q")
         let file = menu("File")
+        item(file, "New Window", #selector(newWindow(_:)), "n", .command, self)
         item(file, "New Private Window", #selector(newPrivateWindow(_:)), "n", [.command, .shift], self)
         item(file, "New Little Bam Window", #selector(BrowserController.newLittleOrbit(_:)), "n", [.command, .option], controller)
         bound(file, "New Tab", #selector(BrowserController.newTab(_:)), .newTab, controller)
