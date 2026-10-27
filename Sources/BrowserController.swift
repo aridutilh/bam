@@ -553,7 +553,7 @@ import QuartzCore
         browser.allowsBackForwardNavigationGestures = true
         BrowserPageGestures.configure(browser)
         preparePageTools(browser)
-        reapplyMute(browser, id: id)
+        tabNavigation.linkStatus.install(in: browser, owner: self); reapplyMute(browser, id: id)
         browser.autoresizingMask = [.width, .height]
         browser.setAccessibilityLabel("Web content")
         browsers[id] = browser
