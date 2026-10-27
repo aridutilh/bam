@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Split View is redrawn: each page is its own rounded card with a small gap between them, and each has a slim bar with Back, Forward, the site (click it to type an address) and Close. The page you're using gets a thin ring in your Space's color and its bar shows Reload and Separate. Drag the gap to resize; the Split remembers where you left it.
 - New tab actions, as in Arc: Duplicate (with its back/forward history), Rename… (leave it empty to go back to the page title), Mute / Unmute for a tab playing sound and Close Tabs Below. They're in the Tabs menu and the command bar.
 - Point at a link and its address shows in a small capsule at the page's bottom-left corner, as in Arc.
 - Fixed: after switching or editing Spaces, typing the letter "e" could open the Emoji & Symbols palette instead of typing. Shortcuts Settings no longer lists or rewrites the hidden menu items macOS adds on its own.
