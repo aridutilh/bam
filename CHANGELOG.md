@@ -33,6 +33,14 @@
 - Settings › Websites sets the zoom every page starts at (90%, 100%, 110% or 125%; ⌘0 returns to it) and a minimum font size for small text. It also lists the sites you keep awake, so you can add one by typing its address or remove one.
 - Settings › Appearance shows each Space's color next to the light and dark theme, so you can recolor a Space without opening it.
 - Settings › Privacy lists the sites where you've allowed ads, so you can block them there again.
+- The window's close, minimize and zoom buttons now sit on the same line as the sidebar, back, forward and reload buttons, as in Arc.
+- Tabs that never got a real title (often restored or imported ones) show the page's last known title, or its site name, instead of a long raw address. Titles also drop a trailing site name like "– Vercel" or "- YouTube".
+- Sidebar rows follow Arc's sizes and spacing: 14-point titles, 16-point icons, the address and Favorites at Arc's heights, and long titles ending in "…" just before the close button.
+- Every tab shows its close button when you point at it, the selected one included. Kept tabs that are open show a minus that puts the page to sleep and keeps the row; once it's asleep, the minus turns into a cross that removes the row (Reopen Closed Tab brings it back).
+- The address at the top of the sidebar reads a little quieter, and a long address fades out at its end.
+- The footer shows each Space as its emoji, the current one in color and the others in gray, spaced like Arc's and closing up when there are many.
+- Tabs fade softly as they scroll under the Space name and above the footer, and a thin line sits over the footer while more tabs continue below.
+- Reload and Stop swap with a quick scale.
 
 ## 0.25.1 build 51 — Quit dialog and sidebar scroll bar polish
 

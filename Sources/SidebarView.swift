@@ -53,6 +53,13 @@ struct SidebarTabItem: Equatable {
     var monogram: String? = nil
     /// A folder the Arc import created (recorded provenance only).
     var importedFromArc: Bool = false
+    /// A better-known title (from history) for a row whose own title is only its address. Display only.
+    var knownTitle: String? = nil
+    /// What the row shows: the best-known title without its trailing site name (SidebarDisplayPolicy.rowTitle).
+    var displayTitle: String {
+        if isFolder || isSplit { return title }
+        return SidebarDisplayPolicy.rowTitle(title, address: subtitle, knownTitle: knownTitle)
+    }
 }
 
 /// A destination offered by Move to Folder menus.
@@ -79,6 +86,8 @@ struct SidebarExtensionItem {
     var faviconProvider: ((UUID) -> NSImage?)? { didSet { refreshFavicons() } }
     var onSelectTab: ((UUID) -> Void)?
     var onCloseTab: ((UUID) -> Void)?
+    /// The cross on an unloaded kept tab: remove that row.
+    var onRemoveSavedTab: ((UUID) -> Void)?
     var onPinTab: ((UUID) -> Void)?
     var onFavoriteTab: ((UUID) -> Void)?
     var onEditSavedTab: ((UUID) -> Void)?
@@ -147,10 +156,10 @@ struct SidebarExtensionItem {
     var onMoveToFolder: ((UUID, UUID?) -> Void)?
     var folderTargets: ((UUID) -> [SidebarFolderTarget])?
     override var isFlipped: Bool { true }
-    private let back = ArkIconButton(symbol: "arrow.left", label: "Go back")
-    private let forward = ArkIconButton(symbol: "arrow.right", label: "Go forward")
-    private let reload = ArkIconButton(symbol: "arrow.clockwise", label: "Reload page")
-    private let toggle = ArkIconButton(symbol: "sidebar.left", label: "Hide sidebar")
+    private let back = ArkIconButton(symbol: "arrow.left", label: "Go back", glyphSize: 18)
+    private let forward = ArkIconButton(symbol: "arrow.right", label: "Go forward", glyphSize: 18)
+    private let reload = ArkIconButton(symbol: "arrow.clockwise", label: "Reload page", glyphSize: 17)
+    private let toggle = ArkIconButton(symbol: "sidebar.left", label: "Hide sidebar", glyphSize: 19)
     private let search = ArkSearchButton()
     private let extensionMenu = ArkIconButton(symbol: "puzzlepiece.extension", label: "Extensions")
     private let extensionLibrary = ArkExtensionLibraryButton()
@@ -167,6 +176,8 @@ struct SidebarExtensionItem {
     private var favorites: [ArkFavoriteButton] = []
     private var favoriteItems: [SidebarTabItem] = []
     private let clip = ArkFlippedView()
+    /// Arc's hairline over the footer, shown only while tabs continue below it.
+    private let footerRule = ArkFlippedView()
     private var page = SidebarPage() { didSet { onTabListChange?() } }
     /// Called when the visible tab list scrolls, re-lays out or changes page, so the scroll thumb can follow.
     var onTabListChange: (() -> Void)?
@@ -217,7 +228,10 @@ struct SidebarExtensionItem {
             })
         }
         [toggle, back, forward, reload, search, extensionMenu, extensionLibrary, siteSettingsButton, favoritesHost, clip, downloads, plus, spaceOverflow].forEach(addSubview)
+        // The window controls' row and the footer's + read a step softer than the address text, as in Yab.
+        for button in [toggle, back, forward, reload, plus, spaceOverflow] { button.tone = ArkPalette.chromeIcon }
         clip.addSubview(page); connect(page); cachedPages[0] = page
+        addSubview(footerRule); footerRule.wantsLayer = true; footerRule.alphaValue = 0
         back.handler = { [weak self] in self?.onBack?() }
         forward.handler = { [weak self] in self?.onForward?() }
         reload.handler = { [weak self] in self?.onReload?() }
@@ -323,6 +337,7 @@ struct SidebarExtensionItem {
         super.viewDidChangeEffectiveAppearance()
         func invalidate(_ view: NSView) { view.needsDisplay = true; view.subviews.forEach(invalidate) }
         invalidate(self)
+        updateFooterRule()
     }
 
     // A vertical tab list is always at its horizontal edge. Ask AppKit to
@@ -339,10 +354,12 @@ struct SidebarExtensionItem {
         page.scroll.onSpaceScroll = { [weak self] in self?.onSpaceScroll?($0, .tabList) ?? false }
         page.scroll.onScroll = { [weak self, weak page] in
             guard let self, let page, page === self.page else { return }
+            self.updateFooterRule()
             self.onTabListChange?()
         }
         page.select = { [weak self] in self?.onSelectTab?($0) }
         page.close = { [weak self] in self?.onCloseTab?($0) }
+        page.remove = { [weak self] in self?.onRemoveSavedTab?($0) }
         page.pin = { [weak self] in self?.onPinTab?($0) }
         page.favorite = { [weak self] in self?.onFavoriteTab?($0) }
         page.editSaved = { [weak self] in self?.onEditSavedTab?($0) }
@@ -424,7 +441,7 @@ struct SidebarExtensionItem {
             scheduleHoverResync()
         }
         back.isEnabled = canGoBack; forward.isEnabled = canGoForward
-        reload.setSymbol(isLoading ? "xmark" : "arrow.clockwise", label: isLoading ? "Stop loading" : "Reload page")
+        reload.setSymbol(isLoading ? "xmark" : "arrow.clockwise", label: isLoading ? "Stop loading" : "Reload page", animated: true)
         for button in spaces { button.selected = button.index == space }
         needsLayout = true
     }
@@ -518,6 +535,15 @@ struct SidebarExtensionItem {
         setPagingOffset(0)
         scheduleHoverResync()
     }
+    /// The rule fades in with the rows hidden below the list (over the list's last few points of travel).
+    var footerRuleOpacity: CGFloat { footerRule.alphaValue }
+    private func updateFooterRule() {
+        let list = page.scroll, content = list.documentView?.frame.height ?? 0
+        let below = content - list.contentView.bounds.maxY
+        let alpha = isPaging ? 0 : min(1, max(0, below / ArkMetrics.listFadeBottom))
+        footerRule.layer?.backgroundColor = effectiveAppearance.isDarkChrome ? NSColor(white: 1, alpha: 0.10).cgColor : NSColor(white: 0, alpha: 0.08).cgColor
+        if footerRule.alphaValue != alpha { footerRule.alphaValue = alpha }
+    }
     private var hoverResyncScheduled = false
     /// After a Space switch, paging settle or list rebuild, once rows have their final frames: whatever the
     /// still pointer is over hovers, and nothing else (a row hovered on a page that left keeps no gray).
@@ -533,11 +559,13 @@ struct SidebarExtensionItem {
     }
     override func layout() {
         super.layout(); let w = bounds.width
-        // Native traffic lights occupy the first 78 points of the top strip.
-        toggle.frame = NSRect(x: 80, y: 10, width: 28, height: 28)
+        // Native traffic lights occupy the first 74 points of the top strip, on this same row
+        // (BrowserController.placeWindowButtons).
+        let size = ArkMetrics.toolbarButtonSize, rowY = ArkMetrics.toolbarCenterY - size / 2
+        toggle.frame = NSRect(x: 79, y: rowY, width: size, height: size)
         let start = w - 104
         for (i, button) in [back, forward, reload].enumerated() {
-            button.frame = NSRect(x: start + CGFloat(i) * 34, y: 10, width: 28, height: 28)
+            button.frame = NSRect(x: start + CGFloat(i) * 34, y: rowY, width: size, height: size)
         }
         // Keep navigation clear of the traffic lights and sidebar toggle.
         let compact = w < 218
@@ -593,21 +621,23 @@ struct SidebarExtensionItem {
         favoritesHost.showPlaceholder(gapSlot.map(slotFrame) ?? (dropZone ? slotFrame(0) : nil), strong: gapSlot != nil)
         let pageTop: CGFloat = gridTop + favoriteHeight + (favoriteRows == 0 ? 0 : 10)
         clip.frame = NSRect(x: 0, y: pageTop, width: w, height: max(0, bounds.height - pageTop - 45))
+        footerRule.frame = NSRect(x: leading + 10, y: clip.frame.maxY, width: max(0, contentWidth - 20), height: 1)
+        updateFooterRule()
         setPagingOffset(offset)
         let y = bounds.height-36
         let footer = ArkFooterLayout(width: w, spaceCount: spaces.count,
                                      selectedIndex: spaces.firstIndex { $0.index == selectedSpace } ?? 0)
         downloads.frame = footer.downloads
         let overflowing = footer.overflowing, visibleCount = footer.visibleCount, startIndex = footer.startIndex
-        let x = footer.spacesX
+        let x = footer.spacesX, step = footer.step
         for (index, button) in spaces.enumerated() {
             button.isHidden = index < startIndex || index >= startIndex + visibleCount
             if !button.isHidden {
-                button.frame = NSRect(x: x + CGFloat(index - startIndex) * 28, y: y, width: 26, height: 28)
+                button.frame = NSRect(x: x + CGFloat(index - startIndex) * step, y: y, width: min(28, step - 1), height: 28)
             }
         }
         spaceOverflow.isHidden = !overflowing
-        spaceOverflow.frame = NSRect(x: x + CGFloat(visibleCount) * 28, y: y, width: 26, height: 28)
+        spaceOverflow.frame = NSRect(x: x + CGFloat(visibleCount) * step, y: y, width: min(28, step - 1), height: 28)
         plus.frame = NSRect(x: footer.plus.minX, y: y, width: 28, height: 28)
         downloads.frame.origin.y = y
     }
@@ -618,6 +648,7 @@ struct SidebarExtensionItem {
 @MainActor private final class SidebarPage: ArkFlippedView, NSTableViewDataSource, NSTableViewDelegate {
     var faviconProvider: ((UUID) -> NSImage?)?
     var select: ((UUID)->Void)?; var close: ((UUID)->Void)?; var pin: ((UUID)->Void)?; var newTab: (()->Void)?
+    var remove: ((UUID)->Void)?
     var manageSpaces: (() -> Void)?
     /// The context menu for this page's Space (by Space ID).
     var spaceMenu: ((Int) -> NSMenu?)?
@@ -683,11 +714,44 @@ struct SidebarExtensionItem {
         // Rows move under a still pointer while scrolling; hover follows the row actually under it.
         scroll.contentView.postsBoundsChangedNotifications = true
         scrollObserver = NotificationCenter.default.addObserver(forName: NSView.boundsDidChangeNotification, object: scroll.contentView, queue: nil) { [weak self] _ in
-            MainActor.assumeIsolated { if let self, self.window != nil { ArkHover.resync(in: self.table) } }
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.updateEdgeFade()
+                if self.window != nil { ArkHover.resync(in: self.table) }
+            }
+        }
+        // Rows added or removed change what lies past the bottom edge.
+        table.postsFrameChangedNotifications = true
+        contentObserver = NotificationCenter.default.addObserver(forName: NSView.frameDidChangeNotification, object: table, queue: nil) { [weak self] _ in
+            MainActor.assumeIsolated { self?.updateEdgeFade() }
         }
     }
     private var scrollObserver: NSObjectProtocol?
-    deinit { if let scrollObserver { NotificationCenter.default.removeObserver(scrollObserver) } }
+    private var contentObserver: NSObjectProtocol?
+    deinit { [scrollObserver, contentObserver].compactMap { $0 }.forEach(NotificationCenter.default.removeObserver) }
+    /// Rows fade as they scroll under the Space's heading and above the footer (Yab), instead of being cut by a hard
+    /// edge. Each edge fades only while rows are actually hidden past it, ramping in over the first points scrolled.
+    private let edgeFade = CAGradientLayer()
+    private(set) var edgeFadeAmounts: (top: CGFloat, bottom: CGFloat) = (0, 0)
+    func updateEdgeFade() {
+        guard let layer = scroll.layer, scroll.bounds.height > 0 else { return }
+        let clip = scroll.contentView.bounds, content = scroll.documentView?.frame.height ?? 0
+        let top = min(1, max(0, clip.minY / ArkMetrics.listFadeTop))
+        let bottom = min(1, max(0, (content - clip.maxY) / ArkMetrics.listFadeBottom))
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        defer { CATransaction.commit() }
+        edgeFadeAmounts = (top, bottom)
+        guard top > 0 || bottom > 0 else { if layer.mask != nil { layer.mask = nil }; return }
+        let height = scroll.bounds.height
+        edgeFade.frame = layer.bounds
+        // The scroll view's layer is flipped like the view: location 0 is the top edge.
+        edgeFade.startPoint = CGPoint(x: 0.5, y: 0); edgeFade.endPoint = CGPoint(x: 0.5, y: 1)
+        let opaque = CGColor(gray: 0, alpha: 1)
+        edgeFade.colors = [CGColor(gray: 0, alpha: 1 - top), opaque, opaque, CGColor(gray: 0, alpha: 1 - bottom)]
+        edgeFade.locations = [0, NSNumber(value: Double(min(0.45, ArkMetrics.listFadeTop / height))),
+                              NSNumber(value: Double(max(0.55, 1 - ArkMetrics.listFadeBottom / height))), 1]
+        if layer.mask !== edgeFade { layer.mask = edgeFade }
+    }
     required init?(coder: NSCoder) { fatalError() }
 
     override func viewDidMoveToSuperview() {
@@ -754,6 +818,9 @@ struct SidebarExtensionItem {
             }
         }
         synchronizeSelection()
+        // The table may re-tile after this pass; re-read what lies past each edge then too.
+        updateEdgeFade()
+        DispatchQueue.main.async { [weak self] in self?.updateEdgeFade() }
     }
 
     /// Keyboard navigation moves a focus ring, never the selection: Up/Down
@@ -883,6 +950,7 @@ struct SidebarExtensionItem {
         // Read the cell's current identity: AppKit can recycle it for a different tab.
         row.select = { [weak self, weak row] in if let id = row?.item.id { self?.select?(id) } }
         row.close = { [weak self, weak row] in if let id = row?.item.id { self?.close?(id) } }
+        row.remove = { [weak self, weak row] in if let id = row?.item.id { self?.remove?(id) } }
         row.pin = { [weak self, weak row] in if let id = row?.item.id { self?.pin?(id) } }
         row.move = { [weak self, weak row] destination in if let id = row?.item.id { self?.move?(id, destination) } }
         row.favorite = { [weak self, weak row] in if let id = row?.item.id { self?.favorite?(id) } }
@@ -914,7 +982,8 @@ struct SidebarExtensionItem {
     }
     func numberOfRows(in tableView: NSTableView) -> Int { entries.count }
     func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
-        switch entries[row] { case .tab: return 36; case .divider: return 20; case .newTab: return 36 }
+        // Yab: the line between kept and Today tabs sits close to both, not in a band of its own.
+        switch entries[row] { case .tab: return 36; case .divider: return 10; case .newTab: return 36 }
     }
     func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool {
         guard entries.indices.contains(row) else { return false }
@@ -992,6 +1061,7 @@ struct SidebarExtensionItem {
         if column.width != width { column.width = width }
         // The list's frame is final now: let the thumb beside the card re-read it.
         scroll.onScroll?()
+        updateEdgeFade()
     }
 }
 
@@ -1053,7 +1123,8 @@ enum ArkPalette {
     static let secondary = NSColor.chrome(light: NSColor(srgbRed: BamInk.lightSecondary, green: BamInk.lightSecondary, blue: BamInk.lightSecondary, alpha: 1),
                                           dark: NSColor(srgbRed: BamInk.darkSecondary, green: BamInk.darkSecondary, blue: BamInk.darkSecondary, alpha: 1))
     /// Hover wash for rows and icon buttons.
-    static let hover = NSColor.chrome(light: black(0.055), dark: white(0.07))
+    /// Light chrome lifts a hovered row with white, as Yab does (a gray wash reads as dirt on a pale Space).
+    static let hover = NSColor.chrome(light: white(0.42), dark: white(0.075))
     static let pressed = NSColor.chrome(light: black(0.10), dark: white(0.20))
     static let iconHover = NSColor.chrome(light: black(0.06), dark: white(0.10))
     /// The selected tab: a lifted pill.
@@ -1069,6 +1140,18 @@ enum ArkPalette {
     static let tileActive = NSColor.chrome(light: white(0.94), dark: white(0.22))
     static let tileRing = NSColor.chrome(light: black(0.06), dark: white(0.28))
     static let separator = NSColor.chrome(light: black(0.08), dark: white(0.10))
+    /// Unselected row titles: Bam's ink, partly see-through so it takes on the Space's own hue (Yab's warm ink on a
+    /// beige Space). The selected row, and anything under the pointer, uses full `ink`.
+    static let rowInk = NSColor.chrome(light: NSColor(srgbRed: BamInk.lightPrimary, green: BamInk.lightPrimary, blue: BamInk.lightPrimary, alpha: 0.76),
+                                       dark: NSColor(srgbRed: BamInk.darkPrimary, green: BamInk.darkPrimary, blue: BamInk.darkPrimary, alpha: 0.84))
+    /// The sidebar's address: Arc shows it a step quieter than the tab titles.
+    static let addressInk = NSColor.chrome(light: NSColor(srgbRed: BamInk.lightPrimary, green: BamInk.lightPrimary, blue: BamInk.lightPrimary, alpha: 0.82),
+                                           dark: NSColor(srgbRed: BamInk.darkPrimary, green: BamInk.darkPrimary, blue: BamInk.darkPrimary, alpha: 0.74))
+    /// Toolbar and footer glyphs: nearly full ink (thin strokes read lighter than text at the same color).
+    static let chromeIcon = NSColor.chrome(light: NSColor(srgbRed: BamInk.lightPrimary, green: BamInk.lightPrimary, blue: BamInk.lightPrimary, alpha: 0.88),
+                                           dark: NSColor(srgbRed: BamInk.darkPrimary, green: BamInk.darkPrimary, blue: BamInk.darkPrimary, alpha: 0.9))
+    static let folderInk = NSColor.chrome(light: NSColor(srgbRed: BamInk.lightPrimary, green: BamInk.lightPrimary, blue: BamInk.lightPrimary, alpha: 0.9),
+                                          dark: NSColor(srgbRed: BamInk.darkPrimary, green: BamInk.darkPrimary, blue: BamInk.darkPrimary, alpha: 0.92))
     /// Space icon tint: the pastel in dark mode, a deeper version on light chrome.
     static func spaceTint(_ index: Int) -> NSColor { spaceTints[min(spaceTints.count - 1, max(0, index))] }
     /// A Space's tint: its imported Arc accent (per appearance, contrast-checked
@@ -1113,11 +1196,15 @@ enum ArkPalette {
 
 /// Sidebar type scale, measured against Arc/Yab at the default sidebar width.
 @MainActor enum ArkType {
-    static let rowSize: CGFloat = 13.5
+    /// Yab's Comfortable density (Arc's sizes): 14pt titles in 36pt rows with 16pt icons.
+    static let rowSize: CGFloat = 14
     static func rowFont(active: Bool, folder: Bool) -> NSFont {
-        // Folders are medium, not semibold: a stack of folders no longer outweighs the tabs.
-        .systemFont(ofSize: rowSize, weight: folder || active ? .medium : .regular)
+        // The selected tab stands out by its card and full-strength ink, not a heavier weight, so its title never
+        // re-wraps or shifts when selection moves. Folders are medium: present, but not louder than the tabs.
+        .systemFont(ofSize: rowSize, weight: folder ? .medium : .regular)
     }
+    /// The Space's name above its rows.
+    static let headingSize: CGFloat = 13
 }
 /// Sidebar geometry in points, matched to Arc/Yab at a ~230-point sidebar.
 /// A single-line editable field cell whose text (drawn and while editing) sits on the field's vertical center with
@@ -1166,10 +1253,20 @@ final class ArkCenteredFieldCell: NSTextFieldCell {
     /// Space kept above and below the thumb within the list, and its shortest length.
     static let scrollThumbInset: CGFloat = 3
     static let scrollThumbMinLength: CGFloat = 24
+    /// How far rows fade as they scroll under the heading (top) and the footer (bottom).
+    static let listFadeTop: CGFloat = 18
+    static let listFadeBottom: CGFloat = 14
     static func sidebarContentWidth(_ width: CGFloat) -> CGFloat { max(0, width - sidebarLeading - sidebarTrailing) }
-    static let addressTop: CGFloat = 44
-    static let addressHeight: CGFloat = 34
-    static let favoriteHeight: CGFloat = 46
+    /// The window controls' row: the traffic lights, sidebar toggle, back, forward and reload share this vertical
+    /// center (Arc), and the first light is centered `trafficLightLeading` from the window's edge.
+    static let toolbarCenterY: CGFloat = 24
+    static let trafficLightLeading: CGFloat = 20
+    static let toolbarButtonSize: CGFloat = 28
+    static let addressTop: CGFloat = 46
+    static let addressHeight: CGFloat = 35
+    static let addressRadius: CGFloat = 10
+    static let addressTextSize: CGFloat = 13
+    static let favoriteHeight: CGFloat = 45
     static let favoriteGap: CGFloat = 8
     /// Narrowest Favorite tile before the grid drops a column (Arc fits four in a ~230pt sidebar).
     static let favoriteMinimumWidth: CGFloat = 44
@@ -1215,9 +1312,9 @@ final class ArkCenteredFieldCell: NSTextFieldCell {
                              width: max(1, device.width.rounded()), height: max(1, device.height.rounded()))
         return context.convertToUserSpace(snapped)
     }
-    static let rowRadius: CGFloat = 9
-    /// Leading icon column and the trailing gap a row always keeps.
-    static let leadingInset: CGFloat = 36
+    static let rowRadius: CGFloat = 10
+    /// Leading icon column and the trailing gap a row always keeps (titles start 10pt after the 16pt icon, as in Arc).
+    static let leadingInset: CGFloat = 35
     static let trailingGap: CGFloat = 10
     /// Room the close button (or folder chevron) takes when it is showing.
     static let trailingControl: CGFloat = 24
@@ -1235,21 +1332,34 @@ final class ArkCenteredFieldCell: NSTextFieldCell {
 /// The footer, as in Arc: Downloads at the leading edge, the Space buttons centered in the footer (an overflow
 /// menu after them only when they don't fit), New Tab at the trailing edge. Pure geometry.
 struct ArkFooterLayout {
-    static let step: CGFloat = 28
+    /// Arc spaces its footer icons about 32 points apart; with more Spaces they close up to 25 before an overflow
+    /// menu takes the rest.
+    static let maximumStep: CGFloat = 32
+    static let minimumStep: CGFloat = 22
     let downloads: NSRect, plus: NSRect
     let visibleCount: Int, startIndex: Int, overflowing: Bool
+    /// Distance between the visible Space buttons.
+    let step: CGFloat
     /// Leading x of the first visible Space button.
     let spacesX: CGFloat
     init(width w: CGFloat, spaceCount: Int, selectedIndex: Int) {
+        // Arc: Downloads (Library) at the leading edge, + at the trailing edge, the Spaces centered between them.
         downloads = NSRect(x: 9, y: 0, width: 28, height: 28)
         plus = NSRect(x: w - 36, y: 0, width: 28, height: 28)
-        let start: CGFloat = 43, end = w - 40
+        let start: CGFloat = 41, end = w - 40
         let room = max(0, end - start)
-        let capacity = max(1, Int(room / Self.step))
-        overflowing = spaceCount > capacity
-        visibleCount = min(spaceCount, max(1, capacity - (overflowing ? 1 : 0)))
+        let count = max(1, spaceCount)
+        let fitted = ((room + 2) / CGFloat(count)).rounded(.down)
+        if fitted >= Self.minimumStep {
+            step = min(Self.maximumStep, fitted); overflowing = false; visibleCount = spaceCount
+        } else {
+            step = Self.minimumStep
+            let capacity = max(1, Int((room + 2) / step))
+            overflowing = spaceCount > capacity
+            visibleCount = min(spaceCount, max(1, capacity - (overflowing ? 1 : 0)))
+        }
         startIndex = max(0, min(selectedIndex - visibleCount / 2, spaceCount - visibleCount))
-        let total = CGFloat(visibleCount + (overflowing ? 1 : 0)) * Self.step - 2
+        let total = CGFloat(visibleCount + (overflowing ? 1 : 0)) * step - 2
         // Centered in the whole footer, as Arc does, but never over the edge buttons.
         spacesX = min(max(start, ((w - total) / 2).rounded()), max(start, end - total))
     }
@@ -1331,23 +1441,61 @@ enum ArkTitleFade {
 /// to save memory is quieted, and only slightly.
 @MainActor enum ArkRowInk {
     static func title(sleeping: Bool) -> NSColor { sleeping ? ArkPalette.secondary : ArkPalette.ink }
+    /// Arc: every title reads at full ink (the selection card does the emphasis); memory-slept pages a step below.
+    static func title(sleeping: Bool, selected: Bool, folder: Bool) -> NSColor {
+        selected || folder ? ArkPalette.ink : title(sleeping: sleeping)
+    }
     static func iconAlpha(sleeping: Bool) -> CGFloat { sleeping ? 0.8 : 1 }
 }
 
 /// A Space's icon: its emoji when it has one, otherwise its tinted symbol.
 @MainActor enum ArkSpaceIcon {
-    static func draw(_ space: (emoji: String?, symbol: String, tint: NSColor), in rect: NSRect, opacity: CGFloat = 1) {
+    /// `grayscale`: an emoji drawn without its color (other Spaces in the footer, as in Yab).
+    static func draw(_ space: (emoji: String?, symbol: String, tint: NSColor), in rect: NSRect, opacity: CGFloat = 1, grayscale: Bool = false) {
         if let emoji = space.emoji {
             let font = NSFont.systemFont(ofSize: rect.height * 0.86)
             let string = NSAttributedString(string: emoji, attributes: [.font: font])
             let size = string.size()
+            let origin = NSPoint(x: rect.midX - size.width / 2, y: rect.midY - size.height / 2)
+            if grayscale, let gray = grayscaleEmoji(string) {
+                gray.draw(in: NSRect(origin: origin, size: size), from: .zero, operation: .sourceOver, fraction: opacity, respectFlipped: true, hints: nil)
+                return
+            }
             NSGraphicsContext.saveGraphicsState()
             NSGraphicsContext.current?.cgContext.setAlpha(opacity)
-            string.draw(at: NSPoint(x: rect.midX - size.width / 2, y: rect.midY - size.height / 2))
+            string.draw(at: origin)
             NSGraphicsContext.restoreGraphicsState()
         } else {
             SidebarSymbol.draw(named: space.symbol, in: rect, color: space.tint, pointSize: rect.height, opacity: opacity)
         }
+    }
+    /// An emoji's light and shade without its hue, rendered once per emoji and size at 3x.
+    private static var grayscaleCache: [String: NSImage] = [:]
+    static func grayscaleEmoji(_ string: NSAttributedString) -> NSImage? {
+        let size = string.size()
+        let key = "\(string.string)|\(size.width)x\(size.height)"
+        if let cached = grayscaleCache[key] { return cached }
+        let scale: CGFloat = 3
+        let width = Int(ceil(size.width * scale)), height = Int(ceil(size.height * scale))
+        guard width > 0, height > 0, width < 512, height < 512,
+              let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: width, pixelsHigh: height, bitsPerSample: 8, samplesPerPixel: 4,
+                                         hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: width * 4, bitsPerPixel: 32) else { return nil }
+        // The point size must be set before the context exists, so drawing lands at 3x.
+        rep.size = size
+        guard let context = NSGraphicsContext(bitmapImageRep: rep) else { return nil }
+        NSGraphicsContext.saveGraphicsState(); NSGraphicsContext.current = context
+        string.draw(at: .zero)
+        NSGraphicsContext.restoreGraphicsState()
+        guard let data = rep.bitmapData else { return nil }
+        for index in stride(from: 0, to: width * height * 4, by: 4) {
+            let r = Double(data[index]), g = Double(data[index + 1]), b = Double(data[index + 2])
+            let luma = UInt8(min(255, (0.299 * r + 0.587 * g + 0.114 * b).rounded()))
+            data[index] = luma; data[index + 1] = luma; data[index + 2] = luma
+        }
+        let image = NSImage(size: size); image.addRepresentation(rep)
+        if grayscaleCache.count > 128 { grayscaleCache.removeAll() }
+        grayscaleCache[key] = image
+        return image
     }
     static func image(for space: BrowserSpace, pointSize: CGFloat) -> NSImage? {
         guard let emoji = space.emoji else {
@@ -1574,6 +1722,13 @@ private class ArkHoverButton: NSButton, ArkHoverTracking {
 private final class ArkIconButton: ArkHoverButton {
     private var symbolName: String
     private let glyphSize: CGFloat
+    /// The glyph's ink at rest; hovered or pressed glyphs use full ink.
+    var tone: NSColor = ArkPalette.ink { didSet { needsDisplay = true } }
+    /// A symbol swap in progress (Arc's quick scale): the old glyph shrinks away, the new one grows in.
+    private var outgoing: String?
+    private var swapProgress: CGFloat = 1
+    private var swapTimer: Timer?
+    static let swapDuration: TimeInterval = 0.18
     init(symbol: String, label: String, glyphSize: CGFloat = 16) {
         symbolName = symbol; self.glyphSize = glyphSize
         super.init(frame: .zero)
@@ -1581,15 +1736,51 @@ private final class ArkIconButton: ArkHoverButton {
         setAccessibilityLabel(label)
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-    func setSymbol(_ symbol: String, label: String) {
+    var currentSymbol: String { symbolName }
+    func setSymbol(_ symbol: String, label: String, animated: Bool = false) {
+        let previous = symbolName
         symbolName = symbol
         toolTip = label
         setAccessibilityLabel(label)
         needsDisplay = true
+        guard animated, previous != symbol, window != nil, !isHiddenOrHasHiddenAncestor,
+              !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
+            if previous != symbol { swapTimer?.invalidate(); swapTimer = nil; outgoing = nil; swapProgress = 1 }
+            return
+        }
+        // Reversing mid-swap starts from whichever glyph is showing now.
+        outgoing = swapProgress < 0.5 ? (outgoing ?? previous) : previous
+        swapProgress = 0
+        swapTimer?.invalidate()
+        let began = ProcessInfo.processInfo.systemUptime
+        let timer = Timer(timeInterval: 1.0 / 60, repeats: true) { [weak self] timer in
+            MainActor.assumeIsolated {
+                guard let self, self.swapTimer === timer else { timer.invalidate(); return }
+                self.swapProgress = CGFloat(min(1, (ProcessInfo.processInfo.systemUptime - began) / Self.swapDuration))
+                self.needsDisplay = true
+                if self.swapProgress >= 1 { self.outgoing = nil; timer.invalidate(); self.swapTimer = nil }
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        swapTimer = timer
     }
     override func draw(_ dirtyRect: NSRect) {
         if (hovered || isHighlighted) && isEnabled { fill(isHighlighted ? ArkPalette.pressed : ArkPalette.iconHover, radius: 7) }
-        symbol(symbolName, rect: NSRect(x: (bounds.width - glyphSize) / 2, y: (bounds.height - glyphSize) / 2, width: glyphSize, height: glyphSize), color: ArkPalette.ink, size: glyphSize)
+        let color = (hovered || isHighlighted) && isEnabled ? ArkPalette.ink : tone
+        func glyph(_ name: String, scale: CGFloat, alpha: CGFloat) {
+            let size = glyphSize * scale
+            guard alpha > 0.01, size > 0.5 else { return }
+            SidebarSymbol.draw(named: name, in: NSRect(x: (bounds.width - size) / 2, y: (bounds.height - size) / 2, width: size, height: size),
+                               color: color, pointSize: size, opacity: (isEnabled ? 1 : 0.32) * alpha)
+        }
+        if let outgoing, swapProgress < 1 {
+            // First half: the old glyph scales down and fades; second half: the new one scales up from 60%.
+            let t = swapProgress
+            if t < 0.5 { let u = t / 0.5; glyph(outgoing, scale: 1 - 0.4 * u, alpha: 1 - u) }
+            else { let u = (t - 0.5) / 0.5, eased = 1 - pow(1 - u, 2); glyph(symbolName, scale: 0.6 + 0.4 * eased, alpha: eased) }
+        } else {
+            glyph(symbolName, scale: 1, alpha: 1)
+        }
     }
 }
 
@@ -1651,9 +1842,26 @@ private final class ArkIconButton: ArkHoverButton {
     required init?(coder: NSCoder) { fatalError() }
     override func draw(_ dirtyRect: NSRect) {
         // A lifted, translucent field like Arc/Yab rather than a dark well.
-        fill(hovered || isHighlighted ? ArkPalette.fieldHover : ArkPalette.field, radius: 10)
-        text(address, rect: NSRect(x: 12, y: (bounds.height - 18) / 2, width: max(0, bounds.width - 12 - trailingInset), height: 18),
-             size: 13.5, color: ArkPalette.ink.withAlphaComponent(0.92))
+        fill(hovered || isHighlighted ? ArkPalette.fieldHover : ArkPalette.field, radius: ArkMetrics.addressRadius)
+        let font = NSFont.systemFont(ofSize: ArkMetrics.addressTextSize)
+        let attributes: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: ArkPalette.addressInk]
+        let line = ceil(font.ascender - font.descender + font.leading)
+        let rect = NSRect(x: 13, y: ((bounds.height - line) / 2).rounded(), width: max(0, bounds.width - 13 - trailingInset), height: line)
+        let width = (address as NSString).size(withAttributes: attributes).width
+        guard let context = NSGraphicsContext.current?.cgContext else { return }
+        // The address reads from its start and fades out at the end when it doesn't fit (no ellipsis), as in Arc/Yab.
+        context.saveGState()
+        context.clip(to: rect)
+        context.beginTransparencyLayer(auxiliaryInfo: nil)
+        (address as NSString).draw(at: NSPoint(x: rect.minX, y: rect.minY), withAttributes: attributes)
+        if width > rect.width, let fade = CGGradient(colorsSpace: CGColorSpaceCreateDeviceGray(),
+                                                     colors: [CGColor(gray: 0, alpha: 0), CGColor(gray: 0, alpha: 1)] as CFArray, locations: [0, 1]) {
+            context.setBlendMode(.destinationOut)
+            let start = rect.maxX - ArkTitleFade.width
+            context.drawLinearGradient(fade, start: CGPoint(x: start, y: 0), end: CGPoint(x: rect.maxX, y: 0), options: [.drawsAfterEndLocation])
+        }
+        context.endTransparencyLayer()
+        context.restoreGState()
     }
 }
 
@@ -1762,6 +1970,56 @@ private final class ArkFavoriteButton: ArkHoverButton {
     @objc private func closeFromMenu() { close?() }
 }
 
+/// A tab row's trailing button, drawn as two strokes: a cross (close or remove) or, on an open kept tab, a minus
+/// (unload). When that tab goes down under the pointer, the minus turns into its cross. Faint with the row's
+/// highlight; its rounded square appears only while the button itself is hovered (Yab).
+@MainActor private final class ArkRowActionButton: ArkHoverButton {
+    /// 0: minus, 1: cross.
+    private(set) var crossness: CGFloat = 1
+    private var morph: Timer?
+    static let morphDuration: TimeInterval = 0.2
+    init() { super.init(frame: .zero); configure(cross: true, label: "Close tab", animated: false) }
+    required init?(coder: NSCoder) { fatalError() }
+    var showsCross: Bool { crossness >= 0.5 }
+    func configure(cross: Bool, label: String, animated: Bool) {
+        toolTip = label; setAccessibilityLabel(label)
+        let target: CGFloat = cross ? 1 : 0
+        morph?.invalidate(); morph = nil
+        guard animated, window != nil, crossness != target, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
+            crossness = target; needsDisplay = true; return
+        }
+        let start = crossness, began = ProcessInfo.processInfo.systemUptime
+        let timer = Timer(timeInterval: 1.0 / 60, repeats: true) { [weak self] timer in
+            MainActor.assumeIsolated {
+                guard let self, self.morph === timer else { timer.invalidate(); return }
+                let progress = min(1, (ProcessInfo.processInfo.systemUptime - began) / Self.morphDuration)
+                // A slight overshoot, so the strokes settle into the cross like a spring.
+                let eased = progress >= 1 ? 1 : 1 - pow(1 - progress, 3) * cos(progress * .pi * 0.5)
+                self.crossness = start + (target - start) * CGFloat(eased)
+                self.needsDisplay = true
+                if progress >= 1 { self.crossness = target; timer.invalidate(); self.morph = nil }
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        morph = timer
+    }
+    override func draw(_ dirtyRect: NSRect) {
+        if hovered || isHighlighted { fill(isHighlighted ? ArkPalette.pressed : ArkPalette.iconHover, radius: 7) }
+        let color = hovered || isHighlighted ? ArkPalette.ink : ArkPalette.secondary
+        let center = NSPoint(x: bounds.midX, y: bounds.midY)
+        // The cross matches a 12pt SF xmark; the minus is a little wider, as Arc's is.
+        let half: CGFloat = 4.1 + 0.9 * (1 - crossness)
+        let angle = crossness * .pi / 4
+        let path = NSBezierPath()
+        for sign in [CGFloat(1), -1] {
+            let dx = cos(angle) * half, dy = sin(angle * sign) * half
+            path.move(to: NSPoint(x: center.x - dx, y: center.y - dy)); path.line(to: NSPoint(x: center.x + dx, y: center.y + dy))
+        }
+        path.lineWidth = 1.45; path.lineCapStyle = .round
+        color.setStroke(); path.stroke()
+    }
+}
+
 @MainActor
 private final class ArkNewTabButton: ArkHoverButton {
     init() {
@@ -1772,9 +2030,9 @@ private final class ArkNewTabButton: ArkHoverButton {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     override func draw(_ dirtyRect: NSRect) {
         if hovered { fill(ArkPalette.hover, radius: ArkMetrics.rowRadius) }
-        symbol("plus", rect: NSRect(x: 10, y: (bounds.height - 15) / 2, width: 15, height: 15), color: ArkPalette.secondary, size: 15)
-        text("New Tab", rect: NSRect(x: 36, y: (bounds.height - 18) / 2, width: max(0, bounds.width - 48), height: 18),
-             size: ArkType.rowSize, color: ArkPalette.secondary)
+        symbol("plus", rect: NSRect(x: 10, y: (bounds.height - 16) / 2, width: 16, height: 16), color: hovered ? ArkPalette.rowInk : ArkPalette.secondary, size: 15)
+        text("New Tab", rect: NSRect(x: ArkMetrics.leadingInset + 2, y: (bounds.height - 18) / 2, width: max(0, bounds.width - 48), height: 18),
+             size: ArkType.rowSize, color: hovered ? ArkPalette.rowInk : ArkPalette.secondary)
     }
 }
 
@@ -1874,15 +2132,17 @@ private final class ArkSpaceButton: ArkHoverButton, SpaceTinted {
         needsDisplay = true
     }
     override func draw(_ dirtyRect: NSRect) {
-        if selected || hovered || dropHovered { fill(selected || dropHovered ? ArkPalette.selection : ArkPalette.hover, radius: 7) }
+        // Yab/Arc: the current Space is the one in color; no plate behind it. Hover and drops get a soft square.
+        if hovered || dropHovered { fill(dropHovered ? ArkPalette.selection : ArkPalette.hover, radius: 7) }
         if dropHovered {
             NSColor.controlAccentColor.withAlphaComponent(0.7).setStroke()
             let ring = NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: 7, yRadius: 7); ring.lineWidth = 1.5; ring.stroke()
         }
-        // Unselected Spaces recede, as Arc's footer dots do.
-        let size: CGFloat = emoji == nil ? 16 : 15
-        ArkSpaceIcon.draw((emoji, symbolName, tint), in: NSRect(x: (bounds.width - size) / 2, y: (bounds.height - size) / 2, width: size, height: size),
-                          opacity: selected || hovered || dropHovered ? 1 : 0.62)
+        let size: CGFloat = 16
+        let lit = selected || hovered || dropHovered
+        ArkSpaceIcon.draw((emoji, symbolName, lit ? tint : ArkPalette.secondary),
+                          in: NSRect(x: (bounds.width - size) / 2, y: (bounds.height - size) / 2, width: size, height: size),
+                          opacity: lit ? 1 : 0.55, grayscale: !lit)
     }
     override func menu(for event: NSEvent) -> NSMenu? {
         if let menu = contextMenu?() { return menu }
@@ -1915,9 +2175,10 @@ private final class ArkSpaceHeading: ArkHoverButton, SpaceTinted {
     override func draw(_ dirtyRect: NSRect) {
         if hovered { fill(ArkPalette.hover, radius: 7) }
         let iconSize: CGFloat = emoji == nil ? 15 : 14
-        ArkSpaceIcon.draw((emoji, symbolName, tint), in: NSRect(x: 2, y: (bounds.height - iconSize) / 2, width: iconSize, height: iconSize))
-        text(name, rect: NSRect(x: 28, y: (bounds.height - 18) / 2, width: max(0, bounds.width - 46), height: 18),
-             size: 13, weight: .semibold, color: ArkPalette.secondary)
+        // Arc: the icon sits in the rows' icon column and the name starts with the row titles.
+        ArkSpaceIcon.draw((emoji, symbolName, tint), in: NSRect(x: 6 + (16 - iconSize) / 2, y: (bounds.height - iconSize) / 2, width: iconSize, height: iconSize))
+        text(name, rect: NSRect(x: ArkMetrics.leadingInset - 2, y: (bounds.height - 18) / 2, width: max(0, bounds.width - ArkMetrics.leadingInset - 16), height: 18),
+             size: ArkType.headingSize, weight: .semibold, color: ArkPalette.secondary)
         if hovered { symbol("chevron.down", rect: NSRect(x: bounds.width - 15, y: (bounds.height - 10) / 2, width: 10, height: 10), color: ArkPalette.secondary, size: 10) }
     }
 }
@@ -1963,7 +2224,8 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted, Ar
     /// Folders show a small disclosure chevron at the trailing edge.
     private let chevronView = NSImageView()
     private var favicon: NSImage?
-    private let closeButton = ArkIconButton(symbol: "xmark", label: "Close tab", glyphSize: 12)
+    private let closeButton = ArkRowActionButton()
+    var remove: (() -> Void)?
     private var hovered = false
     private var area: NSTrackingArea?
     private let hoverLifecycle = ArkHoverLifecycle()
@@ -1974,9 +2236,9 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted, Ar
     private var didDrag = false
     init(item: SidebarTabItem) {
         self.item = item
-        titleLabel = arkLabel(item.title.isEmpty ? "New Tab" : item.title, size: ArkType.rowSize, weight: item.isActive ? .medium : .regular)
-        // Long titles clip under a soft trailing fade (updateTitleFade), not an ellipsis.
-        titleLabel.lineBreakMode = .byClipping; titleLabel.wantsLayer = true
+        titleLabel = arkLabel(item.title.isEmpty ? "New Tab" : item.displayTitle, size: ArkType.rowSize, weight: .regular)
+        // Arc: a long title ends in an ellipsis just before the trailing button (or the row's end).
+        titleLabel.lineBreakMode = .byTruncatingTail
         subtitleLabel = arkLabel(item.subtitle, size: 9, weight: .regular)
         super.init(frame: .zero)
         wantsLayer = true
@@ -1986,8 +2248,12 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted, Ar
         iconView.imageScaling = .scaleProportionallyUpOrDown
         iconView.contentTintColor = item.isActive ? spaceTint : ArkPalette.secondary
         for view in [titleLabel, subtitleLabel, iconView, chevronView, closeButton] as [NSView] { addSubview(view) }
-        closeButton.isHidden = !item.isActive
-        closeButton.handler = { [weak self] in self?.close?() }
+        closeButton.isHidden = true
+        closeButton.handler = { [weak self] in
+            guard let self else { return }
+            // An unloaded kept tab's cross removes the row; everything else closes (a kept tab unloads, keeping it).
+            if self.item.isPinned && self.item.isUnloaded && !self.item.isSplit { self.remove?() } else { self.close?() }
+        }
         chevronView.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 9, weight: .semibold)
         chevronView.contentTintColor = ArkPalette.ink; chevronView.isHidden = true
         chevronView.identifier = NSUserInterfaceItemIdentifier("folder-chevron")
@@ -2013,9 +2279,10 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted, Ar
             // Reused for another row mid-press: abandon that press and any drag it began.
             dragOrigin = nil; pressedID = nil; didDrag = false
         }
-        if first || old.title != item.title || old.isFolder != item.isFolder {
+        if first || old.title != item.title || old.isFolder != item.isFolder || old.subtitle != item.subtitle || old.knownTitle != item.knownTitle {
             // Assistive tech hears exactly what the row shows, including the blank-title fallback.
-            titleLabel.stringValue = item.title.isEmpty ? (item.isFolder ? "Folder" : "New Tab") : item.title
+            let shown = item.displayTitle
+            titleLabel.stringValue = shown.isEmpty ? (item.isFolder ? "Folder" : "New Tab") : shown
             setAccessibilityLabel(titleLabel.stringValue)
             needsLayout = true   // the fade depends on the text's width
         }
@@ -2023,8 +2290,8 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted, Ar
             titleLabel.font = ArkType.rowFont(active: item.isActive, folder: item.isFolder); needsLayout = true
         }
         if first || old.depth != item.depth || old.isFolder != item.isFolder { needsLayout = true }
-        if first || old.isUnloaded != item.isUnloaded || old.isSleeping != item.isSleeping {
-            titleLabel.textColor = ArkRowInk.title(sleeping: item.isSleeping)
+        if first || old.isUnloaded != item.isUnloaded || old.isSleeping != item.isSleeping || old.isActive != item.isActive || old.isFolder != item.isFolder {
+            titleLabel.textColor = ArkRowInk.title(sleeping: item.isSleeping, selected: item.isActive && !item.isFolder, folder: item.isFolder)
             iconView.alphaValue = ArkRowInk.iconAlpha(sleeping: item.isSleeping)
         }
         if first || old.subtitle != item.subtitle { subtitleLabel.stringValue = item.subtitle }
@@ -2039,9 +2306,17 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted, Ar
             }
         } else if favicon == nil, first || old.symbol != item.symbol || old.monogram != item.monogram || old.isFolder { showFallbackIcon() }
         if first || old.isActive != item.isActive || old.isFolder != item.isFolder { applyIconTint() }
-        if first || old.isSplit != item.isSplit || old.isPinned != item.isPinned || old.isFolder != item.isFolder {
-            closeButton.setSymbol("xmark", label: item.isSplit ? "Close Split" : item.isPinned ? "Unload tab" : "Close tab")
-            closeButton.setAccessibilityHelp(item.isSplit ? "Saved panes unload and remain in the sidebar; ordinary panes close." : nil)
+        if first || old.isSplit != item.isSplit || old.isPinned != item.isPinned || old.isFolder != item.isFolder || old.isUnloaded != item.isUnloaded {
+            // Kept tabs (Arc's pinned style): a minus puts an open page down and keeps the row; once down, the same
+            // strokes turn into the cross that removes it. Today tabs and Splits always show the cross.
+            let removes = item.isPinned && item.isUnloaded && !item.isSplit
+            let unloads = item.isPinned && !item.isUnloaded && !item.isSplit
+            let label = item.isSplit ? "Close Split" : removes ? "Remove tab" : unloads ? "Unload tab" : "Close tab"
+            // Only the same row changing state while its button shows animates; reuse and first display snap.
+            let animate = !first && old.id == item.id && !closeButton.isHidden
+            closeButton.configure(cross: !unloads, label: label, animated: animate)
+            closeButton.setAccessibilityHelp(item.isSplit ? "Saved panes unload and remain in the sidebar; ordinary panes close."
+                : removes ? "Removes this kept tab. Reopen Closed Tab brings it back." : unloads ? "Unloads the page and keeps the tab." : nil)
             setAccessibilityHelp(item.isSplit ? "Split. Closing unloads saved panes and keeps their saved tabs; ordinary panes close." : item.isPinned ? "Kept tab. Closing unloads its page and keeps the saved tab." : "Tab")
         }
         updateTrailingControls()
@@ -2153,7 +2428,7 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted, Ar
     /// tech follows) but draws none, as macOS controls do.
     fileprivate static var nextFocusIsFromPointer = false
     private(set) var showsFocusRing = false {
-        didSet { if oldValue != showsFocusRing { needsDisplay = true; updateChevronEmphasis(focused: showsFocusRing) } }
+        didSet { if oldValue != showsFocusRing { needsDisplay = true; updateTrailingControls() } }
     }
     fileprivate func hideFocusRing() { showsFocusRing = false }
     fileprivate func showKeyboardFocus() { if window?.firstResponder === self { showsFocusRing = true } }
@@ -2182,8 +2457,8 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted, Ar
         let frames = ArkRowLayout(width: bounds.width, height: bounds.height, depth: item.depth, listMaxDepth: listMaxDepth,
                                   isFolder: item.isFolder, showsClose: !closeButton.isHidden)
         iconView.frame = frames.icon
-        titleLabel.frame = frames.title
-        updateTitleFade(visibleWidth: frames.visibleTitleEnd - frames.title.minX)
+        // The title's start never moves; only where it ends (and so its ellipsis) follows the button.
+        titleLabel.frame = NSRect(x: frames.title.minX, y: frames.title.minY, width: max(0, frames.visibleTitleEnd - frames.title.minX), height: frames.title.height)
         subtitleLabel.frame = NSRect(x: frames.title.minX + 1, y: 23, width: frames.title.width, height: 12)
         subtitleLabel.isHidden = true
         closeButton.frame = frames.close
@@ -2194,31 +2469,12 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted, Ar
     private func updateTrailingControls() {
         // The title's end depends on both trailing controls, so a change to
         // either (including a reused cell switching tab ↔ folder) re-lays out.
-        let hidden = item.isFolder || item.isUnloaded || (!hovered && !item.isActive)
+        // Yab/Arc: every tab row shows its button under the pointer (or with keyboard focus), the selected one included.
+        let hidden = item.isFolder || !(hovered || showsFocusRing)
         if closeButton.isHidden != hidden { closeButton.isHidden = hidden; needsLayout = true }
         if chevronView.isHidden != !item.isFolder { chevronView.isHidden = !item.isFolder; needsLayout = true }
         updateChevronEmphasis(focused: window?.firstResponder === self && showsFocusRing)
     }
-    /// Trailing fade: a horizontal gradient mask on the title's layer. Only the
-    /// mask moves (to clear the close button on hover); the text never shifts.
-    /// The full title stays in the tooltip and the row's accessibility label.
-    private func updateTitleFade(visibleWidth: CGFloat) {
-        let bounds = titleLabel.bounds
-        let textWidth = ceil(titleLabel.attributedStringValue.size().width) + 2
-        CATransaction.begin(); CATransaction.setDisableActions(true)
-        defer { CATransaction.commit() }
-        guard let stops = ArkTitleFade.stops(textWidth: textWidth, frameWidth: bounds.width, visibleWidth: visibleWidth),
-              let layer = titleLabel.layer else { titleLabel.layer?.mask = nil; titleFadeStops = nil; return }
-        let mask = (layer.mask as? CAGradientLayer) ?? CAGradientLayer()
-        mask.frame = bounds
-        mask.startPoint = CGPoint(x: 0, y: 0.5); mask.endPoint = CGPoint(x: 1, y: 0.5)
-        mask.colors = [NSColor.black.cgColor, NSColor.black.cgColor, NSColor.clear.cgColor, NSColor.clear.cgColor]
-        mask.locations = [0, NSNumber(value: Double(stops.start)), NSNumber(value: Double(stops.end)), 1]
-        if layer.mask !== mask { layer.mask = mask }
-        titleFadeStops = stops
-    }
-    /// The current fade (title-frame fractions), for tests; nil when the title fits.
-    private(set) var titleFadeStops: (start: CGFloat, end: CGFloat)?
     /// Folders recede at rest: the chevron is quieter until the row is hovered
     /// or focused, so open/closed state stays visible without a gray column.
     private func updateChevronEmphasis(focused: Bool) {
@@ -2467,6 +2723,6 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted, Ar
     override func draw(_ dirtyRect: NSRect) {
         if (hovered || isHighlighted) && isEnabled { fill(isHighlighted ? ArkPalette.pressed : ArkPalette.iconHover, radius: 7) }
         symbol("arrow.down.circle", rect: NSRect(x: (bounds.width - 17) / 2, y: (bounds.height - 17) / 2, width: 17, height: 17),
-               color: ArkPalette.ink, size: 16)
+               color: hovered ? ArkPalette.ink : ArkPalette.chromeIcon, size: 16)
     }
 }
