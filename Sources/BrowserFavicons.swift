@@ -41,7 +41,10 @@ import WebKit
 
     func configureFavicons() {
         sidebar.faviconProvider = { [weak self] in self?.favicon(forTabID: $0) }
-        favicons.onChange = { [weak self] _, _ in self?.scheduleFaviconRefresh() }
+        // The store is shared with second windows: the main browser owns its one callback and
+        // passes each new icon to every window.
+        guard primaryBrowser == nil else { return }
+        favicons.onChange = { [weak self] _, _ in self?.sessionWindows.forEach { $0.scheduleFaviconRefresh() } }
     }
 
     private func scheduleFaviconRefresh() {
