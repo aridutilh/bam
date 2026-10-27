@@ -895,13 +895,14 @@ import QuartzCore
            !selectSpace(forProfile: session.profileID(for: tab)) { return }
         cancelPaging(); session.select(id); dismissAddress(); showActive(); save()
     }
-    func close(_ id: UUID) {
+    /// `recordsClosed: false` when the caller already put the tab in Recently Closed (removeSavedTab).
+    func close(_ id: UUID, recordsClosed: Bool = true) {
         cancelPaging(); cancelAutomaticDepartures()
         let group = session.split(for: id)
         let closingIDs = group?.primaryID == id ? [id, group!.secondaryID] : [id]
         let closed = closingIDs.compactMap { closingID in session.tabs.first { $0.id == closingID } }
         let removed = closed.filter { !$0.isSaved }
-        if let source = closed.first { library(for: session.profileID(for: source)).recordClosed(tabs: removed, split: removed.count == 2) }
+        if recordsClosed, let source = closed.first { library(for: session.profileID(for: source)).recordClosed(tabs: removed, split: removed.count == 2) }
         _ = session.close(id)
         if let group, let split = splitCoordinators.removeValue(forKey: group.primaryID) {
             split.detach(); split.view.removeFromSuperview()
@@ -931,13 +932,15 @@ import QuartzCore
         navigationTokens.removeValue(forKey: id); browserExtensionOrigins.removeValue(forKey: id)
         pendingHome.remove(id); tabErrors.removeValue(forKey: id); pendingLoads.remove(id); requestedAddresses.removeValue(forKey: id)
     }
-    /// The cross on an unloaded kept tab removes it, as in Arc and Yab. It leaves as an ordinary closed tab, so
-    /// Reopen Closed Tab (⇧⌘T) and Recently Closed can bring the page back.
+    /// The cross on an unloaded kept tab removes it, as in Arc and Yab. Recently Closed keeps the whole kept tab (its
+    /// custom name and icon, its folder and place), so Reopen Closed Tab (⇧⌘T) puts it back as it was.
     func removeSavedTab(_ id: UUID) {
         cancelPaging()
-        guard let tab = session.tabs.first(where: { $0.id == id }), tab.saved?.kind == .kept, session.split(for: id) == nil,
-              session.setRetention(id: id, kind: nil) else { return }
-        close(id)
+        guard let tab = session.tabs.first(where: { $0.id == id }), tab.saved?.kind == .kept, session.split(for: id) == nil else { return }
+        let library = library(for: session.profileID(for: tab))
+        guard session.setRetention(id: id, kind: nil) else { return }
+        library.recordClosed(tabs: [tab], split: false)
+        close(id, recordsClosed: false)
     }
     func pinTab(_ id: UUID) {
         cancelPaging()

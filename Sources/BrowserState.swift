@@ -845,7 +845,20 @@ struct BrowserSession: Codable {
     /// Puts a reopened ordinary tab back where it was closed (falling back to
     /// the top of Today) and returns its index.
     @discardableResult mutating func insertRestored(_ tab: BrowserTab, originalID: UUID) -> Int {
-        guard !tab.isSaved else { tabs.append(tab); return tabs.count - 1 }
+        guard !tab.isSaved else {
+            // A removed kept tab (removeSavedTab) returns to its folder, if that is still in its Space, and to its
+            // old place there when the container's stored order still remembers it.
+            var tab = tab
+            if let folderID = tab.folderID, tab.saved?.kind != .kept || folder(folderID)?.space != tab.space { tab.folderID = nil }
+            tabs.append(tab)
+            if tab.saved?.kind == .kept {
+                let container: KeptContainer = tab.folderID.map { .folder($0) } ?? .root(tab.space)
+                if var order = storedOrder(for: container), let at = order.firstIndex(of: originalID) {
+                    order[at] = tab.id; setOrder(order, for: container)
+                }
+            }
+            return tabs.count - 1
+        }
         let anchor = closedAnchors.removeValue(forKey: originalID)
         let index: Int
         if let anchor, anchor.space == tab.space, let after = anchor.after,
