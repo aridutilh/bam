@@ -403,8 +403,9 @@ enum PeekMotion {
         return interactive ? super.hitTest(point) : nil
     }
 
+    /// Measured on the reference's pinned-tab Peek: the page settles about 12% darker, untinted.
     var dimColor: CGColor {
-        NSColor.black.withAlphaComponent(effectiveAppearance.isDarkChrome ? 0.5 : 0.42).cgColor
+        NSColor.black.withAlphaComponent(effectiveAppearance.isDarkChrome ? 0.3 : 0.12).cgColor
     }
     private func applyAppearanceColors() {
         let dark = effectiveAppearance.isDarkChrome
