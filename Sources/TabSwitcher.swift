@@ -120,7 +120,10 @@ import WebKit
             guard let tab = session.tabs.first(where: { $0.id == id }) else { return nil }
             let companion = session.split(for: id).flatMap { group in session.tabs.first { $0.id == group.secondaryID } }
             let title = companion.map { "\(tab.displayTitle) · \($0.displayTitle)" } ?? tab.displayTitle
-            return .init(id: id, title: title.isEmpty ? tab.addressLabel : title, favicon: favicon(forTabID: id),
+            // Same mark as the sidebar row: favicon, else the page's monogram, else its symbol.
+            let tint = session.spaceDefinition(session.space).map { ArkPalette.spaceTint(for: $0) } ?? ArkPalette.spaceTint(0)
+            let icon = favicon(forTabID: id) ?? tab.monogram.map { ArkMonogram.image($0, tint: tint, side: 16) }
+            return .init(id: id, title: title.isEmpty ? tab.addressLabel : title, favicon: icon,
                          symbol: tab.symbol, thumbnail: tabNavigation.thumbnails[id])
         }
         guard tiles.count == state.items.count else { cancelTabSwitcher(); return }
