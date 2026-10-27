@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- The permission review when adding an extension no longer mentions 1Password's desktop app for extensions that have nothing to do with it; the desktop-app note now only appears for extensions that ask to talk to a desktop app.
+
 - Close Window (⇧⌘W) closes the window you're in, private windows included.
 - A tab's Share menu now opens as a submenu of share options (AirDrop, Mail, Messages, Notes…), and the ⌃⇥ switcher shows the same letter icon as the sidebar for pages without a favicon.
 

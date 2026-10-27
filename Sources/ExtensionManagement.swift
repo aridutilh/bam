@@ -404,7 +404,11 @@ import UniformTypeIdentifiers
         if !review.bridged.isEmpty { lines += ["Provided by Bam’s compatibility layer (limited):", ExtensionCompatibility.reviewLabel(review.bridged), ""] }
         if review.nativeCompanionAvailable { lines += ["Desktop app (separate approval required):", "The verified 1Password extension can request a connection from Manage Extensions. Enabling website access does not approve it.", ""] }
         if !review.unsupported.isEmpty { lines += ["Unavailable in Bam (not granted):", review.unsupported.joined(separator: ", "), ""] }
-        lines += ["Desktop-app access is reviewed separately in Manage Extensions and currently supports only the verified Chrome build of 1Password. Other native hosts and full Chrome compatibility remain unavailable. Reload existing pages after changing access."]
+        // The desktop-app note only concerns extensions that ask to talk to a desktop app.
+        let asksForDesktopApp = review.nativeCompanionAvailable || review.unsupported.contains("nativeMessaging")
+        lines += [asksForDesktopApp
+            ? "Desktop-app access is reviewed separately in Manage Extensions and currently supports only the verified Chrome build of 1Password. Other native hosts and full Chrome compatibility remain unavailable. Reload existing pages after changing access."
+            : "Reload existing pages after changing access."]
         return lines.joined(separator: "\n")
     }
     static func reviewPermissions(_ review: BrowserExtensionPermissionReview) -> Bool {
