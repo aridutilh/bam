@@ -178,6 +178,8 @@ import WebKit
     /// Arc's "New Space…": make a Space, and the tab moves into it once it exists.
     @objc func moveTabToNewSpace(_ sender: Any?) {
         guard let id = actionTabID(sender) else { NSSound.beep(); return }
+        // A panel already open was started for something else: don't hijack its Space.
+        guard spaceCreationPanel == nil else { NSSound.beep(); return }
         openSpaceCreation()
         if spaceCreationPanel != nil { tabNavigation.pendingMoveToNewSpace = id }
     }
