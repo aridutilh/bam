@@ -33,6 +33,8 @@
 - Settings › Websites sets the zoom every page starts at (90%, 100%, 110% or 125%; ⌘0 returns to it) and a minimum font size for small text. It also lists the sites you keep awake, so you can add one by typing its address or remove one.
 - Settings › Appearance shows each Space's color next to the light and dark theme, so you can recolor a Space without opening it.
 - Settings › Privacy lists the sites where you've allowed ads, so you can block them there again.
+- Auto-archive, as in Arc: Today tabs you haven't looked at for 12 hours close on their own and go to the archive. Choose 12 hours, 24 hours, 7 days, 30 days or Never in Settings › General. Kept tabs and Favorites are never archived, and neither are tabs playing media, in a call, in Picture in Picture, downloading or under a Peek. A Split is archived only when both sides are due. Bam checks at launch, on wake and every few minutes, and tabs from before this update start their clock when you upgrade.
+- The archive has its own window (History › View Archive…, or "Archived Tabs" in the command bar). It lists tabs you closed and tabs Bam archived, grouped by day, with search, an "Archived" mark on the ones Bam closed, Restore on every row, and Clear Archive.
 
 ## 0.25.1 build 51 — Quit dialog and sidebar scroll bar polish
 

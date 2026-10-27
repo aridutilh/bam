@@ -11,6 +11,8 @@ import AppKit
         snapshot.keepsCurrentSiteAwake = currentSleepProtectionHost.map { keepAwakeHosts.contains($0) } ?? false
         snapshot.keepAwakeHosts = keepAwakeHosts.sorted()
         snapshot.canKeepSitesAwake = !privateMode
+        snapshot.archiveChoices = ArchiveInterval.allCases.map(\.title)
+        snapshot.archiveChoice = ArchiveInterval.allCases.firstIndex(of: ArchivePreference.interval) ?? 0
         snapshot.pageZoom = WebsitePreferences.pageZoom
         snapshot.zoomChoices = WebsitePreferences.zoomChoices
         snapshot.minimumFontSize = WebsitePreferences.minimumFontSize
@@ -43,6 +45,11 @@ import AppKit
         }
         actions.setKeepsSiteAwake = { [weak self] host, on in self?.setKeepAwake(host: host, on) }
         actions.hostFromTyped = { WebsitePreferences.host(fromTyped: $0) }
+        actions.setArchiveChoice = { index in
+            guard ArchiveInterval.allCases.indices.contains(index) else { return }
+            ArchivePreference.interval = ArchiveInterval.allCases[index]
+        }
+        actions.showArchive = { [weak self] in self?.showArchive(nil) }
         actions.setPageZoom = { [weak self] zoom in
             let previous = WebsitePreferences.pageZoom
             WebsitePreferences.pageZoom = zoom
