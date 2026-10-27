@@ -150,6 +150,10 @@ struct SidebarExtensionItem {
     }
     var onToggleFolder: ((UUID) -> Void)?
     var onRenameFolder: ((UUID) -> Void)?
+    /// The controller's tab actions for a row's menu (Arc's order): the top group, and Close Tabs Below for Today rows.
+    var tabActionItems: ((UUID) -> (top: [NSMenuItem], closeBelow: NSMenuItem?))?
+    /// A tab renamed in place (double-click its title); an empty name goes back to the page's own title.
+    var onRenameTab: ((UUID, String) -> Void)?
     /// Creates a folder; the item is a tab to put inside it or a parent folder.
     var onNewFolder: ((UUID?) -> Void)?
     var onUngroupFolder: ((UUID) -> Void)?
@@ -248,7 +252,8 @@ struct SidebarExtensionItem {
         toggle.handler = { [weak self] in self?.onToggleSidebar?() }
         search.handler = { [weak self] in self?.onSearch?() }
         plus.handler = { [weak self] in self?.onNewTab?() }
-        downloads.handler = { [weak self] in self?.onShowDownloads?() }
+        downloads.handler = { [weak self] in self?.onShowRecentlyClosed?() }
+        downloads.showDownloads = { [weak self] in self?.onShowDownloads?() }
         downloads.showHistory = { [weak self] in self?.onShowHistory?() }
         downloads.showRecentlyClosed = { [weak self] in self?.onShowRecentlyClosed?() }
         downloads.manageSpaces = { [weak self] in self?.onManageSpaces?() }
@@ -381,6 +386,8 @@ struct SidebarExtensionItem {
         page.move = { [weak self] in self?.onMoveTab?($0, $1) }
         page.toggleFolder = { [weak self] in self?.onToggleFolder?($0) }
         page.renameFolder = { [weak self] in self?.onRenameFolder?($0) }
+        page.tabActionItems = { [weak self] in self?.tabActionItems?($0) }
+        page.renameTab = { [weak self] in self?.onRenameTab?($0, $1) }
         page.newFolder = { [weak self] in self?.onNewFolder?($0) }
         page.ungroupFolder = { [weak self] in self?.onUngroupFolder?($0) }
         page.moveToFolder = { [weak self] in self?.onMoveToFolder?($0, $1) }
@@ -672,6 +679,8 @@ struct SidebarExtensionItem {
     var reorderSaved: ((UUID, Int) -> Void)?
     var toggleFolder: ((UUID) -> Void)?
     var renameFolder: ((UUID) -> Void)?
+    var tabActionItems: ((UUID) -> (top: [NSMenuItem], closeBelow: NSMenuItem?)?)?
+    var renameTab: ((UUID, String) -> Void)?
     var newFolder: ((UUID?) -> Void)?
     var ungroupFolder: ((UUID) -> Void)?
     var moveToFolder: ((UUID, UUID?) -> Void)?
@@ -993,6 +1002,8 @@ struct SidebarExtensionItem {
         row.reorderSaved = { [weak self, weak row] direction in if let id = row?.item.id { self?.reorderSaved?(id, direction) } }
         row.toggleFolder = { [weak self, weak row] in if let id = row?.item.id { self?.toggleFolder?(id) } }
         row.renameFolder = { [weak self, weak row] in if let id = row?.item.id { self?.renameFolder?(id) } }
+        row.tabActionItems = { [weak self, weak row] in row.flatMap { self?.tabActionItems?($0.item.id) } ?? nil }
+        row.renameTab = { [weak self, weak row] title in if let id = row?.item.id { self?.renameTab?(id, title) } }
         row.newFolder = { [weak self, weak row] in if let id = row?.item.id { self?.newFolder?(id) } }
         row.ungroupFolder = { [weak self, weak row] in if let id = row?.item.id { self?.ungroupFolder?(id) } }
         row.moveToFolder = { [weak self, weak row] target in if let id = row?.item.id { self?.moveToFolder?(id, target) } }
@@ -2271,7 +2282,7 @@ private final class ArkSpaceHeading: ArkHoverButton, SpaceTinted {
 }
 
 @MainActor
-private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted, ArkHoverTracking {
+private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted, ArkHoverTracking, NSTextFieldDelegate {
     var displayedSpaceTint: NSColor { spaceTint }
     override func resetCursorRects() {
         super.resetCursorRects()
@@ -2288,6 +2299,8 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted, Ar
     var reorderSaved: ((Int) -> Void)?
     var toggleFolder: (() -> Void)?
     var renameFolder: (() -> Void)?
+    var tabActionItems: (() -> (top: [NSMenuItem], closeBelow: NSMenuItem?)?)?
+    var renameTab: ((String) -> Void)?
     var newFolder: (() -> Void)?
     var ungroupFolder: (() -> Void)?
     var moveToFolder: ((UUID?) -> Void)?
@@ -2365,6 +2378,7 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted, Ar
             identifier = NSUserInterfaceItemIdentifier("tab-row-\(item.id.uuidString)")
             // Reused for another row mid-press: abandon that press and any drag it began.
             dragOrigin = nil; pressedID = nil; didDrag = false
+            endRename(commit: false)
         }
         if first || old.title != item.title || old.isFolder != item.isFolder || old.subtitle != item.subtitle || old.knownTitle != item.knownTitle {
             // Assistive tech hears exactly what the row shows, including the blank-title fallback.
@@ -2618,6 +2632,7 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted, Ar
     }
     override func hitTest(_ point: NSPoint) -> NSView? {
         guard let hit = super.hitTest(point) else { return nil }
+        if let renameField, hit === renameField || hit.isDescendant(of: renameField) { return hit }
         // Labels and symbols belong to the row's selection target; the close
         // button keeps its own native control hit target.
         return hit === closeButton ? closeButton : self
@@ -2628,6 +2643,10 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted, Ar
         // woken) or a folder toggled only on mouse-up without a drag, so
         // dragging never selects or wakes anything. The pressed identity is
         // captured now in case the view is reused before release.
+        // Arc: double-clicking a tab's title renames it in place.
+        if event.clickCount == 2, !item.isFolder, renameTab != nil {
+            dragOrigin = nil; pressedID = nil; beginRename(); return
+        }
         dragOrigin = convert(event.locationInWindow, from: nil); didDrag = false; pressedID = item.id
         // Pointer input: no row shows a keyboard ring now (also one that kept focus from earlier arrows).
         (window?.firstResponder as? ArkTabRow)?.hideFocusRing()
@@ -2725,6 +2744,9 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted, Ar
     override func menu(for event: NSEvent) -> NSMenu? {
         if item.isFolder { return folderMenu() }
         let menu = NSMenu(); menu.autoenablesItems = false
+        // Arc's order: Copy Link, Rename…, Mute, Duplicate first; then keeping, folders and Spaces; closing last.
+        let actions = tabActionItems?()
+        if let top = actions?.top, !top.isEmpty { top.forEach(menu.addItem); menu.addItem(.separator()) }
         let keepTitle = item.isSplit ? (item.isPinned ? "Unkeep Left Tab" : "Keep Left Tab") : (item.isPinned ? "Unkeep Tab" : "Keep Tab")
         let pinItem = NSMenuItem(title: keepTitle, action: #selector(pinFromMenu), keyEquivalent: "")
         pinItem.image = NSImage(systemSymbolName: item.isPinned ? "pin.slash" : "pin", accessibilityDescription: nil)
@@ -2761,6 +2783,7 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted, Ar
         closeItem.target = self; closeItem.isEnabled = !item.isPinned || !item.isUnloaded
         closeItem.toolTip = item.isSplit ? "Saved panes unload and remain in the sidebar; ordinary panes close." : nil
         menu.addItem(closeItem)
+        if !item.isPinned, let below = actions?.closeBelow { menu.addItem(below) }
         return menu
     }
     @objc private func moveFromMenu(_ sender: NSMenuItem) { move?(sender.tag) }
@@ -2773,6 +2796,48 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted, Ar
     @objc private func closeFromMenu() { close?() }
     @objc private func toggleFromMenu() { toggleFolder?() }
     @objc private func renameFromMenu() { renameFolder?() }
+
+    // MARK: Rename in place
+    private var renameField: NSTextField?
+    private var renameCancelled = false
+    /// The title becomes an edit field over the same spot: Return keeps the new name (empty restores the page's
+    /// own title), Esc or clicking away without changes leaves it as it was.
+    func beginRename() {
+        guard renameField == nil, !item.isFolder else { return }
+        let field = NSTextField(string: titleLabel.stringValue)
+        field.isBordered = false; field.drawsBackground = true; field.focusRingType = .none
+        field.backgroundColor = effectiveAppearance.isDarkChrome ? NSColor(white: 1, alpha: 0.10) : NSColor(white: 1, alpha: 0.85)
+        field.font = titleLabel.font; field.textColor = ArkPalette.ink
+        field.usesSingleLineMode = true; field.lineBreakMode = .byClipping; field.cell?.isScrollable = true
+        field.placeholderString = SidebarDisplayPolicy.displayHost(item.subtitle)
+        field.delegate = self
+        field.identifier = NSUserInterfaceItemIdentifier("tab-rename-field")
+        field.setAccessibilityLabel("Tab name")
+        let end = bounds.width - ArkMetrics.trailingGap
+        field.frame = NSRect(x: titleLabel.frame.minX - 1, y: titleLabel.frame.minY - 1, width: max(40, end - titleLabel.frame.minX + 1), height: titleLabel.frame.height + 2)
+        field.wantsLayer = true; field.layer?.cornerRadius = 4
+        renameCancelled = false
+        titleLabel.isHidden = true
+        addSubview(field); renameField = field
+        window?.makeFirstResponder(field)
+        field.currentEditor()?.selectAll(nil)
+    }
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        if commandSelector == #selector(NSResponder.cancelOperation(_:)) { renameCancelled = true; endRename(commit: false); return true }
+        if commandSelector == #selector(NSResponder.insertNewline(_:)) { endRename(commit: true); return true }
+        return false
+    }
+    func controlTextDidEndEditing(_ obj: Notification) { endRename(commit: !renameCancelled) }
+    private func endRename(commit: Bool) {
+        guard let field = renameField else { return }
+        renameField = nil
+        let value = field.stringValue
+        field.delegate = nil
+        if window?.firstResponder === field.currentEditor() { window?.makeFirstResponder(self) }
+        field.removeFromSuperview()
+        titleLabel.isHidden = false
+        if commit, value != titleLabel.stringValue { renameTab?(value) }
+    }
     @objc private func newFolderFromMenu() { newFolder?() }
     @objc private func ungroupFromMenu() { ungroupFolder?() }
     @objc private func removeFromFolderFromMenu() { moveToFolder?(nil) }
@@ -2785,16 +2850,17 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted, Ar
     var showHistory: (() -> Void)?
     var showRecentlyClosed: (() -> Void)?
     var manageSpaces: (() -> Void)?
+    /// Opens Downloads (the menu's Downloads item; the button itself opens Archived Tabs, as Arc's archive box does).
+    var showDownloads: (() -> Void)?
     init() {
         super.init(frame: .zero)
-        identifier = NSUserInterfaceItemIdentifier("sidebar-downloads")
-        setAccessibilityLabel("Downloads")
-        setAccessibilityHelp("Opens Downloads. Its menu has History, Recently Closed and Manage Spaces.")
-        // View > Downloads keeps a fixed ⌘J (App.swift); the menu bar owns that key.
-        toolTip = "Downloads (⌘J)"
+        identifier = NSUserInterfaceItemIdentifier("sidebar-library")
+        setAccessibilityLabel("Archived Tabs")
+        setAccessibilityHelp("Opens Archived Tabs. Its menu has Downloads, History and Manage Spaces.")
+        toolTip = "Archived Tabs"
         let menu = NSMenu(title: "Library")
-        for (title, action) in [("Downloads", #selector(downloadsFromMenu)), ("History", #selector(historyFromMenu)),
-                                ("Recently Closed", #selector(recentlyClosedFromMenu))] {
+        for (title, action) in [("Archived Tabs", #selector(recentlyClosedFromMenu)), ("Downloads", #selector(downloadsFromMenu)),
+                                ("History", #selector(historyFromMenu))] {
             let item = NSMenuItem(title: title, action: action, keyEquivalent: ""); item.target = self; menu.addItem(item)
         }
         menu.addItem(.separator())
@@ -2803,13 +2869,14 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted, Ar
         self.menu = menu
     }
     required init?(coder: NSCoder) { fatalError() }
-    @objc private func downloadsFromMenu() { handler?() }
+    @objc private func downloadsFromMenu() { showDownloads?() }
     @objc private func historyFromMenu() { showHistory?() }
     @objc private func recentlyClosedFromMenu() { showRecentlyClosed?() }
     @objc private func manageSpacesFromMenu() { manageSpaces?() }
     override func draw(_ dirtyRect: NSRect) {
         if (hovered || isHighlighted) && isEnabled { fill(isHighlighted ? ArkPalette.pressed : ArkPalette.iconHover, radius: 7) }
-        symbol("arrow.down.circle", rect: NSRect(x: (bounds.width - 17) / 2, y: (bounds.height - 17) / 2, width: 17, height: 17),
+        // Arc's footer corner: the archive box.
+        symbol("archivebox", rect: NSRect(x: (bounds.width - 17) / 2, y: (bounds.height - 17) / 2, width: 17, height: 17),
                color: hovered ? ArkPalette.ink : ArkPalette.chromeIcon, size: 16)
     }
 }

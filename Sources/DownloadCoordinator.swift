@@ -126,9 +126,9 @@ import Darwin
         library.present(over: parent)
     }
 
-    /// The sidebar's leading Downloads button, when it is on screen.
+    /// The sidebar footer's leading Library (archive box) button, when it is on screen; Downloads hangs from it.
     static func sidebarDownloadsButton(in root: NSView) -> NSView? {
-        if root.identifier?.rawValue == "sidebar-downloads", !root.isHiddenOrHasHiddenAncestor, !root.visibleRect.isEmpty { return root }
+        if root.identifier?.rawValue == "sidebar-library", !root.isHiddenOrHasHiddenAncestor, !root.visibleRect.isEmpty { return root }
         for child in root.subviews { if let found = sidebarDownloadsButton(in: child) { return found } }
         return nil
     }

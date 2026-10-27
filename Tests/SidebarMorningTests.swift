@@ -371,15 +371,15 @@ import AppKit
         footerSidebar.onShowRecentlyClosed = { opened.append("recently-closed") }
         footerSidebar.onManageSpaces = { opened.append("manage-spaces") }
         footerSidebar.onNewTab = { opened.append("new-tab") }
-        let downloadsButton = descendants(footerSidebar).first { $0.identifier?.rawValue == "sidebar-downloads" } as! NSButton
-        require(downloadsButton.accessibilityLabel() == "Downloads" && downloadsButton.toolTip == "Downloads (⌘J)", "The leading button is Downloads")
-        downloadsButton.performClick(nil)
-        require(opened == ["downloads"], "Clicking it opens Bam's actual Downloads window")
-        let libraryMenu = downloadsButton.menu!
-        require(libraryMenu.items.map(\.title) == ["Downloads", "History", "Recently Closed", "", "Manage Spaces…"], "Its menu: Downloads, History, Recently Closed, Manage Spaces")
+        let libraryButton = descendants(footerSidebar).first { $0.identifier?.rawValue == "sidebar-library" } as! NSButton
+        require(libraryButton.accessibilityLabel() == "Archived Tabs" && libraryButton.toolTip == "Archived Tabs", "The leading button is Arc's archive box")
+        libraryButton.performClick(nil)
+        require(opened == ["recently-closed"], "Clicking it opens Archived Tabs")
+        let libraryMenu = libraryButton.menu!
+        require(libraryMenu.items.map(\.title) == ["Archived Tabs", "Downloads", "History", "", "Manage Spaces…"], "Its menu: Archived Tabs, Downloads, History, Manage Spaces")
         opened.removeAll()
         for item in libraryMenu.items where !item.isSeparatorItem { _ = item.target.map { NSApp.sendAction(item.action!, to: $0, from: item) } }
-        require(opened == ["downloads", "history", "recently-closed", "manage-spaces"], "Every menu item opens the real feature")
+        require(opened == ["recently-closed", "downloads", "history", "manage-spaces"], "Every menu item opens the real feature")
         let footerViews = descendants(footerSidebar).filter { $0.window != nil && !$0.isHiddenOrHasHiddenAncestor && $0.frame.minY >= footerSidebar.bounds.height - 40 }
         require(!footerViews.contains { ($0.accessibilityLabel() ?? "").hasPrefix("Picture in Picture") || $0.accessibilityLabel() == "Manage Spaces" },
                 "No PiP or Spaces stack button in the footer")
@@ -643,6 +643,30 @@ import AppKit
         require(chrome.footerRuleOpacity == 0, "At the end of the list the footer's hairline is gone")
         chromeList.contentView.scroll(to: .zero); chromeList.reflectScrolledClipView(chromeList.contentView)
         require(chrome.footerRuleOpacity == 1, "With tabs continuing below, Arc's hairline sits over the footer")
+        // Tab actions in Arc's order: Copy Link… first, then the row's own entries, Close Tabs Below after Close Tab.
+        chrome.tabActionItems = { _ in ([NSMenuItem(title: "Copy Link", action: nil, keyEquivalent: ""), NSMenuItem(title: "Rename…", action: nil, keyEquivalent: "")],
+                                        NSMenuItem(title: "Close Tabs Below", action: nil, keyEquivalent: "")) }
+        let tabMenuClick = NSEvent.mouseEvent(with: .rightMouseDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: chromeWindow.windowNumber,
+                                            context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
+        let todayMenu = chromeRow(todayID).menu(for: tabMenuClick)!.items.map(\.title)
+        require(Array(todayMenu.prefix(3)) == ["Copy Link", "Rename…", ""], "Tab actions lead the menu (\(todayMenu))")
+        require(todayMenu.firstIndex(of: "Close Tabs Below") == todayMenu.firstIndex(of: "Close Tab").map { $0 + 1 }, "Close Tabs Below follows Close Tab on a Today row")
+        require(!chromeRow(downKeptID).menu(for: tabMenuClick)!.items.contains { $0.title == "Close Tabs Below" }, "Kept rows have no Close Tabs Below")
+        // Double-click renames in place: Return keeps the name.
+        var tabRenames: [(UUID, String)] = []
+        chrome.onRenameTab = { tabRenames.append(($0, $1)) }
+        let renameRow = chromeRow(todayID)
+        let doubleClick = NSEvent.mouseEvent(with: .leftMouseDown, location: renameRow.convert(NSPoint(x: 80, y: 18), to: nil), modifierFlags: [], timestamp: 0,
+                                             windowNumber: chromeWindow.windowNumber, context: nil, eventNumber: 0, clickCount: 2, pressure: 1)!
+        renameRow.mouseDown(with: doubleClick)
+        let renameField = descendants(renameRow).first { $0.identifier?.rawValue == "tab-rename-field" } as? NSTextField
+        require(renameField?.stringValue == "Today page", "Double-click turns the title into a field holding the shown name")
+        renameField?.stringValue = "Morning read"
+        if let renameField, let editor = renameField.currentEditor() as? NSTextView {
+            _ = (renameField.delegate as? NSTextFieldDelegate)?.control?(renameField, textView: editor, doCommandBy: #selector(NSResponder.insertNewline(_:)))
+        } else if let renameField { (renameField.delegate as? NSTextFieldDelegate)?.controlTextDidEndEditing?(Notification(name: NSControl.textDidEndEditingNotification, object: renameField)) }
+        require(tabRenames.count == 1 && tabRenames[0].0 == todayID && tabRenames[0].1 == "Morning read", "Return renames the tab (\(tabRenames))")
+        require(descendants(renameRow).first { $0.identifier?.rawValue == "tab-rename-field" } == nil, "The field goes away after renaming")
         // A single row moving (drop, Move Earlier/Later) slides: the table moves that row's view rather than
         // rebuilding the list, so its view (and any state on it) survives the move.
         chromeList.contentView.scroll(to: .zero); chromeList.reflectScrolledClipView(chromeList.contentView)

@@ -424,6 +424,11 @@ import QuartzCore
         sidebar.onSelectTab = { [weak self] id in self?.select(id) }
         sidebar.onCloseTab = { [weak self] id in self?.close(id) }
         sidebar.onRemoveSavedTab = { [weak self] id in self?.removeSavedTab(id) }
+        sidebar.tabActionItems = { [weak self] id in (self?.tabActionMenuItems(for: id) ?? [], self?.closeTabsBelowMenuItem(for: id)) }
+        sidebar.onRenameTab = { [weak self] id, title in
+            guard let self, self.session.renameTab(id: id, title: title) else { return }
+            self.refresh(); self.refreshPaletteResults(); self.save()
+        }
         sidebar.onPinTab = { [weak self] id in self?.pinTab(id) }
         sidebar.onFavoriteTab = { [weak self] id in self?.favoriteTab(id) }
         sidebar.onEditSavedTab = { [weak self] id in self?.editSavedTab(id) }

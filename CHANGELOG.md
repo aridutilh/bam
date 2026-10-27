@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Right-clicking a tab puts Arc's tab actions first (Copy Link, Rename…, Mute, Duplicate), and Today tabs get Close Tabs Below right after Close Tab.
+- Double-click a tab's title to rename it in place; Return keeps the name, Esc cancels, and an empty name goes back to the page's own title.
+- The footer's bottom-left button is now Arc's archive box: it opens Archived Tabs, and its menu has Downloads, History and Manage Spaces.
 - Switching Spaces with the keyboard, the footer or the Spaces menu now slides the new Space in quickly, as Arc does, and the window color crossfades with it instead of jumping. The footer's Space icons fade between gray and color.
 - With the sidebar hidden, rest the pointer at the window's left edge and the sidebar slides in as a floating card over the page; it slides away when you move off it. Press ⌘S while it's showing to pin it back, and the page slides over to make room.
 - Dragging a tab is more physical: a tab you drop glides from where you let go into its new place, and tabs that move (drops, Move Earlier/Later, keeping a tab) slide to their new spots instead of jumping.

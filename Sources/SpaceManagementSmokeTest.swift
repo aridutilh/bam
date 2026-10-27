@@ -65,9 +65,9 @@ import WebKit
         guard let heading = visible.first(where: { ($0.accessibilityLabel() ?? "").hasPrefix("Manage Spaces — ") }) else {
             throw Failure.assertion("Missing editable Spaces native button: the Space heading's Manage Spaces")
         }
-        guard let downloads = visible.first(where: { $0.identifier?.rawValue == "sidebar-downloads" }),
+        guard let downloads = visible.first(where: { $0.identifier?.rawValue == "sidebar-library" }),
               let manageItem = downloads.menu?.items.first(where: { $0.title == "Manage Spaces…" }), manageItem.target != nil, manageItem.action != nil else {
-            throw Failure.assertion("Missing editable Spaces native menu entry: Downloads ▸ Manage Spaces…")
+            throw Failure.assertion("Missing editable Spaces native menu entry: Archived Tabs ▸ Manage Spaces…")
         }
         try check(!visible.contains { $0.accessibilityLabel() == "Manage Spaces" && $0.frame.minY >= browser.sidebar.bounds.height - 40 },
                   "The removed footer Manage Spaces stack button is back")
