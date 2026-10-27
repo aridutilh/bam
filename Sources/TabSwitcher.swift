@@ -15,14 +15,17 @@ import WebKit
     var thumbnails: [UUID: NSImage] = [:]
     var monitors: [Any] = []
     var resignObserver: NSObjectProtocol?
+    var deactivateObserver: NSObjectProtocol?
     /// Set while a ⌘Z that belongs to the page is sent through again.
     var replayingUndo = false
-    /// Tabs (Split primaries) the user muted; reapplied to pages created later.
+    /// Pages (tab IDs) the user muted; reapplied to pages created later.
     var mutedTabs: Set<UUID> = []
     /// A tab waiting for the Space being created ("Move to ▸ New Space…").
     var pendingMoveToNewSpace: UUID?
     /// Capture (⇧⌘2), PageCapture.swift.
     lazy var capture = PageCaptureCoordinator()
+    /// A duplicate's back/forward history, restored in place of its first load (TabActions.swift).
+    var pendingInteractionStates: [UUID: Any] = [:]
     /// The hovered-link address at the page's corner (LinkStatus.swift).
     lazy var linkStatus = LinkStatusController()
     /// A quick ⌃⇥ tap lands without the overlay ever drawing.
@@ -42,11 +45,20 @@ import WebKit
         if let monitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged, handler: { [weak self] event in
             self?.handleTabNavigationFlags(event); return event
         }) { tabNavigation.monitors.append(monitor) }
-        if let window = view.window {
-            tabNavigation.resignObserver = NotificationCenter.default.addObserver(
-                forName: NSWindow.didResignKeyNotification, object: window, queue: .main) { [weak self] _ in
-                MainActor.assumeIsolated { self?.cancelTabSwitcher() }
+        // Losing the keyboard (another window, another app) ends a session
+        // without moving: its ⌃ release would never reach these monitors.
+        // Matched by window at fire time, so it works even if the window
+        // wasn't attached yet when this ran.
+        tabNavigation.resignObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.didResignKeyNotification, object: nil, queue: .main) { [weak self] note in
+            MainActor.assumeIsolated {
+                guard let self, let window = note.object as? NSWindow, window === self.view.window else { return }
+                self.cancelTabSwitcher()
             }
+        }
+        tabNavigation.deactivateObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.cancelTabSwitcher() }
         }
     }
 
@@ -61,12 +73,14 @@ import WebKit
     func captureThumbnail(_ id: UUID, completion: (() -> Void)? = nil) {
         guard let web = browsers[id], web.window != nil, web.bounds.width > 40, web.bounds.height > 40 else { completion?(); return }
         let configuration = WKSnapshotConfiguration()
-        configuration.snapshotWidth = NSNumber(value: Double(TabSwitcherView.thumbnailSize.width * 2))
+        // Points: WebKit already renders at the screen's scale, so this is a 2x picture on Retina.
+        configuration.snapshotWidth = NSNumber(value: Double(TabSwitcherView.thumbnailSize.width))
         configuration.afterScreenUpdates = false
         web.takeSnapshot(with: configuration) { [weak self] image, _ in
             MainActor.assumeIsolated {
                 guard let self else { return }
-                if let image {
+                // The tab may have closed while the picture was being taken.
+                if let image, self.browsers[id] != nil {
                     if self.tabNavigation.thumbnails.count >= TabNavigationState.thumbnailLimit {
                         let live = Set(self.session.recentTabIDs?.prefix(TabNavigationState.thumbnailLimit / 2) ?? [])
                         self.tabNavigation.thumbnails = self.tabNavigation.thumbnails.filter { live.contains($0.key) }
@@ -111,11 +125,16 @@ import WebKit
         state.index = (state.index + delta % state.items.count + state.items.count) % state.items.count
         tabNavigation.switcher = state
         state.view?.select(state.index)
-        if !NSEvent.modifierFlags.contains(.control) { commitTabSwitcher() }
+        // Only a held ⌃ in this (key) window keeps the session open. From the
+        // menu while another window is key (Settings), the release would land
+        // in that window and never close the strip, so land at once instead.
+        if !NSEvent.modifierFlags.contains(.control) || view.window?.isKeyWindow != true { commitTabSwitcher() }
     }
 
     private func revealTabSwitcher() {
         guard var state = tabNavigation.switcher, state.view == nil, let content = view.window?.contentView else { return }
+        // ⌃ already let go but the release was missed: land instead of showing a strip nothing will close.
+        guard NSEvent.modifierFlags.contains(.control) else { commitTabSwitcher(); return }
         let tiles = state.items.compactMap { id -> TabSwitcherView.Tile? in
             guard let tab = session.tabs.first(where: { $0.id == id }) else { return nil }
             let companion = session.split(for: id).flatMap { group in session.tabs.first { $0.id == group.secondaryID } }
@@ -172,13 +191,23 @@ import WebKit
     // MARK: Keys
 
     private func handleTabNavigationFlags(_ event: NSEvent) {
-        guard tabNavigation.switcher != nil, event.window === view.window || event.window == nil else { return }
+        // Any window's ⌃ release lands: the session belongs to the key window, and a
+        // release reported against another of Bam's windows must not leave it stuck open.
+        guard tabNavigation.switcher != nil else { return }
         if !event.modifierFlags.contains(.control) { commitTabSwitcher() }
     }
 
     private func handleTabNavigationKey(_ event: NSEvent) -> NSEvent? {
         if tabNavigation.switcher != nil {
             let flags = event.modifierFlags.intersection([.command, .control, .option, .shift])
+            // Keys for another window are never swallowed by this window's session.
+            if event.window !== view.window { cancelTabSwitcher(); return event }
+            // ⌃ is up but its release was missed: land, then let the key through
+            // (Return and Esc keep their switcher meaning).
+            if !flags.contains(.control), event.keyCode != 53 {
+                commitTabSwitcher()
+                return event.keyCode == 36 || event.keyCode == 76 ? nil : event
+            }
             switch event.keyCode {
             case 53: cancelTabSwitcher(); return nil                                   // Esc
             case 48 where flags.contains(.control): stepTabSwitcher(flags.contains(.shift) ? -1 : 1); return nil   // ⇥
@@ -198,7 +227,9 @@ import WebKit
     }
 
     /// ⌘Z outside a text field reopens the last closed tab, as ⇧⌘T does. In a
-    /// native or page text field it stays Undo.
+    /// native or page text field it stays Undo, and so does any page that
+    /// handles ⌘Z itself (canvas editors such as Figma, Excalidraw or Miro keep
+    /// focus on the page body, not a text field).
     private func handleReopenShortcut(_ event: NSEvent) -> NSEvent? {
         guard !tabNavigation.replayingUndo, event.keyCode == 6,
               event.modifierFlags.intersection([.command, .control, .option, .shift]) == .command,
@@ -210,20 +241,45 @@ import WebKit
             if window.undoManager?.canUndo == true { return event }
             reopenTab(nil); return nil
         }
-        // Whether the page is editing is only known asynchronously; hold the
-        // key, ask, then either reopen or hand the very same ⌘Z back to AppKit.
-        let script = """
+        // The page has native edits to undo (typed in a field, then clicked away): Undo, as Safari does.
+        if web.undoManager?.canUndo == true { return event }
+        // Whether the page is editing, or wants ⌘Z for itself, is only known
+        // asynchronously: hold the key, ask, hand the very same ⌘Z to the page,
+        // and reopen only if nothing on the page claimed it. Run in Bam's own
+        // script world so the page can neither see nor spoof the probe.
+        let world = WKContentWorld.world(name: "bam-undo-probe")
+        let probe = """
         (() => { let e = document.activeElement; while (e && e.shadowRoot && e.shadowRoot.activeElement) e = e.shadowRoot.activeElement;
-          if (!e || e === document.body || e === document.documentElement) return document.designMode === 'on';
-          return e.isContentEditable || /^(INPUT|TEXTAREA|SELECT|IFRAME|EMBED|OBJECT)$/.test(e.tagName); })()
+          const editing = (!e || e === document.body || e === document.documentElement) ? document.designMode === 'on'
+            : (e.isContentEditable || /^(INPUT|TEXTAREA|SELECT|IFRAME|EMBED|OBJECT)$/.test(e.tagName));
+          if (editing) return 'edit';
+          const probe = { seen: null };
+          probe.listener = (ev) => { if (ev.metaKey && (ev.code === 'KeyZ' || ev.key === 'z' || ev.key === 'Z')) probe.seen = ev; };
+          if (window.__bamUndoProbe) removeEventListener('keydown', window.__bamUndoProbe.listener, true);
+          window.__bamUndoProbe = probe;
+          addEventListener('keydown', probe.listener, true);
+          return 'probe'; })()
         """
-        web.evaluateJavaScript(script) { [weak self] result, _ in
+        let verdict = """
+        (() => { const probe = window.__bamUndoProbe; if (!probe) return false;
+          removeEventListener('keydown', probe.listener, true); window.__bamUndoProbe = null;
+          return !!(probe.seen && probe.seen.defaultPrevented); })()
+        """
+        web.evaluateJavaScript(probe, in: nil, in: world) { [weak self, weak web] result in
             MainActor.assumeIsolated {
                 guard let self else { return }
-                if (result as? Bool) == false { self.reopenTab(nil); return }
+                let answer = try? result.get() as? String
                 self.tabNavigation.replayingUndo = true
                 NSApp.sendEvent(event)
                 self.tabNavigation.replayingUndo = false
+                // Not a page we could probe (a PDF, a crashed page): leave it as Undo.
+                guard answer == "probe", let web else { return }
+                // Queued behind the key event, so the page has finished handling it.
+                web.evaluateJavaScript(verdict, in: nil, in: world) { [weak self] result in
+                    MainActor.assumeIsolated {
+                        if (try? result.get() as? Bool) == false { self?.reopenTab(nil) }
+                    }
+                }
             }
         }
         return nil

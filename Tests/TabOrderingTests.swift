@@ -52,6 +52,15 @@ import Foundation
         _ = s.close(a)
         expect(title(s, s.activeID) == "Two", "Closing the only link tab returns to its opener, got \(title(s, s.activeID) ?? "nil")")
 
+        // An opener that moved to another Space is not a landing spot: closing its link tab stays in this Space.
+        s = base()
+        let mover = id(s, "Two"); s.select(mover)
+        let child = s.add(address: "https://child.example", title: "Child", opener: mover)
+        expect(s.moveTab(id: mover, toSpace: 1), "Two moves to Space 1")
+        s.select(child)
+        _ = s.close(child)
+        expect(s.space == 0 && s.active?.space == 0, "Closing a link tab whose opener moved away stays in its Space, got space \(s.space) on \(title(s, s.activeID) ?? "nil")")
+
         // Selecting a tab outside the family forgets openers, as browsers do: the next link tab goes right after its opener again.
         s = base()
         let two = id(s, "Two"); s.select(two)

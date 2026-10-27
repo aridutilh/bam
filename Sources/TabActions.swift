@@ -22,10 +22,14 @@ import WebKit
     /// history and scroll position when the original page is live.
     @discardableResult func duplicate(tabID id: UUID) -> UUID? {
         cancelPaging(); dismissAddress()
-        let source = browsers[id]
+        // A page reached by a form post is duplicated by address only: restoring
+        // its history entry could submit the form again.
+        let state = nonGetDocuments.contains(id) ? nil : browsers[id]?.interactionState
         guard let copy = session.duplicate(id: id), let tab = session.tabs.first(where: { $0.id == copy }) else { NSSound.beep(); return nil }
-        let web = webView(for: tab)
-        if let state = source?.interactionState { web.interactionState = state }
+        // Restored instead of the copy's first load (which waits for extensions), so the
+        // address isn't fetched twice and a late load can't replace the restored page.
+        if let state { tabNavigation.pendingInteractionStates[copy] = state }
+        _ = webView(for: tab)
         showActive(); save()
         return copy
     }
@@ -67,19 +71,22 @@ import WebKit
         guard let id = actionTabID(sender) else { NSSound.beep(); return }
         setTab(id, muted: !isTabMuted(id))
     }
-    func isTabMuted(_ id: UUID) -> Bool { tabNavigation.mutedTabs.contains(session.split(for: id)?.primaryID ?? id) }
+    /// Mute is kept per page, so it survives a Split forming or coming apart.
+    func isTabMuted(_ id: UUID) -> Bool {
+        let members = session.split(for: id).map { [$0.primaryID, $0.secondaryID] } ?? [id]
+        return members.contains { tabNavigation.mutedTabs.contains($0) }
+    }
     /// True while the tab's page (either Split pane) is making sound.
     func isTabPlayingAudio(_ id: UUID) -> Bool {
         let members = session.split(for: id).map { [$0.primaryID, $0.secondaryID] } ?? [id]
         return members.contains { browsers[$0].map(Self.isPlayingAudio) ?? false }
     }
     func setTab(_ id: UUID, muted: Bool) {
-        let primary = session.split(for: id)?.primaryID ?? id
         let members = session.split(for: id).map { [$0.primaryID, $0.secondaryID] } ?? [id]
         var applied = false
         for member in members { if let web = browsers[member], Self.setPageMuted(muted, in: web) { applied = true } }
         guard applied || !muted else { NSSound.beep(); return }
-        if muted { tabNavigation.mutedTabs.insert(primary) } else { tabNavigation.mutedTabs.remove(primary) }
+        for member in members { if muted { tabNavigation.mutedTabs.insert(member) } else { tabNavigation.mutedTabs.remove(member) } }
         refresh()
     }
     /// A page that is created again (woken from sleep, re-rendered) keeps its tab's mute.
@@ -171,6 +178,8 @@ import WebKit
     /// Arc's "New Space…": make a Space, and the tab moves into it once it exists.
     @objc func moveTabToNewSpace(_ sender: Any?) {
         guard let id = actionTabID(sender) else { NSSound.beep(); return }
+        // A panel already open was started for something else: don't hijack its Space.
+        guard spaceCreationPanel == nil else { NSSound.beep(); return }
         openSpaceCreation()
         if spaceCreationPanel != nil { tabNavigation.pendingMoveToNewSpace = id }
     }

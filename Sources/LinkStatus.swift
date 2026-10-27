@@ -68,18 +68,34 @@ import WebKit
             if hoveredWeb == nil || hoveredWeb === web { hide(immediately: false) }
             return
         }
-        show(Self.displayText(href), over: web)
+        show(Self.displayText(href), host: Self.displayHost(href), over: web)
     }
 
-    /// What the capsule says: the address without its http(s) scheme, readable (percent escapes decoded).
+    /// What the capsule says: the address without its http(s) scheme or any
+    /// user name and password (`https://google.com@evil.example` would read as
+    /// Google), readable where that's safe. Percent escapes are decoded only
+    /// when none of them hides an invisible, spacing or direction-changing
+    /// character, which a page could use to make the address read differently.
     static func displayText(_ href: String) -> String {
         var text = href
+        if var parts = URLComponents(string: href), parts.percentEncodedUser != nil || parts.percentEncodedPassword != nil {
+            parts.percentEncodedUser = nil; parts.percentEncodedPassword = nil
+            text = parts.string ?? href
+        }
         for scheme in ["https://", "http://"] where text.lowercased().hasPrefix(scheme) { text = String(text.dropFirst(scheme.count)); break }
         if text.hasSuffix("/"), text.dropLast().contains("/") == false { text.removeLast() }
-        return text.removingPercentEncoding ?? text
+        guard let decoded = text.removingPercentEncoding else { return text }
+        let unsafe: Set<Unicode.GeneralCategory> = [.control, .format, .spaceSeparator, .lineSeparator, .paragraphSeparator,
+                                                     .privateUse, .surrogate, .unassigned, .nonspacingMark, .enclosingMark]
+        return decoded.unicodeScalars.contains { unsafe.contains($0.properties.generalCategory) } ? text : decoded
+    }
+    /// The link's host as the capsule shows it, so it can be kept whole when the address is shortened.
+    static func displayHost(_ href: String) -> String? {
+        guard let url = URL(string: href), let host = url.host, !host.isEmpty else { return nil }
+        return url.port.map { "\(host):\($0)" } ?? host
     }
 
-    private func show(_ text: String, over web: WKWebView) {
+    private func show(_ text: String, host: String?, over web: WKWebView) {
         guard let root = owner?.view else { return }
         hideWork?.cancel(); hideWork = nil
         let pill = self.pill ?? LinkStatusPill()
@@ -87,8 +103,16 @@ import WebKit
         else if root.subviews.last !== pill { root.addSubview(pill, positioned: .above, relativeTo: nil) }
         self.pill = pill; hoveredWeb = web
         let area = web.convert(web.bounds, to: root)
-        pill.text = text
-        let width = min(pill.fittingWidth, LinkStatusPill.maximumWidth, max(80, area.width - LinkStatusPill.inset * 2))
+        let limit = min(LinkStatusPill.maximumWidth, max(80, area.width - LinkStatusPill.inset * 2))
+        // Shortening never hides the host: cut the end of the address, and if the host
+        // alone is too long, show only its end, which names the site that owns it.
+        pill.text = text; pill.truncation = .byTruncatingTail
+        if pill.fittingWidth > limit, let host, text.hasPrefix(host) {
+            pill.text = host + "…"
+            if pill.fittingWidth > limit { pill.text = host; pill.truncation = .byTruncatingHead }
+            else { pill.text = text }
+        }
+        let width = min(pill.fittingWidth, limit)
         let y = root.isFlipped ? area.maxY - LinkStatusPill.inset - LinkStatusPill.height : area.minY + LinkStatusPill.inset
         pill.frame = NSRect(x: area.minX + LinkStatusPill.inset, y: y, width: width, height: LinkStatusPill.height).integral
         if pill.isHidden || pill.alphaValue < 1 {
@@ -134,7 +158,7 @@ private final class WeakMessageHandler: NSObject, WKScriptMessageHandler {
 }
 
 /// The capsule: a thin outline, dark in dark mode and light in light mode,
-/// with the address in one line, shortened in the middle.
+/// with the address in one line, shortened so the host always shows.
 @MainActor final class LinkStatusPill: NSView {
     static let height: CGFloat = 24
     static let inset: CGFloat = 10
@@ -145,6 +169,10 @@ private final class WeakMessageHandler: NSObject, WKScriptMessageHandler {
     var text: String {
         get { label.stringValue }
         set { label.stringValue = newValue; setAccessibilityValue(newValue); needsLayout = true }
+    }
+    var truncation: NSLineBreakMode {
+        get { label.lineBreakMode }
+        set { label.lineBreakMode = newValue }
     }
     var fittingWidth: CGFloat {
         let font = label.font ?? .systemFont(ofSize: 12.5, weight: .medium)
