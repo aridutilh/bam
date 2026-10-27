@@ -44,6 +44,7 @@ typealias PreviewNavigationReadiness = @MainActor (@escaping @MainActor () -> Vo
         configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
         configure?(configuration)
         let browser = PreviewWKWebView(frame: .zero, configuration: configuration)
+        ContentBlocking.shared.track(browser)
         BrowserPageGestures.configure(browser)
         let content = PreviewWebContent(webView: browser, beforeLoad: beforeLoad)
         self.content = content

@@ -72,6 +72,7 @@ struct LittleBamDestination: Equatable {
         configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
         configure?(configuration)
         let page = PreviewWKWebView(frame: .zero, configuration: configuration)
+        ContentBlocking.shared.track(page)
         BrowserPageGestures.configure(page)
         adopt(webView: page)
     }

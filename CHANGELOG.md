@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Bam now blocks ads and trackers on its own, on by default. It uses uBlock Origin's standard lists (EasyList, EasyPrivacy and more), refreshed weekly in the background, and stops requests before they're made. Turn it off for one site in the site controls, or everywhere in Settings › General › Privacy. If a page keeps failing to load, Bam offers "Allow Ads Here".
+
 ## 0.25.1 build 51 — Quit dialog and sidebar scroll bar polish
 
 - The quit dialog is lighter and tidier: a cleaner heading, flat buttons, clearer Esc and Return keys, and everything lined up on one edge.

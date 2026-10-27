@@ -20,7 +20,10 @@ struct SiteSettingsActions {
         SiteSettingsContext(url: web.url,
                             connection: SiteSettingsModel.connection(url: web.url, onlySecureContent: web.hasOnlySecureContent,
                                                                      certificate: certificateSummary(web.serverTrust)),
-                            pageZoom: Double(web.pageZoom), keepsAwake: keepsAwake, extensions: extensions)
+                            pageZoom: Double(web.pageZoom), keepsAwake: keepsAwake, extensions: extensions,
+                            blocksAds: ContentBlockingPreference.site(web.url) == nil || !ContentBlocking.shared.isAvailable ? nil
+                                : ContentBlockingPreference.blocks(web.url) || !ContentBlockingPreference.isEnabled,
+                            adBlockerOn: ContentBlockingPreference.isEnabled)
     }
     static func certificateSummary(_ trust: SecTrust?) -> String? {
         guard let trust, let leaf = (SecTrustCopyCertificateChain(trust) as? [SecCertificate])?.first else { return nil }
@@ -129,6 +132,24 @@ struct SiteSettingsActions {
             toggle.setAccessibilityLabel("Keep this site awake")
             let awakeRow = NSStackView(views: [label("Keep this site awake", font: BamType.sans(13, weight: .medium), color: BamTheme.ink), NSView(), toggle])
             full(awakeRow)
+        }
+
+        if let blocks = context.blocksAds {
+            let toggle = BamToggle(frame: .zero)
+            toggle.isOn = blocks && context.adBlockerOn
+            toggle.isEnabled = context.adBlockerOn
+            let url = context.url
+            // The page reloads, as it must for WebKit to load what was blocked (or stop loading it).
+            toggle.onChange = { ContentBlocking.shared.setBlocks($0, forSiteOf: url) }
+            toggle.setAccessibilityLabel("Block ads and trackers")
+            let name = label("Block ads and trackers", font: BamType.sans(13, weight: .medium), color: context.adBlockerOn ? BamTheme.ink : BamTheme.muted)
+            full(NSStackView(views: [name, NSView(), toggle]))
+            if let detail = SiteSettingsModel.adsDetail(context) {
+                let text = label(detail, font: BamType.sans(11.5), color: BamTheme.muted)
+                full(text)
+                column.setCustomSpacing(12, after: text)
+                if let previous = column.arrangedSubviews.dropLast().last { column.setCustomSpacing(3, after: previous) }
+            }
         }
 
         // Extensions and their access to this site.

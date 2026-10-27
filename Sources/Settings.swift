@@ -115,6 +115,7 @@ struct SettingsActions {
         window.setFrameAutosaveName("BamSettings")
         build()
         NotificationCenter.default.addObserver(self, selector: #selector(shortcutsChanged), name: ShortcutStore.didChange, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(adBlockerChanged), name: .contentBlockingChanged, object: nil)
     }
 
     private func build() {
@@ -286,6 +287,21 @@ struct SettingsActions {
     }
 
     private func generalCards() -> [NSView] {
+        let privacy = BamCard(frame: .zero)
+        let summary = ContentBlockingPreference.summary(ContentBlockingPreference.status, enabled: ContentBlockingPreference.isEnabled)
+        adSummary = summary
+        let blockToggle = toggle(ContentBlockingPreference.isEnabled) { ContentBlockingPreference.isEnabled = $0 }
+        blockToggle.setAccessibilityLabel("Block ads and trackers")
+        let blockRow = BamRow(title: "Block ads and trackers", detail: summary, control: blockToggle)
+        adSummaryRow = blockRow
+        privacy.add(blockRow)
+        let update = BamPillButton(title: "Update Now", symbol: "arrow.clockwise")
+        update.target = self; update.action = #selector(updateFilterLists)
+        update.isEnabled = ContentBlockingPreference.isEnabled && !ContentBlockingPreference.status.updating
+        adUpdatePill = update
+        privacy.add(BamRow(title: "Filter lists",
+                           detail: "uBlock Origin’s defaults: EasyList, EasyPrivacy, uBlock filters, privacy and site fixes, malware and scams, and Peter Lowe’s list. Refreshed weekly, without cookies. Allow ads on one site from its site controls.",
+                           control: update))
         let playback = BamCard(frame: .zero)
         playback.add(BamRow(title: "Automatically show playing videos",
                             detail: "Pop a page’s video into Picture in Picture when you leave its tab.",
@@ -337,7 +353,7 @@ struct SettingsActions {
                                 : "Change this in a normal Bam window; private windows don’t change it.",
                             control: toggle(snapshot.asksBeforeQuitting, enabled: snapshot.canChangeQuitPreference, actions.setAsksBeforeQuitting),
                             enabled: snapshot.canChangeQuitPreference))
-        return [caption("Look"), look, caption("Import"), bring, caption("Playback"), playback, caption("Memory"), memory,
+        return [caption("Look"), look, caption("Privacy"), privacy, caption("Import"), bring, caption("Playback"), playback, caption("Memory"), memory,
                 caption("Quitting"), quitting, caption("Keyboard"), keys]
     }
     private weak var appearanceChips: NSStackView?
@@ -359,6 +375,25 @@ struct SettingsActions {
         actions.importFromArc()
     }
     private weak var resetPill: BamPillButton?
+    private weak var adSummaryRow: BamRow?
+    private weak var adUpdatePill: BamPillButton?
+    private var adSummary = ""
+    @objc private func updateFilterLists() {
+        NotificationCenter.default.post(name: .contentBlockingUpdateRequested, object: nil)
+    }
+    /// New rule counts or an update starting/finishing: rewrite the summary line in place.
+    @objc private func adBlockerChanged() {
+        let summary = ContentBlockingPreference.summary(ContentBlockingPreference.status, enabled: ContentBlockingPreference.isEnabled)
+        adUpdatePill?.isEnabled = ContentBlockingPreference.isEnabled && !ContentBlockingPreference.status.updating
+        guard summary != adSummary, let row = adSummaryRow else { return }
+        func find(_ view: NSView) -> NSTextField? {
+            if let field = view as? NSTextField, field.stringValue == adSummary { return field }
+            for sub in view.subviews { if let found = find(sub) { return found } }
+            return nil
+        }
+        find(row)?.stringValue = summary
+        adSummary = summary
+    }
     @objc private func resetShortcuts() { ShortcutStore.shared.resetAll() }
     /// The recorders repaint themselves; only the reset pill needs a nudge.
     @objc private func shortcutsChanged() { resetPill?.isEnabled = ShortcutStore.shared.anyCustom }

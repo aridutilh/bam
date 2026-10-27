@@ -546,6 +546,7 @@ import QuartzCore
     }
     func register(_ browser: WKWebView, id: UUID) {
         browser.navigationDelegate = self; browser.uiDelegate = self
+        ContentBlocking.shared.track(browser)
         browser.allowsBackForwardNavigationGestures = true
         BrowserPageGestures.configure(browser)
         browser.autoresizingMask = [.width, .height]

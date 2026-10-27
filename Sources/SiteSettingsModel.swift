@@ -26,6 +26,10 @@ struct SiteSettingsContext: Equatable {
     /// nil where it doesn't apply (no host, or a private window that can't keep it).
     var keepsAwake: Bool? = nil
     var extensions: [ExtensionItem] = []
+    /// Whether ads and trackers are blocked on this site; nil for pages that aren't on the web.
+    var blocksAds: Bool? = nil
+    /// Settings' global ad-blocker switch; when off the per-site toggle has nothing to change.
+    var adBlockerOn = true
 }
 
 /// The popover's text and which of its controls apply, free of AppKit so it can be tested.
@@ -86,6 +90,13 @@ enum SiteSettingsModel {
         let floor = CGFloat(min(rows, max(1, minimumRows))) * rowHeight + CGFloat(min(rows, max(1, minimumRows)) - 1) * max(0, spacing)
         let room = available.isFinite ? available : full
         return min(full, max(floor, room))
+    }
+
+    /// The ad-blocking row's caption under its toggle.
+    static func adsDetail(_ context: SiteSettingsContext) -> String? {
+        guard let blocks = context.blocksAds else { return nil }
+        if !context.adBlockerOn { return "The ad blocker is off in Settings." }
+        return blocks ? nil : "Ads are allowed on this site."
     }
 
     static func connection(url: URL?, onlySecureContent: Bool, certificate: String?) -> SiteSettingsContext.Connection {

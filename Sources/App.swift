@@ -480,6 +480,7 @@ import WebKit
 @main enum OrbitMain {
     @MainActor static func main() {
         ProfileInstanceSmokeTest.runChildIfRequested() // Fixture duplicates exit before NSApplication.
+        ContentBlocking.runCompilerIfRequested() // The ad blocker's list compiler exits before NSApplication too.
         let application = NSApplication.shared
         application.setActivationPolicy(.regular)
         let delegate = AppDelegate(); application.delegate = delegate
