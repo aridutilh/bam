@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Links routes: a route for "bücher.de" or "café" now matches the links that actually carry them, "Is equal to" ignores a #section the route doesn't name, and a disguised link like figma.com@evil.com no longer counts as figma.com.
+- Fixed a crash in Settings › Links when removing a route while its text was still being edited.
+- Bam's record of which sites you move to which Space (for route suggestions) is cleared with Clear History, never kept from private windows, and stays small.
+- A link from another app that would open in a Space now opens in Little Bam while the welcome or a Space sheet is open, instead of switching Spaces underneath it.
 - Change Tab Icon… (Tabs menu and command bar) now works on every tab, not only kept ones: pick an icon and a name, and they stay with the tab if you keep it later.
 - Air Traffic Control, as in Arc: Settings › Links routes links from other apps. Each route is "URL contains …" or "URL is equal to …", and opens in a chosen Space, the Space you're in, or Little Bam. Routes are checked top to bottom. Everything else goes to a default you pick (Little Bam, as before). "Try a link" shows where an address would open and which route decides. If you move the same site into the same Space three times, Settings › Links suggests a route for it.
 - New tab actions, as in Arc: Duplicate (with its back/forward history), Rename… (leave it empty to go back to the page title), Mute / Unmute for a tab playing sound and Close Tabs Below. They're in the Tabs menu and the command bar.
