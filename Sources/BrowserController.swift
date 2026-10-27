@@ -1457,6 +1457,8 @@ import QuartzCore
     /// reach disk before the main actor allows the application to terminate.
     func flushSessionForTermination(timeout: TimeInterval = 5) async -> Bool {
         guard !privateMode else { return true }
+        // Auto-archive notes when its clock stopped, so the time until next launch doesn't count.
+        if tabArchiver.clock != nil, !isShuttingDown { tickArchiveClock() }
         save()
         let deadline = ProcessInfo.processInfo.systemUptime + max(0, timeout)
         repeat {
