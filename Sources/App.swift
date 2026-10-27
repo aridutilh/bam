@@ -506,7 +506,7 @@ import WebKit
         item(view, "Keep This Site Awake", #selector(BrowserController.toggleSiteKeepAwake(_:)), "", .command, controller)
         item(view, "Open Video Demo", #selector(BrowserController.openVideoDemo(_:)), "", .command, controller)
         view.addItem(.separator())
-        item(view, "Split View with New Page", #selector(BrowserController.splitWithNewPage(_:)), "=", [.command, .option], controller)
+        item(view, "Split View with New Page", #selector(BrowserController.splitWithNewPage(_:)), "=", [.control, .shift], controller)
         item(view, "Separate Split into Tabs", #selector(BrowserController.unsplitCurrent(_:)), "", .command, controller)
         view.addItem(.separator())
         item(view, "Record Space Swipes (60 Seconds)", #selector(recordSpaceSwipes(_:)), "", .command, self)

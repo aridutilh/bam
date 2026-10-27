@@ -107,7 +107,7 @@ enum PaletteCommandCatalog {
                        symbol: "cursorarrow.rays", shortcut: "⌥⌘C", action: "inspectElement:"),
         PaletteCommand(id: "split-view", title: "Split View", detail: "Open a new page beside this one",
                        keywords: ["split", "side by side"],
-                       symbol: "rectangle.split.2x1", shortcut: "⌥⌘=", action: "splitWithNewPage:"),
+                       symbol: "rectangle.split.2x1", shortcut: "⌃⇧=", action: "splitWithNewPage:"),
         PaletteCommand(id: "appearance-dark", title: "Dark Appearance", detail: "Use dark chrome everywhere",
                        keywords: ["dark mode", "theme", "night"],
                        symbol: "moon", shortcut: nil, action: "useDarkAppearance:"),
