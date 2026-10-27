@@ -344,6 +344,8 @@ import QuartzCore
     let suggestionFetcher = SearchSuggestionFetcher()
     var newTabOnSubmit = false
     var privateMode: Bool
+    /// Pages whose WebKit content process ended (memory pressure, crashes); fixtures report it when a page reloads.
+    var contentProcessTerminations = 0
     /// A private window (File ▸ New Private Window): its own throwaway session and stores, no history,
     /// never saved or restored. `privateMode` is also true for it, and for the whole fresh preview.
     let isPrivateWindow: Bool
@@ -1602,6 +1604,7 @@ import QuartzCore
         }
     }
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        contentProcessTerminations += 1
         tabActivityProbe.invalidate(webView)
         guard let id = browsers.first(where: { $0.value === webView })?.key else { return }
         historyTitleFollowUps.removeValue(forKey: id)
