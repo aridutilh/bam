@@ -1248,9 +1248,10 @@ import QuartzCore
         let tabs = session.visibleTabs; guard let i = tabs.firstIndex(where: { $0.id == session.activeID }), !tabs.isEmpty else { return }
         select(tabs[(i + delta + tabs.count) % tabs.count].id)
     }
-    @objc func zoomIn(_ sender: Any?) { if let web = commandWebView { zoom(web, by: 0.1) } }
-    @objc func zoomOut(_ sender: Any?) { if let web = commandWebView { zoom(web, by: -0.1) } }
-    @objc func actualSize(_ sender: Any?) { if let web = commandWebView { BrowserPageGestures.resetZoom(web) } }
+    // In Reading Mode these size the article's text instead of zooming the page beneath it.
+    @objc func zoomIn(_ sender: Any?) { if let web = commandWebView, !pageTools.reading.step(1, over: web) { zoom(web, by: 0.1) } }
+    @objc func zoomOut(_ sender: Any?) { if let web = commandWebView, !pageTools.reading.step(-1, over: web) { zoom(web, by: -0.1) } }
+    @objc func actualSize(_ sender: Any?) { if let web = commandWebView, !pageTools.reading.step(0, over: web) { BrowserPageGestures.resetZoom(web) } }
     /// View › Zoom In / Zoom Out's step, within their limits (40%–300%).
     func zoom(_ web: WKWebView, by delta: CGFloat) { web.pageZoom = min(3, max(0.4, web.pageZoom + delta)) }
 
@@ -1319,7 +1320,7 @@ import QuartzCore
             guard let (self_, web) = current(), let url = self_.cleanLink(for: web) else { return }
             self_.pageCommandPasteboard.clearContents()
             if self_.pageCommandPasteboard.setString(url.absoluteString, forType: .string), let host = web.superview {
-                self_.pageFeedback.show("Link copied", symbol: "link", in: host)
+                self_.pageFeedback.show("Copied Current URL", symbol: "link", in: host, action: self_.shareAction(for: url))
             }
             self_.siteSettings.close()
         }

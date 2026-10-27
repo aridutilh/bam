@@ -57,7 +57,13 @@ import WebKit
         guard let surface = pageCommandSurface, let url = cleanLink(for: surface.web) else { return }
         pageCommandPasteboard.clearContents()
         guard pageCommandPasteboard.setString(url.absoluteString, forType: .string) else { return }
-        pageFeedback.show("Link copied", symbol: "link", in: surface.host)
+        pageFeedback.show("Copied Current URL", symbol: "link", in: surface.host, action: shareAction(for: url))
+    }
+    /// Share on the copy confirmation, as in Arc: the system share menu for this address.
+    func shareAction(for url: URL) -> PageFeedbackAction {
+        PageFeedbackAction(symbol: "square.and.arrow.up", label: "Share") { anchor in
+            NSSharingServicePicker(items: [url]).show(relativeTo: anchor.bounds, of: anchor, preferredEdge: .minY)
+        }
     }
     /// "[Title](address)" as text, and as a live link for apps that paste rich text.
     @objc func copyMarkdownLink(_ sender: Any?) {
@@ -67,7 +73,7 @@ import WebKit
         pageCommandPasteboard.declareTypes([.string, .html], owner: nil)
         guard pageCommandPasteboard.setString(CleanLinks.markdown(title: title, url: url), forType: .string) else { return }
         pageCommandPasteboard.setString(CleanLinks.html(title: title, url: url), forType: .html)
-        pageFeedback.show("Markdown link copied", symbol: "text.badge.checkmark", in: surface.host)
+        pageFeedback.show("Copied Current URL", symbol: "link", in: surface.host, action: shareAction(for: url))
     }
     @objc func hardReload(_ sender: Any?) {
         guard let surface = pageCommandSurface else { return }

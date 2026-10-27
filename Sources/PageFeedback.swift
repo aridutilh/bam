@@ -1,28 +1,37 @@
 import AppKit
 import QuartzCore
 
-/// A transient confirmation attached to the current page, without changing its
-/// first responder or intercepting pointer input.
+/// A trailing button on a confirmation, such as Share on "Copied Current URL".
+struct PageFeedbackAction {
+    var symbol: String
+    var label: String
+    var perform: @MainActor (NSView) -> Void
+}
+
+/// A transient confirmation in the page's top-right corner, without changing
+/// its first responder or intercepting pointer input outside its own button.
+/// Measured from Arc's copy toast: a frosted pill about 46 points tall, 8
+/// points in from the page's corner, that grows from its center in ~0.2 s,
+/// stays about 4.5 s (longer while the pointer rests on it) and shrinks away.
 @MainActor final class PageFeedbackCoordinator {
     var view: NSView { overlay }
     var isVisible: Bool { overlay.superview != nil && !overlay.isHidden }
     private(set) var message: String?
+    static let displayDuration: TimeInterval = 4.5
 
     private let overlay = PageFeedbackOverlay(frame: .zero)
-    private let fade = CubicAnimator()
-    private let pop = CubicAnimator()
+    private let motion = CubicAnimator()
     private var dismissal: DispatchWorkItem?
     private var generation: UInt = 0
 
     init() { overlay.isHidden = true }
 
-    func show(_ message: String, symbol: String, in host: NSView) {
+    func show(_ message: String, symbol: String, in host: NSView, action: PageFeedbackAction? = nil) {
         guard !message.isEmpty else { hide(); return }
         generation &+= 1
         let request = generation
         dismissal?.cancel(); dismissal = nil
-        fade.stop()
-        pop.stop()
+        motion.stop()
         let sameHost = overlay.superview === host
         if !sameHost {
             overlay.removeFromSuperview()
@@ -30,30 +39,27 @@ import QuartzCore
             overlay.autoresizingMask = [.width, .height]
             host.addSubview(overlay, positioned: .above, relativeTo: nil)
             overlay.alphaValue = 0
+            overlay.setPopProgress(0)
         }
         self.message = message
-        overlay.configure(message: message, symbol: symbol)
+        overlay.configure(message: message, action: action.map { action in
+            PageFeedbackAction(symbol: action.symbol, label: action.label) { [weak self] anchor in
+                // Using the action keeps the confirmation up a little longer.
+                self?.schedule(request: request, after: 2)
+                action.perform(anchor)
+            }
+        })
         overlay.isHidden = false
         overlay.needsLayout = true
         overlay.layoutSubtreeIfNeeded()
-        pop.animationView = overlay
-        pop.animate(from: 0, to: 1, duration: 0.28,
-                    controlPoints: (0, 0, 1, 1), update: { [weak self] progress in
-            guard let self, self.generation == request else { return }
-            self.overlay.setPopProgress(progress)
-        })
-        fade.animationView = overlay
-        fade.animate(from: overlay.alphaValue, to: 1, duration: 0.08,
-                     controlPoints: (0.22, 0.61, 0.36, 1), update: { [weak self] value in
-            guard let self, self.generation == request else { return }
-            self.overlay.alphaValue = value
-        })
-        let work = DispatchWorkItem { [weak self] in
-            guard let self, self.generation == request else { return }
-            self.fadeOut(request: request)
-        }
-        dismissal = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.6, execute: work)
+        motion.animationView = overlay
+        overlay.setPopProgress(1)
+        overlay.alphaValue = 1
+        // Core Animation times the grow from its first rendered frame, so a
+        // busy main thread cannot skip the start of it. Arc's grow is even, not
+        // front-loaded: about a fifth, half, three quarters, then settled.
+        if !BamTheme.reduceMotion { overlay.animateIn(from: sameHost ? 0.85 : 0.2) }
+        schedule(request: request, after: Self.displayDuration)
         if let application = NSApp {
             NSAccessibility.post(element: application, notification: .announcementRequested,
                                  userInfo: [.announcement: message,
@@ -61,11 +67,24 @@ import QuartzCore
         }
     }
 
+    private func schedule(request: UInt, after delay: TimeInterval) {
+        guard generation == request else { return }
+        dismissal?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.generation == request else { return }
+            // Resting the pointer on the confirmation keeps it.
+            if self.overlay.containsPointer { self.schedule(request: request, after: 1); return }
+            self.fadeOut(request: request)
+        }
+        dismissal = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
     func hide() {
         generation &+= 1
         dismissal?.cancel(); dismissal = nil
-        fade.stop()
-        pop.stop()
+        motion.stop()
+        overlay.stopAnimations()
         overlay.setPopProgress(1)
         message = nil
         overlay.isHidden = true
@@ -76,10 +95,12 @@ import QuartzCore
     private func fadeOut(request: UInt) {
         guard generation == request, isVisible else { return }
         dismissal = nil
-        fade.animate(from: overlay.alphaValue, to: 0, duration: 0.16,
-                     controlPoints: (0.25, 0.1, 0.25, 1), update: { [weak self] value in
+        guard !BamTheme.reduceMotion else { hide(); return }
+        overlay.stopAnimations()
+        motion.animate(from: 1, to: 0, duration: 0.16, controlPoints: (0.4, 0, 0.9, 0.6), update: { [weak self] progress in
             guard let self, self.generation == request else { return }
-            self.overlay.alphaValue = value
+            self.overlay.setPopProgress(0.12 + 0.88 * progress)
+            self.overlay.alphaValue = progress
         }, completion: { [weak self] in
             guard let self, self.generation == request else { return }
             self.hide()
@@ -91,8 +112,9 @@ import QuartzCore
 
 @MainActor private final class PageFeedbackOverlay: NSView {
     private let pill = PageFeedbackCard(frame: .zero)
-    private let icon = NSImageView(frame: .zero)
     private let label = NSTextField(labelWithString: "")
+    private let button = PageFeedbackButton(frame: .zero)
+    private var action: PageFeedbackAction?
     override var isFlipped: Bool { true }
     override var acceptsFirstResponder: Bool { false }
 
@@ -102,156 +124,173 @@ import QuartzCore
         setAccessibilityElement(false)
         pill.identifier = NSUserInterfaceItemIdentifier("page.feedback.pill")
         pill.setAccessibilityElement(false)
-        icon.contentTintColor = .labelColor
-        icon.imageScaling = .scaleProportionallyUpOrDown
-        icon.setAccessibilityElement(false)
         label.font = .systemFont(ofSize: 14, weight: .semibold)
         label.textColor = .labelColor
         label.lineBreakMode = .byTruncatingTail
         label.maximumNumberOfLines = 1
-        label.cell?.usesSingleLineMode = true
         label.cell?.wraps = false
         label.isSelectable = false
         label.setAccessibilityElement(false)
+        button.target = self
+        button.action = #selector(performAction)
         addSubview(pill)
-        pill.addSubview(icon); pill.addSubview(label)
+        pill.addSubview(label); pill.addSubview(button)
     }
     required init?(coder: NSCoder) { fatalError("Page feedback is created programmatically") }
 
-    func configure(message: String, symbol: String) {
-        label.stringValue = message
-        icon.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
-            .withSymbolConfiguration(.init(pointSize: 16, weight: .medium))
+    var containsPointer: Bool {
+        guard let window, !isHidden else { return false }
+        let point = pill.convert(window.mouseLocationOutsideOfEventStream, from: nil)
+        return pill.bounds.contains(point)
     }
+
+    func configure(message: String, action: PageFeedbackAction?) {
+        label.stringValue = message
+        self.action = action
+        button.isHidden = action == nil
+        if let action {
+            button.image = NSImage(systemSymbolName: action.symbol, accessibilityDescription: action.label)?
+                .withSymbolConfiguration(.init(pointSize: 13, weight: .medium))
+            button.setAccessibilityLabel(action.label)
+            button.toolTip = action.label
+        }
+    }
+
+    @objc private func performAction() { action?.perform(button) }
 
     override func layout() {
         super.layout()
-        // Intrinsic width can omit text-cell drawing padding and truncate a
-        // short confirmation even when its host has ample room. Measure the
-        // actual font and reserve padding inside the label as well as the pill.
+        // Measure the real font and leave the text cell's drawing padding, so
+        // a short confirmation never truncates when the page has room.
         let font = label.font ?? .systemFont(ofSize: 14, weight: .semibold)
-        let textWidth = ceil((label.stringValue as NSString).size(withAttributes: [.font: font]).width) + 12
-        // Omit the redundant symbol when a narrow Split pane needs the space.
-        let compact = textWidth + 66 > bounds.width - 16
-        // Logical points keep the proportions stable on Retina displays. A
-        // short confirmation has a consistent footprint; narrow panes shrink
-        // the card and omit the symbol before sacrificing readable text.
-        let insetX = min(8, max(0, bounds.width / 8))
-        let leading: CGFloat = compact ? 22 : 44
-        let padding: CGFloat = compact ? 44 : 66
+        let textWidth = ceil((label.stringValue as NSString).size(withAttributes: [.font: font]).width) + 10
+        let inset = min(8, max(0, bounds.width / 8))
         let insetY = min(8, max(0, bounds.height / 8))
-        let width = max(0, min(max(196, textWidth + padding), min(420, bounds.width - 2 * insetX)))
+        let available = max(0, bounds.width - 2 * inset)
+        let buttonWidth: CGFloat = 31, gap: CGFloat = 3
+        let lead: CGFloat = 12
+        // A narrow Split pane drops the button before it shortens the words.
+        let wantsButton = action != nil && lead + textWidth + gap + buttonWidth + 8 <= available
+        button.isHidden = !wantsButton
+        let trailing: CGFloat = wantsButton ? 12 : lead + 2
+        let content = lead + textWidth + (wantsButton ? gap + buttonWidth : 0) + trailing
+        let width = min(max(wantsButton ? 0 : 120, content), min(460, available))
         let height = min(46, max(0, bounds.height - 2 * insetY))
-        // Flipped overlay coordinates keep the tag at the visual bottom-right
-        // of this page, including an individual Split pane or a preview window.
-        pill.frame = NSRect(x: max(0, bounds.width - insetX - width),
-                            y: bounds.maxY - insetY - height, width: width, height: height)
-        let iconSize = min(16, height)
-        icon.isHidden = compact
-        icon.frame = NSRect(x: min(22, width), y: (height - iconSize) / 2,
-                            width: min(iconSize, max(0, width - 22)), height: iconSize)
+        pill.frame = NSRect(x: max(0, bounds.width - inset - width), y: insetY, width: width, height: height)
         let labelHeight = min(20, height)
-        label.frame = NSRect(x: min(leading, width), y: (height - labelHeight) / 2,
-                             width: max(0, width - padding), height: labelHeight)
+        let labelWidth = max(0, width - lead - trailing - (wantsButton ? gap + buttonWidth : 0))
+        label.frame = NSRect(x: min(lead, width), y: (height - labelHeight) / 2, width: labelWidth, height: labelHeight)
+        let buttonHeight = min(28, height)
+        button.frame = NSRect(x: width - trailing - buttonWidth, y: (height - buttonHeight) / 2, width: buttonWidth, height: buttonHeight)
         pill.needsLayout = true
         applyPopScale()
     }
 
     private var popScale: CGFloat = 1
 
+    /// 0 is a pinpoint at the pill's center, 1 its natural size.
     func setPopProgress(_ progress: CGFloat) {
-        // A short impact, then a single small settle. Text returns to its exact
-        // native scale; Reduce Motion jumps directly to progress 1.
-        let t = min(1, max(0, progress))
-        if t < 0.44 {
-            let rise = 1 - pow(1 - t / 0.44, 3)
-            popScale = 0.88 + 0.155 * rise
-        } else {
-            let settle = (t - 0.44) / 0.56
-            popScale = 1 + 0.035 * pow(1 - settle, 3)
-        }
+        popScale = 0.2 + 0.8 * min(1, max(0, progress))
         applyPopScale()
+    }
+
+    private func centeredScale(_ scale: CGFloat, in layer: CALayer) -> CATransform3D {
+        // Scale around the pill's center whatever anchor AppKit gave its layer.
+        let x = layer.bounds.width * (0.5 - layer.anchorPoint.x)
+        let y = layer.bounds.height * (0.5 - layer.anchorPoint.y)
+        var transform = CATransform3DMakeScale(scale, scale, 1)
+        transform.m41 = x * (1 - scale)
+        transform.m42 = y * (1 - scale)
+        return transform
     }
 
     private func applyPopScale() {
         guard let layer = pill.layer else { return }
-        // Preserve AppKit's layer anchor and view frame. Scale around the card
-        // center even if AppKit uses a non-central anchor on this backing layer.
-        let x = layer.bounds.width * (0.5 - layer.anchorPoint.x)
-        let y = layer.bounds.height * (0.5 - layer.anchorPoint.y)
-        var transform = CATransform3DMakeScale(popScale, popScale, 1)
-        transform.m41 = x * (1 - popScale)
-        transform.m42 = y * (1 - popScale)
         CATransaction.begin(); CATransaction.setDisableActions(true)
-        layer.transform = transform
+        layer.transform = centeredScale(popScale, in: layer)
         CATransaction.commit()
     }
 
-    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    func animateIn(from scale: CGFloat) {
+        guard let layer = pill.layer else { return }
+        let grow = CABasicAnimation(keyPath: "transform")
+        grow.fromValue = NSValue(caTransform3D: centeredScale(scale, in: layer))
+        grow.toValue = NSValue(caTransform3D: centeredScale(1, in: layer))
+        grow.duration = 0.24
+        grow.timingFunction = CAMediaTimingFunction(controlPoints: 0.25, 0.46, 0.45, 0.94)
+        let fade = CABasicAnimation(keyPath: "opacity")
+        fade.fromValue = scale < 0.5 ? 0 : 0.6
+        fade.toValue = 1
+        fade.duration = 0.17
+        layer.add(grow, forKey: "pop.grow")
+        layer.add(fade, forKey: "pop.fade")
+    }
+
+    func stopAnimations() {
+        pill.layer?.removeAnimation(forKey: "pop.grow")
+        pill.layer?.removeAnimation(forKey: "pop.fade")
+    }
+
+    /// Only the action button takes clicks; the page under the words stays clickable.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard !button.isHidden, popScale > 0.95, let superview else { return nil }
+        let local = button.convert(point, from: superview)
+        return button.bounds.contains(local) ? button : nil
+    }
 }
 
-/// A restrained, original comic-burst silhouette cut from native frosted glass.
-/// Points stay outside the text's quiet central band, with a fine rim and soft
-/// shadow rather than an opaque cartoon fill.
+/// Frosted glass with a hairline rim and a soft shadow, light or dark with the page chrome.
 @MainActor private final class PageFeedbackCard: NSView {
     private let glass = NSVisualEffectView(frame: .zero)
+    private let tint = CALayer()
     private let rim = CAShapeLayer()
-    private var maskSize: NSSize = .zero
     private var displayOptionsObserver: NSObjectProtocol?
+    private static let radius: CGFloat = 12
     override var isFlipped: Bool { true }
 
     override init(frame: NSRect) {
         super.init(frame: frame)
         wantsLayer = true
-        glass.material = .hudWindow
+        glass.material = .popover
         glass.blendingMode = .withinWindow
         glass.state = .active
+        glass.wantsLayer = true
+        glass.layer?.cornerRadius = Self.radius
+        glass.layer?.cornerCurve = .continuous
+        glass.layer?.masksToBounds = true
         glass.setAccessibilityElement(false)
         addSubview(glass)
+        glass.layer?.addSublayer(tint)
         layer?.masksToBounds = false
         layer?.shadowColor = NSColor.black.cgColor
-        layer?.shadowOpacity = 0.18
-        layer?.shadowRadius = 8
-        layer?.shadowOffset = CGSize(width: 0, height: -2)
-        rim.lineWidth = 0.75
-        rim.lineJoin = .round
+        layer?.shadowOpacity = 0.16
+        layer?.shadowRadius = 14
+        layer?.shadowOffset = CGSize(width: 0, height: -5)
+        rim.fillColor = nil
+        rim.lineWidth = 1
         layer?.addSublayer(rim)
         displayOptionsObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
             object: nil, queue: .main
-        ) { [weak self] _ in self?.needsLayout = true }
+        ) { [weak self] _ in MainActor.assumeIsolated { self?.needsLayout = true } }
     }
     required init?(coder: NSCoder) { fatalError("Page feedback is created programmatically") }
 
     override func layout() {
         super.layout()
         glass.frame = bounds
-        glass.alphaValue = NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency ? 1 : 0.78
-        let path = Self.outline(in: bounds)
-        if maskSize != bounds.size {
-            maskSize = bounds.size
-            glass.maskImage = NSImage(size: bounds.size, flipped: true) { _ in
-                NSColor.black.setFill(); path.fill(); return true
-            }
-        }
-        let cgPath = CGMutablePath()
-        var points = [NSPoint](repeating: .zero, count: 3)
-        for index in 0..<path.elementCount {
-            switch path.element(at: index, associatedPoints: &points) {
-            case .moveTo: cgPath.move(to: points[0])
-            case .lineTo: cgPath.addLine(to: points[0])
-            case .closePath: cgPath.closeSubpath()
-            default: break
-            }
-        }
-        CATransaction.begin(); CATransaction.setDisableActions(true)
-        rim.frame = bounds
-        rim.path = cgPath
-        rim.fillColor = NSColor.white.withAlphaComponent(0.035).cgColor
         let dark = effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-        rim.strokeColor = (dark ? NSColor.white.withAlphaComponent(0.28)
-                              : NSColor.black.withAlphaComponent(0.14)).cgColor
-        layer?.shadowPath = cgPath
+        let solid = NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency
+        let path = CGPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), cornerWidth: Self.radius - 0.5, cornerHeight: Self.radius - 0.5, transform: nil)
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        tint.frame = glass.bounds
+        tint.backgroundColor = (dark ? NSColor(white: 0.16, alpha: solid ? 1 : 0.35)
+                                     : NSColor(white: 0.97, alpha: solid ? 1 : 0.45)).cgColor
+        rim.frame = bounds
+        rim.path = path
+        rim.strokeColor = (dark ? NSColor.white.withAlphaComponent(0.14) : NSColor.black.withAlphaComponent(0.11)).cgColor
+        layer?.shadowPath = CGPath(roundedRect: bounds, cornerWidth: Self.radius, cornerHeight: Self.radius, transform: nil)
+        layer?.shadowOpacity = dark ? 0.38 : 0.16
         CATransaction.commit()
     }
 
@@ -265,27 +304,44 @@ import QuartzCore
             NSWorkspace.shared.notificationCenter.removeObserver(displayOptionsObserver)
         }
     }
+}
 
-    private static func outline(in rect: NSRect) -> NSBezierPath {
-        let w = rect.width, h = rect.height
-        let path = NSBezierPath()
-        guard w >= 44, h >= 24 else { return path }
-        let points: [NSPoint] = [
-            .init(x: 2, y: h * 0.48), .init(x: 11, y: h * 0.30),
-            .init(x: 8, y: 7), .init(x: 27, y: 9),
-            .init(x: 33, y: 2), .init(x: 42, y: 7),
-            .init(x: w - 37, y: 7), .init(x: w - 25, y: 2),
-            .init(x: w - 23, y: 9), .init(x: w - 7, y: 7),
-            .init(x: w - 10, y: h * 0.35), .init(x: w - 2, y: h * 0.53),
-            .init(x: w - 11, y: h * 0.67), .init(x: w - 8, y: h - 7),
-            .init(x: w - 28, y: h - 9), .init(x: w - 35, y: h - 2),
-            .init(x: w - 43, y: h - 7), .init(x: 39, y: h - 7),
-            .init(x: 25, y: h - 2), .init(x: 24, y: h - 9),
-            .init(x: 7, y: h - 7), .init(x: 10, y: h * 0.64)
-        ]
-        path.move(to: points[0])
-        for point in points.dropFirst() { path.line(to: point) }
-        path.close()
-        return path
+/// The small rounded-square button at the pill's end.
+@MainActor private final class PageFeedbackButton: NSButton {
+    private var hovering = false { didSet { needsDisplay = true } }
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        isBordered = false
+        bezelStyle = .regularSquare
+        imagePosition = .imageOnly
+        title = ""
+        contentTintColor = .labelColor
+        focusRingType = .none
+        wantsLayer = true
+    }
+    required init?(coder: NSCoder) { fatalError() }
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect], owner: self))
+    }
+    override func mouseEntered(with event: NSEvent) { hovering = true }
+    override func mouseExited(with event: NSEvent) { hovering = false }
+    override func draw(_ dirtyRect: NSRect) {
+        let dark = effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        let pressed = isHighlighted
+        let shape = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 7, yRadius: 7)
+        let fill: NSColor = dark ? NSColor.white.withAlphaComponent(pressed ? 0.2 : hovering ? 0.15 : 0.09)
+                                 : NSColor.white.withAlphaComponent(pressed ? 0.45 : hovering ? 0.9 : 0.65)
+        fill.setFill(); shape.fill()
+        (dark ? NSColor.white.withAlphaComponent(0.16) : NSColor.black.withAlphaComponent(0.13)).setStroke()
+        shape.lineWidth = 1; shape.stroke()
+        if let image {
+            let size = image.size
+            let rect = NSRect(x: (bounds.width - size.width) / 2, y: (bounds.height - size.height) / 2, width: size.width, height: size.height)
+            let tinted = image.copy() as! NSImage
+            tinted.lockFocus(); NSColor.labelColor.set(); NSRect(origin: .zero, size: size).fill(using: .sourceAtop); tinted.unlockFocus()
+            tinted.draw(in: rect)
+        }
     }
 }

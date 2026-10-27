@@ -86,13 +86,14 @@ import QuartzCore
             let left = pillInHost.minX - host.bounds.minX
             let top = host.isFlipped ? pillInHost.minY - host.bounds.minY : host.bounds.maxY - pillInHost.maxY
             let bottom = host.isFlipped ? host.bounds.maxY - pillInHost.maxY : pillInHost.minY - host.bounds.minY
-            // Require a real inset and a position near the visual bottom-right.
-            // The margins are relational, independent of the tag's design constants.
-            // A tag filling a narrow host can have equal left/right insets;
-            // the corner-proximity bounds still reject a centered wide-page pill.
-            try check(right >= 4 && bottom >= 4 && right <= left + 0.5 && bottom < top
-                        && right < host.bounds.width * 0.15 && bottom < host.bounds.height * 0.15,
-                      "Feedback tag for \(message) is not anchored bottom-right: top=\(top), right=\(right), left=\(left), bottom=\(bottom), host=\(host.bounds)")
+            // Require a real inset and a position near the visual top-right, as
+            // Arc's copy confirmation sits. The margins are relational,
+            // independent of the tag's design constants. A tag filling a narrow
+            // host can have equal left/right insets; the corner-proximity bounds
+            // still reject a centered wide-page pill.
+            try check(right >= 4 && top >= 4 && right <= left + 0.5 && top < bottom
+                        && right < host.bounds.width * 0.15 && top < host.bounds.height * 0.15,
+                      "Feedback tag for \(message) is not anchored top-right: top=\(top), right=\(right), left=\(left), bottom=\(bottom), host=\(host.bounds)")
             let point = label.convert(NSPoint(x: label.bounds.midX, y: label.bounds.midY), to: host)
             try check(overlay.hitTest(point) == nil, "Feedback intercepts page clicks over \(message)")
         }
@@ -121,20 +122,20 @@ import QuartzCore
             }
             try check(pasteboard.string(forType: .string) == web.url?.absoluteString,
                       "Copy URL did not use \(label)'s live address")
-            try check(commands.pageFeedback.isVisible && commands.pageFeedback.message == "Link copied"
+            try check(commands.pageFeedback.isVisible && commands.pageFeedback.message == "Copied Current URL"
                         && commands.pageFeedback.view.window === window,
                       "Copy URL feedback was missing or belonged to another window for \(label)")
             try check(window.firstResponder === responder, "Copy URL feedback stole \(label)'s responder")
-            try feedbackFits("Link copied", in: web.superview)
+            try feedbackFits("Copied Current URL", in: web.superview)
             commands.pageFeedback.hide()
             commands.copyMarkdownLink(nil)
             let markdown = pasteboard.string(forType: .string) ?? ""
             try check(markdown.hasPrefix("[") && markdown.hasSuffix("(\(web.url?.absoluteString ?? "-"))")
                         && pasteboard.string(forType: .html)?.contains("<a href=") == true,
-                      "Copy Markdown Link did not copy [Title](address) and a live link for \(label): \(markdown)")
-            try check(commands.pageFeedback.message == "Markdown link copied" && window.firstResponder === responder,
+                      "Copy URL as Markdown did not copy [Title](address) and a live link for \(label): \(markdown)")
+            try check(commands.pageFeedback.message == "Copied Current URL" && window.firstResponder === responder,
                       "Markdown link feedback was missing or stole \(label)'s responder")
-            try feedbackFits("Markdown link copied", in: web.superview)
+            try feedbackFits("Copied Current URL", in: web.superview)
         }
         func hardRefresh(_ web: WKWebView, label: String, window: NSWindow) async throws {
             try await seed(web, "refresh")
@@ -154,7 +155,7 @@ import QuartzCore
             commands.view.addSubview(compactHost)
             defer { commands.pageFeedback.hide(); compactHost.removeFromSuperview() }
             let responder = commandWindow.firstResponder
-            for (message, symbol) in [("Link copied", "link"), ("Hard refreshing…", "arrow.clockwise")] {
+            for (message, symbol) in [("Copied Current URL", "link"), ("Hard refreshing…", "arrow.clockwise")] {
                 commands.pageFeedback.show(message, symbol: symbol, in: compactHost)
                 try check(commands.pageFeedback.isVisible && commands.pageFeedback.view.window === commandWindow,
                           "Minimum-width feedback for \(message) was not attached to the fixture window")
@@ -181,7 +182,7 @@ import QuartzCore
                 return nil
             }
             let responder = commandWindow.firstResponder
-            commands.pageFeedback.show("Link copied", symbol: "link", in: firstHost)
+            commands.pageFeedback.show("Copied Current URL", symbol: "link", in: firstHost)
             await pause(0.04)
             commands.pageFeedback.hide()
             let overlay = commands.pageFeedback.view
@@ -198,7 +199,7 @@ import QuartzCore
                         && CATransform3DEqualToTransform(hiddenPill.layer?.transform ?? CATransform3DIdentity, hiddenTransform),
                       "A cancelled confirmation animation changed or reattached its hidden view")
 
-            commands.pageFeedback.show("Link copied", symbol: "link", in: firstHost)
+            commands.pageFeedback.show("Copied Current URL", symbol: "link", in: firstHost)
             await pause(0.04)
             commands.pageFeedback.show("Hard refreshing…", symbol: "arrow.clockwise", in: secondHost)
             try check(commands.pageFeedback.view.superview === secondHost
@@ -213,15 +214,15 @@ import QuartzCore
 
             // The first two requests expire after 1.6 seconds. A fresh request
             // made now must remain visible after both those deadlines pass.
-            commands.pageFeedback.show("Link copied", symbol: "link", in: firstHost)
+            commands.pageFeedback.show("Copied Current URL", symbol: "link", in: firstHost)
             let latestShown = ProcessInfo.processInfo.systemUptime
             await pause(1.25)
             let latestAge = ProcessInfo.processInfo.systemUptime - latestShown
-            try check(commands.pageFeedback.isVisible && commands.pageFeedback.message == "Link copied"
+            try check(commands.pageFeedback.isVisible && commands.pageFeedback.message == "Copied Current URL"
                         && commands.pageFeedback.view.superview === firstHost && secondHost.subviews.isEmpty
                         && commands.pageFeedback.view.alphaValue > 0.99,
                       "An older dismissal removed or moved the latest confirmation (latest age \(latestAge)s)")
-            try feedbackFits("Link copied", in: firstHost)
+            try feedbackFits("Copied Current URL", in: firstHost)
             try check(commandWindow.firstResponder === responder,
                       "Confirmation interruption or host replacement stole keyboard focus")
         }
@@ -238,8 +239,7 @@ import QuartzCore
             }
             commandWindow.setContentSize(NSSize(width: originalSize.width - 137, height: originalSize.height - 73))
             commands.view.layoutSubtreeIfNeeded(); commands.layoutBrowser()
-            // copy() ends with Copy Markdown Link, the longer of the two confirmations.
-            try feedbackFits("Markdown link copied", in: main.superview)
+            try feedbackFits("Copied Current URL", in: main.superview)
         }
         try await hardRefresh(main, label: "main", window: commandWindow)
 

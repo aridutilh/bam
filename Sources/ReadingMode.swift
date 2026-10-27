@@ -24,13 +24,25 @@ import WebKit
         set { if persists { UserDefaults.standard.set(newValue, forKey: Self.preferencesKey) } else { memoryPreferences = newValue } }
     }
 
-    func isReading(_ web: WKWebView) -> Bool { purge(); return sessions[ObjectIdentifier(web)] != nil }
+    func isReading(_ web: WKWebView) -> Bool { session(for: web) != nil }
+    /// This page's reader. A closed page's address can be reused by a new web view,
+    /// so the session must still point at this very page.
+    private func session(for web: WKWebView) -> ReaderSession? {
+        purge()
+        guard let session = sessions[ObjectIdentifier(web)], session.page === web else { return nil }
+        return session
+    }
     /// A closed tab's page is gone; its reader goes with it.
     private func purge() {
         for (key, session) in sessions where session.page == nil { session.close(animated: false); sessions.removeValue(forKey: key) }
     }
     /// The reader laid over this page, for Find.
-    func readerView(over web: WKWebView) -> WKWebView? { sessions[ObjectIdentifier(web)]?.reader }
+    func readerView(over web: WKWebView) -> WKWebView? { session(for: web)?.reader }
+    /// ⌘+ / ⌘- / ⌘0 chosen from the View menu: the article's text size, not the covered page's zoom.
+    func step(_ delta: Int, over web: WKWebView) -> Bool {
+        guard let session = session(for: web) else { return false }
+        session.step(delta); return true
+    }
 
     func toggle(_ web: WKWebView) {
         if isReading(web) { exit(web, animated: true) } else { enter(web) }
@@ -38,16 +50,18 @@ import WebKit
 
     func enter(_ web: WKWebView) {
         let key = ObjectIdentifier(web)
-        guard sessions[key] == nil, !starting.contains(key), let source = Self.extractionSource else {
+        guard session(for: web) == nil, !starting.contains(key), let source = Self.extractionSource else {
             if Self.extractionSource == nil { onNoArticle?(web) }
             return
         }
         starting.insert(key)
+        let address = web.url
         Task { @MainActor [weak self, weak web] in
-            guard let self, let web else { return }
+            guard let self, let web else { self?.starting.remove(key); return }
             let value = try? await web.callAsyncJavaScript(source, arguments: [:], in: nil, contentWorld: Self.world)
             self.starting.remove(key)
-            guard web.window != nil, self.sessions[key] == nil else { return }
+            // The page moved on while Readability ran: that article is no longer this page's.
+            guard web.window != nil, web.url == address, self.session(for: web) == nil else { return }
             guard let article = value as? [String: Any], article["content"] is String else { self.onNoArticle?(web); return }
             self.present(article: article, over: web)
         }
@@ -75,7 +89,7 @@ import WebKit
         switch body["type"] as? String {
         case "loaded": session.render()
         case "close": exit(page, animated: true)
-        case "prefs": if let prefs = body["prefs"] as? [String: Any] { preferences = prefs }
+        case "prefs": if let prefs = body["prefs"] as? [String: Any] { preferences = Self.validated(prefs) }
         default: break
         }
     }
@@ -89,6 +103,15 @@ import WebKit
     fileprivate func pageNavigated(_ session: ReaderSession) {
         guard let page = session.page else { return }
         exit(page, animated: false)
+    }
+
+    /// Only the three known settings, in range, reach UserDefaults.
+    static func validated(_ prefs: [String: Any]) -> [String: Any] {
+        var out: [String: Any] = [:]
+        if let size = prefs["size"] as? Int, (0..<12).contains(size) { out["size"] = size }
+        if let face = prefs["face"] as? String, ["serif", "sans"].contains(face) { out["face"] = face }
+        if let theme = prefs["theme"] as? String, ["auto", "light", "sepia", "dark"].contains(theme) { out["theme"] = theme }
+        return out
     }
 
     // MARK: Resources
@@ -175,7 +198,8 @@ import WebKit
         reader.navigationDelegate = self
         reader.autoresizingMask = [.width, .height]
         reader.alphaValue = 0
-        reader.setValue(false, forKey: "drawsBackground")
+        // Private WebKit setter (long-standing); skipped rather than crash if a WebKit drops it.
+        if reader.responds(to: NSSelectorFromString("_setDrawsBackground:")) { reader.setValue(false, forKey: "drawsBackground") }
         reader.setAccessibilityLabel("Reading Mode")
         reader.allowsMagnification = false
         reader.onStep = { [weak self] delta in self?.step(delta) }
@@ -218,7 +242,7 @@ import WebKit
         }
     }
 
-    private func step(_ delta: Int) {
+    func step(_ delta: Int) {
         Task { @MainActor [weak self] in
             _ = try? await self?.reader.callAsyncJavaScript("return BamReader.step(delta);", arguments: ["delta": delta], in: nil, contentWorld: .page)
         }
@@ -245,7 +269,10 @@ import WebKit
     }
 
     func receive(_ message: WKScriptMessage) {
-        guard let body = message.body as? [String: Any] else { return }
+        // Handlers reach every frame, including the article's embedded players:
+        // only Reader.html itself may close the reader or save settings.
+        guard message.frameInfo.isMainFrame, message.frameInfo.request.url?.isFileURL == true,
+              let body = message.body as? [String: Any] else { return }
         coordinator?.received(body, from: self)
     }
 
