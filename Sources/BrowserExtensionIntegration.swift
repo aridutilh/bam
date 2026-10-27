@@ -98,7 +98,7 @@ struct ExtensionHostOverride {
             let before = Set(self.littleWindows.keys)
             // Little Bam refuses non-web addresses on its own; an extension's own page
             // goes in after the window exists, through the readiness-gated open path.
-            let isExtensionPage = url?.scheme == "webkit-extension"
+            let isExtensionPage = BrowserExtensions.pageSchemes.contains(url?.scheme ?? "")
             self.openLittleOrbit(url: isExtensionPage ? nil : url, profileID: profile)
             guard let id = self.littleWindows.keys.first(where: { !before.contains($0) }), let little = self.littleWindows[id], let window = little.window else { return nil }
             // The extension's own page, in its own WebKit configuration (as extension tabs are). Every navigation in the
@@ -331,7 +331,7 @@ struct ExtensionHostOverride {
     @available(macOS 15.4, *)
     @discardableResult
     func handleExtensionRenderers(_ phase: BrowserExtensions.ExtensionRendererPhase, profileID: UUID, baseURL: URL) -> [RetiredRendererProbe] {
-        guard !isShuttingDown, baseURL.scheme == "webkit-extension", let origin = baseURL.host?.lowercased() else { return [] }
+        guard !isShuttingDown, let baseScheme = baseURL.scheme, BrowserExtensions.pageSchemes.contains(baseScheme), let origin = baseURL.host?.lowercased() else { return [] }
         var released: [RetiredRendererProbe] = []
         let extensionController = browserExtensions.extensionController(profileID: profileID)
         /// A preview of this exact install in this profile's runtime: its profile and its configuration's extension
@@ -342,7 +342,7 @@ struct ExtensionHostOverride {
                   web.configuration.webExtensionController === extensionController else { return false }
             let preview = web as? PreviewWKWebView
             return [web.url, preview?.requestedURL, preview?.pendingReadyURL].contains { url in
-                url?.scheme == "webkit-extension" && url?.host?.lowercased() == origin
+                url?.scheme == baseScheme && url?.host?.lowercased() == origin
             }
         }
         func retire(_ ids: [UUID]) {

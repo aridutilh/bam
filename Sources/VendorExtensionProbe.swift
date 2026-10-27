@@ -173,6 +173,9 @@ import WebKit
         }
         observations["manual_teardown"] = ["modal_aborted": aborted, "sheets_ended": sheets]
     }
+    /// `BAM_VENDOR_POPUP_TEXT=1`: report the first 800 characters of every sampled extension page, not only login/onboarding
+    /// screens. Only meaningful for the fresh, signed-out profiles this probe creates.
+    static var popupTextAlways: Bool { ProcessInfo.processInfo.environment["BAM_VENDOR_POPUP_TEXT"] == "1" }
     static let manualSiteAccessFlag = "BAM_VENDOR_MANUAL_SITE_ACCESS"
     enum ManualSiteAccessDecision: Equatable { case off, on, invalid(String) }
     /// Absent means off. Present, only "1" enables (an empty or any other value is refused), and only with quiet mode
@@ -383,21 +386,34 @@ import WebKit
         let installer = host.installer
         try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: false)
         installer.stagingRoot = scratch
-        let listing = try await installer.chromeWebStore.candidate(for: expected)
-        guard listing.source == .chromeWebStore, listing.upstreamID == expected else {
-            throw BrowserExtensions.failure("The Chrome Web Store did not resolve \(expected) to that listing")
+        // `BAM_VENDOR_FOLDER` (diagnostic only): import an unpacked copy through the ordinary folder import instead of
+        // the store, so an instrumented vendor build can be observed. Reported as such; never a store observation.
+        let diagnosticFolder = env["BAM_VENDOR_FOLDER"].flatMap { $0.isEmpty ? nil : URL(fileURLWithPath: $0, isDirectory: true) }
+        let id: UUID
+        if let diagnosticFolder {
+            observations["diagnostic_unpacked_folder"] = true
+            id = try await host.importPackage(at: diagnosticFolder, profileID: profile)
+        } else {
+            let listing = try await installer.chromeWebStore.candidate(for: expected)
+            guard listing.source == .chromeWebStore, listing.upstreamID == expected else {
+                throw BrowserExtensions.failure("The Chrome Web Store did not resolve \(expected) to that listing")
+            }
+            id = try await installer.install(listing, profileID: profile)
         }
-        let id = try await installer.install(listing, profileID: profile)
         try Task.checkCancellation()
         guard !finished, !expiring else { return }
         extensionID = id
-        guard let record = host.items(profileID: profile).first(where: { $0.id == id }), let origin = record.catalog,
-              origin.source == .chromeWebStore, origin.upstreamID == expected, origin.verifiedChromeExtensionID == expected else {
-            throw BrowserExtensions.failure("The installed package is not a CRX3 publisher-signature-verified build of \(expected)")
+        guard let record = host.items(profileID: profile).first(where: { $0.id == id }) else {
+            throw BrowserExtensions.failure("The installed package has no record")
         }
-        observations["provenance"] = origin.provenance
+        if diagnosticFolder == nil {
+            guard let origin = record.catalog, origin.source == .chromeWebStore, origin.upstreamID == expected, origin.verifiedChromeExtensionID == expected else {
+                throw BrowserExtensions.failure("The installed package is not a CRX3 publisher-signature-verified build of \(expected)")
+            }
+            observations["provenance"] = origin.provenance
+            observations["package_sha256"] = origin.sha256
+        }
         observations["package_version"] = record.version
-        observations["package_sha256"] = origin.sha256
         observations["installed_into_temporary_storage"] = host.storageURL.path.hasPrefix(FileManager.default.temporaryDirectory.path)
         guard record.nativeHost == nil else { throw BrowserExtensions.failure("A native companion was granted during installation") }
         observations["native_companion_granted"] = false
@@ -516,6 +532,8 @@ import WebKit
                 if plan.readPopupGetters {
                     if let action = invokedAction ?? context.action(for: nil) {
                         observations["action_has_popup"] = action.presentsPopup
+                        observations["action_badge_text"] = action.badgeText
+                        observations["action_label"] = action.label
                         observations["action_popup_is_shown"] = action.popupPopover?.isShown == true
                         if let popup = action.popupWebView {
                             notePopup(popup)
@@ -586,7 +604,8 @@ import WebKit
             readyState: document.readyState,
             textLength: raw.length,
             onboarding: onboarding,
-            text: onboarding ? raw.slice(0,800).replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}/gi,'[email redacted]') : '[omitted: not identified as login/onboarding]'
+            text: (onboarding || \(Self.popupTextAlways)) ? raw.slice(0,800).replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}/gi,'[email redacted]') : '[omitted: not identified as login/onboarding]',
+            elements: document.querySelectorAll('*').length
           };
         })()
         """
@@ -633,7 +652,9 @@ import WebKit
     /// The one sanitizer for every string the probe prints. URL user-info,
     /// queries and fragments can carry sign-in state, so they are removed from
     /// anything URL-shaped, and length is bounded. Nothing else is redacted.
-    nonisolated static func sanitize(_ text: String, limit: Int = 1500) -> String {
+    /// Diagnostic folder runs (`BAM_VENDOR_FOLDER`) print longer strings so instrumented logs survive.
+    nonisolated static let defaultSanitizeLimit = ProcessInfo.processInfo.environment["BAM_VENDOR_FOLDER"].map { $0.isEmpty ? 1500 : 30000 } ?? 1500
+    nonisolated static func sanitize(_ text: String, limit: Int = defaultSanitizeLimit) -> String {
         var clean = text.replacingOccurrences(of: #"([A-Za-z][A-Za-z0-9+.-]*://)[^\s/?#@]+@"#, with: "$1", options: .regularExpression)
         clean = clean.replacingOccurrences(of: #"([A-Za-z][A-Za-z0-9+.-]*://[^\s?#]+)[?#][^\s"'<>]*"#, with: "$1[redacted]", options: .regularExpression)
         return clean.count > limit ? String(clean.prefix(limit)) + "…" : clean
@@ -782,7 +803,7 @@ import WebKit
         if let browser = controller {
             for (id, web) in browser.browsers {
                 let scheme = web.url?.scheme ?? "none"
-                let role = scheme == "webkit-extension" ? "extension-tab" : (["http", "https"].contains(scheme) ? "web-tab" : "other-tab(\(scheme))")
+                let role = ["webkit-extension", "safari-web-extension"].contains(scheme) ? "extension-tab" : (["http", "https"].contains(scheme) ? "web-tab" : "other-tab(\(scheme))")
                 ownedViews.append(WeakView(web, role: role + (browser.session.activeID == id ? "(selected)" : "")))
             }
             ownedViews += browser.littleWindows.values.compactMap(\.webView).map { WeakView($0, role: "little-bam") }

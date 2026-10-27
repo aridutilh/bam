@@ -11,6 +11,8 @@ import Darwin
     var onChange: (() -> Void)?
     var snapshots: [Snapshot] { records.map(\.snapshot) }
     var activeCount: Int { records.filter { $0.isActive }.count }
+    /// The pages that started a download still in progress (auto-archive leaves those tabs open).
+    var activeSourceWebViews: [WKWebView] { records.filter { $0.isActive }.compactMap { $0.download?.webView } }
 
     private var records: [DownloadRecord] = []
     private var active: [ObjectIdentifier: DownloadRecord] = [:]

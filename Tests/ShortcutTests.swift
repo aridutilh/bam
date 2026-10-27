@@ -14,6 +14,7 @@ struct ShortcutTests {
             try everyMenuCommand()
             try legacyChordsMigrate()
             try filtersMatchKeys()
+            try newerDefaultsGiveWay()
             print("All shortcut tests passed")
         } catch {
             print("FAILED: \(error)"); exit(1)
@@ -144,5 +145,29 @@ struct ShortcutTests {
         let right = KeyCombo(String(UnicodeScalar(NSRightArrowFunctionKey)!), [.command, .option])
         try check(right.matches("right arrow") && right.matches("opt cmd →"), "named keys")
         try check(!KeyCombo("t", .command).matches("ta"), "short fragments don't match key names")
+    }
+
+    /// A chord saved before a newer menu item took the same default stays the user's; the newer one gives way.
+    /// Commands that left the menus drop out of Settings' list. Menu items with an uppercase key carry Shift.
+    @MainActor static func newerDefaultsGiveWay() throws {
+        let key = ShortcutStore.defaultsKey
+        let saved = UserDefaults.standard.dictionary(forKey: key)
+        defer { if let saved { UserDefaults.standard.set(saved, forKey: key) } else { UserDefaults.standard.removeObject(forKey: key) } }
+        let inspector = KeyCombo("i", [.command, .option])
+        UserDefaults.standard.set(["newTab": ["key": "i", "modifiers": NSEvent.ModifierFlags([.command, .option]).rawValue]], forKey: key)
+        let store = ShortcutStore(); store.configure(persists: true)
+        store.register([
+            MenuShortcut(id: "newTab:", title: "New Tab", menu: "File", defaultCombo: KeyCombo("t", .command)),
+            MenuShortcut(id: "showWebInspector:", title: "Show Web Inspector", menu: "Develop", defaultCombo: inspector),
+            MenuShortcut(id: "selectSpace:3", title: "Work", menu: "Tabs › Go to Space", defaultCombo: KeyCombo("3", [.command, .option]))
+        ])
+        try check(store.combo(forID: "newTab:") == inspector && store.combo(forID: "showWebInspector:") == nil,
+                  "only one command wears a chord after a newer default collides")
+        try check(store.owner(of: inspector, besides: nil)?.id == "newTab:", "and it is the chord the user chose")
+        store.register([MenuShortcut(id: "newTab:", title: "New Tab", menu: "File", defaultCombo: KeyCombo("t", .command))])
+        try check(store.command("selectSpace:3")?.menu == "", "a removed Space's command leaves Settings' list")
+        let shifted = NSMenuItem(title: "Show All Tabs", action: nil, keyEquivalent: "T")
+        try check(KeyCombo(menuItem: shifted) == KeyCombo("t", [.command, .shift]), "an uppercase key equivalent implies Shift")
+        try check(KeyCombo(menuItem: NSMenuItem(title: "Zoom", action: nil, keyEquivalent: "")) == nil, "no key, no chord")
     }
 }

@@ -39,15 +39,20 @@ import WebKit
         }
     }
 
-    /// A new tab's page: starts at the default zoom with the minimum font size in force.
+    /// Every page these preferences reached (tabs, Peek, Little Bam), so a change reaches them all.
+    private static let pages = NSHashTable<WKWebView>.weakObjects()
+    /// A new page (tab, Peek or Little Bam): starts at the default zoom with the minimum font size
+    /// in force. Once only: a Peek or Little Bam page promoted into a tab keeps the zoom it has.
     static func apply(to web: WKWebView) {
+        guard !pages.contains(web) else { return }
+        pages.add(web)
         web.pageZoom = CGFloat(pageZoom)
         web.configuration.preferences.minimumFontSize = CGFloat(minimumFontSize)
     }
     /// Open pages after a change. A page someone zoomed with ⌘+/⌘− keeps its zoom;
     /// one still at the old default moves to the new one.
-    static func update(_ pages: [WKWebView], previousZoom: Double) {
-        for web in pages {
+    static func update(_ tabs: [WKWebView], previousZoom: Double) {
+        for web in Set(tabs + pages.allObjects) {
             if abs(Double(web.pageZoom) - previousZoom) < 0.001 { web.pageZoom = CGFloat(pageZoom) }
             web.configuration.preferences.minimumFontSize = CGFloat(minimumFontSize)
         }

@@ -47,6 +47,9 @@ struct SettingsSnapshot {
     var keepAwakeHosts: [String] = []
     /// False in a private window, which never remembers sites.
     var canKeepSitesAwake = true
+    /// Archive tabs after: the choices' titles and which one is picked.
+    var archiveChoices: [String] = ["Never"]
+    var archiveChoice = 0
     var pageZoom: Double = 1
     var zoomChoices: [Double] = [1]
     var minimumFontSize: Double = 0
@@ -72,6 +75,8 @@ struct SettingsActions {
     var setKeepsSiteAwake: (String, Bool) -> Void = { _, _ in }
     /// "Mail.Google.com/inbox" → "mail.google.com", or nil when it isn't a site.
     var hostFromTyped: (String) -> String? = { _ in nil }
+    var setArchiveChoice: (Int) -> Void = { _ in }
+    var showArchive: () -> Void = {}
     var setPageZoom: (Double) -> Void = { _ in }
     var setMinimumFontSize: (Double) -> Void = { _ in }
     var setAsksBeforeQuitting: (Bool) -> Void = { _ in }
@@ -302,7 +307,7 @@ struct SettingsSearchHit: Equatable {
         if !query.isEmpty { renderResults(); return }
         let subtitle: String
         switch section {
-        case .general: subtitle = "How Bam starts, plays and quits."
+        case .general: subtitle = "How Bam starts, tidies, plays and quits."
         case .appearance: subtitle = "Light or dark, and each Space’s color."
         case .websites: subtitle = "How pages look and when they rest."
         case .privacy: subtitle = "What pages may load while you browse."
@@ -378,6 +383,29 @@ struct SettingsSearchHit: Equatable {
         return group
     }
 
+    /// A pop-up choice (Arc's style for a long list): a pill naming the pick that opens a checked menu.
+    private func choiceMenu(_ titles: [String], picked: Int, label: String, _ pick: @escaping (Int) -> Void) -> NSView {
+        let current = titles.indices.contains(picked) ? titles[picked] : ""
+        let button = SettingsMenuPill(title: current)
+        button.setAccessibilityLabel(label); button.setAccessibilityValue(current)
+        button.onPress = { [weak self, weak button] in
+            guard let self, let button else { return }
+            let menu = NSMenu(); menu.autoenablesItems = false
+            for (index, title) in titles.enumerated() {
+                let handler = SettingsMenuAction { [weak self] in
+                    self?.act { pick(index) }
+                    self?.refresh()
+                }
+                let item = NSMenuItem(title: title, action: #selector(SettingsMenuAction.run(_:)), keyEquivalent: "")
+                item.target = handler; item.representedObject = handler; item.state = index == picked ? .on : .off
+                menu.addItem(item)
+            }
+            menu.popUp(positioning: menu.items.indices.contains(picked) ? menu.items[picked] : nil,
+                       at: NSPoint(x: 8, y: button.bounds.height - 6), in: button)
+        }
+        return button
+    }
+
     // MARK: General
 
     private func generalCards() -> [NSView] {
@@ -388,6 +416,14 @@ struct SettingsSearchHit: Equatable {
                         keywords: ["import", "migrate"]))
         startup.add(row("Welcome to Bam", "Pick a color, name a Space, learn the keys.",
                         pill("Show Again", symbol: "sparkles", #selector(showWelcome)), keywords: ["onboarding", "tour"]))
+        let tabs = card()
+        let archive = choiceMenu(snapshot.archiveChoices, picked: snapshot.archiveChoice, label: "Archive tabs after") { [actions] index in
+            actions.setArchiveChoice(index)
+        }
+        tabs.add(row("Archive tabs after", "Today tabs you haven’t looked at for this long close into the archive. Kept tabs, Favorites and tabs playing or in a call stay.",
+                     archive, keywords: ["auto archive", "auto-archive", "close old tabs", "tidy", "clean up"]))
+        tabs.add(row("Archived tabs", "Everything you closed or Bam archived, by day. Restore any of it.",
+                     pill("View Archive…", symbol: "archivebox", #selector(showArchive)), keywords: ["recently closed", "reopen", "history"]))
         let playback = card()
         playback.add(row("Picture in Picture when you leave a video",
                          "A playing video floats over other tabs and Spaces.",
@@ -398,8 +434,9 @@ struct SettingsSearchHit: Equatable {
                          snapshot.canChangeQuitPreference ? nil : "Change this in a normal Bam window; private windows don’t change it.",
                          toggle(snapshot.asksBeforeQuitting, enabled: snapshot.canChangeQuitPreference, label: "Ask before quitting", actions.setAsksBeforeQuitting),
                          enabled: snapshot.canChangeQuitPreference, keywords: ["ask before quitting", "quit", "⌘q"]))
-        return [caption("Start"), startup, caption("Playback"), playback, caption("Quitting"), quitting]
+        return [caption("Start"), startup, caption("Tabs"), tabs, caption("Playback"), playback, caption("Quitting"), quitting]
     }
+    @objc private func showArchive() { actions.showArchive() }
     @objc private func importFromArc() {
         window.orderOut(nil)
         actions.importFromArc()
@@ -1034,6 +1071,29 @@ struct SettingsSearchHit: Equatable {
     override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); contentTintColor = BamTheme.muted }
     override func resetCursorRects() { addCursorRect(bounds, cursor: .pointingHand) }
     override var isHighlighted: Bool { didSet { contentTintColor = isHighlighted ? BamTheme.red : BamTheme.muted } }
+}
+
+/// A quiet pill with up-down chevrons that opens a menu of choices.
+@MainActor final class SettingsMenuPill: NSView {
+    var onPress: (() -> Void)?
+    private let pill: BamPillButton
+    init(title: String) {
+        pill = BamPillButton(title: title, symbol: "chevron.up.chevron.down", compact: true)
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+        pill.imagePosition = .imageTrailing
+        pill.target = self; pill.action = #selector(press)
+        addSubview(pill)
+        NSLayoutConstraint.activate([
+            pill.leadingAnchor.constraint(equalTo: leadingAnchor), pill.trailingAnchor.constraint(equalTo: trailingAnchor),
+            pill.topAnchor.constraint(equalTo: topAnchor), pill.bottomAnchor.constraint(equalTo: bottomAnchor),
+            pill.widthAnchor.constraint(greaterThanOrEqualToConstant: 116)
+        ])
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+    @objc private func press() { onPress?() }
+    override func setAccessibilityLabel(_ label: String?) { pill.setAccessibilityLabel(label) }
+    override func setAccessibilityValue(_ value: Any?) { pill.setAccessibilityValue(value) }
 }
 
 /// A closure as a menu item's target; the item keeps it alive through representedObject.

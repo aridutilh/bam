@@ -404,6 +404,7 @@ extension BrowserController {
 
     func openSpaceCreation() {
         guard spaceCreationPanel == nil else { return }
+        guard !isPrivateWindow else { NSSound.beep(); return }
         guard session.spaces.count < BrowserSession.maximumSpaces else { NSSound.beep(); return }
         dismissAddress()
         // Stop the rubber-band settle; its per-frame preview writes and

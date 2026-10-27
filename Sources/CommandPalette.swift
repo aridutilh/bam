@@ -356,6 +356,7 @@ extension BrowserController {
         let commands = scoped ? [] : editingAddress
             ? PaletteCommandCatalog.commands.filter { $0.id == "copy-url" }.map { PaletteCommandMatch(command: $0, leading: false) }
             : PaletteCommandCatalog.matches(typed)
+                .filter { !isPrivateWindow || PaletteCommandCatalog.availableInPrivateWindow($0.command) }
         let calculation = scoped ? nil : PaletteCalculator.evaluate(typed)
         let activeSpace = session.spaces.first { $0.id == session.space }
         let recent = session.tabs.map(\.id).enumerated()

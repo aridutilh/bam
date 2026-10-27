@@ -137,12 +137,32 @@ import CryptoKit
                       !fm.fileExists(atPath: destination.path), "\(name): other background formats remain byte-exact")
         }
 
-        for (index, path) in ["../outside.js", "lib/../background.js", "/background.js", "//host/a.js",
+        for (index, path) in ["../outside.js", "lib/../background.js", "//host/a.js", "/../outside.js", "./../outside.js", "/", "./",
                               "https://example.com/a.js", "data:text/javascript,alert(1)", "a\\b.js",
                               "background.js?query", "background.js#fragment", "%2e%2e/outside.js",
                               "lib%2fbackground.js", "%5cbackground.js", "lib//background.js",
-                              "./background.js", "background.js\n", "bad%ZZ.js", ""].enumerated() {
+                              "background.js\n", "bad%ZZ.js", ""].enumerated() {
             try reject("unsafe-\(index)", bytes: manifest([path]))
+        }
+        // Chrome reads `/background.js` and `./background.js` as the package's own background.js; so does Bam.
+        do {
+            let rooted = fm.temporaryDirectory.appendingPathComponent("bam-rooted-\(UUID().uuidString)", isDirectory: true)
+            try fm.createDirectory(at: rooted.appendingPathComponent("lib"), withIntermediateDirectories: true)
+            defer { try? fm.removeItem(at: rooted) }
+            try Data("1".utf8).write(to: rooted.appendingPathComponent("background.js"))
+            try Data("1".utf8).write(to: rooted.appendingPathComponent("lib/a.js"))
+            for path in ["/background.js", "./background.js", "././background.js", "/lib/a.js", "./lib/a.js"] {
+                var accepted = true
+                do { try ExtensionPackagePreparation.validateScript(path, in: rooted) } catch { accepted = false }
+                try check(accepted, "Root-relative script path \(path) is accepted")
+            }
+            for path in ["//lib/a.js", "/./../background.js", "lib/./a.js"] {
+                var rejected = false
+                do { try ExtensionPackagePreparation.validateScript(path, in: rooted) } catch { rejected = true }
+                try check(rejected, "Unsafe rooted path \(path) is rejected")
+            }
+            try check(ExtensionPackagePreparation.manifestRelative("/a.js") == "a.js" && ExtensionPackagePreparation.manifestRelative("//a.js") == "//a.js" &&
+                      ExtensionPackagePreparation.manifestRelative("././a.js") == "a.js", "manifestRelative strips one root slash and leading ./ only")
         }
         try reject("missing", bytes: manifest(["background.js", "missing.js"]))
         try reject("directory", bytes: manifest(["lib"]), setup: { try fm.createDirectory(at: $0.appendingPathComponent("lib"), withIntermediateDirectories: true) })

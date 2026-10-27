@@ -651,6 +651,10 @@ final class BamCenteredTextFieldCell: NSTextFieldCell {
             return MainActor.assumeIsolated { self.handle(event) }
         }
     }
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window == nil, recording { stop() } // Settings rebuilt or closed under a recording cap.
+    }
     private func stop() {
         if let monitor { NSEvent.removeMonitor(monitor) }
         monitor = nil
@@ -663,6 +667,8 @@ final class BamCenteredTextFieldCell: NSTextFieldCell {
             if event.window !== window || !bounds.contains(convert(event.locationInWindow, from: nil)) { stop() }
             return event
         }
+        // Keys meant for another window (Settings closed or left mid-recording) are theirs: stop and let them through.
+        if event.window !== window || window?.isKeyWindow != true { stop(); return event }
         guard let scalar = event.charactersIgnoringModifiers?.unicodeScalars.first else { return nil }
         switch scalar.value {
         case 0x1B: stop(); return nil                                                  // Escape keeps the old chord

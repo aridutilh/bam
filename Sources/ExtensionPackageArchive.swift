@@ -64,8 +64,13 @@ struct ExtensionZipArchive: Sendable {
         var isDirectory: Bool { name.hasSuffix("/") || unixFileType == 0o040000 }
     }
 
-    static let maximumEntries = 10_000
-    static let maximumTotalBytes = 100 * 1_024 * 1_024
+    /// Wappalyzer 6.10 ships about 13,300 files (one icon per technology), so the cap sits well above that while staying
+    /// below the classic ZIP limit of 65,535 entries.
+    static let maximumEntries = 30_000
+    /// Uncompressed bytes. Adblock Plus 4.x unpacks to about 330 MiB of bundled filter lists (a 77 MB download), so
+    /// the cap is 512 MiB; the download itself stays capped at `maximumArchiveBytes`.
+    static let maximumTotalBytes = 512 * 1_024 * 1_024
+    static let maximumArchiveBytes = 128 * 1_024 * 1_024
     static let maximumManifestBytes = 1_048_576
 
     let data: Data
@@ -181,7 +186,7 @@ struct ExtensionZipArchive: Sendable {
             }
             total += entry.uncompressedSize
             guard total <= Self.maximumTotalBytes else {
-                throw ExtensionPackageError("The package exceeds the 100 MiB uncompressed limit.")
+                throw ExtensionPackageError("The package exceeds the 512 MiB uncompressed limit.")
             }
             if relative == "manifest.json", entry.uncompressedSize > Self.maximumManifestBytes {
                 throw ExtensionPackageError("The extension manifest exceeds 1 MiB.")
@@ -269,7 +274,7 @@ struct ExtensionZipArchive: Sendable {
                     let bytes = try contents(of: entry)
                     total += bytes.count
                     guard total <= Self.maximumTotalBytes else {
-                        throw ExtensionPackageError("The package exceeds the 100 MiB uncompressed limit.")
+                        throw ExtensionPackageError("The package exceeds the 512 MiB uncompressed limit.")
                     }
                     if relative == "manifest.json", bytes.count > Self.maximumManifestBytes {
                         throw ExtensionPackageError("The extension manifest exceeds 1 MiB.")

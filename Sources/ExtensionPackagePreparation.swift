@@ -89,8 +89,20 @@ enum ExtensionPackagePreparation {
         return "Prepared an explicit UTF-8 background page for Manifest V2. Extension scripts are unchanged; the original manifest is preserved."
     }
 
+    /// Chrome resolves manifest script paths against the package root, so `/js/a.js` and `./js/a.js` both name
+    /// `js/a.js` (SponsorBlock and Calendly ship such paths). Strips one leading `/` (never `//`) and any leading `./`
+    /// segments; everything else is left for `validateScript` to judge.
+    static func manifestRelative(_ path: String) -> String {
+        var value = Substring(path)
+        if value.hasPrefix("/") && !value.hasPrefix("//") { value = value.dropFirst() }
+        while value.hasPrefix("./") { value = value.dropFirst(2) }
+        return String(value)
+    }
+
     /// Shared by the content-script preparation: local, regular, non-escaping script files only.
-    static func validateScript(_ path: String, in package: URL, kind: String = "background") throws {
+    /// The path is read as Chrome reads it (see `manifestRelative`).
+    static func validateScript(_ rawPath: String, in package: URL, kind: String = "background") throws {
+        let path = manifestRelative(rawPath)
         func isSafe(_ value: String) -> Bool {
             !value.isEmpty && value.utf8.count <= 4_096 &&
             !value.hasPrefix("/") && !value.contains("\\") &&

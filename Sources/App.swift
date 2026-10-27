@@ -25,6 +25,11 @@ import WebKit
     var appearanceMenu: NSMenu?
     private let quitCoordinator = QuitCoordinator()
     private var mainWindowWasClosed = false
+    /// Open private windows (⇧⌘N). Never saved or restored.
+    var privateWindows: [PrivateWindowController] = []
+    /// Menu commands go through this to the browser in the key window.
+    let commandRouter = BrowserCommandRouter()
+    private var supportDirectory: URL?
     func applicationDidFinishLaunching(_ notification: Notification) {
         BamType.registerFonts()
         if CommandLine.arguments.contains("--favicon-test") { faviconSmoke = WebsiteFaviconSmokeTest(); faviconSmoke?.start(); return }
@@ -90,6 +95,9 @@ import WebKit
         BrowserLibrary.dress = { BamSheetStyle.dress(window: $0, root: $1) }
         BrowserLibrary.rowView = { BamTableRowView() }
         controller = BrowserController(sessionURL: support.appendingPathComponent("session.json"), ephemeral: preview)
+        supportDirectory = support
+        commandRouter.main = controller
+        commandRouter.privateWindows = { [weak self] in self?.privateWindows ?? [] }
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1260, height: 800), styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
         window.title = launch.windowTitle; window.titleVisibility = .hidden; window.titlebarAppearsTransparent = true
         window.isReleasedWhenClosed = false; window.delegate = self
@@ -132,6 +140,23 @@ import WebKit
         }
     }
     @objc func showWelcome(_ sender: Any?) { presentOnboarding() }
+    /// File ▸ New Private Window (⇧⌘N).
+    @objc func newPrivateWindow(_ sender: Any?) {
+        guard let supportDirectory, onboarding == nil else { NSSound.beep(); return }
+        let reference = NSApp.keyWindow.flatMap { key in key === window || privateWindows.contains { $0.window === key } ? key : nil } ?? window
+        let entry = PrivateWindowController(supportDirectory: supportDirectory, cascadeFrom: reference)
+        entry.onClose = { [weak self] closed in
+            // Released after AppKit finishes closing, so the window and its pages deallocate.
+            weak var released = closed.controller
+            DispatchQueue.main.async { self?.privateWindows.removeAll { $0 === closed } }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+                if released != nil { NSLog("Private window: its browser was not released after closing") }
+                else { NSLog("Private window: closed and released") }
+            }
+        }
+        privateWindows.append(entry)
+        entry.show()
+    }
     @objc func showSettings(_ sender: Any?) { presentSettings(section: settings?.window.isVisible == true ? settings!.section : .general) }
     func presentSettings(section: SettingsSection) {
         guard let controller, onboarding == nil else { return }
@@ -263,7 +288,10 @@ import WebKit
     func windowDidBecomeKey(_ notification: Notification) {
         if let selected = notification.object as? NSWindow, selected === window { mainWindowWasClosed = false }
     }
-    func applicationWillTerminate(_ notification: Notification) { controller?.prepareToClose(persistSession: false) }
+    func applicationWillTerminate(_ notification: Notification) {
+        for entry in privateWindows { entry.controller.discardPrivateWindowData() }
+        controller?.prepareToClose(persistSession: false)
+    }
     func application(_ application: NSApplication, open urls: [URL]) {
         receiveExternalURLs(urls)
     }
@@ -294,12 +322,21 @@ import WebKit
     }
     /// The action's selector, plus the item's choice when one menu repeats an action
     /// (Appearance ▸ Dark → "chooseAppearance:dark", Go to Space ▸ 2nd → "selectSpace:2").
+    /// Items AppKit adds on its own are left alone: hidden alternates (Edit ▸ Emoji & Symbols' fn E),
+    /// private commands, and chords a KeyCombo can't hold (the fn key, as in Window ▸ Fill). Written
+    /// back without fn, such a chord would become a bare letter that swallows typing.
+    static func isListable(_ item: NSMenuItem) -> Bool {
+        guard let action = item.action, !item.isSeparatorItem, !item.title.isEmpty, !item.isHidden, !item.isAlternate,
+              !NSStringFromSelector(action).hasPrefix("_"),
+              item.keyEquivalentModifierMask.intersection([.function, .numericPad, .help]).isEmpty,
+              action != #selector(NSWindow.makeKeyAndOrderFront(_:)), !(item.representedObject is NSWindow) else { return false }
+        return true
+    }
     static func shortcutID(for item: NSMenuItem, in menu: NSMenu) -> String? {
-        guard let action = item.action, !item.isSeparatorItem, !item.title.isEmpty,
-              action != #selector(NSWindow.makeKeyAndOrderFront(_:)), !(item.representedObject is NSWindow) else { return nil }
+        guard isListable(item), let action = item.action else { return nil }
         let name = NSStringFromSelector(action)
         if let choice = item.representedObject as? String { return name + choice }
-        let siblings = menu.items.filter { $0.action == action }
+        let siblings = menu.items.filter { $0.action == action && isListable($0) }
         guard siblings.count > 1, let index = siblings.firstIndex(where: { $0 === item }) else { return name }
         return name + String(index + 1)
     }
@@ -308,7 +345,7 @@ import WebKit
         let items = menuShortcutItems()
         ShortcutStore.shared.register(items.map { entry in
             MenuShortcut(id: entry.id, title: entry.item.title, menu: entry.menu,
-                         defaultCombo: entry.item.keyEquivalent.isEmpty ? nil : KeyCombo(entry.item.keyEquivalent, entry.item.keyEquivalentModifierMask))
+                         defaultCombo: KeyCombo(menuItem: entry.item))
         })
         applyShortcuts(items)
     }
@@ -327,6 +364,8 @@ import WebKit
         let store = ShortcutStore.shared
         for entry in known ?? menuShortcutItems() where store.command(entry.id) != nil {
             let combo = store.combo(forID: entry.id)
+            // Only touch items whose chord changes, so a default stays exactly as the menu built it.
+            guard KeyCombo(menuItem: entry.item) != combo else { continue }
             entry.item.keyEquivalent = combo?.key ?? ""
             entry.item.keyEquivalentModifierMask = combo?.modifiers ?? []
         }
@@ -357,7 +396,9 @@ import WebKit
     }
     @objc func recordSpaceSwipes(_ sender: Any?) { SpaceSwipeDiagnostics.shared.start() }
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(newPrivateWindow(_:)) { return onboarding == nil && controller != nil }
         if menuItem.action == #selector(selectSpace(_:)) {
+            if commandRouter.keyPrivateWindow != nil { menuItem.state = .off; return false }
             menuItem.state = controller?.session.space == menuItem.tag ? .on : .off
             return controller?.session.spaceDefinition(menuItem.tag) != nil && window?.attachedSheet == nil
         }
@@ -377,7 +418,9 @@ import WebKit
         let main = NSMenu(); NSApp.mainMenu = main
         func menu(_ title: String) -> NSMenu { let item = NSMenuItem(title: title, action: nil, keyEquivalent: ""); main.addItem(item); let sub = NSMenu(title: title); item.submenu = sub; return sub }
         func item(_ menu: NSMenu, _ title: String, _ action: Selector, _ key: String = "", _ modifiers: NSEvent.ModifierFlags = .command, _ target: AnyObject? = nil) {
-            let item = NSMenuItem(title: title, action: action, keyEquivalent: key); item.keyEquivalentModifierMask = modifiers; item.target = target; menu.addItem(item)
+            let item = NSMenuItem(title: title, action: action, keyEquivalent: key); item.keyEquivalentModifierMask = modifiers
+            // Browser commands follow the key window (a private window or the main browser).
+            item.target = target === controller ? commandRouter : target; menu.addItem(item)
         }
         // Every item is built with its default chord; registerMenuShortcuts then lists them all
         // in Settings › Shortcuts and puts on the chords people chose.
@@ -393,6 +436,7 @@ import WebKit
         item(app, "Show All", #selector(NSApplication.unhideAllApplications(_:)))
         app.addItem(.separator()); item(app, "Quit Bam", #selector(NSApplication.terminate(_:)), "q")
         let file = menu("File")
+        item(file, "New Private Window", #selector(newPrivateWindow(_:)), "n", [.command, .shift], self)
         item(file, "New Little Bam Window", #selector(BrowserController.newLittleOrbit(_:)), "n", [.command, .option], controller)
         bound(file, "New Tab", #selector(BrowserController.newTab(_:)), .newTab, controller)
         bound(file, "Open Location…", #selector(BrowserController.focusAddress(_:)), .openLocation, controller)
@@ -454,7 +498,7 @@ import WebKit
         item(history, "Forward", #selector(BrowserController.goForward(_:)), "]", .command, controller)
         history.addItem(.separator())
         item(history, "Show History…", #selector(BrowserController.showHistory(_:)), "y", .command, controller)
-        item(history, "Recently Closed…", #selector(BrowserController.showArchive(_:)), "", .command, controller)
+        item(history, "View Archive…", #selector(BrowserController.showArchive(_:)), "", .command, controller)
         item(view, "Downloads…", #selector(BrowserController.showDownloads(_:)), "j", .command, controller)
         let tabs = menu("Tabs")
         item(tabs, "Next Tab", #selector(BrowserController.nextTab(_:)), "\t", .control, controller)
@@ -465,6 +509,11 @@ import WebKit
             let entry = NSMenuItem(title: number == 9 ? "Last Tab" : "Tab \(number)", action: #selector(BrowserController.selectTabByNumber(_:)), keyEquivalent: String(number))
             entry.keyEquivalentModifierMask = .command; entry.tag = number; entry.target = controller; tabNumbers.addItem(entry)
         }
+        tabs.addItem(.separator())
+        item(tabs, "Duplicate Tab", #selector(BrowserController.duplicateTab(_:)), "", .command, controller)
+        item(tabs, "Rename Tab…", #selector(BrowserController.renameTab(_:)), "", .command, controller)
+        item(tabs, "Mute Tab", #selector(BrowserController.toggleMuteTab(_:)), "", .command, controller)
+        item(tabs, "Close Tabs Below", #selector(BrowserController.closeTabsBelow(_:)), "", .command, controller)
         bound(tabs, "Next Space", #selector(BrowserController.nextSpace(_:)), .nextSpace, controller)
         bound(tabs, "Previous Space", #selector(BrowserController.previousSpace(_:)), .previousSpace, controller)
         tabs.addItem(.separator())

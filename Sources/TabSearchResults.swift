@@ -321,7 +321,10 @@ enum PaletteTarget: Equatable {
                 row.configure(title: title, detail: detail, badge: context, symbol: tab.symbol,
                               action: current ? nil : "Switch to Tab")
             case .command(let command):
-                let live = ShortcutCommand(paletteID: command.id).map { ShortcutStore.shared.combo(for: $0).compact }
+                // The chord the menu command wears now (remapped or removed in Settings › Shortcuts).
+                let store = ShortcutStore.shared
+                let live = store.command(command.action).map { _ in store.combo(forID: command.action)?.compact ?? "" }
+                    ?? ShortcutCommand(paletteID: command.id).map { store.combo(for: $0).compact }
                 row.configure(title: command.title, detail: command.detail,
                               badge: live ?? command.shortcut ?? "", symbol: command.symbol)
             case .site(let completion):

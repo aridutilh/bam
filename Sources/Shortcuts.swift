@@ -207,10 +207,23 @@ struct MenuShortcut: Equatable {
             if let known = positions[command.id] { entry.defaultCombo = catalog[known].defaultCombo }
             ordered.append(entry)
         }
-        // Commands not in the menus right now (a Space that was removed) stay known, after the rest.
-        ordered += catalog.filter { !seen.contains($0.id) }
+        // Commands not in the menus right now (a Space that was removed) stay known, after the
+        // rest, but out of Settings' list: there is no menu item to wear their chord.
+        ordered += catalog.filter { !seen.contains($0.id) }.map { var gone = $0; gone.menu = ""; return gone }
         catalog = ordered
         reindex()
+        settleCollisions()
+    }
+    /// A chord saved before a newer menu item took the same default (⌥⌘I, say, before Develop ▸
+    /// Show Web Inspector existed) would leave two items wearing it, and the first silently wins.
+    /// The chord someone chose stays theirs; the newer default gives way, as a takeover would.
+    private func settleCollisions() {
+        for (id, override) in custom {
+            guard let combo = override else { continue }
+            for other in catalog where other.id != id && custom[other.id] == nil && other.defaultCombo == combo {
+                custom[other.id] = .some(nil)
+            }
+        }
     }
     private func reindex() { positions = Dictionary(uniqueKeysWithValues: catalog.enumerated().map { ($1.id, $0) }) }
     func command(_ id: String) -> MenuShortcut? { positions[id].map { catalog[$0] } }
@@ -294,6 +307,14 @@ struct MenuShortcut: Equatable {
 }
 
 extension KeyCombo {
+    /// The chord a menu item wears, or nil when it has none. An uppercase letter
+    /// carries an implied Shift, as NSMenuItem reads it.
+    @MainActor init?(menuItem item: NSMenuItem) {
+        guard !item.keyEquivalent.isEmpty else { return nil }
+        var modifiers = item.keyEquivalentModifierMask
+        if item.keyEquivalent.count == 1, item.keyEquivalent != item.keyEquivalent.lowercased() { modifiers.insert(.shift) }
+        self.init(item.keyEquivalent, modifiers)
+    }
     /// Whether a filter typed in Settings names this chord: glyphs ("⌥⌘→", "⌘k") or
     /// words ("cmd k", "option command right").
     func matches(_ query: String) -> Bool {

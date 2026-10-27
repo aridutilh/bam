@@ -170,6 +170,16 @@ struct SidebarExtensionItem {
     private let downloads = ArkDownloadsButton()
     private let plus = ArkIconButton(symbol: "plus", label: "New tab")
     private let spaceOverflow = ArkIconButton(symbol: "ellipsis", label: "Choose Space")
+    /// A private window: the "Private" label under the address field, and no Space buttons in the footer.
+    var isPrivateWindow = false {
+        didSet {
+            guard isPrivateWindow != oldValue else { return }
+            if isPrivateWindow, privateBadge.superview == nil { addSubview(privateBadge) }
+            privateBadge.isHidden = !isPrivateWindow; needsLayout = true
+            for page in cachedPages.values { page.hidesHeading = isPrivateWindow }
+        }
+    }
+    private let privateBadge = PrivateWindowBadge()
     private var spaceDefinitions: [BrowserSpace] = []
     private var spaces: [ArkSpaceButton] = []
     private let favoritesHost = ArkFavoritesDropHost()
@@ -463,7 +473,7 @@ struct SidebarExtensionItem {
 
     private func pageForSpace(_ space: Int) -> SidebarPage {
         if let cached = cachedPages[space] { return cached }
-        let created = SidebarPage(); connect(created); cachedPages[space] = created
+        let created = SidebarPage(); created.hidesHeading = isPrivateWindow; connect(created); cachedPages[space] = created
         if let definition = definition(for: space) {
             created.configureAppearance(space: definition, destinations: spaceDefinitions)
         }
@@ -579,15 +589,16 @@ struct SidebarExtensionItem {
         let hasActions = !extensionButtons.isEmpty
         // Trailing controls inside the field, right to left: site settings (for a page), then the extension library
         // (while no extension actions have a row of their own).
-        let trailing = [showsSiteSettings ? siteSettingsButton : nil, hasActions ? nil : extensionLibrary].compactMap { $0 }
+        let trailing = [showsSiteSettings ? siteSettingsButton : nil, hasActions || isPrivateWindow ? nil : extensionLibrary].compactMap { $0 }
         search.trailingInset = trailing.isEmpty ? 10 : 6 + 28 * CGFloat(trailing.count)
         siteSettingsButton.isHidden = !showsSiteSettings
-        extensionLibrary.isHidden = hasActions
+        extensionLibrary.isHidden = hasActions || isPrivateWindow
         for (index, button) in trailing.enumerated() {
             button.frame = NSRect(x: search.frame.maxX - 32 - 28 * CGFloat(index), y: fieldTop + (fieldHeight - 28) / 2, width: 28, height: 28)
         }
         extensionMenu.isHidden = !hasActions
-        let actionTop = fieldTop + fieldHeight + 6
+        let badgeHeight = isPrivateWindow ? layoutPrivateBadge(privateBadge, below: fieldTop + fieldHeight) : 0
+        let actionTop = fieldTop + fieldHeight + 6 + badgeHeight
         extensionMenu.frame = NSRect(x: 8, y: actionTop, width: 30, height: 30)
         let actionCapacity = max(0, Int((w - 52) / 34))
         for (index, button) in extensionButtons.enumerated() {
@@ -597,7 +608,7 @@ struct SidebarExtensionItem {
         let hiddenCount = max(0, extensionButtons.count - actionCapacity)
         extensionMenu.setSymbol(hiddenCount > 0 ? "ellipsis.circle" : "puzzlepiece.extension",
             label: hiddenCount > 0 ? "All extensions, including \(hiddenCount) more" : "Extensions")
-        let gridTop = hasActions ? actionTop + 38 : fieldTop + fieldHeight + 10
+        let gridTop = hasActions ? actionTop + 38 : fieldTop + fieldHeight + 10 + badgeHeight
         // A drag over Favorites holds a gap open (one more slot); a sidebar drag over an empty grid opens a drop zone.
         let gapSlot = favoriteGap.map { min($0, favorites.count) }
         let dropZone = favorites.isEmpty && sidebarDragActive
@@ -631,12 +642,12 @@ struct SidebarExtensionItem {
         let overflowing = footer.overflowing, visibleCount = footer.visibleCount, startIndex = footer.startIndex
         let x = footer.spacesX, step = footer.step
         for (index, button) in spaces.enumerated() {
-            button.isHidden = index < startIndex || index >= startIndex + visibleCount
+            button.isHidden = isPrivateWindow || index < startIndex || index >= startIndex + visibleCount
             if !button.isHidden {
                 button.frame = NSRect(x: x + CGFloat(index - startIndex) * step, y: y, width: min(28, step - 1), height: 28)
             }
         }
-        spaceOverflow.isHidden = !overflowing
+        spaceOverflow.isHidden = !overflowing || isPrivateWindow
         spaceOverflow.frame = NSRect(x: x + CGFloat(visibleCount) * step, y: y, width: min(28, step - 1), height: 28)
         plus.frame = NSRect(x: footer.plus.minX, y: y, width: 28, height: 28)
         downloads.frame.origin.y = y
@@ -670,6 +681,8 @@ struct SidebarExtensionItem {
     var rowDragWillBegin: ((UUID) -> Bool)?
     var escape: (() -> Void)?
     let heading = ArkSpaceHeading()
+    /// A private window's single Space has no name row (its "Private" label sits under the address field).
+    var hidesHeading = false { didSet { needsLayout = true } }
     let scroll = SidebarScrollView()
     private let table = SidebarTableView()
     private let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("tabs"))
@@ -1097,8 +1110,10 @@ struct SidebarExtensionItem {
     override func layout() {
         super.layout(); let w = bounds.width
         heading.frame = NSRect(x: 12, y: 0, width: max(0, w - 12 - ArkMetrics.sidebarTrailing - 4), height: 32)
+        heading.isHidden = hidesHeading
+        let listTop: CGFloat = hidesHeading ? 0 : 39
         // Rows span to the trailing content edge; the scroll thumb lives outside them, in the gap beside the card.
-        scroll.frame = NSRect(x: ArkMetrics.sidebarLeading, y: 39, width: ArkMetrics.sidebarContentWidth(w), height: max(0, bounds.height - 39))
+        scroll.frame = NSRect(x: ArkMetrics.sidebarLeading, y: listTop, width: ArkMetrics.sidebarContentWidth(w), height: max(0, bounds.height - listTop))
         let width = scroll.contentSize.width
         if table.frame.width != width { table.setFrameSize(NSSize(width: width, height: table.frame.height)) }
         if column.width != width { column.width = width }
@@ -2796,5 +2811,46 @@ private final class ArkTabRow: ArkFlippedView, NSDraggingSource, SpaceTinted, Ar
         if (hovered || isHighlighted) && isEnabled { fill(isHighlighted ? ArkPalette.pressed : ArkPalette.iconHover, radius: 7) }
         symbol("arrow.down.circle", rect: NSRect(x: (bounds.width - 17) / 2, y: (bounds.height - 17) / 2, width: 17, height: 17),
                color: hovered ? ArkPalette.ink : ArkPalette.chromeIcon, size: 16)
+    }
+}
+
+/// The "Private" label under the address field, sized like Arc's "Incognito" pill.
+@MainActor final class PrivateWindowBadge: NSView {
+    private let icon = NSImageView()
+    private let label = NSTextField(labelWithString: "Private")
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        layer?.cornerRadius = 11
+        icon.image = NSImage(systemSymbolName: "eye.slash", accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: 11, weight: .semibold))
+        label.font = .systemFont(ofSize: 11.5, weight: .semibold)
+        label.lineBreakMode = .byClipping
+        [icon, label].forEach(addSubview)
+        setAccessibilityElement(true); setAccessibilityRole(.staticText); setAccessibilityLabel("Private window")
+        applyColors()
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    var preferredWidth: CGFloat { ceil(label.intrinsicContentSize.width) + 38 }
+    override func layout() {
+        super.layout()
+        icon.frame = NSRect(x: 9, y: (bounds.height - 14) / 2, width: 16, height: 14)
+        let height = label.intrinsicContentSize.height
+        label.frame = NSRect(x: 28, y: (bounds.height - height) / 2, width: bounds.width - 32, height: height)
+    }
+    override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); applyColors() }
+    private func applyColors() {
+        // Fixed colors: the private window is dark whatever the app appearance.
+        layer?.backgroundColor = NSColor(white: 1, alpha: 0.035).cgColor
+        let ink = NSColor(srgbRed: 0.49, green: 0.49, blue: 0.51, alpha: 1)
+        icon.contentTintColor = ink; label.textColor = ink
+    }
+}
+
+extension SidebarView {
+    /// Places the badge under the address field; returns the height it adds above Favorites and the tabs.
+    func layoutPrivateBadge(_ badge: PrivateWindowBadge, below fieldBottom: CGFloat) -> CGFloat {
+        badge.frame = NSRect(x: ArkMetrics.sidebarLeading + 6, y: fieldBottom + 8, width: badge.preferredWidth, height: 22)
+        return 30
     }
 }

@@ -17,6 +17,10 @@ import WebKit
     var resignObserver: NSObjectProtocol?
     /// Set while a ⌘Z that belongs to the page is sent through again.
     var replayingUndo = false
+    /// Tabs (Split primaries) the user muted; reapplied to pages created later.
+    var mutedTabs: Set<UUID> = []
+    /// The hovered-link address at the page's corner (LinkStatus.swift).
+    lazy var linkStatus = LinkStatusController()
     /// A quick ⌃⇥ tap lands without the overlay ever drawing.
     static let revealDelay: TimeInterval = 0.09
     static let maximumTiles = 5
@@ -45,7 +49,7 @@ import WebKit
     /// Called whenever a tab comes on screen: remembers it for ⌃⇥ and keeps a
     /// picture of the page being left.
     func noteTabShown(_ id: UUID, leaving previous: UUID?) {
-        if let previous, previous != id { captureThumbnail(previous) }
+        if let previous, previous != id { captureThumbnail(previous); tabNavigation.linkStatus.hide(immediately: true) }
         let primary = session.split(for: id)?.primaryID ?? id
         if session.recentTabIDs?.first != primary { session.noteRecent(primary) }
     }

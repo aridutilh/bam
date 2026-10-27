@@ -6,6 +6,7 @@ import WebKit
 @MainActor enum BrowserPageGestures {
     static func configure(_ web: WKWebView) {
         web.allowsMagnification = true
+        WebsitePreferences.apply(to: web) // Settings › Websites: default zoom, minimum font size (once per page).
     }
     /// Actual Size (⌘0) returns to Settings › Websites' default zoom and also undoes a pinch.
     static func resetZoom(_ web: WKWebView) {

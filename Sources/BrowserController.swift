@@ -229,6 +229,8 @@ import QuartzCore
     var windowButtonOffset = CGPoint.zero
     var floatingRevealWork: DispatchWorkItem?
     let pictureInPicture = PictureInPictureCoordinator()
+    /// Auto-archive's timer and wake observer (BrowserTabArchive.swift).
+    let tabArchiver = TabArchiver()
     let findBar = FindBarCoordinator()
     let pageFeedback = PageFeedbackCoordinator()
     let pageTools = PageToolsCoordinator()
@@ -330,6 +332,9 @@ import QuartzCore
     let suggestionFetcher = SearchSuggestionFetcher()
     var newTabOnSubmit = false
     var privateMode: Bool
+    /// A private window (File ▸ New Private Window): its own throwaway session and stores, no history,
+    /// never saved or restored. `privateMode` is also true for it, and for the whole fresh preview.
+    let isPrivateWindow: Bool
     var spaceManager: SpaceManagementController?
     var savedTabEditor: SavedTabEditorController?
     var arcImporter: ArcImportController?
@@ -375,13 +380,14 @@ import QuartzCore
 
     /// `profileStores` is for disposable runs only (e.g. an isolated store from
     /// `WebsiteProfileStore(isolated:)`); nil keeps the standard store for `ephemeral`.
-    init(sessionURL: URL, ephemeral: Bool = false, downloadCoordinator: DownloadCoordinator? = nil,
+    init(sessionURL: URL, ephemeral: Bool = false, privateWindow: Bool = false, downloadCoordinator: DownloadCoordinator? = nil,
          profileStores: WebsiteProfileStore? = nil) {
+        let ephemeral = ephemeral || privateWindow
         self.downloads = downloadCoordinator ?? DownloadCoordinator()
-        self.sessionURL = sessionURL; self.privateMode = ephemeral
+        self.sessionURL = sessionURL; self.privateMode = ephemeral; self.isPrivateWindow = privateWindow
         self.profileStores = profileStores ?? WebsiteProfileStore(ephemeral: ephemeral)
         self.favicons = WebsiteFaviconStore(directory: ephemeral ? nil : sessionURL.deletingLastPathComponent().appendingPathComponent("Favicons", isDirectory: true))
-        session = ephemeral ? .fresh() : SessionFile.load(sessionURL)
+        session = privateWindow ? .privateWindow() : ephemeral ? .fresh() : SessionFile.load(sessionURL)
         if !ephemeral, UserDefaults.standard.object(forKey: "AutomaticallyShowPlayingVideo") != nil { automaticallyShowsVideo = UserDefaults.standard.bool(forKey: "AutomaticallyShowPlayingVideo") }
         displayedWidth = session.sidebarVisible ? CGFloat(session.sidebarWidth) : 0
         super.init(nibName: nil, bundle: nil)
@@ -608,6 +614,7 @@ import QuartzCore
         BrowserPageGestures.configure(browser)
         WebsitePreferences.apply(to: browser) // Settings › Websites: default zoom, minimum font size.
         preparePageTools(browser)
+        tabNavigation.linkStatus.install(in: browser, owner: self); reapplyMute(browser, id: id)
         browser.autoresizingMask = [.width, .height]
         browser.setAccessibilityLabel("Web content")
         browsers[id] = browser
@@ -690,6 +697,7 @@ import QuartzCore
         for id in arriving { tabLastUsed[id] = ProcessInfo.processInfo.systemUptime }
         let outgoing = displayedMemberIDs.filter { !arriving.contains($0) }
         for id in outgoing { tabLastUsed[id] = ProcessInfo.processInfo.systemUptime }
+        stampViewed(arriving + outgoing) // Auto-archive counts from the last time a tab was on screen.
         let switched = displayedTabID != nil && displayedTabID != tab.id
         if switched { pageFeedback.hide() }
         // Capture actual hosts before restore callbacks or model changes can re-enter.
@@ -910,13 +918,17 @@ import QuartzCore
            !selectSpace(forProfile: session.profileID(for: tab)) { return }
         cancelPaging(); session.select(id); dismissAddress(); showActive(); save()
     }
-    func close(_ id: UUID) {
+    /// `archived`: auto-archive closed it, so the archive says so.
+    func close(_ id: UUID, archived: Bool = false) {
         cancelPaging(); cancelAutomaticDepartures()
         let group = session.split(for: id)
         let closingIDs = group?.primaryID == id ? [id, group!.secondaryID] : [id]
         let closed = closingIDs.compactMap { closingID in session.tabs.first { $0.id == closingID } }
         let removed = closed.filter { !$0.isSaved }
-        if let source = closed.first { library(for: session.profileID(for: source)).recordClosed(tabs: removed, split: removed.count == 2) }
+        // An auto-archived blank tab just goes; there is nothing in it to restore.
+        if let source = closed.first, !(archived && removed.allSatisfy(\.isHome)) {
+            library(for: session.profileID(for: source)).recordClosed(tabs: removed, split: removed.count == 2, reason: archived ? .archived : nil)
+        }
         _ = session.close(id)
         if let group, let split = splitCoordinators.removeValue(forKey: group.primaryID) {
             split.detach(); split.view.removeFromSuperview()
@@ -1182,7 +1194,7 @@ import QuartzCore
             root.previewSpace = pagingTarget.flatMap { session.spaceDefinition($0)?.colorIndex }; root.previewProgress = abs(offset) / max(1, sidebar.bounds.width)
         }
         // Never advertise creation that the Space cap would refuse.
-        let canCreate = session.spaces.count < BrowserSession.maximumSpaces
+        let canCreate = session.spaces.count < BrowserSession.maximumSpaces && !isPrivateWindow
         if !result.finished { updateSpaceCreateIndicator(progress: canCreate ? result.createProgress : nil) }
         if phase == .ended || phase == .cancelled { trackingSwipe = false }
         if result.finished {
@@ -1322,6 +1334,8 @@ import QuartzCore
             keyWindow.performClose(sender); return
         }
         if let peek = peeks[session.activeID], peek.isPresented { peek.dismiss(); return }
+        // A private window goes away with its last tab, as Arc's does.
+        if isPrivateWindow, session.visibleTabs.count <= 1 { view.window?.performClose(sender); return }
         close(session.activeID)
     }
     @objc func reopenTab(_ sender: Any?) { if let record = library.popClosed() { restoreClosed(record) } }
@@ -1571,7 +1585,7 @@ import QuartzCore
         }
         if scheme == "file" {
             guard let resources = Bundle.main.resourceURL, url.standardizedFileURL.path.hasPrefix(resources.standardizedFileURL.path + "/") else { decisionHandler(.cancel); return }
-        } else if scheme == "webkit-extension" {
+        } else if ["webkit-extension", "safari-web-extension"].contains(scheme) {
             guard let profile = profileID(of: webView), allowsExtensionPage(url, profileID: profile) else { decisionHandler(.cancel); return }
         } else if !["http", "https", "about"].contains(scheme) { decisionHandler(.cancel); return }
         if navigationAction.navigationType == .linkActivated, let address = URLInput.directURL(url.absoluteString) {
@@ -1596,7 +1610,7 @@ import QuartzCore
         }
         if navigationAction.targetFrame?.isMainFrame == true, let id = browsers.first(where: { $0.value === webView })?.key {
             invalidateFaviconDocument(id)
-            let newOrigin = scheme == "webkit-extension" ? url.host?.lowercased() : nil
+            let newOrigin = ["webkit-extension", "safari-web-extension"].contains(scheme) ? url.host?.lowercased() : nil
             if browserExtensionOrigins[id] != newOrigin {
                 // Do not replay a form submission across renderer configurations.
                 guard navigationAction.request.httpMethod?.uppercased() == "GET" else { decisionHandler(.cancel); return }

@@ -19,6 +19,7 @@ extension BrowserController {
     }
     func startTabResourceMonitoring() {
         guard memoryPressureSource == nil else { return }
+        startTabArchiving()
         if !privateMode {
             if UserDefaults.standard.object(forKey: "AutomaticTabSleeping") != nil {
                 automaticTabSleeping = UserDefaults.standard.bool(forKey: "AutomaticTabSleeping")
@@ -36,6 +37,7 @@ extension BrowserController {
         memoryPressureSource = source; source.resume()
     }
     func stopTabResourceMonitoring() {
+        stopTabArchiving()
         sleepTask?.cancel(); sleepTask = nil; sleepPassID = nil
         memoryPressureSource?.cancel(); memoryPressureSource = nil
     }
