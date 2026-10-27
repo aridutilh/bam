@@ -151,6 +151,31 @@ struct ExtensionHostOverride {
         guard URLInput.extensionURL(url.absoluteString) != nil, #available(macOS 15.4, *) else { return false }
         return browserExtensions.allowsExtensionURL(url, profileID: profileID)
     }
+    /// A web page (not Bam, not the extension itself) asked to open `url`, an extension page, in a top frame:
+    /// allowed only for resources the extension makes web-accessible to the page's origin, as in Chrome.
+    func allowsWebOpenedExtensionPage(_ url: URL, initiator frame: WKFrameInfo?, profileID: UUID) -> Bool {
+        guard #available(macOS 15.4, *) else { return false }
+        let origin = frame.flatMap { frame -> ExtensionNavigationPolicy.Origin? in
+            let security = frame.securityOrigin
+            guard !security.protocol.isEmpty, !security.host.isEmpty else { return nil }
+            return ExtensionNavigationPolicy.Origin(scheme: security.protocol, host: security.host, port: security.port)
+        }
+        return ExtensionNavigationPolicy.allowsWebInitiated(target: url, initiator: origin,
+                                                            manifest: browserExtensions.manifest(forExtensionURL: url, profileID: profileID))
+    }
+    /// Replaces the page that tried with a plain explanation; Back returns to it.
+    func showBlockedExtensionPage(_ url: URL, in web: WKWebView) {
+        let host = (url.host ?? "").replacingOccurrences(of: "<", with: "").replacingOccurrences(of: "&", with: "")
+        let html = """
+            <!doctype html><meta charset="utf-8"><title>Page blocked</title>
+            <style>:root{color-scheme:light dark}body{font:15px -apple-system,sans-serif;max-width:520px;margin:18vh auto;padding:0 24px;color:#555}
+            h1{font-size:22px;font-weight:600;color:CanvasText;margin:0 0 10px}code{font-size:12px;opacity:.7}</style>
+            <h1>This page is blocked</h1>
+            <p>A website tried to open a page that belongs to one of your extensions. Extensions only let websites open the pages they choose to share, so Bam stopped it.</p>
+            <p><code>\(url.scheme ?? "")://\(host)\(url.path.replacingOccurrences(of: "<", with: ""))</code></p>
+            """
+        web.loadHTMLString(html, baseURL: nil)
+    }
     func extensionPageConfiguration(_ url: URL, profileID: UUID) -> WKWebViewConfiguration? {
         guard #available(macOS 15.4, *) else { return nil }
         return browserExtensions.configuration(forExtensionURL: url, profileID: profileID)

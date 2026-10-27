@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Websites can no longer open an extension's private pages (its settings, for example) by linking or redirecting to them. As in Chrome, a site can only open the pages an extension chooses to share with it; anything else shows a plain "This page is blocked" page. Extension popups, settings pages and the tabs extensions open themselves are unchanged.
 - Split View with New Page moves to Arc's ⌃⇧= (it was ⌥⌘=). A custom shortcut you set yourself is kept.
 - Opening a Split now shows the search bar over the new page: pick a site, search or an open tab and it loads there. Press Esc (or click outside) and the empty page closes again.
 - Little Bam windows no longer close into the archive while they're playing audio or video, holding text you're writing, downloading, or using the camera or microphone, and time your Mac spent asleep no longer counts toward "Archive Little Bams after" (waking up the next morning used to close them all).

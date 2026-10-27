@@ -307,6 +307,8 @@ struct BrowserExtensionPermissionReview {
         return (runtime, context)
     }
     func allowsExtensionURL(_ url: URL, profileID: UUID) -> Bool { ownedEnabledContext(for: url, profileID: profileID) != nil }
+    /// The manifest of the enabled extension that owns `url` here (its `web_accessible_resources` decide what pages may open).
+    func manifest(forExtensionURL url: URL, profileID: UUID) -> [String: Any]? { ownedEnabledContext(for: url, profileID: profileID)?.1.webExtension.manifest }
     /// The extension controller of a profile's runtime, so the owner can confirm a view belongs to it.
     func extensionController(profileID: UUID) -> WKWebExtensionController? { runtimes[profileID]?.controller }
     func configuration(forExtensionURL url: URL, profileID: UUID) -> WKWebViewConfiguration? {
