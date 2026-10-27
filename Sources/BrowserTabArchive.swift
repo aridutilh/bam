@@ -7,6 +7,7 @@ import WebKit
     private var wake: NSObjectProtocol?
     private var launch: DispatchWorkItem?
     fileprivate var sweeping = false
+    fileprivate var sweepingLittleBams = false
     /// The Archive window, made on first use.
     var archiveWindow: ArchivedTabsController?
     /// When each Little Bam window was last in use (made or focused), by its key in littleWindows.
@@ -47,8 +48,12 @@ import WebKit
         tabArchiver.period = ArchivePreference.sweepPeriod
         tabArchiver.start { [weak self] in
             guard let self else { return }
-            self.sweepLittleBams()
-            Task { @MainActor in await self.sweepArchive() }
+            Task { @MainActor in
+                // The clock first, so time the Mac slept (a wake sweep) doesn't count against Little Bams either.
+                self.tickArchiveClock()
+                await self.sweepLittleBams()
+                await self.sweepArchive()
+            }
         }
         tabArchiver.keyObserver = NotificationCenter.default.addObserver(forName: NSWindow.didResignKeyNotification, object: nil, queue: .main) { [weak self] note in
             MainActor.assumeIsolated {
@@ -65,16 +70,33 @@ import WebKit
     }
 
     /// Settings › Links › Archive Little Bams after: a Little Bam window left unused that long closes,
-    /// and its page goes to the archive. The window in front is never closed.
-    @discardableResult func sweepLittleBams(now: Date = Date()) -> Int {
+    /// and its page goes to the archive. Never the window in front, nor one that is playing media,
+    /// holding typed text, downloading or using the camera or microphone (the same pages Today's
+    /// archive leaves alone). Time the Mac slept or Bam was closed doesn't count (tickArchiveClock).
+    @discardableResult func sweepLittleBams(now: Date = Date()) async -> Int {
+        guard !isPrivateWindow, !isShuttingDown, !tabArchiver.sweepingLittleBams else { return 0 }
+        tabArchiver.sweepingLittleBams = true
+        defer { tabArchiver.sweepingLittleBams = false }
         let trial = ArchivePreference.defaults == nil ? ArchivePreference.environment["BAM_ARCHIVE_AFTER_SECONDS"].flatMap(TimeInterval.init) : nil
         let after = trial ?? LinkBehavior.littleBamArchive.seconds
-        var closed = 0
         tabArchiver.littleBamActive = tabArchiver.littleBamActive.filter { littleWindows[$0.key] != nil }
+        var due: [UUID] = []
         for (id, little) in littleWindows {
             if little.window?.isKeyWindow == true { tabArchiver.littleBamActive[id] = now; continue }
             guard let since = tabArchiver.littleBamActive[id] else { tabArchiver.littleBamActive[id] = now; continue }
-            guard now.timeIntervalSince(since) >= after else { continue }
+            if now.timeIntervalSince(since) >= after { due.append(id) }
+        }
+        let downloading = Set(downloads.activeSourceWebViews.map(ObjectIdentifier.init))
+        var closed = 0
+        for id in due {
+            guard let little = littleWindows[id] else { continue }
+            if let web = little.webView {
+                if web.cameraCaptureState != .none || web.microphoneCaptureState != .none || downloading.contains(ObjectIdentifier(web)) { continue }
+                if await Self.pageWantsToStay(web) { continue }
+            }
+            // Re-read after the wait: the window may have closed, been used, or Bam may be quitting.
+            guard !isShuttingDown, let little = littleWindows[id], little.window?.isKeyWindow != true,
+                  let since = tabArchiver.littleBamActive[id], now.timeIntervalSince(since) >= after else { continue }
             if let web = little.webView, let url = web.url, URLInput.directURL(url.absoluteString) != nil {
                 let tab = BrowserTab(title: web.title?.isEmpty == false ? web.title! : (url.host ?? url.absoluteString),
                                      address: url.absoluteString, space: session.space)
@@ -99,6 +121,7 @@ import WebKit
                 guard let viewed = session.tabs[index].lastViewedAt else { continue }
                 session.tabs[index].lastViewedAt = ArchiveClock.moved(viewed, by: shift, now: now); changed = true
             }
+            for (id, since) in tabArchiver.littleBamActive { tabArchiver.littleBamActive[id] = ArchiveClock.moved(since, by: shift, now: now) }
         }
         let today = Set(session.tabs.lazy.filter { !$0.isSaved }.map(\.id))
         if let known = tabArchiver.knownToday {
