@@ -223,7 +223,9 @@ import WebKit
     }
 
     /// ⌘Z outside a text field reopens the last closed tab, as ⇧⌘T does. In a
-    /// native or page text field it stays Undo.
+    /// native or page text field it stays Undo, and so does any page that
+    /// handles ⌘Z itself (canvas editors such as Figma, Excalidraw or Miro keep
+    /// focus on the page body, not a text field).
     private func handleReopenShortcut(_ event: NSEvent) -> NSEvent? {
         guard !tabNavigation.replayingUndo, event.keyCode == 6,
               event.modifierFlags.intersection([.command, .control, .option, .shift]) == .command,
@@ -235,20 +237,45 @@ import WebKit
             if window.undoManager?.canUndo == true { return event }
             reopenTab(nil); return nil
         }
-        // Whether the page is editing is only known asynchronously; hold the
-        // key, ask, then either reopen or hand the very same ⌘Z back to AppKit.
-        let script = """
+        // The page has native edits to undo (typed in a field, then clicked away): Undo, as Safari does.
+        if web.undoManager?.canUndo == true { return event }
+        // Whether the page is editing, or wants ⌘Z for itself, is only known
+        // asynchronously: hold the key, ask, hand the very same ⌘Z to the page,
+        // and reopen only if nothing on the page claimed it. Run in Bam's own
+        // script world so the page can neither see nor spoof the probe.
+        let world = WKContentWorld.world(name: "bam-undo-probe")
+        let probe = """
         (() => { let e = document.activeElement; while (e && e.shadowRoot && e.shadowRoot.activeElement) e = e.shadowRoot.activeElement;
-          if (!e || e === document.body || e === document.documentElement) return document.designMode === 'on';
-          return e.isContentEditable || /^(INPUT|TEXTAREA|SELECT|IFRAME|EMBED|OBJECT)$/.test(e.tagName); })()
+          const editing = (!e || e === document.body || e === document.documentElement) ? document.designMode === 'on'
+            : (e.isContentEditable || /^(INPUT|TEXTAREA|SELECT|IFRAME|EMBED|OBJECT)$/.test(e.tagName));
+          if (editing) return 'edit';
+          const probe = { seen: null };
+          probe.listener = (ev) => { if (ev.metaKey && (ev.code === 'KeyZ' || ev.key === 'z' || ev.key === 'Z')) probe.seen = ev; };
+          if (window.__bamUndoProbe) removeEventListener('keydown', window.__bamUndoProbe.listener, true);
+          window.__bamUndoProbe = probe;
+          addEventListener('keydown', probe.listener, true);
+          return 'probe'; })()
         """
-        web.evaluateJavaScript(script) { [weak self] result, _ in
+        let verdict = """
+        (() => { const probe = window.__bamUndoProbe; if (!probe) return false;
+          removeEventListener('keydown', probe.listener, true); window.__bamUndoProbe = null;
+          return !!(probe.seen && probe.seen.defaultPrevented); })()
+        """
+        web.evaluateJavaScript(probe, in: nil, in: world) { [weak self, weak web] result in
             MainActor.assumeIsolated {
                 guard let self else { return }
-                if (result as? Bool) == false { self.reopenTab(nil); return }
+                let answer = try? result.get() as? String
                 self.tabNavigation.replayingUndo = true
                 NSApp.sendEvent(event)
                 self.tabNavigation.replayingUndo = false
+                // Not a page we could probe (a PDF, a crashed page): leave it as Undo.
+                guard answer == "probe", let web else { return }
+                // Queued behind the key event, so the page has finished handling it.
+                web.evaluateJavaScript(verdict, in: nil, in: world) { [weak self] result in
+                    MainActor.assumeIsolated {
+                        if (try? result.get() as? Bool) == false { self?.reopenTab(nil) }
+                    }
+                }
             }
         }
         return nil
