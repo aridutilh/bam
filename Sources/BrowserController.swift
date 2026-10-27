@@ -218,6 +218,8 @@ import QuartzCore
     let animator = CubicAnimator()
     let pagingAnimator = SpringAnimator()
     let pictureInPicture = PictureInPictureCoordinator()
+    /// Auto-archive's timer and wake observer (BrowserTabArchive.swift).
+    let tabArchiver = TabArchiver()
     let findBar = FindBarCoordinator()
     let pageFeedback = PageFeedbackCoordinator()
     let pageTools = PageToolsCoordinator()
@@ -636,6 +638,7 @@ import QuartzCore
         for id in arriving { tabLastUsed[id] = ProcessInfo.processInfo.systemUptime }
         let outgoing = displayedMemberIDs.filter { !arriving.contains($0) }
         for id in outgoing { tabLastUsed[id] = ProcessInfo.processInfo.systemUptime }
+        stampViewed(arriving + outgoing) // Auto-archive counts from the last time a tab was on screen.
         let switched = displayedTabID != nil && displayedTabID != tab.id
         if switched { pageFeedback.hide() }
         // Capture actual hosts before restore callbacks or model changes can re-enter.
@@ -851,13 +854,17 @@ import QuartzCore
            !selectSpace(forProfile: session.profileID(for: tab)) { return }
         cancelPaging(); session.select(id); dismissAddress(); showActive(); save()
     }
-    func close(_ id: UUID) {
+    /// `archived`: auto-archive closed it, so the archive says so.
+    func close(_ id: UUID, archived: Bool = false) {
         cancelPaging(); cancelAutomaticDepartures()
         let group = session.split(for: id)
         let closingIDs = group?.primaryID == id ? [id, group!.secondaryID] : [id]
         let closed = closingIDs.compactMap { closingID in session.tabs.first { $0.id == closingID } }
         let removed = closed.filter { !$0.isSaved }
-        if let source = closed.first { library(for: session.profileID(for: source)).recordClosed(tabs: removed, split: removed.count == 2) }
+        // An auto-archived blank tab just goes; there is nothing in it to restore.
+        if let source = closed.first, !(archived && removed.allSatisfy(\.isHome)) {
+            library(for: session.profileID(for: source)).recordClosed(tabs: removed, split: removed.count == 2, reason: archived ? .archived : nil)
+        }
         _ = session.close(id)
         if let group, let split = splitCoordinators.removeValue(forKey: group.primaryID) {
             split.detach(); split.view.removeFromSuperview()

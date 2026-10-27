@@ -100,6 +100,15 @@ import AppKit
         check(limit.closedRecords.count == 200 && limit.closedRecords.last?.tabs[0].address == "https://example.com/3", "Archive retains the newest 200 closures")
         check(limit.storageURL == nil && limit.lastStorageError == nil, "Ephemeral operation needs no storage")
 
+        // Auto-archive marks its records; records saved before it load as closed by hand.
+        let reasons = BrowserLibrary(storageURL: nil)
+        reasons.recordClosed(tabs: [tab("https://example.com/auto")], split: false, reason: .archived)
+        reasons.recordClosed(tabs: [tab("https://example.com/hand")], split: false)
+        check(reasons.closedRecords.map(\.wasAutoArchived) == [false, true], "Auto-archived records say so; hand-closed ones don't")
+        let legacyRecord = #"{"id":"\#(UUID().uuidString)","closedAt":1800000000000,"split":false,"tabs":[{"id":"\#(UUID().uuidString)","title":"Old","address":"https://example.com","space":0,"pinned":false}]}"#
+        let legacyDecoder = JSONDecoder(); legacyDecoder.dateDecodingStrategy = .millisecondsSince1970
+        check((try? legacyDecoder.decode(ClosedRecord.self, from: Data(legacyRecord.utf8)))?.reason == nil, "Older archive records load without a reason")
+
         let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .millisecondsSince1970
         func object<T: Encodable>(_ value: T) throws -> [String: Any] {
             try JSONSerialization.jsonObject(with: encoder.encode(value)) as! [String: Any]

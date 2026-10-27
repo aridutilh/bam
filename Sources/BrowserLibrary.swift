@@ -8,10 +8,14 @@ struct BrowserHistoryEntry: Codable, Identifiable, Equatable {
 }
 
 struct ClosedRecord: Codable, Identifiable, Equatable {
+    /// How a tab reached the archive. Records saved before auto-archive have none (closed by hand).
+    enum Reason: String, Codable { case closed, archived }
     var id = UUID()
     var closedAt = Date()
     var tabs: [BrowserTab]
     var split: Bool
+    var reason: Reason? = nil
+    var wasAutoArchived: Bool { reason == .archived }
 }
 
 /// Metadata only. The caller chooses the file; nil keeps an ephemeral library.
@@ -23,6 +27,8 @@ struct ClosedRecord: Codable, Identifiable, Equatable {
     var onOpenURL: ((String) -> Void)?
     var onRestoreClosed: ((ClosedRecord) -> Void)?
     var onStorageError: ((String) -> Void)?
+    /// Any change to history or the archive, for windows other than the built-in ones.
+    var onChange: (() -> Void)?
     /// A genuine change to in-memory history, for extension history events. Never sent at startup load.
     enum HistoryChange: Equatable {
         /// `recordVisit` accepted this visit (a new entry or a coalesced revisit, as it now stands). Sent even if
@@ -100,7 +106,7 @@ struct ClosedRecord: Codable, Identifiable, Equatable {
         guard let loadFailure else { return true }
         lastStorageError = loadFailure; onStorageError?(loadFailure); return false
     }
-    private func reloadWindows() { historyWindow?.reload(); archiveWindow?.reload() }
+    private func reloadWindows() { historyWindow?.reload(); archiveWindow?.reload(); onChange?() }
 
     @discardableResult func recordVisit(title: String, address: String) -> VisitToken? {
         guard let url = Self.webURL(address) else { return nil }
@@ -148,8 +154,8 @@ struct ClosedRecord: Codable, Identifiable, Equatable {
         return true
     }
 
-    func recordClosed(tabs: [BrowserTab], split: Bool) {
-        let record = ClosedRecord(tabs: tabs, split: split)
+    func recordClosed(tabs: [BrowserTab], split: Bool, reason: ClosedRecord.Reason? = nil) {
+        let record = ClosedRecord(tabs: tabs, split: split, reason: reason)
         guard Self.validClosed(record) else { return }
         _ = commit {
             closedRecords.insert(record, at: 0)

@@ -55,6 +55,9 @@ struct BrowserTab: Codable, Identifiable, Equatable {
     /// The kept-section folder holding this tab. Only kept tabs live in folders;
     /// Favorites and ordinary (Today) tabs are always at their section root.
     var folderID: UUID?
+    /// When this tab was last the visible one (wall clock, saved with the session). Auto-archive
+    /// closes Today tabs that haven't been viewed for the chosen time; nil means "not seen yet".
+    var lastViewedAt: Date?
 
     init(id: UUID = UUID(), title: String, address: String, space: Int,
          pinned: Bool = false, saved: SavedTabState? = nil, sleepState: TabSleepState? = nil, folderID: UUID? = nil) {
@@ -109,7 +112,7 @@ struct BrowserTab: Codable, Identifiable, Equatable {
     fileprivate static func validCustomTitle(_ title: String) -> Bool {
         title.count <= 80 && !title.unicodeScalars.contains { CharacterSet.controlCharacters.contains($0) }
     }
-    private enum CodingKeys: String, CodingKey { case id, title, address, space, pinned, saved, sleepState, folderID }
+    private enum CodingKeys: String, CodingKey { case id, title, address, space, pinned, saved, sleepState, folderID, lastViewedAt }
     private enum SavedProfileKeys: String, CodingKey { case profileID }
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -131,6 +134,7 @@ struct BrowserTab: Codable, Identifiable, Equatable {
         else { saved = try? values.decodeIfPresent(SavedTabState.self, forKey: .saved) }
         sleepState = try? values.decodeIfPresent(TabSleepState.self, forKey: .sleepState)
         folderID = try? values.decodeIfPresent(UUID.self, forKey: .folderID)
+        lastViewedAt = (try? values.decodeIfPresent(Date.self, forKey: .lastViewedAt)).flatMap { $0?.timeIntervalSince1970.isFinite == true ? $0 : nil }
         if saved == nil, (try? values.decodeIfPresent(Bool.self, forKey: .pinned)) == true {
             saved = SavedTabState(kind: .kept, address: address)
         }
@@ -143,6 +147,7 @@ struct BrowserTab: Codable, Identifiable, Equatable {
         try values.encodeIfPresent(saved, forKey: .saved)
         try values.encodeIfPresent(sleepState, forKey: .sleepState)
         try values.encodeIfPresent(folderID, forKey: .folderID)
+        try values.encodeIfPresent(lastViewedAt, forKey: .lastViewedAt)
     }
 }
 
