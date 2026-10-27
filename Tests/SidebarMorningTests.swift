@@ -689,6 +689,53 @@ import AppKit
         } else if let renameField { (renameField.delegate as? NSTextFieldDelegate)?.controlTextDidEndEditing?(Notification(name: NSControl.textDidEndEditingNotification, object: renameField)) }
         require(tabRenames.count == 1 && tabRenames[0].0 == todayID && tabRenames[0].1 == "Morning read", "Return renames the tab (\(tabRenames))")
         require(descendants(renameRow).first { $0.identifier?.rawValue == "tab-rename-field" } == nil, "The field goes away after renaming")
+        // Arc's sidebar player: above the footer, the list ends above it; its buttons reach the controller.
+        let listBottomBefore = chromeList.convert(chromeList.bounds, to: chrome).maxY
+        var mediaCalls: [String] = []
+        chrome.onMediaPlayPause = { mediaCalls.append("playpause") }; chrome.onMediaSelect = { mediaCalls.append("select") }
+        chrome.onMediaMute = { mediaCalls.append("mute") }; chrome.onMediaNext = { mediaCalls.append("next") }
+        chrome.setMediaPlayer(SidebarMediaState(tabID: todayID, title: "Song", isPlaying: true, isMuted: false, canPrevious: false, canNext: true))
+        chrome.layoutSubtreeIfNeeded(); spin(); RunLoop.main.run(until: Date().addingTimeInterval(0.3)); chrome.layoutSubtreeIfNeeded()
+        let player = descendants(chrome).first { $0.identifier?.rawValue == "sidebar-media-player" }!
+        @MainActor func playerButton(_ label: String) -> NSButton? { descendants(player).first { $0.accessibilityLabel() == label } as? NSButton }
+        require(!player.isHidden && player.frame.maxY <= chrome.bounds.height - 40 && chromeList.convert(chromeList.bounds, to: chrome).maxY <= player.frame.minY,
+                "The player sits above the footer and the list ends above it (\(player.isHidden) \(player.frame) \(chrome.bounds) list \(chromeList.convert(chromeList.bounds, to: chrome)))")
+        require(chromeList.convert(chromeList.bounds, to: chrome).maxY < listBottomBefore, "The list makes room for the player")
+        require(playerButton("Pause") != nil && playerButton("Previous")?.isEnabled == false && playerButton("Next")?.isEnabled == true,
+                "Pause while playing; previous/next only when the page has them")
+        playerButton("Pause")?.performClick(nil); playerButton("Go to Song")?.performClick(nil); playerButton("Mute")?.performClick(nil); playerButton("Next")?.performClick(nil)
+        require(mediaCalls == ["playpause", "select", "mute", "next"], "Player buttons reach the controller (\(mediaCalls))")
+        chrome.setMediaPlayer(SidebarMediaState(tabID: todayID, title: "Song", isPlaying: false, isMuted: true, canPrevious: false, canNext: false))
+        require(playerButton("Play") != nil && playerButton("Unmute") != nil, "Paused and muted states show Play and Unmute")
+        chrome.setMediaPlayer(nil); chrome.layoutSubtreeIfNeeded(); spin(); RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+        require(player.isHidden && abs(chromeList.convert(chromeList.bounds, to: chrome).maxY - listBottomBefore) < 0.5, "Without media the player goes and the list returns")
+        // Rows: Arc's speaker after the icon while the page plays; clicking it mutes.
+        var muteToggles: [UUID] = []
+        chrome.onToggleTabMute = { muteToggles.append($0) }
+        var audioItems = chromeItems; audioItems[2].isPlayingAudio = true
+        chrome.update(tabs: audioItems, space: 0, canGoBack: false, canGoForward: false, isLoading: false); spin()
+        let speaker = descendants(chromeRow(todayID)).first { $0.identifier?.rawValue == "tab-speaker" } as? NSButton
+        require(speaker?.isHidden == false && speaker?.accessibilityLabel() == "Mute tab", "A playing tab shows its speaker")
+        speaker?.performClick(nil)
+        require(muteToggles == [todayID], "Clicking the speaker mutes that tab")
+        audioItems[2].isPlayingAudio = false; audioItems[2].isMuted = true
+        chrome.update(tabs: audioItems, space: 0, canGoBack: false, canGoForward: false, isLoading: false); spin()
+        require(speaker?.isHidden == false && speaker?.accessibilityLabel() == "Unmute tab", "A muted tab keeps a slashed speaker")
+        chrome.update(tabs: chromeItems, space: 0, canGoBack: false, canGoForward: false, isLoading: false); spin()
+        require(speaker?.isHidden == true, "No sound, no speaker")
+        // Arc's Edit Theme… in a Space's menu (heading and footer), replacing the color-only entry.
+        var themed: [Int] = []
+        chrome.spaceContextMenu = { _ in
+            let menu = NSMenu(); menu.autoenablesItems = false
+            for title in ["Change Space Icon…", "Rename Space…", "Edit Theme Color…", "Manage Spaces…"] { menu.addItem(NSMenuItem(title: title, action: nil, keyEquivalent: "")) }
+            return menu
+        }
+        chrome.onEditTheme = { themed.append($0) }
+        let footerSpace = descendants(chrome).first { ($0.accessibilityLabel() ?? "").hasPrefix("Switch to ") && !$0.isHidden }!
+        let spaceMenu = footerSpace.menu(for: tabMenuClick)!
+        require(spaceMenu.items.map(\.title) == ["Change Space Icon…", "Rename Space…", "Edit Theme…", "Manage Spaces…"], "Edit Theme… replaces the color entry (\(spaceMenu.items.map(\.title)))")
+        let themeItem = spaceMenu.items[2]; _ = NSApp.sendAction(themeItem.action!, to: themeItem.target, from: themeItem)
+        require(themed.count == 1, "Edit Theme… reaches the controller with the Space")
         // A single row moving (drop, Move Earlier/Later) slides: the table moves that row's view rather than
         // rebuilding the list, so its view (and any state on it) survives the move.
         chromeList.contentView.scroll(to: .zero); chromeList.reflectScrolledClipView(chromeList.contentView)
